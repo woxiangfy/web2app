@@ -18,7 +18,7 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
-    "icon": ["icons/icon.ico"],
+    "icon": ["icons/icon.png", "icons/icon.ico"],
     "android": {
       "minSdkVersion": 24
     }

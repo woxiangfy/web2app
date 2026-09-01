@@ -86,6 +86,24 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 //  例：APP_URL="https://u:p@example.com" APP_NAME="MyApp" cargo build --release
 // =====================================================================
 
+// const 上下文可用的字符串相等判断：`str` 的 `==` 与 `match` 在常量求值中不可用
+// （`PartialEq` 尚未稳定为 const trait，见 issue #143874），这里用字节逐个比较实现。
+const fn str_eq(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < ab.len() {
+        if ab[i] != bb[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 // 编译期环境变量注入宏：读环境变量 $name，非空则用，否则用 $default。
 macro_rules! env_str {
     ($name:literal, $default:expr) => {{
@@ -97,16 +115,26 @@ macro_rules! env_str {
         }
     }};
 }
+
 // 布尔型注入宏：true/1/yes => true；false/0/no => false；其余用默认值。
+// 注意：在 `const XXX: bool = env_bool!(...)` 的常量上下文中，既不能用 `==` / `match` 比较
+// `str`（`PartialEq` 非 const trait），也不能用 `&&` / `||`（conditionally-const），都会触发
+// E0658。故这里借助上面的 const fn `str_eq` + if-else 链实现（字节级比较，const 安全）。
 macro_rules! env_bool {
     ($name:literal, $default:expr) => {{
         match option_env!($name) {
             Some(s) => {
-                let t = s == "true" || s == "1" || s == "yes";
-                let f = s == "false" || s == "0" || s == "no";
-                if t {
+                if str_eq(s, "true") {
                     true
-                } else if f {
+                } else if str_eq(s, "1") {
+                    true
+                } else if str_eq(s, "yes") {
+                    true
+                } else if str_eq(s, "false") {
+                    false
+                } else if str_eq(s, "0") {
+                    false
+                } else if str_eq(s, "no") {
                     false
                 } else {
                     $default
