@@ -2,12 +2,13 @@ name: 自定义打包（JSON 配置生成应用）
 
 # 手动触发：在仓库 Actions 页点 "Run workflow"，
 #   粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
-#   一次触发同时产出：Windows MSI 安装包、Windows 免安装绿色版(zip)、Android APK。
+#   一次触发同时产出：Windows MSI 安装包、Windows 免安装绿色版(zip)、已签名的 Android APK。
 #
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
 #     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）
 #     "app_name": "MyApp",                   // 运行期显示名（默认 Web2App）
+#     "icon_url": "https://example.com/logo.png", // 应用图标 PNG 的 URL（默认空=沿用仓库默认图标）
 #     "window_title": "我的应用",             // 窗口标题（默认同 app_name）
 #     "proxy_enabled": "true",               // 是否启用本地反向代理注入鉴权（默认 false）
 #     "proxy_http": "",                      // 外部 HTTP 代理（默认空）
@@ -33,7 +34,7 @@ jobs:
     name: Build Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 单一入口：接受 JSON 字符串或 JSON URL，解析后与默认值合并，
       # 把最终 8 个编译期变量写入 GITHUB_ENV，后续步骤直接作为环境变量读取。
@@ -57,6 +58,7 @@ jobs:
           DEFAULTS = {
               "app_url": "",
               "app_name": "Web2App",
+              "icon_url": "",
               "window_title": "",
               "proxy_enabled": "false",
               "proxy_http": "",
@@ -98,6 +100,7 @@ jobs:
               merged[k] = v
 
           merged["app_url"] = merged["app_url"].strip()
+          merged["icon_url"] = merged["icon_url"].strip()
           if not merged["app_url"]:
               sys.exit("缺少必填字段 app_url")
           for k in BOOL_KEYS:
@@ -113,7 +116,7 @@ jobs:
 
           print("已注入环境变量：")
           for k, v in merged.items():
-              shown = mask(v) if k == "app_url" else v
+              shown = mask(v) if k in ("app_url", "icon_url") else v
               print(f"  {k.upper()}={shown}")
           PY
 
@@ -125,6 +128,22 @@ jobs:
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
+
+      - name: 下载自定义图标（可选，来自 icon_url）
+        # 从 JSON 的 icon_url 下载 PNG，用官方 `cargo tauri icon` 重新生成全套图标
+        #（icon.ico / icon.png / 各尺寸），Windows 窗口图标与 MSI 安装包都会使用新图标。
+        # 建议 1024x1024 正方形 PNG（带透明通道最佳）。
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ICON_URL:-}" ]; then echo "未配置 icon_url，沿用默认图标"; exit 0; fi
+          echo "下载图标: $ICON_URL"
+          curl -fsSL --retry 3 "$ICON_URL" -o icon-custom.png
+          magic=$(head -c 8 icon-custom.png | od -An -tx1 | tr -d ' \n')
+          if [ "$magic" != "89504e470d0a1a0a" ]; then
+            echo "::error::icon_url 下载的不是 PNG 文件（文件头=$magic）"; exit 1
+          fi
+          cargo tauri icon icon-custom.png
 
       - name: Build (tauri, 编译期注入配置，仅 MSI)
         # --bundles msi：只打 MSI 安装包（不产 NSIS）。编译期常量 APP_URL/APP_NAME/...
@@ -170,7 +189,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 与 Windows job 相同的解析逻辑：把 JSON 配置注入为环境变量，供 cargo 编译期读取。
       - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量）
@@ -190,6 +209,7 @@ jobs:
           DEFAULTS = {
               "app_url": "",
               "app_name": "Web2App",
+              "icon_url": "",
               "window_title": "",
               "proxy_enabled": "false",
               "proxy_http": "",
@@ -231,6 +251,7 @@ jobs:
               merged[k] = v
 
           merged["app_url"] = merged["app_url"].strip()
+          merged["icon_url"] = merged["icon_url"].strip()
           if not merged["app_url"]:
               sys.exit("缺少必填字段 app_url")
           for k in BOOL_KEYS:
@@ -245,7 +266,7 @@ jobs:
 
           print("已注入环境变量：")
           for k, v in merged.items():
-              shown = mask(v) if k == "app_url" else v
+              shown = mask(v) if k in ("app_url", "icon_url") else v
               print(f"  {k.upper()}={shown}")
           PY
 
@@ -255,7 +276,7 @@ jobs:
           targets: aarch64-linux-android
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -275,12 +296,39 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
+      - name: 下载自定义图标（可选，来自 icon_url）
+        # 与 Windows job 相同：下载 PNG 后用官方 `cargo tauri icon` 重新生成全套图标，
+        # 其中 icons/android/* 是各分辨率的 Android 启动图标，稍后复制进安卓工程。
+        # 必须在 android init 之前执行，init 生成的工程才会使用新图标。
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ICON_URL:-}" ]; then echo "未配置 icon_url，沿用默认图标"; exit 0; fi
+          echo "下载图标: $ICON_URL"
+          curl -fsSL --retry 3 "$ICON_URL" -o icon-custom.png
+          magic=$(head -c 8 icon-custom.png | od -An -tx1 | tr -d ' \n')
+          if [ "$magic" != "89504e470d0a1a0a" ]; then
+            echo "::error::icon_url 下载的不是 PNG 文件（文件头=$magic）"; exit 1
+          fi
+          cargo tauri icon icon-custom.png
+
       - name: Initialize Android project (gen/android)
         # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
         # --ci 跳过交互式询问；--skip-targets-install 因为上面已用 rust-toolchain 装了 aarch64 target。
         run: |
           if [ ! -d "gen/android" ]; then
             cargo tauri android init --ci --skip-targets-install
+          fi
+
+      - name: 应用自定义图标到 Android 工程
+        # 把 `cargo tauri icon` 生成的各分辨率启动图标复制进安卓工程 res 目录，
+        # 覆盖默认图标（未配置 icon_url 时跳过，沿用默认）。
+        run: |
+          if [ -d "icons/android" ]; then
+            cp -r icons/android/. gen/android/app/src/main/res/
+            echo "已覆盖 Android 启动图标"
+          else
+            echo "无自定义图标，沿用默认"
           fi
 
       - name: Allow cleartext HTTP (localhost proxy)
@@ -294,12 +342,76 @@ jobs:
         # --apk 仅产出 APK（便于直接安装测试）；若要上架 Play Store 的 AAB，去掉 --apk 即可。
         # 注意：tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），
         # 不是 rustup 的完整三元组 aarch64-linux-android。
+        # release APK 默认【未签名】，直接安装会提示"无证书/无法安装"，需下一步 zipalign+apksigner 签名。
         run: cargo tauri android build --target aarch64 --apk
+
+      - name: 签名 APK（release 包默认未签名，不签名无法安装）
+        # 签名密钥两级策略：
+        #   1) 配置了仓库 secrets（ANDROID_KEYSTORE_BASE64 等）→ 用正式 keystore 签名，
+        #      各次构建可互相覆盖升级（长期使用/上架建议这种方式）。
+        #   2) 未配置 → 现场用 keytool 生成一次性 keystore 签名。能正常安装使用，
+        #      但每次构建的签名不同，新版无法覆盖安装旧版（需先卸载）。
+        shell: bash
+        env:
+          KS_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $build_tools"
+
+          if [ -n "$KS_BASE64" ]; then
+            if [ -z "${KS_ALIAS:-}" ] || [ -z "${KS_STORE_PASS:-}" ]; then
+              echo "::error::配置了 ANDROID_KEYSTORE_BASE64 时，ANDROID_KEY_ALIAS 和 ANDROID_KEYSTORE_PASSWORD 也必须配置"; exit 1
+            fi
+            echo "使用 secrets 中的正式 keystore 签名"
+            keystore="$RUNNER_TEMP/release.keystore"
+            printf '%s' "$KS_BASE64" | base64 -d > "$keystore"
+            storepass="$KS_STORE_PASS"
+            keypass="${KS_KEY_PASS:-$KS_STORE_PASS}"
+            alias="$KS_ALIAS"
+          else
+            echo "::warning::未配置签名 secrets，使用一次性 CI keystore 签名（可安装，但跨构建无法覆盖升级）"
+            keystore="$RUNNER_TEMP/ci.keystore"
+            keytool -genkeypair -keystore "$keystore" -alias web2app-ci \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass androidci -keypass androidci \
+              -dname "CN=web2app-ci, OU=CI, O=web2app"
+            storepass="androidci"
+            keypass="androidci"
+            alias="web2app-ci"
+          fi
+
+          mkdir -p "$RUNNER_TEMP/signed"
+          found=0
+          shopt -s nullglob globstar
+          for unsigned in gen/android/app/build/outputs/apk/**/*-unsigned.apk; do
+            found=1
+            base=$(basename "$unsigned" -unsigned.apk)
+            aligned="$RUNNER_TEMP/aligned-$base.apk"
+            signed="$RUNNER_TEMP/signed/$base-signed.apk"
+            "$build_tools/zipalign" -p -f 4 "$unsigned" "$aligned"
+            "$build_tools/apksigner" sign \
+              --ks "$keystore" \
+              --ks-pass "pass:$storepass" \
+              --key-pass "pass:$keypass" \
+              --ks-key-alias "$alias" \
+              --out "$signed" "$aligned"
+            "$build_tools/apksigner" verify "$signed"
+            echo "已签名: $signed"
+          done
+          if [ "$found" = "0" ]; then
+            echo "::error::未找到 *-unsigned.apk，构建产物异常"
+            find gen/android/app/build/outputs -type f || true
+            exit 1
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          # artifact 名固定为 android-apk。
+          # artifact 名固定为 android-apk（内容为已签名、可直接安装的 APK）。
           name: android-apk
-          path: gen/android/app/build/outputs/apk/**/*.apk
+          path: ${{ runner.temp }}/signed/*.apk
           if-no-files-found: error

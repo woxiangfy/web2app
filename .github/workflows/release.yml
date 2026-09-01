@@ -35,7 +35,7 @@ jobs:
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -63,7 +63,10 @@ jobs:
   # 因此无需在本地安装 Android SDK/NDK/JDK。gen/ 已被 .gitignore 忽略，每次构建现生成，避免漂移。
   # 尽力而为：失败不影响 Windows 包发布。
   #
-  # 如需正式签名发布，配置 KEY_ALIAS / KEY_PASSWORD / KEYSTORE 等密钥后再打开签名步骤。
+  # release APK 默认未签名（安装会提示无证书），构建后会自动 zipalign + apksigner 签名：
+  #   - 配置了 secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS / ANDROID_KEYSTORE_PASSWORD
+  #     （可选 ANDROID_KEY_PASSWORD）→ 用正式 keystore 签名，各版本可覆盖升级；
+  #   - 未配置 → 用一次性 CI keystore 签名（可安装，但跨构建无法覆盖升级）。
   # ---------------------------------------------------------------------------
   android:
     name: Build Android APK
@@ -80,7 +83,7 @@ jobs:
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (with Android target)
         uses: dtolnay/rust-toolchain@stable
@@ -88,7 +91,7 @@ jobs:
           targets: aarch64-linux-android
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -127,11 +130,76 @@ jobs:
         # --apk 仅产出 APK（便于直接安装测试）；若要上架 Play Store 的 AAB，去掉 --apk 即可。
         # 注意：tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），
         # 不是 rustup 的完整三元组 aarch64-linux-android。
+        # release APK 默认【未签名】，直接安装会提示"无证书/无法安装"，需下一步 zipalign+apksigner 签名。
         run: cargo tauri android build --target aarch64 --apk
+
+      - name: 签名 APK（release 包默认未签名，不签名无法安装）
+        # 签名密钥两级策略：
+        #   1) 配置了仓库 secrets（ANDROID_KEYSTORE_BASE64 等）→ 用正式 keystore 签名，
+        #      各次构建可互相覆盖升级（长期使用/上架建议这种方式）。
+        #   2) 未配置 → 现场用 keytool 生成一次性 keystore 签名。能正常安装使用，
+        #      但每次构建的签名不同，新版无法覆盖安装旧版（需先卸载）。
+        shell: bash
+        env:
+          KS_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $build_tools"
+
+          if [ -n "$KS_BASE64" ]; then
+            if [ -z "${KS_ALIAS:-}" ] || [ -z "${KS_STORE_PASS:-}" ]; then
+              echo "::error::配置了 ANDROID_KEYSTORE_BASE64 时，ANDROID_KEY_ALIAS 和 ANDROID_KEYSTORE_PASSWORD 也必须配置"; exit 1
+            fi
+            echo "使用 secrets 中的正式 keystore 签名"
+            keystore="$RUNNER_TEMP/release.keystore"
+            printf '%s' "$KS_BASE64" | base64 -d > "$keystore"
+            storepass="$KS_STORE_PASS"
+            keypass="${KS_KEY_PASS:-$KS_STORE_PASS}"
+            alias="$KS_ALIAS"
+          else
+            echo "::warning::未配置签名 secrets，使用一次性 CI keystore 签名（可安装，但跨构建无法覆盖升级）"
+            keystore="$RUNNER_TEMP/ci.keystore"
+            keytool -genkeypair -keystore "$keystore" -alias web2app-ci \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass androidci -keypass androidci \
+              -dname "CN=web2app-ci, OU=CI, O=web2app"
+            storepass="androidci"
+            keypass="androidci"
+            alias="web2app-ci"
+          fi
+
+          mkdir -p "$RUNNER_TEMP/signed"
+          found=0
+          shopt -s nullglob globstar
+          for unsigned in gen/android/app/build/outputs/apk/**/*-unsigned.apk; do
+            found=1
+            base=$(basename "$unsigned" -unsigned.apk)
+            aligned="$RUNNER_TEMP/aligned-$base.apk"
+            signed="$RUNNER_TEMP/signed/$base-signed.apk"
+            "$build_tools/zipalign" -p -f 4 "$unsigned" "$aligned"
+            "$build_tools/apksigner" sign \
+              --ks "$keystore" \
+              --ks-pass "pass:$storepass" \
+              --key-pass "pass:$keypass" \
+              --ks-key-alias "$alias" \
+              --out "$signed" "$aligned"
+            "$build_tools/apksigner" verify "$signed"
+            echo "已签名: $signed"
+          done
+          if [ "$found" = "0" ]; then
+            echo "::error::未找到 *-unsigned.apk，构建产物异常"
+            find gen/android/app/build/outputs -type f || true
+            exit 1
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
+          # artifact 名固定为 android-apk（内容为已签名、可直接安装的 APK）。
           name: android-apk
-          path: gen/android/app/build/outputs/apk/**/*.apk
+          path: ${{ runner.temp }}/signed/*.apk
           if-no-files-found: error
