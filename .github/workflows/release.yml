@@ -54,14 +54,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
-  # Android APK（aarch64）。尽力而为：若尚未执行过 `cargo tauri android init`
-  # （即仓库里还没有 gen/android 安卓工程），本作业会失败，但不影响 Windows 包发布。
+  # Android APK（aarch64）。本作业会在 CI 上【自动生成 gen/android 并交叉编译出 APK】，
+  # 因此无需在本地安装 Android SDK/NDK/JDK。gen/ 已被 .gitignore 忽略，每次构建现生成，避免漂移。
+  # 尽力而为：失败不影响 Windows 包发布。
   #
-  # 首次使用前的一次性准备（在你本机，而非 CI）：
-  #   1) 安装 Tauri CLI：        cargo install tauri-cli --version "^2"
-  #   2) 初始化安卓工程：        cargo tauri android init
-  #      （会生成 gen/android 与 Kotlin 胶水代码、安卓图标，请一并提交到仓库）
-  #   3) 如需正式签名发布，配置 KEY_ALIAS / KEY_PASSWORD / KEYSTORE 等密钥后再打开下方签名步骤。
+  # 如需正式签名发布，配置 KEY_ALIAS / KEY_PASSWORD / KEYSTORE 等密钥后再打开签名步骤。
   # ---------------------------------------------------------------------------
   android:
     name: Build Android APK
@@ -98,6 +95,7 @@ jobs:
         run: |
           yes | sdkmanager "ndk;27.0.12077973" "build-tools;34.0.0" "platforms;android-34"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -105,9 +103,23 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
+      - name: Initialize Android project (gen/android)
+        # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
+        # --ci 跳过交互式询问；--skip-targets-install 因为上面已用 rust-toolchain 装了 aarch64 target。
+        run: |
+          if [ ! -d "gen/android" ]; then
+            cargo tauri android init --ci --skip-targets-install
+          fi
+
+      - name: Allow cleartext HTTP (localhost proxy)
+        # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，
+        # release 构建的 usesCleartextTraffic 默认为 false，必须置 true 否则鉴权代理真机上加载失败。
+        run: |
+          sed -i -E 's/android:usesCleartextTraffic="[^"]*"/android:usesCleartextTraffic="true"/' gen/android/app/src/main/AndroidManifest.xml
+          grep -n "usesCleartextTraffic" gen/android/app/src/main/AndroidManifest.xml
+
       - name: Build Android APK
-        # gen/android 必须已在仓库中（见上方“一次性准备”）。--apk 仅产出 APK（便于直接安装测试）；
-        # 若要上架 Play Store 的 AAB，去掉 --apk 即可。
+        # --apk 仅产出 APK（便于直接安装测试）；若要上架 Play Store 的 AAB，去掉 --apk 即可。
         run: cargo tauri android build --target aarch64-linux-android --apk
 
       - name: Upload APK

@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
+#[cfg(not(target_os = "android"))]
 use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
 use crate::APP_NAME;
@@ -58,6 +60,7 @@ impl Default for SettingsState {
 
 /// 把 Hotkey 结构转换为 Shortcut（用于注册全局快捷键）。
 /// key 必须是可被 Code::from_str 解析的合法键名（JS event.code 即符合）。
+#[cfg(not(target_os = "android"))]
 pub fn hotkey_to_shortcut(h: &Hotkey) -> Option<Shortcut> {
     let code = Code::from_str(&h.key).ok()?;
     let mut mods = Modifiers::empty();
@@ -74,6 +77,7 @@ pub fn hotkey_to_shortcut(h: &Hotkey) -> Option<Shortcut> {
 }
 
 /// 打开设置界面的固定快捷键：Shift+F1（不可在设置里修改）。
+#[cfg(not(target_os = "android"))]
 pub fn settings_open_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SHIFT), Code::F1)
 }

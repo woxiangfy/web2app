@@ -10,8 +10,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-single-instance = "2"
 url = "2"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
@@ -44,6 +42,12 @@ tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 [target.'cfg(not(windows))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+# 桌面端专属插件：全局快捷键 / 单实例。Android / iOS 不支持（其底层依赖 global-hotkey 等
+# 桌面库，无移动端实现），必须按平台 gate，否则交叉编译 Android 时这两个 crate 会编译失败。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 opt-level = "z"

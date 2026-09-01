@@ -6,9 +6,9 @@
 use tauri::{
     DragDropEvent, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
-use tauri_plugin_global_shortcut::{
-    Code, GlobalShortcutExt, ShortcutState,
-};
+// 全局快捷键相关类型仅在桌面端使用（Android 无该插件依赖，见 Cargo.toml 的平台 gate）。
+#[cfg(not(target_os = "android"))]
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, ShortcutState};
 use url::Url;
 
 // WebView2 拖拽 polyfill（仅 Windows 注入）：在不关闭原生拖放处理器的前提下，
@@ -764,13 +764,17 @@ fn save_settings(
     state: State<SettingsState>,
     new_settings: Settings,
 ) -> Result<(), String> {
-    // 1) 唤醒快捷键的按键必须可被解析
-    let new_sc = settings::hotkey_to_shortcut(&new_settings.wake_hotkey)
-        .ok_or_else(|| format!("不支持的按键：{}，请换一个按键", new_settings.wake_hotkey.key))?;
-    // 2) 不能与“打开设置(Shift+F1)”冲突
-    if new_sc == settings::settings_open_shortcut() {
-        return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
-    }
+    // 1)+2) 桌面端：唤醒快捷键按键必须可被解析，且不能与“打开设置(Shift+F1)”冲突。
+    // Android 无全局快捷键，跳过此校验（也不引用 tauri_plugin_global_shortcut 的类型）。
+    #[cfg(not(target_os = "android"))]
+    let new_sc = {
+        let sc = settings::hotkey_to_shortcut(&new_settings.wake_hotkey)
+            .ok_or_else(|| format!("不支持的按键：{}，请换一个按键", new_settings.wake_hotkey.key))?;
+        if sc == settings::settings_open_shortcut() {
+            return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
+        }
+        sc
+    };
 
     let mut guard = state.0.lock().unwrap();
     let old = guard.clone();
@@ -795,8 +799,6 @@ fn save_settings(
             }
         }
     }
-    #[cfg(target_os = "android")]
-    let _ = &new_sc; // 移动端不应用运行时快捷键/托盘，避免未使用告警
 
     // 4) 持久化 + 更新托管状态
     settings::save_settings(&app, &new_settings).map_err(|e| e.to_string())?;
