@@ -125,7 +125,9 @@ jobs:
 
       - name: Build Android APK
         # --apk 仅产出 APK（便于直接安装测试）；若要上架 Play Store 的 AAB，去掉 --apk 即可。
-        run: cargo tauri android build --target aarch64-linux-android --apk
+        # 注意：tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），
+        # 不是 rustup 的完整三元组 aarch64-linux-android。
+        run: cargo tauri android build --target aarch64 --apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
