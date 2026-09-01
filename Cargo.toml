@@ -8,6 +8,12 @@ rust-version = "1.70"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# 移动端（Android/iOS）要求库目标：Tauri 的 mobile_entry_point 需要在 lib 里导出，
+# 并由移动端原生壳以 cdylib/staticlib 形式加载。桌面端 main.rs 通过 rlib 链接到 web2app_lib。
+[lib]
+name = "web2app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 url = "2"
