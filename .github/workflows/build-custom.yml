@@ -16,10 +16,26 @@ on:
         description: '运行期显示名（窗口标题 / 托盘提示 / 设置页标题）'
         required: false
         default: 'Web2App'
+      window_title:
+        description: '窗口标题（留空则同 app_name）'
+        required: false
+        default: ''
       proxy_enabled:
         description: '是否启用本地反向代理注入鉴权 (true / false)'
         required: false
         default: 'false'
+      proxy_http:
+        description: '外部 HTTP 代理地址（留空=启用本地代理注入鉴权；仅 Windows）'
+        required: false
+        default: ''
+      proxy_https:
+        description: '外部 HTTPS 代理地址（留空=同 HTTP 代理）'
+        required: false
+        default: ''
+      proxy_bypass:
+        description: '不走代理的地址，分号分隔（留空=localhost;127.0.0.1;<-loopback>）'
+        required: false
+        default: ''
       data_dir_default:
         description: 'WebView2 数据目录：false=LOCALAPPDATA(推荐) / true=exe 同目录'
         required: false
@@ -33,7 +49,11 @@ jobs:
     env:
       APP_URL: ${{ github.event.inputs.app_url }}
       APP_NAME: ${{ github.event.inputs.app_name }}
+      WINDOW_TITLE: ${{ github.event.inputs.window_title }}
       PROXY_ENABLED: ${{ github.event.inputs.proxy_enabled }}
+      PROXY_HTTP: ${{ github.event.inputs.proxy_http }}
+      PROXY_HTTPS: ${{ github.event.inputs.proxy_https }}
+      PROXY_BYPASS: ${{ github.event.inputs.proxy_bypass }}
       DATA_DIR_DEFAULT: ${{ github.event.inputs.data_dir_default }}
     steps:
       - uses: actions/checkout@v4
@@ -86,6 +106,7 @@ jobs:
 #     env:
 #       APP_URL: "https://user:pass@notes.example.com"
 #       APP_NAME: "MyNotes"
+#       # 其它可选：WINDOW_TITLE / PROXY_HTTP / PROXY_HTTPS / PROXY_BYPASS
 #       PROXY_ENABLED: "true"
 #       DATA_DIR_DEFAULT: "false"
 #     steps:
