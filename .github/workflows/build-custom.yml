@@ -1,62 +1,112 @@
-name: 自定义打包（按配置生成应用）
+name: 自定义打包（JSON 配置生成应用）
 
-# 手动触发：在 GitHub 仓库 Actions 页点 “Run workflow”，填入网址 / 显示名等即可生成对应应用。
+# 手动触发：在仓库 Actions 页点 "Run workflow"，
+#   粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
 #
-# 想“一键生成某个固定应用”时：复制本文件为 .github/workflows/build-xxx.yml，
-#   - 把 `on` 改成 `push: { branches: [build-xxx] }`（或保留 workflow_dispatch 手动触发）；
-#   - 删掉下面的 `inputs`，改为在 job 的 `env:` 里写死对应值（见文件底部注释示例）。
-# 这样无需改源码，纯靠 CI 变量就能为每个应用产出独立的安装包。
+# 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
+#   {
+#     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）
+#     "app_name": "MyApp",                   // 运行期显示名（默认 Web2App）
+#     "window_title": "我的应用",             // 窗口标题（默认同 app_name）
+#     "proxy_enabled": "true",               // 是否启用本地反向代理注入鉴权（默认 false）
+#     "proxy_http": "",                      // 外部 HTTP 代理（默认空）
+#     "proxy_https": "",                     // 外部 HTTPS 代理（默认空）
+#     "proxy_bypass": "",                    // 不走代理的地址，分号分隔（默认空=代码内置）
+#     "data_dir_default": "false"            // WebView2 数据目录（默认 false=LOCALAPPDATA）
+#   }
+#
+# 想"一键生成某个固定应用"：把 config_url 固定指向仓库内一份 .json（如 docs/myapp.json），
+# 或把 config_json 直接写死在下面 job 的 env 里，无需改源码即可为每个应用产出独立安装包。
 on:
   workflow_dispatch:
     inputs:
-      app_url:
-        description: '要嵌入的网址（支持 https://user:pass@host 形式）'
-        required: true
-      app_name:
-        description: '运行期显示名（窗口标题 / 托盘提示 / 设置页标题）'
+      config_json:
+        description: '配置 JSON 字符串（单行）。与 config_url 二选一，都填则以本项为准'
         required: false
-        default: 'Web2App'
-      window_title:
-        description: '窗口标题（留空则同 app_name）'
+      config_url:
+        description: '或填一个返回上述 JSON 的 URL（公开可访问）'
         required: false
-        default: ''
-      proxy_enabled:
-        description: '是否启用本地反向代理注入鉴权 (true / false)'
-        required: false
-        default: 'false'
-      proxy_http:
-        description: '外部 HTTP 代理地址（留空=启用本地代理注入鉴权；仅 Windows）'
-        required: false
-        default: ''
-      proxy_https:
-        description: '外部 HTTPS 代理地址（留空=同 HTTP 代理）'
-        required: false
-        default: ''
-      proxy_bypass:
-        description: '不走代理的地址，分号分隔（留空=localhost;127.0.0.1;<-loopback>）'
-        required: false
-        default: ''
-      data_dir_default:
-        description: 'WebView2 数据目录：false=LOCALAPPDATA(推荐) / true=exe 同目录'
-        required: false
-        default: 'false'
 
 jobs:
   windows:
-    name: Build Windows (${{ github.event.inputs.app_name }})
+    name: Build Windows
     runs-on: windows-latest
-    # 这些环境变量在 `cargo tauri build` 时由 Rust 的 option_env! 读取并烘焙进二进制。
-    env:
-      APP_URL: ${{ github.event.inputs.app_url }}
-      APP_NAME: ${{ github.event.inputs.app_name }}
-      WINDOW_TITLE: ${{ github.event.inputs.window_title }}
-      PROXY_ENABLED: ${{ github.event.inputs.proxy_enabled }}
-      PROXY_HTTP: ${{ github.event.inputs.proxy_http }}
-      PROXY_HTTPS: ${{ github.event.inputs.proxy_https }}
-      PROXY_BYPASS: ${{ github.event.inputs.proxy_bypass }}
-      DATA_DIR_DEFAULT: ${{ github.event.inputs.data_dir_default }}
     steps:
       - uses: actions/checkout@v4
+
+      # 单一入口：接受 JSON 字符串或 JSON URL，解析后与默认值合并，
+      # 把最终 8 个编译期变量写入 GITHUB_ENV，后续步骤直接作为环境变量读取。
+      - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量）
+        shell: bash
+        env:
+          CONFIG_JSON: ${{ github.event.inputs.config_json }}
+          CONFIG_URL: ${{ github.event.inputs.config_url }}
+        run: |
+          python - <<'PY'
+          import os, sys, json, re, urllib.request
+
+          DEFAULTS = {
+              "app_url": "",
+              "app_name": "Web2App",
+              "window_title": "",
+              "proxy_enabled": "false",
+              "proxy_http": "",
+              "proxy_https": "",
+              "proxy_bypass": "",
+              "data_dir_default": "false",
+          }
+          BOOL_KEYS = {"proxy_enabled", "data_dir_default"}
+
+          raw = (os.environ.get("CONFIG_JSON") or "").strip()
+          url = (os.environ.get("CONFIG_URL") or "").strip()
+
+          if not raw and url:
+              req = urllib.request.Request(url, headers={"User-Agent": "web2app-ci"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  raw = r.read().decode("utf-8").strip()
+
+          if not raw:
+              sys.exit("必须提供 config_json 或 config_url，二者至少填一个")
+
+          try:
+              data = json.loads(raw)
+          except Exception as e:
+              sys.exit(f"配置不是合法 JSON：{e}")
+          if not isinstance(data, dict):
+              sys.exit("配置 JSON 必须是对象（字典）")
+
+          merged = dict(DEFAULTS)
+          for k, v in data.items():
+              if k not in merged:
+                  print(f"::warning::忽略未知字段 {k}")
+                  continue
+              if v is None:
+                  continue
+              if isinstance(v, bool):
+                  v = "true" if v else "false"
+              else:
+                  v = str(v)
+              merged[k] = v
+
+          merged["app_url"] = merged["app_url"].strip()
+          if not merged["app_url"]:
+              sys.exit("缺少必填字段 app_url")
+          for k in BOOL_KEYS:
+              merged[k] = merged[k].strip().lower()
+
+          # 打印时隐藏 URL 里的账号密码，避免泄漏到日志。
+          def mask(u):
+              return re.sub(r"(://[^/@\s]+)@", "://***@", u)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              for k, v in merged.items():
+                  f.write(f"{k.upper()}={v}\n")
+
+          print("已注入环境变量：")
+          for k, v in merged.items():
+              shown = mask(v) if k == "app_url" else v
+              print(f"  {k.upper()}={shown}")
+          PY
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -68,17 +118,17 @@ jobs:
         run: cargo install tauri-cli --version "^2"
 
       - name: Build (tauri, 编译期注入配置)
-        # cargo tauri build 时，Rust 编译期常量 APP_URL/APP_NAME/... 会读取上面的 env。
+        # cargo tauri build 时，Rust 编译期常量 APP_URL/APP_NAME/... 读取上一步注入的环境变量。
         run: cargo tauri build
 
       - name: 重命名产物（按 APP_NAME 区分不同应用）
-        # 注意：这里只改安装包“文件名”，程序内部显示名已随 APP_NAME 注入生效；
+        # 注意：这里只改安装包"文件名"，程序内部显示名已随 APP_NAME 注入生效；
         # 若还要改安装目录 / 可执行文件名 / 托盘标识等，需同步改 tauri.conf.json 的
         # productName / identifier（可另行做一套 workflow 模板）。
-        if: ${{ github.event.inputs.app_name != 'Web2App' }}
+        if: ${{ env.APP_NAME != 'Web2App' }}
         shell: pwsh
         run: |
-          $name = "${{ github.event.inputs.app_name }}"
+          $name = $env:APP_NAME -replace '[\\/:*?"<>|]', '_'
           $msi  = "target/release/bundle/msi"
           $nsis = "target/release/bundle/nsis"
           if (Test-Path $msi)  { Get-ChildItem "$msi\Web2App*.msi"  | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
@@ -87,14 +137,14 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.app_name }}-windows
+          name: ${{ env.APP_NAME }}-windows
           path: |
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
           if-no-files-found: warn
 
 # ---------------------------------------------------------------------------
-# 固定应用的一键示例（复制本文件后改用）：
+# 固定应用的一键示例（复制本文件后，把 config_json 写死即可）：
 #
 # name: Build MyApp
 # on:
@@ -103,14 +153,20 @@ jobs:
 # jobs:
 #   windows:
 #     runs-on: windows-latest
-#     env:
-#       APP_URL: "https://user:pass@notes.example.com"
-#       APP_NAME: "MyNotes"
-#       # 其它可选：WINDOW_TITLE / PROXY_HTTP / PROXY_HTTPS / PROXY_BYPASS
-#       PROXY_ENABLED: "true"
-#       DATA_DIR_DEFAULT: "false"
 #     steps:
 #       - uses: actions/checkout@v4
+#       - name: 解析配置
+#         shell: bash
+#         env:
+#           CONFIG_JSON: '{"app_url":"https://user:pass@notes.example.com","app_name":"MyNotes","proxy_enabled":"true"}'
+#         run: |
+#           python - <<'PY'
+#           import os, json
+#           data = json.loads(os.environ["CONFIG_JSON"])
+#           for k, v in data.items():
+#               with open(os.environ["GITHUB_ENV"], "a") as f:
+#                   f.write(f"{k.upper()}={v}\n")
+#           PY
 #       - uses: dtolnay/rust-toolchain@stable
 #       - uses: Swatinem/rust-cache@v2
 #       - run: cargo install tauri-cli --version "^2"
