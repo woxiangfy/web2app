@@ -2,7 +2,7 @@ name: 自定义打包（JSON 配置生成应用）
 
 # 手动触发：在仓库 Actions 页点 "Run workflow"，
 #   粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
-#   一次触发同时产出 Windows 安装包（msi/nsis）和 Android APK。
+#   一次触发同时产出：Windows MSI 安装包、Windows 免安装绿色版(zip)、Android APK。
 #
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
@@ -126,23 +126,29 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
-      - name: Build (tauri, 编译期注入配置)
-        # cargo tauri build 时，Rust 编译期常量 APP_URL/APP_NAME/... 读取上一步注入的环境变量。
-        run: cargo tauri build
+      - name: Build (tauri, 编译期注入配置，仅 MSI)
+        # --bundles msi：只打 MSI 安装包（不产 NSIS）。编译期常量 APP_URL/APP_NAME/...
+        # 读取上一步注入的环境变量；主二进制 web2app.exe 仍会编译到 target/release/，供绿色版使用。
+        run: cargo tauri build --bundles msi
 
-      - name: 重命名产物（按 APP_NAME 区分不同应用）
-        # 注意：这里只改安装包"文件名"，程序内部显示名已随 APP_NAME 注入生效；
-        # 若还要改安装目录 / 可执行文件名 / 托盘标识等，需同步改 tauri.conf.json 的
-        # productName / identifier（可另行做一套 workflow 模板）。
+      - name: 重命名 MSI + 生成免安装绿色版
+        # 1) MSI 文件名带上 APP_NAME（仅当 APP_NAME 非默认 Web2App）。
+        # 2) 把主程序 web2app.exe 复制为 <APP_NAME>.exe 后打包成 zip，即无需安装的绿色版
+        #    （依赖系统 WebView2 运行时，Win10/11 自带；前端资源已嵌入 exe，无需额外文件）。
+        # 程序内部显示名 / 安装目录 / 托盘标识仍由 tauri.conf.json 的 productName 决定。
         shell: pwsh
         run: |
           $name = $env:APP_NAME -replace '[\\/:*?"<>|]', '_'
           if ($name -ne 'Web2App') {
-            $msi  = "target/release/bundle/msi"
-            $nsis = "target/release/bundle/nsis"
-            if (Test-Path $msi)  { Get-ChildItem "$msi\Web2App*.msi"  | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
-            if (Test-Path $nsis) { Get-ChildItem "$nsis\Web2App*.exe" | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
+            $msi = "target/release/bundle/msi"
+            if (Test-Path $msi) { Get-ChildItem "$msi\Web2App*.msi" | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
           }
+          $exe = "target/release/web2app.exe"
+          if (-not (Test-Path $exe)) { throw "未找到主程序 $exe" }
+          $portable = "target/release/$name.exe"
+          Copy-Item $exe $portable -Force
+          Compress-Archive -Path $portable -DestinationPath "target/release/$name-portable.zip" -Force
+          Remove-Item $portable -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -151,7 +157,7 @@ jobs:
           name: windows-installers
           path: |
             target/release/bundle/msi/*.msi
-            target/release/bundle/nsis/*.exe
+            target/release/*-portable.zip
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
