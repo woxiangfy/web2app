@@ -1,9 +1,11 @@
 name: Release
 
 # 发布版本自动编译：在 GitHub 上 Publish 一个 Release 时触发，自动构建并上传安装包。
+# 也支持手动触发（Actions → Release → Run workflow），此时只跑 Android job，用于快速验证 APK 构建。
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +21,9 @@ jobs:
   # ---------------------------------------------------------------------------
   windows:
     name: Build Windows installers
+    # 仅在正式发布（release 事件）时构建 Windows 包；workflow_dispatch 手动触发时跳过，
+    # 只跑 Android job（快速验证 APK 构建）。上传步骤依赖 github.event.release，手动触发会失败。
+    if: github.event_name == 'release'
     runs-on: windows-latest
     env:
       APP_URL: ${{ secrets.APP_URL || vars.APP_URL }}
