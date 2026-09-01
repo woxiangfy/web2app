@@ -277,6 +277,7 @@ fn toggle_window(app: &tauri::AppHandle) {
 ///      头，这是“始终鉴权”的可靠做法，子资源不会丢凭据；
 ///   2) `BasicAuthenticationRequested` 兜底，主框架文档（不触发 WebResourceRequested 的硬限制）及
 ///      任何漏网请求收到 401 时自动应答账号密码。
+///
 ///   注：WebSocket 握手已由本地反向代理（`src/proxy.rs`）统一注入 Authorization 头，这两层原生
 ///   事件主要作为外链/直接访问上游 URL 时的兜底。
 /// - 所有钩子注册完成后，用 `target_url`（本地反向代理 URL）发起首次导航，避免首批请求
