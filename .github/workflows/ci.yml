@@ -1,0 +1,105 @@
+name: CI
+
+# 提交代码即自动测试：每次 push 到主分支、或针对主分支的 PR 都会触发。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 代码质量 + 单元测试（Ubuntu）
+  #    这里编译的是 Linux 主机目标——它走的是与 Android 完全一致的
+  #    `#[cfg(not(windows))]` 代码路径（托盘 / 全局快捷键被剔除，鉴权走本地代理），
+  #    因此本作业同时也验证了“移动端那一套”的 Rust 代码能正确编译与运行。
+  # ---------------------------------------------------------------------------
+  lint-and-test:
+    name: Lint & Test (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (WebKit2GTK for Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting (non-blocking)
+        # 仅作提示；若与本地 rustfmt 版本略有差异不会阻断流水线。
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all
+
+  # ---------------------------------------------------------------------------
+  # 2) Windows 端编译检查（原生 MSVC，验证 WebView2 那一套代码）
+  # ---------------------------------------------------------------------------
+  check-windows:
+    name: Check (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check (Windows target)
+        run: cargo check --all-targets
+
+  # ---------------------------------------------------------------------------
+  # 3) Android 端交叉编译检查（aarch64-linux-android，尽力而为，不阻断流水线）
+  #    前置：需要 NDK。本作业验证 Rust 能针对 Android 目标编译通过。
+  #    注意：它只编译 Rust，不产出 APK（APK 由 release.yml 在发布时产出）。
+  # ---------------------------------------------------------------------------
+  check-android:
+    name: Check (Android aarch64)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          yes | sdkmanager "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check (Android target)
+        run: cargo ndk -t arm64-v8a build

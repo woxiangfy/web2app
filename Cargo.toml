@@ -1,0 +1,52 @@
+[package]
+name = "web2app"
+version = "0.1.0"
+description = "web2app — a desktop/mobile webview app (Rust + Tauri) that embeds a URL, minimizes to the system tray, and toggles with a global shortcut. Supports Windows (WebView2) and Android."
+edition = "2021"
+rust-version = "1.70"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+url = "2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 本地反向代理（HTTP + WebSocket）所需依赖，用于绕过 WebView2 不对 WebSocket 触发
+# WebResourceRequested / BasicAuthenticationRequested 的限制。proxy 模块是纯 Rust、零平台依赖，
+# 因此 Windows 与 Android 共用同一份代码。
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+http-body-util = "0.1"
+bytes = "1"
+http = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
+
+# 仅 Windows：调用 WebView2 原生 API 处理 Basic 鉴权。
+# 版本必须与 Tauri 2.11.x 内部使用的 wry 一致（webview2-com 0.38 / windows 0.61），
+# 否则 ICoreWebView2 等 COM 类型会因版本不同而编译失败。
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT"] }
+# Windows 沿用系统证书库（native-tls/schannel），与你当前可用的构建保持一致。
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+
+# 非 Windows（Android 等）：使用 rustls，便于交叉编译（无需系统 OpenSSL / NDK 之外的 C 依赖）。
+# 注意：tokio-tungstenite 没有 `rustls-tls` 这个 feature（那是 reqwest 的），它对应的是
+# `rustls-tls-native-roots` / `rustls-tls-webpki-roots`；这里用 webpki-roots（内置 Mozilla 根证书），
+# 与 reqwest 的 `rustls-tls`（同样内置 webpki-roots）保持一致，便于 Android 交叉编译时无需依赖系统 CA 存储。
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

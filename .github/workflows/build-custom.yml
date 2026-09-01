@@ -1,0 +1,104 @@
+name: 自定义打包（按配置生成应用）
+
+# 手动触发：在 GitHub 仓库 Actions 页点 “Run workflow”，填入网址 / 显示名等即可生成对应应用。
+#
+# 想“一键生成某个固定应用”时：复制本文件为 .github/workflows/build-xxx.yml，
+#   - 把 `on` 改成 `push: { branches: [build-xxx] }`（或保留 workflow_dispatch 手动触发）；
+#   - 删掉下面的 `inputs`，改为在 job 的 `env:` 里写死对应值（见文件底部注释示例）。
+# 这样无需改源码，纯靠 CI 变量就能为每个应用产出独立的安装包。
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: '要嵌入的网址（支持 https://user:pass@host 形式）'
+        required: true
+      app_name:
+        description: '运行期显示名（窗口标题 / 托盘提示 / 设置页标题）'
+        required: false
+        default: 'Web2App'
+      proxy_enabled:
+        description: '是否启用本地反向代理注入鉴权 (true / false)'
+        required: false
+        default: 'false'
+      data_dir_default:
+        description: 'WebView2 数据目录：false=LOCALAPPDATA(推荐) / true=exe 同目录'
+        required: false
+        default: 'false'
+
+jobs:
+  windows:
+    name: Build Windows (${{ github.event.inputs.app_name }})
+    runs-on: windows-latest
+    # 这些环境变量在 `cargo tauri build` 时由 Rust 的 option_env! 读取并烘焙进二进制。
+    env:
+      APP_URL: ${{ github.event.inputs.app_url }}
+      APP_NAME: ${{ github.event.inputs.app_name }}
+      PROXY_ENABLED: ${{ github.event.inputs.proxy_enabled }}
+      DATA_DIR_DEFAULT: ${{ github.event.inputs.data_dir_default }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build (tauri, 编译期注入配置)
+        # cargo tauri build 时，Rust 编译期常量 APP_URL/APP_NAME/... 会读取上面的 env。
+        run: cargo tauri build
+
+      - name: 重命名产物（按 APP_NAME 区分不同应用）
+        # 注意：这里只改安装包“文件名”，程序内部显示名已随 APP_NAME 注入生效；
+        # 若还要改安装目录 / 可执行文件名 / 托盘标识等，需同步改 tauri.conf.json 的
+        # productName / identifier（可另行做一套 workflow 模板）。
+        if: ${{ github.event.inputs.app_name != 'Web2App' }}
+        shell: pwsh
+        run: |
+          $name = "${{ github.event.inputs.app_name }}"
+          $msi  = "target/release/bundle/msi"
+          $nsis = "target/release/bundle/nsis"
+          if (Test-Path $msi)  { Get-ChildItem "$msi\Web2App*.msi"  | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
+          if (Test-Path $nsis) { Get-ChildItem "$nsis\Web2App*.exe" | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.app_name }}-windows
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+
+# ---------------------------------------------------------------------------
+# 固定应用的一键示例（复制本文件后改用）：
+#
+# name: Build MyApp
+# on:
+#   push:
+#     branches: [build-myapp]
+# jobs:
+#   windows:
+#     runs-on: windows-latest
+#     env:
+#       APP_URL: "https://user:pass@notes.example.com"
+#       APP_NAME: "MyNotes"
+#       PROXY_ENABLED: "true"
+#       DATA_DIR_DEFAULT: "false"
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: dtolnay/rust-toolchain@stable
+#       - uses: Swatinem/rust-cache@v2
+#       - run: cargo install tauri-cli --version "^2"
+#       - run: cargo tauri build
+#       - uses: softprops/action-gh-release@v2
+#         with:
+#           files: |
+#             target/release/bundle/msi/*.msi
+#             target/release/bundle/nsis/*.exe
+#         env:
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# ---------------------------------------------------------------------------

@@ -1,0 +1,26 @@
+# Rust
+/target/
+
+# Tauri
+/gen/
+*.dll
+*.so
+*.dylib
+
+# 编译产物
+dist-js/
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 本地敏感配置（若存在，含密码/内网地址）
+.env
+.env.local

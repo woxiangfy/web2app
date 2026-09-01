@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>设置 - Web2App</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --surface: #f6f7f9;
+    --surface-hover: #ebedf0;
+    --border: #d1d5db;
+    --text: #1f2937;
+    --text-secondary: #6b7280;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --danger: #dc2626;
+    --success: #16a34a;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #18181b;
+      --surface: #27272a;
+      --surface-hover: #3f3f46;
+      --border: #52525b;
+      --text: #f4f4f5;
+      --text-secondary: #a1a1aa;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --danger: #f87171;
+      --success: #4ade80;
+      --shadow: 0 1px 2px rgba(0,0,0,0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 22px 24px;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.3px; }
+  .hint { font-size: 12px; color: var(--text-secondary); margin: 0 0 20px; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+    box-shadow: var(--shadow);
+  }
+  .row { margin: 12px 0; }
+  .row:first-child { margin-top: 0; }
+  .row:last-child { margin-bottom: 0; }
+  .label { font-weight: 600; margin-bottom: 8px; color: var(--text); }
+  .ctrl { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+  .kbd {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    padding: 6px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-width: 80px;
+    text-align: center;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+  }
+  button, select {
+    padding: 7px 13px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    transition: background .12s, border-color .12s, transform .05s;
+  }
+  button:hover, select:hover { background: var(--surface-hover); border-color: var(--text-secondary); }
+  button:active { transform: translateY(1px); }
+  button.primary {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+  button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+  button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  select { min-width: 72px; appearance: none; padding-right: 28px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; }
+  @media (prefers-color-scheme: dark) {
+    select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23a1a1aa' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); }
+  }
+
+  label.chk { display: flex; align-items: center; gap: 10px; margin: 10px 0; cursor: pointer; }
+  input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--primary); cursor: pointer; }
+
+  .sub { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+  .actions { margin-top: 18px; display: flex; gap: 10px; }
+  #status { margin-top: 14px; font-size: 12px; min-height: 18px; font-weight: 500; }
+  .ok { color: var(--success); }
+  .err { color: var(--danger); }
+  .muted { color: var(--text-secondary); }
+
+  /* 捕获中状态 */
+  .capturing {
+    animation: pulse 1.2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+</style>
+</head>
+<body>
+  <h1>Web2App 设置</h1>
+  <p class="hint">随时按 <b>Shift + F1</b> 可打开本设置窗口。</p>
+
+  <div class="card">
+    <div class="row">
+      <div class="label">唤醒快捷键（显示 / 隐藏主窗口）</div>
+      <div class="ctrl">
+        <span class="kbd" id="hkCurrent" title="当前生效的快捷键">—</span>
+        <button id="captureBtn">点击捕获</button>
+        <span class="muted">或手动选择：</span>
+        <select id="keySelect" title="选择主键"></select>
+      </div>
+      <div id="hkStatus" class="sub">尚未捕获新快捷键，保存时将沿用当前值。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="trayEnabled"/> 启用系统托盘图标</label>
+      <label class="chk"><input type="checkbox" id="minimizeOnClose"/> 关闭窗口时最小化到托盘</label>
+      <div class="sub">“最小化到托盘”需同时启用托盘图标；否则关闭窗口即退出程序。</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="saveBtn">保存</button>
+    <button id="closeBtn">关闭窗口</button>
+  </div>
+
+  <div id="status"></div>
+
+<script>
+  const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args || {});
+
+  let captured = null; // 当前要保存的快捷键 { ctrl, alt, shift, key }
+
+  function prettyKey(code) {
+    if (code.startsWith("Digit")) return code.slice(5);
+    if (code.startsWith("Key")) return code.slice(3);
+    if (code.startsWith("Numpad")) return "Num" + code.slice(6);
+    const arrows = { ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→" };
+    return arrows[code] || code;
+  }
+  function hkLabel(hk) {
+    if (!hk || !hk.key) return "—";
+    const m = [];
+    if (hk.ctrl) m.push("Ctrl");
+    if (hk.alt) m.push("Alt");
+    if (hk.shift) m.push("Shift");
+    m.push(prettyKey(hk.key));
+    return m.join("+") || "—";
+  }
+  function setStatus(msg, cls) {
+    const el = document.getElementById("status");
+    el.textContent = msg;
+    el.className = cls || "";
+  }
+
+  (async () => {
+    try {
+      const s = await invoke("get_settings");
+      document.getElementById("hkCurrent").textContent = hkLabel(s.wake_hotkey);
+      document.getElementById("trayEnabled").checked = s.tray_enabled;
+      document.getElementById("minimizeOnClose").checked = s.minimize_on_close;
+      captured = s.wake_hotkey; // 默认沿用当前
+    } catch (e) {
+      setStatus("加载设置失败：" + e, "err");
+    }
+
+    const sel = document.getElementById("keySelect");
+    const keys = [
+      "F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12",
+      "Digit0","Digit1","Digit2","Digit3","Digit4","Digit5","Digit6","Digit7","Digit8","Digit9",
+      "KeyA","KeyB","KeyC","KeyD","KeyE","KeyQ","KeyS","KeyW","KeyZ",
+      "Space","Enter","Escape","Tab"
+    ];
+    keys.forEach(k => {
+      const o = document.createElement("option");
+      o.value = k; o.textContent = prettyKey(k);
+      sel.appendChild(o);
+    });
+    sel.value = (captured && captured.key) || "Digit4";
+    sel.addEventListener("change", () => {
+      captured = { ctrl: false, alt: true, shift: false, key: sel.value };
+      document.getElementById("hkStatus").textContent = "已选键：" + hkLabel(captured);
+    });
+  })();
+
+  // 捕获快捷键
+  document.getElementById("captureBtn").addEventListener("click", () => {
+    const st = document.getElementById("hkStatus");
+    const btn = document.getElementById("captureBtn");
+    st.textContent = "请按下快捷键组合（例如 Alt+4，按 Esc 取消）…";
+    btn.textContent = "捕获中…";
+    btn.classList.add("capturing");
+
+    const handler = (e) => {
+      if (e.key === "Escape") {
+        cleanup();
+        st.textContent = "已取消捕获，沿用当前值。";
+        return;
+      }
+      e.preventDefault();
+      if (["Control","Alt","Shift","Meta"].includes(e.key)) return; // 仅修饰键，继续等待
+      const hk = {
+        ctrl: e.ctrlKey || e.metaKey,
+        alt: e.altKey,
+        shift: e.shiftKey,
+        key: e.code
+      };
+      captured = hk;
+      document.getElementById("hkCurrent").textContent = hkLabel(hk);
+      st.textContent = "已捕获：" + hkLabel(hk);
+      cleanup();
+    };
+    const cleanup = () => {
+      document.removeEventListener("keydown", handler, true);
+      btn.textContent = "点击捕获";
+      btn.classList.remove("capturing");
+    };
+    document.addEventListener("keydown", handler, true);
+  });
+
+  document.getElementById("saveBtn").addEventListener("click", async () => {
+    const payload = {
+      wake_hotkey: captured,
+      tray_enabled: document.getElementById("trayEnabled").checked,
+      minimize_on_close: document.getElementById("minimizeOnClose").checked
+    };
+    try {
+      // Tauri generate_handler 会把 Rust 的 snake_case 参数名转为 camelCase，
+      // 因此后端 save_settings 的 `new_settings` 参数对应前端键名 `newSettings`。
+      await invoke("save_settings", { newSettings: payload });
+      document.getElementById("hkCurrent").textContent = hkLabel(payload.wake_hotkey);
+      setStatus("已保存。快捷键立即生效；托盘 / 最小化选项将在下次相关操作时生效。", "ok");
+    } catch (e) {
+      setStatus("保存失败：" + (e || "未知错误"), "err");
+    }
+  });
+
+  document.getElementById("closeBtn").addEventListener("click", async () => {
+    try { await invoke("close_settings_window"); } catch (_) {}
+  });
+</script>
+</body>
+</html>

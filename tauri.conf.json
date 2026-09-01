@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Web2App",
+  "version": "0.1.0",
+  "identifier": "com.example.web2app",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "https://www.example.com",
+    "beforeBuildCommand": "",
+    "frontendDist": "dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": ["icons/icon.ico"],
+    "android": {
+      "minSdkVersion": 24
+    }
+  },
+  "plugins": {}
+}
