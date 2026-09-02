@@ -1,0 +1,246 @@
+name: 生成打包配置 JSON
+
+# 手动触发：在 Actions 页选这个 workflow → "Run workflow"，按表单填好各项，
+# 就会产出一份【可直接用于 build-custom.yml 手动打包】的配置 JSON。
+#
+# 产出两样东西：
+#   1. Artifact「packaging-config」里的 packaging-config.json —— 完整、格式化的配置（含签名，请勿公开分享）。
+#   2. Job Summary 里的一行「单行 JSON」—— 可整段复制，粘贴到 build-custom.yml 的 config_json 输入框。
+#
+# 为什么需要它：build-custom.yml 手动打包要求粘贴一份配置 JSON（config_json）或给个 JSON URL，
+# 直接在 Actions 输入框里手拼 JSON 容易漏引号/错字段；用本 workflow 先走表单填一次，
+# 由脚本组装、校验、清洗，拿到「保证合法」的 JSON 再喂给打包 workflow，省去手写纠错。
+#
+# 字段含义与 config.example.json / build-custom.yml 完全对应：
+#   app_url        必填，要嵌入的网址，可带账号密码（如 https://user:pass@host）
+#   app_name       安装名（Windows 安装包/快捷方式/安装目录 + 两端数据存储目录名），默认 Web2App
+#   title          显示名（Windows 窗口标题 + Android 应用名称）；留空则自动回落为 app_name
+#   icon_url       应用图标 PNG 的 URL（留空=沿用仓库默认图标）
+#   proxy_*        本地反向代理 / 外部代理配置（proxy_enabled=true 且不填外部代理 → 仅注入鉴权）
+#   data_dir_default  WebView2 数据目录策略
+#   android_keystore_*  Android 签名（可选）。4 项要么全不填（打包时回落到仓库 secrets / 一次性 CI 密钥），
+#                 要么填了 android_keystore_base64 就【必须】同时给 alias 和 keystore 密码。
+#                 字段对应：base64=keystore(.jks) 文件内容编码成 base64；alias=别名；
+#                 android_keystore_password=keystore 存储密码；android_key_password=条目 key 密码（可留空，默认同存储密码）。
+#
+# 本 workflow 只做“生成配置”，不联网、不构建、不需要 checkout 源码，故无需任何 SDK。
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: '网址（必填，可带账号密码，如 https://user:pass@host）'
+        required: true
+        default: 'https://example.com'
+      app_name:
+        description: '安装名（安装包名/快捷方式/安装目录/数据目录名）'
+        required: false
+        default: 'Web2App'
+      title:
+        description: '显示名（Windows 窗口标题 + Android 应用名称）；留空则回落为 app_name'
+        required: false
+        default: ''
+      icon_url:
+        description: '应用图标 PNG 的 URL（留空=沿用仓库默认图标）'
+        required: false
+        default: ''
+      proxy_enabled:
+        description: '是否启用本地反向代理（注入账号密码鉴权）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      proxy_http:
+        description: '外部 HTTP 代理（留空=直连）'
+        required: false
+        default: ''
+      proxy_https:
+        description: '外部 HTTPS 代理（留空=直连）'
+        required: false
+        default: ''
+      proxy_bypass:
+        description: '不走代理的地址，分号分隔'
+        required: false
+        default: ''
+      data_dir_default:
+        description: 'WebView2 数据目录是否用默认 LOCALAPPDATA'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      android_keystore_base64:
+        description: 'Android 签名 keystore(.jks) 的 base64（可选，很长；不填则签名回落到仓库 secrets/一次性密钥）'
+        required: false
+        default: ''
+      android_key_alias:
+        description: 'keystore 别名（填了上面的 base64 时必填）'
+        required: false
+        default: ''
+      android_keystore_password:
+        description: 'keystore 存储密码（填了上面的 base64 时必填）'
+        required: false
+        default: ''
+      android_key_password:
+        description: '条目 key 密码（可选，默认同 keystore 密码）'
+        required: false
+        default: ''
+
+jobs:
+  generate:
+    name: 组装并校验配置 JSON
+    runs-on: ubuntu-latest
+    steps:
+      - name: 组装 JSON + 校验 + 输出 artifact 与单行版
+        shell: bash
+        env:
+          I_APP_URL: ${{ github.event.inputs.app_url }}
+          I_APP_NAME: ${{ github.event.inputs.app_name }}
+          I_TITLE: ${{ github.event.inputs.title }}
+          I_ICON_URL: ${{ github.event.inputs.icon_url }}
+          I_PROXY_ENABLED: ${{ github.event.inputs.proxy_enabled }}
+          I_PROXY_HTTP: ${{ github.event.inputs.proxy_http }}
+          I_PROXY_HTTPS: ${{ github.event.inputs.proxy_https }}
+          I_PROXY_BYPASS: ${{ github.event.inputs.proxy_bypass }}
+          I_DATA_DIR_DEFAULT: ${{ github.event.inputs.data_dir_default }}
+          I_KS_B64: ${{ github.event.inputs.android_keystore_base64 }}
+          I_KS_ALIAS: ${{ github.event.inputs.android_key_alias }}
+          I_KS_STORE_PASS: ${{ github.event.inputs.android_keystore_password }}
+          I_KS_KEY_PASS: ${{ github.event.inputs.android_key_password }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, pathlib
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          # ---- 读取表单输入 ----
+          def v(k):
+              return (os.environ.get(k) or "").strip()
+
+          app_url   = v("I_APP_URL")
+          app_name  = v("I_APP_NAME") or "Web2App"
+          title     = v("I_TITLE")
+          icon_url  = v("I_ICON_URL")
+          proxy_enabled = (v("I_PROXY_ENABLED") or "false").lower()
+          proxy_http    = v("I_PROXY_HTTP")
+          proxy_https   = v("I_PROXY_HTTPS")
+          proxy_bypass  = v("I_PROXY_BYPASS")
+          data_dir_default = (v("I_DATA_DIR_DEFAULT") or "false").lower()
+          ks_b64    = v("I_KS_B64")
+          ks_alias  = v("I_KS_ALIAS")
+          ks_store  = v("I_KS_STORE_PASS")
+          ks_key    = v("I_KS_KEY_PASS")
+
+          # ---- 校验必填与联动 ----
+          errors = []
+
+          # app_url 基本格式检查（允许 http/https 与可选的 user:pass）
+          m = re.match(r"^https?://", app_url)
+          if not app_url:
+              errors.append("app_url 为必填项")
+          elif not m:
+              errors.append(f"app_url 必须以 http:// 或 https:// 开头（当前：{app_url!r}）")
+
+          # app_name 清洗为 Windows 文件名安全名，仅用于回显提示（不写进 JSON，
+          # 打包时 build-custom.yml 会再洗一遍；此处只防用户填了明显非法字符导致看不懂产物名）
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", app_name)
+          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          if not safe:
+              errors.append("app_name 清洗后为空，请换一个名称")
+
+          for flag, k in ((proxy_enabled, "proxy_enabled"), (data_dir_default, "data_dir_default")):
+              if flag not in ("true", "false"):
+                  errors.append(f"{k} 只能是 true 或 false（当前：{flag!r}）")
+
+          # 签名联动校验：给了 base64 就必须给 alias 和存储密码
+          if ks_b64:
+              if not ks_alias or not ks_store:
+                  errors.append("填了 android_keystore_base64 时，必须同时提供 android_key_alias 和 android_keystore_password")
+              try:
+                  raw = bytes(ks_b64, "ascii")
+                  import base64 as _b
+                  dec = _b.b64decode(raw, validate=True)
+                  if len(dec) < 64:
+                      errors.append("android_keystore_base64 解码后内容过小，疑似不是完整 keystore（正常至少几百字节）")
+              except Exception:
+                  errors.append("android_keystore_base64 不是合法的 base64（可能混入了换行/空格，请去掉后重试）")
+          else:
+              # 未给 keystore：清空签名相关字段，避免打包时误导（build-custom 会回落 secrets/一次性）。
+              # 若用户误填了孤儿 alias/密码，先记录成 warning（不阻断），再清空，避免生成含"半截签名"的配置。
+              orphans = bool(ks_alias or ks_store or ks_key)
+              ks_alias, ks_store, ks_key = "", "", ""
+              if orphans:
+                  print("::warning::未提供 android_keystore_base64，但填了 alias/密码；"
+                        "这些将被清空并忽略，签名回落到仓库 secrets 或一次性密钥")
+
+          if errors:
+              print("::error::配置校验失败：")
+              for e in errors:
+                  print(f"::error::  - {e}")
+              sys.exit(1)
+
+          # ---- title 回落为 app_name（与 build-custom.yml 取值链一致）----
+          if not title:
+              title = app_name
+
+          # ---- 组装最终配置（字段顺序与 config.example.json 对齐）----
+          cfg = {
+              "app_url": app_url,
+              "app_name": app_name,
+              "title": title,
+              "icon_url": icon_url,
+              "proxy_enabled": proxy_enabled,
+              "proxy_http": proxy_http,
+              "proxy_https": proxy_https,
+              "proxy_bypass": proxy_bypass,
+              "data_dir_default": data_dir_default,
+              "android_keystore_base64": ks_b64,
+              "android_key_alias": ks_alias,
+              "android_keystore_password": ks_store,
+              "android_key_password": ks_key,
+          }
+
+          pretty = json.dumps(cfg, ensure_ascii=False, indent=2)
+          oneline = json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
+
+          # ---- 落盘：artifact 用（含签名真值，勿公开分享）----
+          out = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "config"
+          out.mkdir(parents=True, exist_ok=True)
+          cfg_path = out / "packaging-config.json"
+          cfg_path.write_text(pretty + "\n", encoding="utf-8")
+
+          # ---- 控制台/日志回显（密码打码，避免泄漏到公开日志）----
+          def mask_ks(v):
+              return "***（已配置）" if v else "（未配置）"
+          print("=== 已生成 packaging-config.json，内容预览 ===")
+          for k, val in cfg.items():
+              if k in ("android_keystore_password", "android_key_password"):
+                  val = mask_ks(val)
+              elif k == "android_keystore_base64":
+                  val = f"（已配置，{len(val)} 字符）" if val else "（未配置）"
+              print(f"  {k}: {val}")
+
+          # ---- Job Summary：给出一行「单行 JSON」，可直接复制粘贴给 build-custom.yml ----
+          masked = dict(cfg)
+          for k in ("android_keystore_base64", "android_keystore_password", "android_key_password"):
+              masked[k] = "***"
+          summary_oneline = json.dumps(masked, ensure_ascii=False, separators=(",", ":"))
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## 生成的打包配置 JSON\n\n")
+              f.write("### 使用方式\n\n")
+              f.write("1. 下载本工作流的 **packaging-config** artifact（含完整签名的 `packaging-config.json`）；\n")
+              f.write("2. 或把下面这行**单行 JSON**（签名相关字段已打码，请用 artifact 里的完整版）复制，\n")
+              f.write("   粘贴到 **build-custom.yml** 的 `config_json` 输入框，或存成文件后用 `config_url` 指向。\n\n")
+              f.write("> ⚠️ 签名密码会写入 artifact 的 JSON 里，artifact 仅供你自己下载，**不要公开分享**；\n")
+              f.write("> 正式长期打包更推荐把 keystore 放仓库 Secrets，本配置的签名字段留空。\n\n")
+              f.write("```json\n" + summary_oneline + "\n```\n")
+          PY
+
+      - name: 上传配置 JSON（含签名，仅你自己下载）
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaging-config
+          path: ${{ runner.temp }}/config/packaging-config.json
+          if-no-files-found: error
