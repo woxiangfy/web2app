@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
-use crate::APP_NAME;
+use crate::{APP_NAME, sanitize_dir_name};
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -83,10 +83,12 @@ pub fn settings_open_shortcut() -> Shortcut {
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|p| p.join(SETTINGS_FILE))
+    // Tauri 默认按 tauri.conf.json 的 identifier（com.example.web2app）生成目录末段，
+    // 这里改用清洗后的自定义 app_name，与 WebView2 数据目录保持一致（见 lib.rs）。
+    let base = app.path().app_config_dir().ok()?;
+    let root = base.parent().unwrap_or(&base);
+    let dir = root.join(sanitize_dir_name(APP_NAME));
+    Some(dir.join(SETTINGS_FILE))
 }
 
 /// 读取设置；文件不存在或解析失败时使用默认值。

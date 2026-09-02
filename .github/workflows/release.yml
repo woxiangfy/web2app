@@ -147,6 +147,35 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
+      - name: 统一安装名称（APP_NAME → productName，供 android init 烘焙）
+        # 必须在 `cargo tauri android init` 之前把 APP_NAME 写入 tauri.conf.json 的
+        # productName，否则 init 会把默认名烘焙进安卓工程，后续 strings.xml 补丁只是兜底。
+        env:
+          PYTHONUTF8: "1"
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = os.environ.get("APP_NAME", "").strip()
+          if not name:
+              print("未配置 APP_NAME，沿用默认名称")
+              raise SystemExit(0)
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
+          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          if not safe:
+              safe = "Web2App"
+
+          with open("tauri.conf.json", encoding="utf-8") as f:
+              conf = json.load(f)
+          conf["productName"] = safe
+          with open("tauri.conf.json", "w", encoding="utf-8") as f:
+              json.dump(conf, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(f"productName = {safe}（android init 将据此烘焙安卓应用名称）")
+          PY
+
       - name: Initialize Android project (gen/android) + 安装匹配平台
         # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
         # --ci 跳过交互式询问；--skip-targets-install 因为上面已用 rust-toolchain 装了 aarch64 target。
@@ -166,6 +195,32 @@ jobs:
           fi
           echo "目标 compileSdk=$SDK buildToolsVersion=$BT"
           yes | sdkmanager "platforms;android-$SDK" "build-tools;$BT"
+
+      - name: 应用自定义图标到 Android 工程
+        # 官方推荐：android init 之后运行 `cargo tauri icon`，它会把生成的 Android
+        # 启动图标直接放入 gen/android/app/src/main/res/（mipmap-*）。
+        # 使用仓库已提交的图标源（icons/icon.png）；若仓库图标已是自定义，则安卓图标同步为自定义。
+        # 兜底：若当前 tauri-cli 版本未自动放置，再手动把生成的 icons/android/* 复制进 res。
+        run: |
+          SRC=""
+          if [ -f "icon-custom.png" ]; then
+            SRC="icon-custom.png"
+          elif [ -f "icons/icon.png" ]; then
+            SRC="icons/icon.png"
+          fi
+          if [ -z "$SRC" ]; then
+            echo "未找到图标源文件，沿用默认图标"
+            exit 0
+          fi
+          cargo tauri icon "$SRC"
+          if [ -d "gen/android/app/src/main/res" ]; then
+            if [ -d "icons/android" ]; then
+              cp -r icons/android/. gen/android/app/src/main/res/
+            fi
+            echo "已应用自定义 Android 启动图标（源：$SRC）"
+          else
+            echo "::warning::未找到 gen/android res 目录，图标可能未应用"
+          fi
 
       - name: 统一应用名称（Android 桌面名称 ← APP_NAME）
         # 与 build-custom.yml / Windows 端（productName）保持一致：
@@ -187,7 +242,9 @@ jobs:
           res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")
           if res.exists():
               s = res.read_text(encoding="utf-8")
-              s2, n = re.subn(r'(<string\s+name="app_name"\s*>)[^<]*(</string>)',
+              # 容忍 name 上可能带额外属性（如 translatable="false"），否则旧正则
+              # 匹配失败会新增重复 app_name 资源，导致名称仍是默认值。
+              s2, n = re.subn(r'(<string\s+name="app_name"(?:\s+[\w:-]+="[^"]*")*\s*>)[^<]*(</string>)',
                               lambda m: m.group(1) + label + m.group(2), s)
               if n == 0 and "</resources>" in s:
                   s2 = s.replace("</resources>",

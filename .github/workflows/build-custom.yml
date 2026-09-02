@@ -373,6 +373,37 @@ jobs:
               print(f"  {k.upper()}={display(k, v)}")
           PY
 
+      - name: 统一安装名称（app_name → productName，供 android init 烘焙）
+        # Android 端必须在 `cargo tauri android init` 之前把 app_name 写入
+        # tauri.conf.json 的 productName，否则 init 会把默认名 "Web2App"/"web2app"
+        # 烘焙进安卓工程（strings.xml / Manifest），后续 strings.xml 补丁只是兜底。
+        env:
+          PYTHONUTF8: "1"
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = os.environ.get("APP_NAME", "").strip()
+          if not name:
+              print("未配置 app_name，沿用默认名称")
+              raise SystemExit(0)
+          # 去掉 Windows 文件名非法字符；压缩连续空白；去首尾空格与句点；空则回落默认名
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
+          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          if not safe:
+              safe = "Web2App"
+
+          with open("tauri.conf.json", encoding="utf-8") as f:
+              conf = json.load(f)
+          conf["productName"] = safe
+          with open("tauri.conf.json", "w", encoding="utf-8") as f:
+              json.dump(conf, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(f"productName = {safe}（android init 将据此烘焙安卓应用名称）")
+          PY
+
       - name: Install Rust toolchain (with Android target)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -403,9 +434,8 @@ jobs:
         run: cargo install tauri-cli --version "^2"
 
       - name: 下载自定义图标（可选，来自 icon_url）
-        # 与 Windows job 相同：下载 PNG 后用官方 `cargo tauri icon` 重新生成全套图标，
-        # 其中 icons/android/* 是各分辨率的 Android 启动图标，稍后复制进安卓工程。
-        # 必须在 android init 之前执行，init 生成的工程才会使用新图标。
+        # 仅下载 PNG 源文件；图标在 android init 之后用 `cargo tauri icon` 应用到安卓工程
+        # （官方推荐：init 后运行 tauri icon 会把启动图标直接放入 gen/android 的 res 目录）。
         shell: bash
         run: |
           set -euo pipefail
@@ -416,7 +446,7 @@ jobs:
           if [ "$magic" != "89504e470d0a1a0a" ]; then
             echo "::error::icon_url 下载的不是 PNG 文件（文件头=$magic）"; exit 1
           fi
-          cargo tauri icon icon-custom.png
+          echo "icon-custom.png 已下载（将在 android init 后应用）"
 
       - name: Initialize Android project (gen/android) + 安装匹配平台
         # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
@@ -440,14 +470,22 @@ jobs:
           yes | sdkmanager "platforms;android-$SDK" "build-tools;$BT"
 
       - name: 应用自定义图标到 Android 工程
-        # 把 `cargo tauri icon` 生成的各分辨率启动图标复制进安卓工程 res 目录，
-        # 覆盖默认图标（未配置 icon_url 时跳过，沿用默认）。
+        # 官方推荐：android init 之后运行 `cargo tauri icon`，它会把生成的 Android
+        # 启动图标直接放入 gen/android/app/src/main/res/（mipmap-*）。
+        # 兜底：若当前 tauri-cli 版本未自动放置，再手动把生成的 icons/android/* 复制进 res。
         run: |
-          if [ -d "icons/android" ]; then
-            cp -r icons/android/. gen/android/app/src/main/res/
-            echo "已覆盖 Android 启动图标"
+          if [ ! -f "icon-custom.png" ]; then
+            echo "未下载自定义图标，沿用默认"
+            exit 0
+          fi
+          cargo tauri icon icon-custom.png
+          if [ -d "gen/android/app/src/main/res" ]; then
+            if [ -d "icons/android" ]; then
+              cp -r icons/android/. gen/android/app/src/main/res/
+            fi
+            echo "已应用自定义 Android 启动图标"
           else
-            echo "无自定义图标，沿用默认"
+            echo "::warning::未找到 gen/android res 目录，图标可能未应用"
           fi
 
       - name: 统一应用名称（Android 桌面名称 ← app_name）
@@ -477,7 +515,9 @@ jobs:
           res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")
           if res.exists():
               s = res.read_text(encoding="utf-8")
-              s2, n = re.subn(r'(<string\s+name="app_name"\s*>)[^<]*(</string>)',
+              # 容忍 name 上可能带额外属性（如 translatable="false"），否则旧正则
+              # 匹配失败会新增重复 app_name 资源，导致名称仍是默认值。
+              s2, n = re.subn(r'(<string\s+name="app_name"(?:\s+[\w:-]+="[^"]*")*\s*>)[^<]*(</string>)',
                               lambda m: m.group(1) + label + m.group(2), s)
               if n == 0 and "</resources>" in s:
                   s2 = s.replace("</resources>",

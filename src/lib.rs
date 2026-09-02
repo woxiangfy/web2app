@@ -144,6 +144,40 @@ macro_rules! env_bool {
     }};
 }
 
+// 把应用名清洗为合法的目录名（Windows/Linux/macOS 通用）：
+//   - 替换路径非法字符 < > : " / \ | ? * 与控制字符为下划线
+//   - 压缩连续空白为单个空格、去首尾空白与首尾句点
+//   - 清洗后为空则回落 "Web2App"
+// 用于让 Windows 的 WebView2 数据目录 / 设置目录以自定义 app_name 命名，
+// 而非固定的 tauri.conf.json identifier（com.example.web2app）。
+pub(crate) fn sanitize_dir_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_ws = false;
+    for c in name.chars() {
+        let mapped = match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 32 => '_',
+            c => c,
+        };
+        if mapped.is_whitespace() {
+            // 压缩连续空白；首个字符前的空白不输出
+            if !prev_ws && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(mapped);
+            prev_ws = false;
+        }
+    }
+    let trimmed = out.trim().trim_matches('.').to_string();
+    if trimmed.is_empty() {
+        "Web2App".to_string()
+    } else {
+        trimmed
+    }
+}
+
 // 默认打开的网址；支持带账号密码的形式：
 //   "https://用户名:密码@www.example.com"
 // 注意：现代 Chromium / WebView2 已废弃“URL 内嵌 userinfo 自动发 Basic 鉴权”的行为，
@@ -574,12 +608,17 @@ pub fn run() {
                 b = b.additional_browser_args(proxy_args.as_str());
             }
             // 数据目录：true = WebView2 系统默认（紧挨 exe，安装版可能因无写权限而失败）；
-            // false = %LOCALAPPDATA%\{identifier}（始终可写，推荐）。
+            // false = %LOCALAPPDATA%\{自定义 app_name}（始终可写，推荐）。
+            // Tauri 默认按 tauri.conf.json 的 identifier（com.example.web2app）生成目录末段，
+            // 这里改用清洗后的自定义 app_name，使不同 app 的存储目录互不干扰且直观。
             // 用 if-let 而非 `?`：app_local_data_dir 在极少数环境可能返回 Err，直接 `?` 会让整个
             // 启动失败崩溃；拿不到就退回到 WebView2 默认位置，保证能启动。
             if !DATA_DIR_DEFAULT {
                 if let Ok(dir) = app.path().app_local_data_dir() {
-                    b = b.data_directory(dir);
+                    // dir 形如 %LOCALAPPDATA%/com.example.web2app，用自定义 app_name 替换末段
+                    let base = dir.parent().unwrap_or(&dir);
+                    let new_dir = base.join(sanitize_dir_name(APP_NAME));
+                    b = b.data_directory(new_dir);
                 }
             }
 
