@@ -1,4 +1,4 @@
-name: 生成 Android 签名密钥 (keystore)
+name: 生成 Android 签名密钥
 
 # 手动触发：在 Actions 页选这个 workflow → "Run workflow"，全自动执行，无需填写任何输入。
 #

@@ -1,4 +1,4 @@
-name: 自定义打包（JSON 配置生成应用）
+name: 自定义打包
 
 # 手动触发：在仓库 Actions 页点 "Run workflow"，
 #   ① 选【打包目标】：全部(all，默认) / 仅 Windows / 仅 Android —— 决定跑哪些打包 job；
