@@ -309,15 +309,18 @@ jobs:
 
       - name: 开启 gradle 错误栈（便于定位 assemble 失败原因）
         # 把 org.gradle.stacktrace=all 写进 gen/android/gradle.properties，
-        # 下次若 APK 构建失败，gradle 会直接打印完整错误栈（e: 编译错误 / 资源链接错误等），
+        # 若 APK 构建失败，gradle 会直接打印完整错误栈（e: 编译错误 / 资源链接错误等），
         # 省去"BUILD FAILED"尾部看不出根因的麻烦。
+        # 关键：必须先确保文件末尾有换行，否则 echo >> 会把内容粘到上一行——
+        # 曾因此把 stacktrace=all 粘到 android.nonFinalResIds=false 后面，
+        # 导致 gradle 报 "Cannot parse ... android.nonFinalResIds='falseorg.gradle.stacktrace=all'"。
         run: |
           gp="gen/android/gradle.properties"
-          if [ -f "$gp" ]; then
-            grep -q "org.gradle.stacktrace" "$gp" || echo "org.gradle.stacktrace=all" >> "$gp"
-          else
-            mkdir -p gen/android && echo "org.gradle.stacktrace=all" > "$gp"
-          fi
+          mkdir -p "$(dirname "$gp")"
+          touch "$gp"
+          # 末尾无换行则补一个，防止新行粘到上一行
+          [ -z "$(tail -c1 "$gp" 2>/dev/null)" ] || printf '\n' >> "$gp"
+          grep -q "org.gradle.stacktrace" "$gp" || echo "org.gradle.stacktrace=all" >> "$gp"
           echo "--- gradle.properties ---"; cat "$gp"
 
       - name: Build Android APK
