@@ -218,9 +218,23 @@ cargo test --all
 
 ### 3. 手动打包 — `.github/workflows/build-custom.yml`
 
-在 GitHub Actions 页手动 **Run workflow**，填一份配置 JSON（或填一个返回 JSON 的 URL），
-一次触发同时产出：**Windows MSI 安装包** + **Windows 免安装绿色版 zip** + **已签名 Android APK**。
-无需改源码，就能为不同的网址/名字/图标生成各自独立的安装包。
+在 GitHub Actions 页手动 **Run workflow**，先勾选本次要打哪些产物（默认全选、互不依赖），
+再填一份配置 JSON（或填一个返回 JSON 的 URL）。无需改源码，就能为不同的网址/名字/图标
+生成各自独立的安装包。
+
+手动运行时有 **3 个独立复选框**，想打哪个就勾哪个，产物分别上传到各自的 artifact：
+
+| 选项 | 含义 | 对应产物 |
+| --- | --- | --- |
+| `windows_installer` | 打 Windows **安装版(MSI)** | `windows-msi` → `<app_name>_<版本>_x64_zh-CN.msi` |
+| `windows_portable` | 打 Windows **单文件版**（免安装 zip） | `windows-portable` → `<app_name>-portable.zip` |
+| `android` | 打已签名的 Android APK | `android-apk` → 签名 APK |
+
+全部勾选＝一次触发同时产出上面三样（旧行为）；只勾 Windows 安装版时跳过 zip、只勾单文件版时用
+`--no-bundle` 只编 exe（不打 MSI，更快）；三个都不勾则工作流无 job 运行。
+
+> 说明：这里的「单文件版」即 **Windows 免安装绿色版**——单个 `<app_name>.exe` 打成 zip，
+> 双击即用，不写注册表，但依赖系统自带 WebView2 运行时。
 
 配置模板见仓库根目录的 **`config.example.json`**（复制到本地改好再粘贴即可）。
 

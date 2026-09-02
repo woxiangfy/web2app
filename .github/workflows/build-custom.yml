@@ -1,10 +1,12 @@
 name: 自定义打包
 
 # 手动触发：在仓库 Actions 页点 "Run workflow"，
-#   ① 选【打包目标】：全部(all，默认) / 仅 Windows / 仅 Android —— 决定跑哪些打包 job；
+#   ① 勾选本次要打哪些产物（默认全选，互不依赖）：
+#       - Windows 安装版(MSI)    —— 需双击安装、写注册表的正式安装包
+#       - Windows 单文件版(zip)   —— 免安装绿色版（单个 <app_name>.exe 打包）
+#       - Android APK             —— 已签名、可直接安装的安卓包
+#   想打哪个就勾哪个；产物分别独立上传到各自的 artifact。
 #   ② 粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
-#   默认（all）一次产出：Windows MSI 安装包、Windows 免安装绿色版(zip)、已签名的 Android APK；
-#   选 windows 只产 Windows 两项，选 android 只产 APK。
 #
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
@@ -50,23 +52,31 @@ on:
       config_url:
         description: '或填一个返回上述 JSON 的 URL（公开可访问）'
         required: false
-      target:
-        description: '打包目标：全部 / 仅 Windows / 仅 Android'
+      windows_installer:
+        description: '打 Windows 安装版(MSI) —— 双击安装、写注册表的正式安装包'
         required: false
-        default: all
-        type: choice
-        options:
-          - all
-          - windows
-          - android
+        default: true
+        type: boolean
+      windows_portable:
+        description: '打 Windows 单文件版 —— 免安装绿色版（zip）'
+        required: false
+        default: true
+        type: boolean
+      android:
+        description: '打 Android APK —— 已签名、可直接安装'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
-  # 用一句话按 target 决定是否跑该 job。target 为 all 或包含对应平台名则跑。
-  # （选择框值恒为 windows/android/all；保留“空串即全打”的兜底兼容。）
+  # 各 job 用【独立复选框】决定是否运行：
+  #   windows_installer / windows_portable / android 是 workflow_dispatch 的三个 boolean 输入（默认 true）。
+  # 布尔表达式统一写成 `!= 'false'`：默认 true、显式勾选为 true、或未传该字段时都视为"要打"；
+  # 只有显式取消勾选（= 'false'）才跳过。windows job 在安装版或单文件版任一被勾选时运行。
   windows:
     name: Build Windows
     runs-on: windows-latest
-    if: ${{ !github.event.inputs.target || contains(github.event.inputs.target, 'windows') || contains(github.event.inputs.target, 'all') }}
+    if: ${{ github.event.inputs.windows_installer != 'false' || github.event.inputs.windows_portable != 'false' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -204,7 +214,7 @@ jobs:
         # 把 app_name 写入 tauri.conf.json 的 productName，统一 Windows 端的"安装名称"：
         #   MSI 安装包文件名 / 开始菜单与桌面快捷方式 / 控制面板"程序和功能"显示名 / 安装目录。
         # 同时固定 mainBinaryName=web2app（tauri.conf.json 的【顶层】字段，不是 bundle 下）：
-        # 主程序 exe 文件名不随 productName 变化，下方"免安装绿色版"步骤引用的
+        # 主程序 exe 文件名不随 productName 变化，下方"生成 Windows 单文件版"步骤引用的
         # target/release/web2app.exe 路径保持稳定。
         env:
           PYTHONUTF8: "1"
@@ -256,33 +266,49 @@ jobs:
           fi
           cargo tauri icon icon-custom.png
 
-      - name: Build (tauri, 编译期注入配置，仅 MSI)
-        # --bundles msi：只打 MSI 安装包（不产 NSIS）。编译期常量 APP_URL/APP_NAME/...
-        # 读取之前注入的环境变量；主二进制 web2app.exe 仍会编译到 target/release/，供绿色版使用。
+      - name: 编译并打包 Windows 安装版（MSI）
+        # 仅当勾选"Windows 安装版"才执行。--bundles msi：只产 MSI 安装包（不产 NSIS）。
+        # 编译期常量 APP_URL/APP_NAME/... 读取之前注入的环境变量；
+        # 主二进制 web2app.exe 仍会编译到 target/release/，若同时勾了单文件版可复用它打 zip。
+        if: ${{ github.event.inputs.windows_installer != 'false' }}
         run: cargo tauri build --bundles msi
 
-      - name: 生成免安装绿色版
-        # 把主程序 web2app.exe 复制为 <app_name>.exe 后打包成 zip，即无需安装的绿色版
-        # （依赖系统 WebView2 运行时，Win10/11 自带；前端资源已嵌入 exe，无需额外文件）。
-        # MSI 的文件名已由上一步 productName 统一处理（<app_name>_<版本>_x64_zh-CN.msi），无需再重命名。
+      - name: 编译主程序（单文件版前置，不产 MSI）
+        # 仅当【只勾单文件版、未勾安装版】才执行：用 --no-bundle 只编译出 web2app.exe，
+        # 跳过 WiX/MSI 打包，省时间。若同时勾了安装版，上一步已产出同款 exe，本步无需再跑。
+        if: ${{ github.event.inputs.windows_installer == 'false' && github.event.inputs.windows_portable != 'false' }}
+        run: cargo tauri build --no-bundle
+
+      - name: 生成 Windows 单文件版（免安装 zip）
+        # 仅当勾选"Windows 单文件版"才执行。把主程序 web2app.exe 复制为 <app_name>.exe
+        # 后打包成 zip，即无需安装的绿色版（依赖系统 WebView2 运行时，Win10/11 自带；
+        # 前端资源已嵌入 exe，无需额外文件）。要求前面两步中至少一步已产出 web2app.exe。
+        if: ${{ github.event.inputs.windows_portable != 'false' }}
         shell: pwsh
         run: |
           $name = $env:APP_NAME -replace '[\\/:*?"<>|]', '_'
           $exe = "target/release/web2app.exe"
-          if (-not (Test-Path $exe)) { throw "未找到主程序 $exe" }
+          if (-not (Test-Path $exe)) { throw "未找到主程序 $exe（请确认勾选了安装版或单文件版）" }
           $portable = "target/release/$name.exe"
           Copy-Item $exe $portable -Force
           Compress-Archive -Path $portable -DestinationPath "target/release/$name-portable.zip" -Force
           Remove-Item $portable -Force
 
-      - name: Upload artifacts
+      - name: Upload Windows 安装版 (MSI)
+        # MSI 文件名已由 productName 统一（<app_name>_<版本>_x64_zh-CN.msi），无需重命名。
+        if: ${{ github.event.inputs.windows_installer != 'false' }}
         uses: actions/upload-artifact@v7
         with:
-          # artifact 名固定为 windows-installers（APP_NAME 已在安装包文件名上体现）。
-          name: windows-installers
-          path: |
-            target/release/bundle/msi/*.msi
-            target/release/*-portable.zip
+          name: windows-msi
+          path: target/release/bundle/msi/*.msi
+          if-no-files-found: warn
+
+      - name: Upload Windows 单文件版 (zip)
+        if: ${{ github.event.inputs.windows_portable != 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-portable
+          path: target/release/*-portable.zip
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
@@ -294,7 +320,7 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: ${{ !github.event.inputs.target || contains(github.event.inputs.target, 'android') || contains(github.event.inputs.target, 'all') }}
+    if: ${{ github.event.inputs.android != 'false' }}
     steps:
       - uses: actions/checkout@v7
 
