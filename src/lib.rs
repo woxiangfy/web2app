@@ -16,6 +16,7 @@ use url::Url;
 const DND_POLYFILL: &str = include_str!("dnd_polyfill.js");
 
 mod proxy;
+mod resolve;
 mod settings;
 use settings::{Settings, SettingsState};
 
@@ -192,6 +193,11 @@ pub(crate) fn sanitize_dir_name(name: &str) -> String {
 // 不会自动发送。程序会把账号密码解析出来，通过本地反向代理给所有 HTTP/WebSocket 请求统一
 // 注入 `Authorization: Basic ...` 头，再转发到真实服务器。
 const APP_URL: &str = env_str!("APP_URL", "https://用户名:密码@www.example.com");
+
+// Ed25519 公钥（PEM/SPKI 或裸 base64，32 字节原始公钥）。当 APP_URL 是【域名数组】时
+// （如 `["a.com","b.com"]`），运行时依次对这些域名做 DNS TXT 查询，用本公钥验签 +
+// AES-GCM 解密 TXT 值得到真实 URL。普通字符串 URL 模式下忽略本字段。
+const PUBLIC_KEY: &str = env_str!("PUBLIC_KEY", "");
 
 // 应用名称（用于窗口标题、托盘提示、单实例聚焦等）
 const APP_NAME: &str = env_str!("APP_NAME", "Web2App");
@@ -791,7 +797,24 @@ pub fn run() {
         *app.state::<SettingsState>().0.lock().unwrap() = initial_settings.clone();
 
         // 解析默认网址，拆出账号密码（用于 Basic 鉴权）。
-        let parsed = Url::parse(APP_URL).expect("APP_URL 不是合法网址");
+        // 若 APP_URL 是【域名数组】（app_url 为数组时），则运行时依次对这些域名做 DNS TXT
+        // 查询 + Ed25519 验签 + AES-GCM 解密，得到真实 URL；全部失败则报"服务器连接失败"。
+        let resolved_url: String = if let Some(domains) = resolve::parse_domains(APP_URL) {
+            let domains: Vec<String> = domains
+                .into_iter()
+                .map(|d| resolve::normalize_domain(&d))
+                .collect();
+            resolve::resolve_url_from_domains(&domains, PUBLIC_KEY).unwrap_or_else(|_| {
+                // 全部域名解析/解密失败：直接退出进程并报错，避免弹出一个打不开的窗口。
+                eprintln!("[resolve] 服务器连接失败（所有域名均无法解析出真实地址）");
+                std::process::exit(1);
+            })
+        } else {
+            APP_URL.to_string()
+        };
+
+        let parsed = Url::parse(&resolved_url)
+            .unwrap_or_else(|e| panic!("APP_URL 不是合法网址（{e}）：{resolved_url}"));
 
         // 去掉 userinfo 的“干净”上游地址，用于【直连 / 外部代理】两种场景的导航 URL
         // （鉴权交给 WebView2 原生事件兜底，见 attach_webview_hooks）。

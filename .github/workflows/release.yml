@@ -38,6 +38,7 @@ jobs:
       # 两者都没配时，代码里的 env_str! 会自动回落成 APP_NAME。
       WINDOW_TITLE: ${{ vars.APP_TITLE || vars.WINDOW_TITLE }}
       DATA_DIR_DEFAULT: ${{ vars.DATA_DIR_DEFAULT }}
+      PUBLIC_KEY: ${{ secrets.PUBLIC_KEY || vars.PUBLIC_KEY }}
       PROXY_ENABLED: ${{ vars.PROXY_ENABLED }}
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
@@ -121,6 +122,7 @@ jobs:
       APP_TITLE: ${{ vars.APP_TITLE }}
       WINDOW_TITLE: ${{ vars.APP_TITLE || vars.WINDOW_TITLE }}
       DATA_DIR_DEFAULT: ${{ vars.DATA_DIR_DEFAULT }}
+      PUBLIC_KEY: ${{ secrets.PUBLIC_KEY || vars.PUBLIC_KEY }}
       PROXY_ENABLED: ${{ vars.PROXY_ENABLED }}
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}

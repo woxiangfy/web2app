@@ -24,3 +24,7 @@ Thumbs.db
 # 本地敏感配置（若存在，含密码/内网地址）
 .env
 .env.local
+
+# 动态解析验证临时产物（含私钥，切勿入库）
+/txttest_keys/
+/txttest_verify_materials.md

@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 url = "2"
-base64 = "0.22"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -31,6 +31,16 @@ bytes = "1"
 http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
 
+# 动态解析真实 URL（app_url 为域名数组时）：DNS TXT 查询 + Ed25519 验签 + AEAD 解密。
+# 均为纯 Rust、零平台依赖，跨平台（Windows / Android）可用。
+hickory-resolver = "0.26"
+# Ed25519 签名验签（防篡改）：客户端仅持公钥验签，服务端持私钥签名。
+ed25519-dalek = "2"
+# AES-256-GCM 认证加密（隐藏网址）：用 HKDF-SHA256 从固定 Secret + Nonce 派生密钥。
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
 # 仅 Windows：调用 WebView2 原生 API 处理 Basic 鉴权。
 # 版本必须与 Tauri 2.11.x 内部使用的 wry 一致（webview2-com 0.38 / windows 0.61），
 # 否则 ICoreWebView2 等 COM 类型会因版本不同而编译失败。
@@ -39,7 +49,7 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT"] }
 # Windows 沿用系统证书库（native-tls/schannel），与你当前可用的构建保持一致。
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 
 # 非 Windows（Android 等）：使用 rustls，便于交叉编译（无需系统 OpenSSL / NDK 之外的 C 依赖）。
 # 注意：tokio-tungstenite 没有 `rustls-tls` 这个 feature（那是 reqwest 的），它对应的是
@@ -47,7 +57,7 @@ tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 # 与 reqwest 的 `rustls-tls`（同样内置 webpki-roots）保持一致，便于 Android 交叉编译时无需依赖系统 CA 存储。
 [target.'cfg(not(windows))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
 # 桌面端专属插件：全局快捷键 / 单实例。Android / iOS 不支持（其底层依赖 global-hotkey 等
 # 桌面库，无移动端实现），必须按平台 gate，否则交叉编译 Android 时这两个 crate 会编译失败。

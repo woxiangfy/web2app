@@ -266,6 +266,50 @@ cargo test --all
 
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
 
+#### 动态解析真实 URL（`app_url` 数组 + `public_key` 公钥解密）
+
+当后端地址可能变动、又不想频繁重新打包时，可以把 `app_url` 配成**一组域名（JSON 数组）**，
+并同时提供 `public_key`（Ed25519 公钥）。应用启动时会：
+
+1. **依次**对数组里每个域名做 **DNS TXT 记录查询**；
+2. 拿到 TXT 值（一段 base64 密文）后，用 `public_key` 做 **Ed25519 验签 + AES-GCM 解密**得到真实 URL；
+3. 某个域名查询/解密/验签失败则**自动尝试下一个**；全部失败时报错 **「服务器连接失败」**。
+
+```json
+{
+  "app_url": ["node1.example.com", "node2.example.com"],
+  "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=",
+  "app_name": "MyApp"
+}
+```
+
+##### 安全模型
+
+| 诉求 | 实现方式 | 安全边界 |
+| --- | --- | --- |
+| **防劫持（硬保证）** | 服务端 Ed25519 **私钥签名**，客户端**公钥验签** | 攻击者即使拿到公钥 + 完全控制 DNS TXT，没有私钥就无法伪造出能通过验签的密文，最多破坏记录导致解密失败（DoS），**无法劫持到恶意网址** |
+| **隐藏真实网址（软保证）** | AES-256-GCM 认证加密包装 | 外部查 TXT 只能看到密文。但对称密钥由客户端内置 Secret 派生，**攻击者反编译客户端可还原**，故此层只防"公网批量爬取/随手 dig"，不防针对性反编译 |
+| **每次加密不同** | Nonce(12B) + 随机盐(8B) 每次随机 | 同一 URL 多次加密密文完全不同，防重放/防密文比对猜测 |
+| **密文尽可能短** | Ed25519(64B) + AEAD tag(16B) + Nonce(12B) | 约 130~150 字节，base64 后约 180~200 字符，**单条 DNS TXT 可放下**（上限 255 字节） |
+
+要点：
+
+- **数据格式**（服务端 `tools/encrypt_url.py` 与客户端 `src/resolve.rs` 一致）：
+  `TXT = base64( Nonce(12B) ‖ AES-256-GCM(HKDF(Secret,Nonce), Payload ‖ Ed25519签名) )`，
+  其中 `Payload = URL ‖ 0x00 ‖ 时间戳(8B) ‖ 0x00 ‖ 随机盐(8B)`。
+- **时间戳防重放**：`Payload` 内嵌 Unix 秒时间戳，客户端校验 ±48 小时窗口，超出视为过期/重放。
+- **`public_key` 格式**：Ed25519 公钥的**裸 base64（32 字节）**，或 SPKI PEM（`BEGIN PUBLIC KEY`）。
+  推荐直接用 `tools/encrypt_url.py genkey` 生成的 `public_key.b64` 内容。
+- **查询通道**：走系统默认 DNS（读 `/etc/resolv.conf` 或 Windows 系统配置）。
+- **降级**：`app_url` 为普通字符串时行为与原来完全一致（忽略 `public_key`）。
+
+> 生成密钥对 + 加密 URL，用仓库里的 `tools/encrypt_url.py`（需 `pip install cryptography`）：
+> ```bash
+> python tools/encrypt_url.py genkey keys          # 生成私钥(服务端持有) + 公钥(客户端)
+> python tools/encrypt_url.py keys/private_key.pem "https://user:pass@host"   # 输出 base64 密文
+> ```
+> 把密文作为某个域名的 TXT 记录值，把 `keys/public_key.b64` 的内容作为配置里的 `public_key`。
+
 #### Android 签名（打包时从三层来源取第一份可用的）
 
 手动打包产出的 release APK **必须签名**才能安装。签名密钥沿三层策略**依次取第一份可用的**：

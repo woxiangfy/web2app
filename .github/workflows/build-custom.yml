@@ -11,6 +11,9 @@ name: 自定义打包
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
 #     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）
+#                                            //   也支持【域名数组】形式：["a.com","b.com"]，
+#                                            //   运行时依次对这些域名做 DNS TXT 查询、用 public_key
+#                                            //   解密 TXT 值得到真实 URL（详见 public_key 说明）
 #
 #     "app_name": "MyApp",                   // 【安装名】（默认 Web2App）——给系统/安装器看的：
 #                                            //   Windows 安装包名、开始菜单与桌面快捷方式、
@@ -30,6 +33,11 @@ name: 自定义打包
 #     "proxy_http": "",                      // 外部 HTTP 代理（默认空）
 #     "proxy_https": "",                     // 外部 HTTPS 代理（默认空）
 #     "proxy_bypass": "",                    // 不走代理的地址，分号分隔（默认空=代码内置）
+#     "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=", // Ed25519 公钥（裸 base64 或 SPKI PEM）。
+#                                            //   仅当 app_url 为【域名数组】时必填：运行时对每个域名
+#                                            //   做 DNS TXT 查询，TXT 值是一段 base64 密文，用本公钥
+#                                            //   验签 + AES-GCM 解密得到真实 URL。任一域名解析/解密/验签
+#                                            //   失败自动尝试下一个，全部失败报"服务器连接失败"。
 #     "data_dir_default": "false",           // WebView2 数据目录（默认 false=LOCALAPPDATA）
 #     "android_keystore_base64": "...",      // Android 签名 keystore(.jks/.keystore) 的 base64（可选，
 #                                            //   优先于仓库 secrets；正式签名，跨构建可覆盖升级）
@@ -114,6 +122,9 @@ jobs:
               "proxy_https": "",
               "proxy_bypass": "",
               "data_dir_default": "false",
+              # Ed25519 公钥（裸 base64 或 SPKI PEM）。当 app_url 为【域名数组】时，运行时对每个域名
+              # 做 DNS TXT 查询，用本公钥验签 + AES-GCM 解密 TXT 值得到真实 URL。
+              "public_key": "",
               # Android 签名（仅 Android job 使用，这里合并进配置避免"未知字段"告警）
               "android_keystore_base64": "",
               "android_key_alias": "",
@@ -162,10 +173,31 @@ jobs:
                   v = str(v)
               merged[k] = v
 
-          merged["app_url"] = merged["app_url"].strip()
+          # app_url 支持两种形态：
+          #   ① 字符串：单个 URL（原逻辑，含 user:pass@host）
+          #   ② 数组：一组"跳板域名"，运行时做 DNS TXT 查询 + Ed25519 验签解密得到真实 URL
+          if isinstance(data.get("app_url"), list):
+              domains = [str(d).strip() for d in data["app_url"] if str(d).strip()]
+              if not domains:
+                  sys.exit("app_url 为数组时不能为空")
+              merged["app_url"] = json.dumps(domains, ensure_ascii=False, separators=(",", ":"))
+              # 数组模式强制要求 public_key
+              if not merged["public_key"].strip():
+                  sys.exit("app_url 为域名数组时，必须提供 public_key（Ed25519 公钥）")
+          else:
+              merged["app_url"] = merged["app_url"].strip()
+              if not merged["app_url"]:
+                  sys.exit("缺少必填字段 app_url")
           merged["icon_url"] = merged["icon_url"].strip()
-          if not merged["app_url"]:
-              sys.exit("缺少必填字段 app_url")
+          # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
+          # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
+          if merged["public_key"]:
+              merged["public_key"] = (
+                  merged["public_key"]
+                  .replace("\\n", "\n")
+                  .replace("\\r", "")
+                  .strip()
+              )
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
           # JSON 型字段（对象/数组）统一序列化为单行 JSON 文本；默认值 {} 也要转成 "{}"，
@@ -203,7 +235,12 @@ jobs:
               for k, v in merged.items():
                   if k in SKIP_ENV:
                       continue
-                  f.write(f"{k.upper()}={v}\n")
+                  # public_key 是 PEM 多行文本，含换行符，用 GITHUB_ENV 的 heredoc 语法写入，
+                  # 否则换行会被截断成多个环境变量，导致 Rust 侧读不到完整公钥。
+                  if k == "public_key" and "\n" in v:
+                      f.write(f"{k.upper()}<<EOF\n{v.rstrip()}\nEOF\n")
+                  else:
+                      f.write(f"{k.upper()}={v}\n")
 
           print("已注入环境变量：")
           for k, v in merged.items():
@@ -363,6 +400,9 @@ jobs:
               "proxy_https": "",
               "proxy_bypass": "",
               "data_dir_default": "false",
+              # Ed25519 公钥（裸 base64 或 SPKI PEM）。当 app_url 为【域名数组】时，运行时对每个域名
+              # 做 DNS TXT 查询，用本公钥验签 + AES-GCM 解密 TXT 值得到真实 URL。
+              "public_key": "",
               "android_keystore_base64": "",
               "android_key_alias": "",
               "android_keystore_password": "",
@@ -410,10 +450,31 @@ jobs:
                   v = str(v)
               merged[k] = v
 
-          merged["app_url"] = merged["app_url"].strip()
+          # app_url 支持两种形态：
+          #   ① 字符串：单个 URL（原逻辑，含 user:pass@host）
+          #   ② 数组：一组"跳板域名"，运行时做 DNS TXT 查询 + Ed25519 验签解密得到真实 URL
+          if isinstance(data.get("app_url"), list):
+              domains = [str(d).strip() for d in data["app_url"] if str(d).strip()]
+              if not domains:
+                  sys.exit("app_url 为数组时不能为空")
+              merged["app_url"] = json.dumps(domains, ensure_ascii=False, separators=(",", ":"))
+              # 数组模式强制要求 public_key
+              if not merged["public_key"].strip():
+                  sys.exit("app_url 为域名数组时，必须提供 public_key（Ed25519 公钥）")
+          else:
+              merged["app_url"] = merged["app_url"].strip()
+              if not merged["app_url"]:
+                  sys.exit("缺少必填字段 app_url")
           merged["icon_url"] = merged["icon_url"].strip()
-          if not merged["app_url"]:
-              sys.exit("缺少必填字段 app_url")
+          # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
+          # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
+          if merged["public_key"]:
+              merged["public_key"] = (
+                  merged["public_key"]
+                  .replace("\\n", "\n")
+                  .replace("\\r", "")
+                  .strip()
+              )
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
           # JSON 型字段（对象/数组）统一序列化为单行 JSON 文本；默认值 {} 也要转成 "{}"，
@@ -482,7 +543,12 @@ jobs:
               for k, v in merged.items():
                   if k in SKIP_ENV:
                       continue
-                  f.write(f"{k.upper()}={v}\n")
+                  # public_key 是 PEM 多行文本，含换行符，用 GITHUB_ENV 的 heredoc 语法写入，
+                  # 否则换行会被截断成多个环境变量，导致 Rust 侧读不到完整公钥。
+                  if k == "public_key" and "\n" in v:
+                      f.write(f"{k.upper()}<<EOF\n{v.rstrip()}\nEOF\n")
+                  else:
+                      f.write(f"{k.upper()}={v}\n")
               for k, v in signing.items():
                   f.write(f"{k}={v}\n")
 
