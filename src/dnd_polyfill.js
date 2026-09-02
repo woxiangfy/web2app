@@ -17,7 +17,7 @@
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy of 
  * this software and associated documentation files (the "Software"), to deal in 
- * the Software without restriction, including without limitation the rights to use, 
+ * the Software without restriction, including without limitation the rights to use,
  * copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the 
  * Software, and to permit persons to whom the Software is furnished to do so, 
  * subject to the following conditions:
@@ -33,8 +33,14 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 (function (opts) {
-    let isDragging = false;
-    let draggedElement = null;
+    // 拖动判定阈值（像素）：按下左键后，指针位移超过该值才判定为“拖动”。
+    // 若只是轻点（位移不超过阈值），不进入拖拽流程，也不创建 ghost 遮挡层，
+    // 从而保证 draggable 元素上的原生 click 仍能正常触发（可拖可点）。
+    const DRAG_THRESHOLD = (opts && opts.dragThreshold) || 4;
+
+    let isDragging = false;      // 已判定为拖动（位移超过阈值、ghost 已创建）
+    let pendingElement = null;   // 刚按下、尚未判定拖/点的 draggable 候选元素
+    let draggedElement = null;   // 真正被拖动的元素
     let startPosition = { x: 0, y: 0 };
     let currentOverElement = null;
     let ghostElement = null;
@@ -89,104 +95,6 @@
         return event;
     }
 
-    if (opts.setPointerCursor) {
-        // 该 polyfill 常以“初始化脚本”形式在 HTML 解析前注入，此时 document.head 可能为 null，
-        // 故先判空再插入样式，避免初始化阶段抛错导致后续 mousedown/move/up 监听器未能注册。
-        const head = document.head;
-        if (head) {
-            const styleTag = document.createElement('style');
-            styleTag.textContent = '[draggable="true"] { cursor: pointer; }';
-
-            // Insert the style tag as the first child of the head element
-            if (head.children.length > 0) {
-                head.insertBefore(styleTag, head.children[0]);
-            } else {
-                head.appendChild(styleTag);
-            }
-        }
-    }
-
-    document.addEventListener('mousedown', function (e) {
-        // Only proceed if the left mouse button is clicked
-        if (e.button !== 0) return;
-
-        let draggableElement = findDraggableAncestor(e.target);
-
-        if (!draggableElement) return;
-
-        // Override the existing functionality
-        draggableElement.setAttribute('draggable', 'false');
-
-        // Create a "ghost" clone for visual dragging
-        ghostElement = draggableElement.cloneNode(true);
-        applyStylesToGhost(draggableElement, ghostElement);
-
-        // Update state for dragging
-        isDragging = true;
-        draggedElement = draggableElement;
-        startPosition.x = e.clientX;
-        startPosition.y = e.clientY;
-
-        // Fire dragstart event
-        draggedElement.dispatchEvent(createMockDragEvent('dragstart', {
-            bubbles: true,
-            cancelable: true,
-            clientX: e.clientX,
-            clientY: e.clientY
-        }));
-    });
-
-    document.addEventListener('mousemove', function (e) {
-        if (!isDragging || !ghostElement) return;
-
-        // Update ghost position
-        let x = e.clientX - startPosition.x;
-        let y = e.clientY - startPosition.y;
-        ghostElement.style.transform = `translate(${x}px, ${y}px)`;
-
-        // Check for drag over target
-        ghostElement.style.display = 'none';
-        let elementBelow = document.elementFromPoint(e.clientX, e.clientY);
-        ghostElement.style.display = '';
-
-        if (elementBelow && elementBelow !== currentOverElement) {
-            elementBelow.dispatchEvent(createMockDragEvent('dragover', {
-                bubbles: true,
-                cancelable: true,
-                clientX: e.clientX,
-                clientY: e.clientY
-            }));
-            currentOverElement = elementBelow;
-        }
-    });
-
-    document.addEventListener('mouseup', function (e) {
-        //Only drop and dragend if dragging the event was triggerd with button 0 (left-click)
-        if (!isDragging || e.button !== 0) return;
-
-        // Fire drop event if we have a target
-        if (currentOverElement) {
-            currentOverElement.dispatchEvent(createMockDragEvent('drop', {
-                bubbles: true,
-                cancelable: true
-            }));
-        }
-
-        // Fire dragend event
-        draggedElement.dispatchEvent(createMockDragEvent('dragend', {
-            bubbles: true,
-            cancelable: true
-        }));
-
-        // Cleanup
-        isDragging = false;
-        draggedElement.setAttribute('draggable', 'true');
-        document.body.removeChild(ghostElement);
-        ghostElement = null;
-        draggedElement = null;
-        currentOverElement = null;
-    });
-
     /**
      * Applies computed styles from the original element to the ghost element.
      * @param {HTMLElement} original - The original draggable element.
@@ -208,5 +116,181 @@
 
         document.body.appendChild(ghost);
     }
+
+    /**
+     * 移除并清空 ghost（若存在）。无论是否发生过拖动都必须调用，防止遮挡层残留。
+     */
+    function clearGhost() {
+        if (ghostElement && ghostElement.parentNode) {
+            ghostElement.parentNode.removeChild(ghostElement);
+        }
+        ghostElement = null;
+    }
+
+    /**
+     * 真正开始一次拖动：创建 ghost 并派发 dragstart。
+     * 仅在 mousemove 位移超过阈值后被调用一次。
+     */
+    function beginDrag(element, clientX, clientY) {
+        draggedElement = element;
+
+        // Create a "ghost" clone for visual dragging
+        ghostElement = element.cloneNode(true);
+        applyStylesToGhost(element, ghostElement);
+
+        isDragging = true;
+
+        // Fire dragstart event
+        element.dispatchEvent(createMockDragEvent('dragstart', {
+            bubbles: true,
+            cancelable: true,
+            clientX: clientX,
+            clientY: clientY
+        }));
+    }
+
+    /**
+     * 复位一次鼠标交互的完整状态。
+     * fireDrop 仅在“确实发生过拖动”时为 true，此时派发 drop/dragend；
+     * 若只是轻点（从未超阈值）则 fireDrop 为 false，不派发任何拖拽事件，
+     * 让浏览器的原生 click 照常触发。
+     */
+    function endInteraction(fireDrop) {
+        // 恢复 draggable，保证元素下次仍可拖动
+        if (pendingElement && pendingElement.getAttribute('draggable') !== 'true') {
+            pendingElement.setAttribute('draggable', 'true');
+        }
+        if (draggedElement && draggedElement.getAttribute('draggable') !== 'true') {
+            draggedElement.setAttribute('draggable', 'true');
+        }
+
+        if (fireDrop && isDragging && draggedElement) {
+            // Fire drop event if we have a target
+            if (currentOverElement) {
+                currentOverElement.dispatchEvent(createMockDragEvent('drop', {
+                    bubbles: true,
+                    cancelable: true
+                }));
+            }
+
+            // Fire dragend event
+            draggedElement.dispatchEvent(createMockDragEvent('dragend', {
+                bubbles: true,
+                cancelable: true
+            }));
+        }
+
+        // 无论是否拖动，都清理 ghost（若存在），避免遮挡层残留导致后续点击被吞
+        clearGhost();
+
+        isDragging = false;
+        pendingElement = null;
+        draggedElement = null;
+        currentOverElement = null;
+    }
+
+    if (opts.setPointerCursor) {
+        // 该 polyfill 常以“初始化脚本”形式在 HTML 解析前注入，此时 document.head 可能为 null，
+        // 故先判空再插入样式，避免初始化阶段抛错导致后续 mousedown/move/up 监听器未能注册。
+        const head = document.head;
+        if (head) {
+            const styleTag = document.createElement('style');
+            styleTag.textContent = '[draggable="true"] { cursor: pointer; }';
+
+            // Insert the style tag as the first child of the head element
+            if (head.children.length > 0) {
+                head.insertBefore(styleTag, head.children[0]);
+            } else {
+                head.appendChild(styleTag);
+            }
+        }
+    }
+
+    document.addEventListener('mousedown', function (e) {
+        // Only proceed if the left mouse button is clicked
+        if (e.button !== 0) return;
+
+        // 若上一次交互尚未收尾（如 mouseup 落在窗口外），先复位，避免状态错乱
+        if (pendingElement || isDragging) {
+            endInteraction(false);
+        }
+
+        let draggableElement = findDraggableAncestor(e.target);
+
+        if (!draggableElement) return;
+
+        // 立刻禁用原生 draggable，抑制 WebView2 的 OLE 拖放把本次操作“拖走”吞掉
+        //（这正是该 polyfill 要绕过的原生 bug）。mouseup 时按需恢复。
+        draggableElement.setAttribute('draggable', 'false');
+
+        // 仅记录候选与起点。先不创建 ghost、不进入拖拽——是否为拖动交给 mousemove 判定位移。
+        pendingElement = draggableElement;
+        startPosition.x = e.clientX;
+        startPosition.y = e.clientY;
+    });
+
+    document.addEventListener('mousemove', function (e) {
+        // A) 尚未进入拖拽但有候选元素：判定位移是否超阈值
+        if (pendingElement && !isDragging) {
+            let dx = e.clientX - startPosition.x;
+            let dy = e.clientY - startPosition.y;
+            if (Math.abs(dx) >= DRAG_THRESHOLD || Math.abs(dy) >= DRAG_THRESHOLD) {
+                // 位移超过阈值 → 判定为拖动，真正开始
+                beginDrag(pendingElement, e.clientX, e.clientY);
+                pendingElement = null;
+            }
+            // 位移未超阈值：仍视为“即将点击”，不做任何事，保证原生 click 正常。
+            return;
+        }
+
+        // B) 已在拖动：更新 ghost 位置 + 合成 dragover
+        if (!isDragging || !ghostElement) return;
+
+        let x = e.clientX - startPosition.x;
+        let y = e.clientY - startPosition.y;
+        ghostElement.style.transform = `translate(${x}px, ${y}px)`;
+
+        // Check for drag over target
+        ghostElement.style.display = 'none';
+        let elementBelow = document.elementFromPoint(e.clientX, e.clientY);
+        ghostElement.style.display = '';
+
+        if (elementBelow && elementBelow !== currentOverElement) {
+            elementBelow.dispatchEvent(createMockDragEvent('dragover', {
+                bubbles: true,
+                cancelable: true,
+                clientX: e.clientX,
+                clientY: e.clientY
+            }));
+            currentOverElement = elementBelow;
+        }
+    });
+
+    document.addEventListener('mouseup', function (e) {
+        // Only drop and dragend if dragging the event was triggerd with button 0 (left-click)
+        if (e.button !== 0) return;
+
+        if (!pendingElement && !isDragging) return;
+
+        // fireDrop 仅在“确实发生过拖动”时为 true：
+        //   · 拖动过 → 派发 drop/dragend + 清 ghost；
+        //   · 仅轻点 → 不派发拖拽事件、不创建过 ghost，原生 click 由浏览器照常触发。
+        endInteraction(isDragging);
+    });
+
+    // 兜底：若指针按住后移出窗口、mouseup 未触发（松在窗口外），
+    // 则在此复位，避免 draggable 长时间停留在 false / ghost 残留。
+    document.addEventListener('mouseleave', function () {
+        if (pendingElement || isDragging) {
+            endInteraction(false);
+        }
+    });
+
+    // 再兜底：窗口失焦（如拖到别的程序）时同样复位。
+    window.addEventListener('blur', function () {
+        if (pendingElement || isDragging) {
+            endInteraction(false);
+        }
+    });
 
 })({ setPointerCursor: true });
