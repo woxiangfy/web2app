@@ -1,0 +1,191 @@
+name: 生成 Android 签名密钥 (keystore)
+
+# 手动触发：在 Actions 页选这个 workflow → "Run workflow"，全自动执行，无需填写任何输入。
+#
+# 【这个 workflow 是干什么的】
+#   产出一把【固定的 Android 签名 keystore】，并打包成 artifact 供你下载长期保存。
+#   运行一次 = 生成一把新密钥。你把它下载保存好后，之后【每一次】手动打包（build-custom.yml）
+#   都用这一把 keystore 签名，就能保证不同版本 APK 的【签名一致】，从而可覆盖升级安装。
+#
+# 【下载后你会拿到 4 样东西】(artifact 名：android-signing-key)
+#   1. release.keystore         —— 密钥库文件本身（请妥善长期保存，丢了无法再补）
+#   2. keystore-info.txt        —— alias、keystore 密码、base64（单行）、生成时间、使用提醒
+#   3. packaging-config.json    —— 已把上述签名 4 项填好的「手动打包配置 JSON 模板」（美化版）
+#   4. packaging-config.single.json —— 同一配置的【单行】版，可直接粘贴给 build-custom.yml
+#
+# 【拿到后怎么手动打包】
+#   打开 packaging-config.json，把 app_url / app_name / title 改成你的真实应用
+#   （签名与应用网址无关，改了仍有效），然后把 single 版整段粘进
+#   build-custom.yml 的 config_json 输入框（或存成文件用 config_url 指向）→ 打出的 APK
+#   就是用这把密钥签的、签名一致可覆盖升级。
+#
+# 【极重要提醒】
+#   * 这把 keystore 是【签名根密钥】。下载后请立即保存到安全处，并记下 keystore-info.txt 里的密码。
+#   * 【不要为了“再来一把”而重复运行本 workflow】——每次运行都是【新密钥】，不同密钥签的 APK
+#     之间无法覆盖升级（需先卸载）。一旦开始用某把，就始终用同一把。
+#   * keystore 的 base64 + 密码 = 私钥明文等价物，务必保密，不要提交到公开仓库/分享给他人。
+#   * 若要上架 Google Play / 应用市场，建议用你自己的公司主体信息重新生成（dname 的 CN/O/C）。
+#   * 更进阶：若希望“每次打包自动用同一把、不用自己粘 base64”，把这把 keystore 的
+#     base64 / alias / 密码配成仓库 Secrets：ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS /
+#     ANDROID_KEYSTORE_PASSWORD（build-custom.yml 会自动读取）。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate-key:
+    name: 生成签名密钥并打包
+    runs-on: ubuntu-latest
+    steps:
+      # keytool 随 JDK 提供；GitHub 的 ubuntu-latest 自带 openjdk，这里显式装 JDK17 保证 keytool 可用、与打包 CI 一致。
+      - name: 安装 JDK 17（提供 keytool）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 生成 keystore + base64 + 密码 + 打包配置 JSON 模板
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, secrets, shutil, string, subprocess, sys, datetime, pathlib, base64
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          # ---------- 1. 定位 keytool ----------
+          jh = os.environ.get("JAVA_HOME", "")
+          kt = shutil.which("keytool")
+          if not kt and jh:
+              cand = pathlib.Path(jh) / "bin" / "keytool"
+              if cand.exists():
+                  kt = str(cand)
+          if not kt:
+              print("::error::未找到 keytool，请确认 setup-java 步骤成功（JAVA_HOME=%s）" % jh)
+              sys.exit(1)
+          print("keytool: %s" % kt)
+
+          # ---------- 2. 固定参数（全自动、默认值）----------
+          # dname：自签证书主体。默认 Web2App 占位；正式上架请用自己的公司信息重新生成。
+          ALIAS = "web2app"
+          DNAME = "CN=Web2App, OU=Mobile, O=Web2App, L=Beijing, ST=Beijing, C=CN"
+          VALIDITY = 10000  # 约 27 年
+          out_dir = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "android-signing-key"
+          out_dir.mkdir(parents=True, exist_ok=True)
+          ks_path = out_dir / "release.keystore"
+
+          # ---------- 3. 随机强密码（排除 shell/XML/JSON 敏感字符，避免后续转义问题）----------
+          alphabet = string.ascii_letters + string.digits + "@#!%*+-=_:."
+          def strong_pw(n=18):
+              while True:
+                  s = "".join(secrets.choice(alphabet) for _ in range(n))
+                  if (any(c.islower() for c in s) and any(c.isupper() for c in s)
+                          and any(c.isdigit() for c in s)
+                          and any(c in "@#!%*+-=_:." for c in s)):
+                      return s
+          storepass = strong_pw()
+          # keytool 省略 -keypass 时，JKS 条目 key 密码默认 = storepass；PKCS12 本无独立 key 密码。
+          # 故 JSON 的 android_key_password 留空，build-custom 会自动回落到同 storepass。二者一致。
+          keypass = storepass
+
+          # ---------- 4. 用 keytool 生成 keystore ----------
+          cmd = [kt, "-genkeypair", "-keystore", str(ks_path), "-alias", ALIAS,
+                 "-keyalg", "RSA", "-keysize", "2048", "-validity", str(VALIDITY),
+                 "-storepass", storepass, "-dname", DNAME]
+          r = subprocess.run(cmd, capture_output=True, text=True)
+          if r.returncode != 0 or not ks_path.exists():
+              print("::error::keytool 生成失败：\n%s%s" % (r.stdout, r.stderr))
+              sys.exit(1)
+          ks_bytes = ks_path.read_bytes()
+          print("已生成 %s（%d 字节，alias=%s）" % (ks_path.name, len(ks_bytes), ALIAS))
+
+          # ---------- 5. base64（单行）----------
+          ks_b64 = base64.b64encode(ks_bytes).decode("ascii")
+
+          # ---------- 6. 组装「手动打包配置 JSON」模板（已填好签名，app 字段用默认，需你自己改成真实值）----------
+          cfg = {
+              "app_url": "https://example.com",   # ← 改成你的真实网址
+              "app_name": "Web2App",              # ← 改成你的安装名
+              "title": "Web2App",                 # ← 改成你的显示名（留空回落 app_name）
+              "icon_url": "",
+              "proxy_enabled": "false",
+              "proxy_http": "",
+              "proxy_https": "",
+              "proxy_bypass": "",
+              "data_dir_default": "false",
+              "android_keystore_base64": ks_b64,
+              "android_key_alias": ALIAS,
+              "android_keystore_password": storepass,
+              "android_key_password": "",          # 空=回落同 storepass
+          }
+          pretty = json.dumps(cfg, ensure_ascii=False, indent=2)
+          oneline = json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
+
+          now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+          info = [
+              "Android 签名密钥信息（请妥善保存，本文件泄露=私钥泄露）",
+              "======================================================",
+              "生成时间 : " + now,
+              "文件     : release.keystore（%d 字节，请长期保存）" % len(ks_bytes),
+              "alias    : " + ALIAS,
+              "storepass: " + storepass,
+              "keypass  : " + keypass + "   （与 storepass 相同；build-custom 里 android_key_password 留空即可）",
+              "",
+              "keystore base64（单行，供填入 android_keystore_base64 / Secrets）:",
+              ks_b64,
+              "",
+              "【使用提醒】",
+              "1) 这是你的签名根密钥。把 release.keystore 和本文件的密码一起备份到安全处；丢了无法找回。",
+              "2) 之后每一次手动打包都用这一把签名 → 各版本 APK 签名一致、可覆盖升级。",
+              "3) 不要再运行本 workflow 生成第二把（每次都是新密钥，新旧无法覆盖升级）；",
+              "   若要换正式上架密钥，请用自己公司信息重新生成并从此固定用它。",
+              "4) 更省心做法：把上面 base64 / alias / storepass 配成仓库 Secrets（ANDROID_KEYSTORE_BASE64 / ",
+              "   ANDROID_KEY_ALIAS / ANDROID_KEYSTORE_PASSWORD），build-custom.yml 打包会自动读取，不用手动粘。",
+          ]
+          (out_dir / "keystore-info.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
+          (out_dir / "packaging-config.json").write_text(pretty + "\n", encoding="utf-8")
+          (out_dir / "packaging-config.single.json").write_text(oneline, encoding="utf-8")
+
+          # ---------- 7. 日志预览（密码展示给用户以便保存；不打印整段 base64）----------
+          print("=== 产物（目录 %s）===" % out_dir)
+          for f in ("release.keystore", "keystore-info.txt", "packaging-config.json", "packaging-config.single.json"):
+              p = out_dir / f
+              print("  - %s  (%d bytes)" % (f, p.stat().st_size if p.exists() else 0))
+          print("\n=== 签名密钥 ===")
+          print("  alias    : %s" % ALIAS)
+          print("  storepass: %s" % storepass)
+          print("  keypass  : %s（同 storepass）" % keypass)
+          print("  base64   : %d 字符（完整值见 artifact 的 keystore-info.txt）" % len(ks_b64))
+          print("\n=== 打包配置 JSON 模板（app 字段是默认，需你自己改成真实值）===")
+          for k, val in cfg.items():
+              if k == "android_keystore_base64":
+                  val = "（已填，%d 字符）" % len(val)
+              elif k in ("android_keystore_password",):
+                  val = "（已填，见上）"
+              print("  %s: %s" % (k, val))
+
+          # ---------- 8. Job Summary ----------
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as f:
+              f.write("## 签名密钥已生成 —— 请立即下载并保存\n\n")
+              f.write("**artifact：`android-signing-key`**（含 release.keystore / keystore-info.txt / 打包配置 JSON 模板）\n\n")
+              f.write("### 签名密钥\n\n")
+              f.write("| 项 | 值 |\n|---|---|\n")
+              f.write("| alias | `%s` |\n" % ALIAS)
+              f.write("| keystore 密码 | `%s` |\n" % storepass)
+              f.write("| key 密码 | `%s`（=storepass） |\n" % keypass)
+              f.write("| keystore | `release.keystore`（%d 字节，请长期备份） |\n" % len(ks_bytes))
+              f.write("\n> keystore 完整 base64 在 artifact 的 `keystore-info.txt` 里，太长不便在此展示。\n\n")
+              f.write("### 之后每次手动打包（固定同签名、可覆盖升级）\n\n")
+              f.write("1. 打开 `packaging-config.json`，把 `app_url` / `app_name` / `title` 改成你的真实应用；\n")
+              f.write("2. 在 Actions 跑 **build-custom.yml**，把 `packaging-config.single.json` 的内容整段粘进 `config_json`；\n")
+              f.write("3. 打出的 APK 即用这把密钥签名，之后所有版本都用它 → 签名一致可覆盖升级。\n\n")
+              f.write("### ⚠️ 提醒\n\n")
+              f.write("- **不要重复运行本 workflow** 去“再生成一把”——每次都是新密钥，新旧之间无法覆盖升级。\n")
+              f.write("- 把 `release.keystore` + 上面密码备份到安全处；base64+密码=私钥，勿提交公开仓库。\n")
+          PY
+
+      - name: 上传签名密钥包（keystore + 密码说明 + 打包配置 JSON 模板）
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-signing-key
+          path: ${{ runner.temp }}/android-signing-key/
+          if-no-files-found: error
