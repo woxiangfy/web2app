@@ -459,12 +459,25 @@ fn attach_webview_hooks(
                                         let ah = app_for_menu.clone();
                                         let sel_handler = CustomItemSelectedEventHandler::create(
                                             Box::new(move |_sender, _args| {
-                                                let ah2 = ah.clone();
-                                                // 必须在主线程上创建设置窗口（Tauri 窗口构建要求主线程），
-                                                // COM 回调线程不保证是主线程，故经 run_on_main_thread 转派。
-                                                let app3 = ah2.clone();
-                                                let _ = ah2.run_on_main_thread(move || {
-                                                    settings::open_settings_window(&app3);
+                                                // ⚠️ 关键：不能在 COM 回调里【直接】调用 run_on_main_thread。
+                                                // WebView2 的 CustomItemSelected/ContextMenuRequested 回调就运行在
+                                                // 【主线程】上，而 tauri 的 run_on_main_thread 检测到"已在主线程"时
+                                                // 会【同步内联】执行闭包（见 tauri-runtime-wry::send_user_message，
+                                                // current_thread()==main_thread 分支直接 handle_user_message）。
+                                                // 此时我们正嵌套在 WebView2 自身的 COM 事件分发里，同步再 build 一个
+                                                // 新 WebView2 控制器（settings 窗）需要 COM STA 重入，无法在此上下文
+                                                // 完成 → 整个进程卡死（右键"设置"弹出后无响应）。
+                                                // 解法：先切到一个后台线程，让 run_on_main_thread 从【非主线程】走
+                                                // event_loop proxy 排队，等 COM 分发完全退栈后的【下一个事件循环轮次】
+                                                // 才在主线程建窗（等价于 Shift+F1 的调用上下文，安全）。
+                                                let app_spawn = ah.clone();
+                                                let _ = std::thread::spawn(move || {
+                                                    // 后台线程上调用：与主线程 id 不同 → 走 proxy 排队，
+                                                    // 在下一次事件循环轮次于主线程执行闭包。
+                                                    let app_main = app_spawn.clone();
+                                                    let _ = app_spawn.run_on_main_thread(move || {
+                                                        settings::open_settings_window(&app_main);
+                                                    });
                                                 });
                                                 Ok(())
                                             }),
@@ -670,13 +683,38 @@ mod window_state {
         })
     }
 
-    /// 创建窗口后应用已保存的几何。无保存状态时不做任何事（保留窗口默认尺寸）。
+    /// 创建窗口后应用已保存的几何；保存的几何若已失效（上次最大化、尺寸过小、
+    /// 或窗口中心落在屏外——显示器被拔掉/分辨率/DPI 变化所致）则**丢弃几何并直接
+    /// 最大化**，保证窗口始终可见可用。无保存状态时不做任何事（保留窗口默认尺寸）。
     pub fn apply(win: &WebviewWindow, st: &State) {
-        let _ = win.set_position(tauri::PhysicalPosition::new(st.x, st.y));
-        let _ = win.set_size(tauri::PhysicalSize::new(st.width, st.height));
+        // 1) 上次是最大化 → 直接最大化，必然铺满且可见。
         if st.maximized {
             let _ = win.maximize();
+            return;
         }
+
+        // 2) 校验保存的位置/尺寸是否还“够用”：
+        //    - 窗口中心点不在任何当前显示器上 → 窗口被留在屏外，用户看不到（且重开依旧，
+        //      因为每次都恢复同样的屏外坐标）。此时丢弃几何、最大化兜底。
+        //    - 尺寸小于最小窗口约束(创建时 min_inner_size=400x300，此处 outer 略留余量)
+        //      → 视为损坏几何，最大化兜底。
+        let center_on_screen = win
+            .monitor_from_point(
+                (st.x as f64) + (st.width as f64) / 2.0,
+                (st.y as f64) + (st.height as f64) / 2.0,
+            )
+            .ok()
+            .flatten()
+            .is_some();
+        let too_small = st.width < 420 || st.height < 320;
+        if !center_on_screen || too_small {
+            let _ = win.maximize();
+            return;
+        }
+
+        // 3) 几何有效：恢复位置与尺寸。
+        let _ = win.set_position(tauri::PhysicalPosition::new(st.x, st.y));
+        let _ = win.set_size(tauri::PhysicalSize::new(st.width, st.height));
     }
 }
 
