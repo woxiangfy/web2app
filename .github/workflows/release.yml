@@ -200,13 +200,16 @@ jobs:
 
       - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
         # Tauri 模板的 MainActivity 调用了 enableEdgeToEdge()：WebView 会延伸绘制到
-        # 状态栏/导航栏下方，页面顶部被系统通栏遮挡。这里改写 MainActivity，给内容视图
-        # 注册 WindowInsets 监听，按 systemBars + displayCutout 的实际高度内缩；
-        # 若某机型未启用 edge-to-edge，insets 顶部为 0，不影响原有布局。
+        # 状态栏/导航栏下方，页面顶部被系统通栏遮挡。这里【保留原文件结构】，只做外科手术式注入：
+        #   1) 补 androidx.core 的 3 个 import（若模板已有则跳过）；
+        #   2) 在 super.onCreate(...) 之后注册 WindowInsets 监听，让内容视图按
+        #      systemBars 实际高度内缩——edge-to-edge 仍生效（应用全屏），但页面内容
+        #      不被系统通栏遮挡。
+        # 采用"只注入、不重写"的方式，避免破坏模板原有的 import / 基类写法，兼容性更好。
         # gen/android 每次构建现生成，因此每次 init 后都要打一遍补丁。
         run: |
           python3 - <<'PY'
-          import pathlib, re, sys, textwrap
+          import pathlib, re, sys
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
           root = pathlib.Path("gen/android/app/src/main/java")
@@ -215,82 +218,53 @@ jobs:
               raise SystemExit("::error::未找到 MainActivity.kt / MainActivity.java")
           f = files[0]
           src = f.read_text(encoding="utf-8")
+
           if "setOnApplyWindowInsetsListener" in src:
               print("MainActivity 已包含系统栏适配，跳过改写")
           else:
-              m = re.search(r"^package\s+([\w.]+)", src, re.M)
-              pkg = m.group(1) if m else ""
-              # 基类（TauriActivity）的引用方式因模板而异：
-              #   - 可能是 `import app.tauri.TauriActivity` 后用简单名 `TauriActivity`
-              #   - 也可能在类声明里直接写全限定名 `app.tauri.TauriActivity()`（新版模板）
-              # 这里从类声明解析出基类，自行决定是否需要 import，避免依赖模板 import 行格式，
-              # 从而兼容不同 tauri-cli 版本生成的模板。
-              cm = re.search(r"class\s+MainActivity\s*(?::\s*|extends\s+)([\w.]+)", src)
-              if not cm:
-                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的继承声明，模板可能已变化，请人工确认")
-              sup = cm.group(1)
-              if "." in sup:
-                  base_import_line = ""            # 已用全限定名，无需 import
-                  base_ref = sup
-              elif f.suffix == ".kt":
-                  base_import_line = "import app.tauri." + sup
-                  base_ref = sup
-              else:
-                  base_import_line = "import app.tauri." + sup + ";"
-                  base_ref = sup
+              # 1) 补 import（缺失才加，插到最后一条 import 之后；若完全没有 import 则插在 package 之后）
+              needed = [
+                  "import androidx.core.graphics.Insets",
+                  "import androidx.core.view.ViewCompat",
+                  "import androidx.core.view.WindowInsetsCompat",
+              ]
+              for imp in needed:
+                  if imp in src:
+                      continue
+                  imports = list(re.finditer(r"^import .*$", src, re.M))
+                  if imports:
+                      pos = imports[-1].end()
+                  else:
+                      mp = re.search(r"^package .*$", src, re.M)
+                      pos = mp.end() if mp else 0
+                      imp = ("\n\n" + imp) if pos else (imp + "\n")
+                  src = src[:pos] + "\n" + imp + src[pos:]
 
+              # 2) 在 super.onCreate(...) 之后注入 insets 监听（Kotlin/Java 均兼容）
               if f.suffix == ".kt":
-                  code = textwrap.dedent(f"""\
-                      package {pkg}
-
-                      import android.os.Bundle
-                      import androidx.core.graphics.Insets
-                      import androidx.core.view.ViewCompat
-                      import androidx.core.view.WindowInsetsCompat
-                      {base_import_line}
-
-                      class MainActivity : {base_ref}() {{
-                          override fun onCreate(savedInstanceState: Bundle?) {{
-                              super.onCreate(savedInstanceState)
-                              // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
-                              ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) {{ v, insets ->
-                                  val bars: Insets = insets.getInsets(
-                                      WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-                                  )
-                                  v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-                                  insets
-                              }}
-                          }}
-                      }}
-                      """)
+                  listener = (
+                      "        ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { v, insets ->\n"
+                      "            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())\n"
+                      "            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)\n"
+                      "            insets\n"
+                      "        }\n"
+                  )
               else:
-                  code = textwrap.dedent(f"""\
-                      package {pkg};
+                  listener = (
+                      "        ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content),\n"
+                      "                (v, insets) -> {\n"
+                      "                    Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());\n"
+                      "                    v.setPadding(bars.left, bars.top, bars.right, bars.bottom);\n"
+                      "                    return insets;\n"
+                      "                });\n"
+                  )
 
-                      import android.os.Bundle;
-                      import androidx.core.graphics.Insets;
-                      import androidx.core.view.ViewCompat;
-                      import androidx.core.view.WindowInsetsCompat;
-                      {base_import_line}
+              pat = re.compile(r"super\.onCreate\s*\([^)]*\)\s*;?")
+              if not pat.search(src):
+                  raise SystemExit("::error::MainActivity 中未找到 super.onCreate 调用，模板可能已变化，请人工确认")
+              src = pat.sub(lambda m: m.group(0) + "\n" + listener, src, count=1)
 
-                      public class MainActivity extends {base_ref} {{
-                          @Override
-                          protected void onCreate(Bundle savedInstanceState) {{
-                              super.onCreate(savedInstanceState);
-                              // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
-                              ViewCompat.setOnApplyWindowInsetsListener(
-                                      findViewById(android.R.id.content),
-                                      (v, insets) -> {{
-                                          Insets bars = insets.getInsets(
-                                                  WindowInsetsCompat.Type.systemBars()
-                                                          | WindowInsetsCompat.Type.displayCutout());
-                                          v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-                                          return insets;
-                                      }});
-                          }}
-                      }}
-                      """)
-              f.write_text(code, encoding="utf-8")
+              f.write_text(src, encoding="utf-8")
               print(f"已改写 {f}（内容视图按系统栏 insets 内缩，避免顶部通栏遮挡）")
 
           # 确保 androidx.core 可用（模板的 androidx.activity/appcompat 一般已传递引入；
@@ -318,6 +292,19 @@ jobs:
         run: |
           sed -i -E 's/android:usesCleartextTraffic="[^"]*"/android:usesCleartextTraffic="true"/' gen/android/app/src/main/AndroidManifest.xml
           grep -n "usesCleartextTraffic" gen/android/app/src/main/AndroidManifest.xml
+
+      - name: 开启 gradle 错误栈（便于定位 assemble 失败原因）
+        # 把 org.gradle.stacktrace=all 写进 gen/android/gradle.properties，
+        # 下次若 APK 构建失败，gradle 会直接打印完整错误栈（e: 编译错误 / 资源链接错误等），
+        # 省去"BUILD FAILED"尾部看不出根因的麻烦。
+        run: |
+          gp="gen/android/gradle.properties"
+          if [ -f "$gp" ]; then
+            grep -q "org.gradle.stacktrace" "$gp" || echo "org.gradle.stacktrace=all" >> "$gp"
+          else
+            mkdir -p gen/android && echo "org.gradle.stacktrace=all" > "$gp"
+          fi
+          echo "--- gradle.properties ---"; cat "$gp"
 
       - name: Build Android APK
         # --apk 仅产出 APK（便于直接安装测试）；若要上架 Play Store 的 AAB，去掉 --apk 即可。
