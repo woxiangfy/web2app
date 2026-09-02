@@ -37,14 +37,18 @@ pub struct Hotkey {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            // 默认【不设置】唤醒快捷键：key 为空字符串表示“未启用”。
+            // 用户可在设置页自行捕获一个组合键，保存后立即生效。
             wake_hotkey: Hotkey {
                 ctrl: false,
-                alt: true,
+                alt: false,
                 shift: false,
-                key: "Digit4".to_string(), // 默认 Alt+4
+                key: String::new(),
             },
-            tray_enabled: true,
-            minimize_on_close: true,
+            // 默认【不启用】系统托盘。
+            tray_enabled: false,
+            // 默认【关闭窗口即退出程序】，而非最小化到托盘（无托盘时本也无从最小化）。
+            minimize_on_close: false,
         }
     }
 }

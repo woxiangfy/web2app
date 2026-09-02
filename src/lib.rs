@@ -810,20 +810,27 @@ fn save_settings(
     state: State<SettingsState>,
     new_settings: Settings,
 ) -> Result<(), String> {
-    // 1)+2) 桌面端：唤醒快捷键按键必须可被解析，且不能与“打开设置(Shift+F1)”冲突。
-    // Android 无全局快捷键，跳过此校验（也不引用 tauri_plugin_global_shortcut 的类型）。
+    // 1)+2) 桌面端：唤醒快捷键可留空（表示“不设置快捷键”）；若填写则必须可被解析，
+    // 且不能与“打开设置(Shift+F1)”冲突。Android 无全局快捷键，跳过此校验
+    // （也不引用 tauri_plugin_global_shortcut 的类型）。
     #[cfg(not(target_os = "android"))]
     let new_sc = {
-        let sc = settings::hotkey_to_shortcut(&new_settings.wake_hotkey).ok_or_else(|| {
-            format!(
-                "不支持的按键：{}，请换一个按键",
-                new_settings.wake_hotkey.key
-            )
-        })?;
-        if sc == settings::settings_open_shortcut() {
-            return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
+        let key = new_settings.wake_hotkey.key.trim();
+        if key.is_empty() {
+            // 空 key = 未启用唤醒快捷键
+            None
+        } else {
+            let sc = settings::hotkey_to_shortcut(&new_settings.wake_hotkey).ok_or_else(|| {
+                format!(
+                    "不支持的按键：{}，请换一个按键",
+                    new_settings.wake_hotkey.key
+                )
+            })?;
+            if sc == settings::settings_open_shortcut() {
+                return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
+            }
+            Some(sc)
         }
-        sc
     };
 
     let mut guard = state.0.lock().unwrap();
@@ -833,13 +840,15 @@ fn save_settings(
     #[cfg(not(target_os = "android"))]
     {
         let old_sc = settings::hotkey_to_shortcut(&old.wake_hotkey);
-        if Some(&new_sc) != old_sc.as_ref() {
+        if new_sc != old_sc {
             if let Some(os) = old_sc {
                 let _ = app.global_shortcut().unregister(os);
             }
-            app.global_shortcut()
-                .register(new_sc)
-                .map_err(|e| e.to_string())?;
+            if let Some(ns) = new_sc {
+                app.global_shortcut()
+                    .register(ns)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         if new_settings.tray_enabled != old.tray_enabled {
             if new_settings.tray_enabled {

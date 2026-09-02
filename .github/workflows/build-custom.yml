@@ -555,23 +555,24 @@ jobs:
               raise SystemExit(0)
           label = esc_res(name)
 
-          # 1) strings.xml 的 app_name 资源（Manifest 通常以 @string/app_name 引用它）
+          # 1) strings.xml 的应用名资源：app_name（application 的 label）与
+          #    main_activity_title（MainActivity 的 label，才是桌面图标/任务栏真正显示的名字）。
+          #    tauri v2 模板里这两个都等于 productName（= app_name），必须【都】改成 title，
+          #    否则桌面仍显示 app_name。缺哪个就补哪个，避免只改一半。
           res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")
           if res.exists():
               s = res.read_text(encoding="utf-8")
-              # 容忍 name 上可能带额外属性（如 translatable="false"），否则旧正则
-              # 匹配失败会新增重复 app_name 资源，导致名称仍是默认值。
-              s2, n = re.subn(r'(<string\s+name="app_name"(?:\s+[\w:-]+="[^"]*")*\s*>)[^<]*(</string>)',
-                              lambda m: m.group(1) + label + m.group(2), s)
-              if n == 0 and "</resources>" in s:
-                  s2 = s.replace("</resources>",
-                                 f'    <string name="app_name">{label}</string>\n</resources>')
-                  n = 1
-              if n:
-                  res.write_text(s2, encoding="utf-8")
-                  print(f"strings.xml: app_name → {name}")
-              else:
-                  print("::warning::strings.xml 中既无 app_name 资源也无 </resources>，请人工检查")
+              s2 = s
+              for res_name in ("app_name", "main_activity_title"):
+                  # 容忍 name 上可能带额外属性（如 translatable="false"）
+                  pat = rf'(<string\s+name="{res_name}"(?:\s+[\w:-]+="[^"]*")*\s*>)[^<]*(</string>)'
+                  s2, n = re.subn(pat, lambda m: m.group(1) + label + m.group(2), s2)
+                  if n == 0 and "</resources>" in s2:
+                      s2 = s2.replace("</resources>",
+                                      f'    <string name="{res_name}">{label}</string>\n</resources>')
+                      n = 1
+                  print(f"strings.xml: {res_name} → {name}（{'覆盖' if n else '未找到，已跳过'}）")
+              res.write_text(s2, encoding="utf-8")
           else:
               print("::warning::未找到 strings.xml")
 

@@ -131,7 +131,7 @@
         <span class="muted">或手动选择：</span>
         <select id="keySelect" title="选择主键"></select>
       </div>
-      <div id="hkStatus" class="sub">尚未捕获新快捷键，保存时将沿用当前值。</div>
+      <div id="hkStatus" class="sub">默认不设置快捷键；可在下方选择或点击捕获一个组合键。</div>
     </div>
   </div>
 
@@ -139,7 +139,7 @@
     <div class="row">
       <label class="chk"><input type="checkbox" id="trayEnabled"/> 启用系统托盘图标</label>
       <label class="chk"><input type="checkbox" id="minimizeOnClose"/> 关闭窗口时最小化到托盘</label>
-      <div class="sub">“最小化到托盘”需同时启用托盘图标；否则关闭窗口即退出程序。</div>
+      <div class="sub">默认关闭窗口即退出程序。勾选“启用系统托盘图标”并勾选“最小化到托盘”后，关闭窗口才会隐藏到托盘而非退出。</div>
     </div>
   </div>
 
@@ -200,10 +200,20 @@
       o.value = k; o.textContent = prettyKey(k);
       sel.appendChild(o);
     });
-    sel.value = (captured && captured.key) || "Digit4";
+    // 下拉框最前面加一个“无（不设置快捷键）”选项，对应空 key。
+    const noneOpt = document.createElement("option");
+    noneOpt.value = ""; noneOpt.textContent = "无（不设置快捷键）";
+    sel.prepend(noneOpt);
+    sel.value = (captured && captured.key) || "";
     sel.addEventListener("change", () => {
-      captured = { ctrl: false, alt: true, shift: false, key: sel.value };
-      document.getElementById("hkStatus").textContent = "已选键：" + hkLabel(captured);
+      if (sel.value === "") {
+        captured = { ctrl: false, alt: false, shift: false, key: "" };
+        document.getElementById("hkStatus").textContent = "已选择：不设置唤醒快捷键";
+        document.getElementById("hkCurrent").textContent = "—";
+      } else {
+        captured = { ctrl: false, alt: true, shift: false, key: sel.value };
+        document.getElementById("hkStatus").textContent = "已选键：" + hkLabel(captured);
+      }
     });
   })();
 

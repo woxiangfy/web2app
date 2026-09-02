@@ -232,6 +232,67 @@ cargo test --all
 
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
 
+#### Android 正式签名（与上面配置 JSON 的字段对应）
+
+手动打包产出的 release APK 默认**未签名**（无法直接安装），CI 会用你提供的签名信息对 APK 做
+zipalign + apksigner 签名。签名密钥沿三层策略**依次取第一份可用的**：
+
+| 优先级 | 签名来源 | 适合场景 |
+| --- | --- | --- |
+| 1 | 配置 JSON 里的 `android_keystore_base64` 等 4 个字段 | 每个应用各持一把正式密钥，随配置一起分发 |
+| 2 | 仓库 Secrets（`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD`） | 长期使用 / 准备上架，各次构建可互相覆盖升级 |
+| 3 | 都没有 → CI 现场用 keytool 生成**一次性** keystore 签名 | 临时试装；但每次构建签名都不同，**新版无法覆盖安装旧版**（需先卸载） |
+
+**正式签名请务必用方式 1 或 2**，并保留好 keystore 文件与密码——Android 应用升级必须用**同一把密钥**签名，
+密钥一旦丢失，已装应用将永远无法覆盖升级。
+
+生成并填到 JSON 的完整步骤：
+
+**① 在本机生成一把 keystore**（需 JDK；装过 Android Studio 的话可直接用其自带 keytool，
+例如 `"C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe"`，或先 `export PATH="$PATH:.../jbr/bin"`）：
+
+```bash
+keytool -genkeypair -v \
+  -keystore release.keystore \
+  -alias my-app-alias \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -storepass YourStorePass -keypass YourKeyPass \
+  -dname "CN=MyApp, OU=Dev, O=MyCompany, L=City, ST=State, C=CN"
+```
+
+- `-storepass` 是 keystore 存储密码 → 填 JSON 的 `android_keystore_password`
+- `-keypass` 是条目 key 密码，通常与 storepass 相同 → 填 `android_key_password`（可省略，默认同 storepass）
+- `-alias` 填 `android_key_alias`
+- 有效性 `-validity 10000` 天 ≈ 27 年，够用；正式上架建议更长
+
+**② 把 keystore 编码成 base64 单行字符串**（CI 无法直接收文件，只能收 JSON 里的 base64）：
+PowerShell：
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\release.keystore"))
+```
+Git Bash / macOS / Linux：
+```bash
+base64 -w0 release.keystore   # 输出即一整行 base64
+```
+
+**③ 把 base64 与别名/密码填入配置 JSON**（字段名严格对应 `config.example.json`）：
+```json
+{
+  "app_url": "https://user:pass@example.com",
+  "app_name": "MyApp",
+  "title": "我的应用",
+  "android_keystore_base64": "<第②步输出的整行 base64>",
+  "android_key_alias": "my-app-alias",
+  "android_keystore_password": "YourStorePass",
+  "android_key_password": "YourKeyPass"
+}
+```
+
+> ⚠️ `android_keystore_base64` 是 keystore 的**明文等价物**（任何人拿到都能用它给同包名应用签名冒充你），
+> 等于一把私钥。**不要**把它提交进公开仓库的 JSON / README / 历史记录；正式长期使用更推荐放仓库
+> **Secrets**（方式 2），配置 JSON 里只留方式 1 用于「每个应用各自一把密钥、随配置分发」的场景。
+> 想验证 JSON 里的 keystore 是否有效，可用 `keytool -list -keystore <解码后的.jks> -storepass <密码>` 查看别名。
+
 ---
 
 ## 常见问题
