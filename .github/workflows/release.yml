@@ -37,6 +37,37 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: 统一安装名称（APP_NAME → productName）
+        # 与 build-custom.yml 保持一致：若仓库 vars 配置了 APP_NAME，则统一 Windows 端的
+        # "安装名称"（MSI/NSIS 安装包文件名、快捷方式、"程序和功能"显示名、安装目录）。
+        # 未配置 APP_NAME 时不改动，沿用 tauri.conf.json 默认的 Web2App。
+        env:
+          PYTHONUTF8: "1"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re, sys
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = os.environ.get("APP_NAME", "").strip()
+          if not name:
+              print("未配置 APP_NAME，沿用 tauri.conf.json 默认名称")
+              raise SystemExit(0)
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
+          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          if not safe:
+              print("APP_NAME 清洗后为空，沿用默认名称")
+              raise SystemExit(0)
+
+          with open("tauri.conf.json", encoding="utf-8") as f:
+              conf = json.load(f)
+          conf["productName"] = safe
+          with open("tauri.conf.json", "w", encoding="utf-8") as f:
+              json.dump(conf, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(f"productName = {safe}")
+          PY
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -62,11 +93,14 @@ jobs:
   # Android APK（aarch64）。本作业会在 CI 上【自动生成 gen/android 并交叉编译出 APK】，
   # 因此无需在本地安装 Android SDK/NDK/JDK。gen/ 已被 .gitignore 忽略，每次构建现生成，避免漂移。
   # 尽力而为：失败不影响 Windows 包发布。
+  # init 后会打三处补丁：桌面 label 统一为 APP_NAME（vars）、系统状态栏 insets 适配、
+  # usesCleartextTraffic=true（放行本地 http 代理）。
   #
   # release APK 默认未签名（安装会提示无证书），构建后会自动 zipalign + apksigner 签名：
   #   - 配置了 secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS / ANDROID_KEYSTORE_PASSWORD
   #     （可选 ANDROID_KEY_PASSWORD）→ 用正式 keystore 签名，各版本可覆盖升级；
   #   - 未配置 → 用一次性 CI keystore 签名（可安装，但跨构建无法覆盖升级）。
+  #   （手动打包 build-custom.yml 还支持在 JSON 里直接提供 keystore，优先级高于 secrets。）
   # ---------------------------------------------------------------------------
   android:
     name: Build Android APK
@@ -118,6 +152,152 @@ jobs:
           if [ ! -d "gen/android" ]; then
             cargo tauri android init --ci --skip-targets-install
           fi
+
+      - name: 统一应用名称（Android 桌面名称 ← APP_NAME）
+        # 与 build-custom.yml / Windows 端（productName）保持一致：
+        # 若仓库 vars 配置了 APP_NAME，把它写入 Android 工程的桌面 label（strings.xml 的
+        # app_name 或 Manifest 内联 android:label），实现"一个名字、两端一致"。
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, pathlib
+          from xml.sax.saxutils import escape
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = os.environ.get("APP_NAME", "").strip()
+          if not name:
+              print("未配置 APP_NAME，Android 沿用默认名称")
+              raise SystemExit(0)
+          label = escape(name)
+
+          # 1) strings.xml 的 app_name 资源（Manifest 通常以 @string/app_name 引用它）
+          res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")
+          if res.exists():
+              s = res.read_text(encoding="utf-8")
+              s2, n = re.subn(r'(<string\s+name="app_name"\s*>)[^<]*(</string>)',
+                              lambda m: m.group(1) + label + m.group(2), s)
+              if n == 0 and "</resources>" in s:
+                  s2 = s.replace("</resources>",
+                                 f'    <string name="app_name">{label}</string>\n</resources>')
+                  n = 1
+              if n:
+                  res.write_text(s2, encoding="utf-8")
+                  print(f"strings.xml: app_name → {name}")
+              else:
+                  print("::warning::strings.xml 中既无 app_name 资源也无 </resources>，请人工检查")
+          else:
+              print("::warning::未找到 strings.xml")
+
+          # 2) Manifest 若使用内联 label（而非 @string/app_name 引用），直接替换
+          mf = pathlib.Path("gen/android/app/src/main/AndroidManifest.xml")
+          if mf.exists():
+              s = mf.read_text(encoding="utf-8")
+              s2, n = re.subn(r'(android:label=")(?!@string/)[^"]*(")',
+                              lambda m: m.group(1) + label + m.group(2), s)
+              if n:
+                  mf.write_text(s2, encoding="utf-8")
+                  print(f"AndroidManifest: 内联 android:label → {name}")
+          PY
+
+      - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
+        # Tauri 模板的 MainActivity 调用了 enableEdgeToEdge()：WebView 会延伸绘制到
+        # 状态栏/导航栏下方，页面顶部被系统通栏遮挡。这里改写 MainActivity，给内容视图
+        # 注册 WindowInsets 监听，按 systemBars + displayCutout 的实际高度内缩；
+        # 若某机型未启用 edge-to-edge，insets 顶部为 0，不影响原有布局。
+        # gen/android 每次构建现生成，因此每次 init 后都要打一遍补丁。
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys, textwrap
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          root = pathlib.Path("gen/android/app/src/main/java")
+          files = [p for p in root.rglob("MainActivity.*") if p.suffix in (".kt", ".java")]
+          if not files:
+              raise SystemExit("::error::未找到 MainActivity.kt / MainActivity.java")
+          f = files[0]
+          src = f.read_text(encoding="utf-8")
+          if "setOnApplyWindowInsetsListener" in src:
+              print("MainActivity 已包含系统栏适配，跳过改写")
+          else:
+              m = re.search(r"^package\s+([\w.]+)", src, re.M)
+              pkg = m.group(1) if m else ""
+              # Kotlin 模板 import 行尾无分号、Java 有分号，两种都匹配
+              m = re.search(r"^import\s+([\w.]+TauriActivity)\s*;?\s*$", src, re.M)
+              if not m:
+                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的 import，模板可能已变化，请人工确认")
+              base = m.group(1)
+
+              if f.suffix == ".kt":
+                  code = textwrap.dedent(f"""\
+                      package {pkg}
+
+                      import android.os.Bundle
+                      import androidx.core.graphics.Insets
+                      import androidx.core.view.ViewCompat
+                      import androidx.core.view.WindowInsetsCompat
+                      import {base}
+
+                      class MainActivity : TauriActivity() {{
+                          override fun onCreate(savedInstanceState: Bundle?) {{
+                              super.onCreate(savedInstanceState)
+                              // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
+                              ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) {{ v, insets ->
+                                  val bars: Insets = insets.getInsets(
+                                      WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+                                  )
+                                  v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                                  insets
+                              }}
+                          }}
+                      }}
+                      """)
+              else:
+                  code = textwrap.dedent(f"""\
+                      package {pkg};
+
+                      import android.os.Bundle;
+                      import androidx.core.graphics.Insets;
+                      import androidx.core.view.ViewCompat;
+                      import androidx.core.view.WindowInsetsCompat;
+                      import {base};
+
+                      public class MainActivity extends TauriActivity {{
+                          @Override
+                          protected void onCreate(Bundle savedInstanceState) {{
+                              super.onCreate(savedInstanceState);
+                              // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
+                              ViewCompat.setOnApplyWindowInsetsListener(
+                                      findViewById(android.R.id.content),
+                                      (v, insets) -> {{
+                                          Insets bars = insets.getInsets(
+                                                  WindowInsetsCompat.Type.systemBars()
+                                                          | WindowInsetsCompat.Type.displayCutout());
+                                          v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                                          return insets;
+                                      }});
+                          }}
+                      }}
+                      """)
+              f.write_text(code, encoding="utf-8")
+              print(f"已改写 {f}（内容视图按系统栏 insets 内缩）")
+
+          # 确保 androidx.core 可用（模板的 androidx.activity/appcompat 一般已传递引入；
+          # 兜底：gradle 中既无 androidx.core 也无 appcompat 时补一行依赖）
+          for gname in ("build.gradle.kts", "build.gradle"):
+              g = pathlib.Path("gen/android/app") / gname
+              if not g.exists():
+                  continue
+              t = g.read_text(encoding="utf-8")
+              if ("androidx.core" in t) or ("appcompat" in t):
+                  print(f"{gname} 已含 androidx.core/appcompat 依赖")
+                  break
+              t2, n = re.subn(r"(dependencies\s*\{)",
+                              lambda mm: mm.group(1) + '\n    implementation("androidx.core:core-ktx:1.9.0")',
+                              t, count=1)
+              if n:
+                  g.write_text(t2, encoding="utf-8")
+                  print(f"{gname} 已补充 androidx.core 依赖")
+              break
+          PY
 
       - name: Allow cleartext HTTP (localhost proxy)
         # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，
@@ -197,7 +377,7 @@ jobs:
           fi
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # artifact 名固定为 android-apk（内容为已签名、可直接安装的 APK）。
           name: android-apk

@@ -7,14 +7,21 @@ name: 自定义打包（JSON 配置生成应用）
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
 #     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）
-#     "app_name": "MyApp",                   // 运行期显示名（默认 Web2App）
+#     "app_name": "MyApp",                   // 统一应用名（默认 Web2App）：
+#                                            //   Windows 安装包名/快捷方式/安装目录、
+#                                            //   Android 桌面名称、运行期窗口标题，全部用它
 #     "icon_url": "https://example.com/logo.png", // 应用图标 PNG 的 URL（默认空=沿用仓库默认图标）
 #     "window_title": "我的应用",             // 窗口标题（默认同 app_name）
 #     "proxy_enabled": "true",               // 是否启用本地反向代理注入鉴权（默认 false）
 #     "proxy_http": "",                      // 外部 HTTP 代理（默认空）
 #     "proxy_https": "",                     // 外部 HTTPS 代理（默认空）
 #     "proxy_bypass": "",                    // 不走代理的地址，分号分隔（默认空=代码内置）
-#     "data_dir_default": "false"            // WebView2 数据目录（默认 false=LOCALAPPDATA）
+#     "data_dir_default": "false",           // WebView2 数据目录（默认 false=LOCALAPPDATA）
+#     "android_keystore_base64": "...",      // Android 签名 keystore(.jks/.keystore) 的 base64（可选，
+#                                            //   优先于仓库 secrets；正式签名，跨构建可覆盖升级）
+#     "android_key_alias": "my-alias",       // keystore 别名（配了 keystore 时必填）
+#     "android_keystore_password": "****",   // keystore 密码（配了 keystore 时必填）
+#     "android_key_password": ""             // key 密码（可选，默认同 keystore 密码）
 #   }
 #
 # 想"一键生成某个固定应用"：把 config_url 固定指向仓库内一份 .json（如 docs/myapp.json），
@@ -37,7 +44,7 @@ jobs:
       - uses: actions/checkout@v7
 
       # 单一入口：接受 JSON 字符串或 JSON URL，解析后与默认值合并，
-      # 把最终 8 个编译期变量写入 GITHUB_ENV，后续步骤直接作为环境变量读取。
+      # 把最终编译期变量写入 GITHUB_ENV，后续步骤直接作为环境变量读取。
       - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量）
         shell: bash
         env:
@@ -65,8 +72,16 @@ jobs:
               "proxy_https": "",
               "proxy_bypass": "",
               "data_dir_default": "false",
+              # Android 签名（仅 Android job 使用，这里合并进配置避免"未知字段"告警）
+              "android_keystore_base64": "",
+              "android_key_alias": "",
+              "android_keystore_password": "",
+              "android_key_password": "",
           }
           BOOL_KEYS = {"proxy_enabled", "data_dir_default"}
+          # 签名相关字段不写入 GITHUB_ENV（keystore 体积大/含敏感信息，由 Android job 自行落盘处理）
+          SKIP_ENV = {"android_keystore_base64", "android_key_alias",
+                      "android_keystore_password", "android_key_password"}
 
           raw = (os.environ.get("CONFIG_JSON") or "").strip()
           url = (os.environ.get("CONFIG_URL") or "").strip()
@@ -106,18 +121,62 @@ jobs:
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
 
-          # 打印时隐藏 URL 里的账号密码，避免泄漏到日志。
+          # 打印时隐藏敏感内容，避免泄漏到日志。
           def mask(u):
               return re.sub(r"(://[^/@\s]+)@", "://***@", u)
 
+          def display(k, v):
+              if k in ("app_url", "icon_url"):
+                  return mask(v)
+              if k in ("android_keystore_password", "android_key_password"):
+                  return "***（已配置）" if v else "（未配置）"
+              if k == "android_keystore_base64":
+                  return f"（已配置，{len(v)} 字符）" if v else "（未配置）"
+              return v
+
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
               for k, v in merged.items():
+                  if k in SKIP_ENV:
+                      continue
                   f.write(f"{k.upper()}={v}\n")
 
           print("已注入环境变量：")
           for k, v in merged.items():
-              shown = mask(v) if k in ("app_url", "icon_url") else v
-              print(f"  {k.upper()}={shown}")
+              print(f"  {k.upper()}={display(k, v)}")
+          PY
+
+      - name: 统一安装名称（app_name → productName）
+        # 把 app_name 写入 tauri.conf.json 的 productName，统一 Windows 端的"安装名称"：
+        #   MSI 安装包文件名 / 开始菜单与桌面快捷方式 / 控制面板"程序和功能"显示名 / 安装目录。
+        # 同时固定 bundle.mainBinaryName=web2app：主程序 exe 文件名不随 productName 变化，
+        # 下方"免安装绿色版"步骤引用的 target/release/web2app.exe 路径保持稳定。
+        env:
+          PYTHONUTF8: "1"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re, sys
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = os.environ.get("APP_NAME", "").strip()
+          if not name:
+              print("未配置 app_name，沿用 tauri.conf.json 默认名称")
+              raise SystemExit(0)
+          # 去掉 Windows 文件名非法字符；压缩连续空白；去首尾空格与句点
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
+          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          if not safe:
+              print("app_name 清洗后为空，沿用默认名称")
+              raise SystemExit(0)
+
+          with open("tauri.conf.json", encoding="utf-8") as f:
+              conf = json.load(f)
+          conf["productName"] = safe
+          conf.setdefault("bundle", {})["mainBinaryName"] = "web2app"
+          with open("tauri.conf.json", "w", encoding="utf-8") as f:
+              json.dump(conf, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(f"productName = {safe}（安装包/快捷方式/安装目录使用该名称；主程序文件名固定为 web2app.exe）")
           PY
 
       - name: Install Rust toolchain
@@ -147,21 +206,16 @@ jobs:
 
       - name: Build (tauri, 编译期注入配置，仅 MSI)
         # --bundles msi：只打 MSI 安装包（不产 NSIS）。编译期常量 APP_URL/APP_NAME/...
-        # 读取上一步注入的环境变量；主二进制 web2app.exe 仍会编译到 target/release/，供绿色版使用。
+        # 读取之前注入的环境变量；主二进制 web2app.exe 仍会编译到 target/release/，供绿色版使用。
         run: cargo tauri build --bundles msi
 
-      - name: 重命名 MSI + 生成免安装绿色版
-        # 1) MSI 文件名带上 APP_NAME（仅当 APP_NAME 非默认 Web2App）。
-        # 2) 把主程序 web2app.exe 复制为 <APP_NAME>.exe 后打包成 zip，即无需安装的绿色版
-        #    （依赖系统 WebView2 运行时，Win10/11 自带；前端资源已嵌入 exe，无需额外文件）。
-        # 程序内部显示名 / 安装目录 / 托盘标识仍由 tauri.conf.json 的 productName 决定。
+      - name: 生成免安装绿色版
+        # 把主程序 web2app.exe 复制为 <app_name>.exe 后打包成 zip，即无需安装的绿色版
+        # （依赖系统 WebView2 运行时，Win10/11 自带；前端资源已嵌入 exe，无需额外文件）。
+        # MSI 的文件名已由上一步 productName 统一处理（<app_name>_<版本>_x64_zh-CN.msi），无需再重命名。
         shell: pwsh
         run: |
           $name = $env:APP_NAME -replace '[\\/:*?"<>|]', '_'
-          if ($name -ne 'Web2App') {
-            $msi = "target/release/bundle/msi"
-            if (Test-Path $msi) { Get-ChildItem "$msi\Web2App*.msi" | Rename-Item -NewName { $_.Name -replace 'Web2App', $name } }
-          }
           $exe = "target/release/web2app.exe"
           if (-not (Test-Path $exe)) { throw "未找到主程序 $exe" }
           $portable = "target/release/$name.exe"
@@ -170,7 +224,7 @@ jobs:
           Remove-Item $portable -Force
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # artifact 名固定为 windows-installers（APP_NAME 已在安装包文件名上体现）。
           name: windows-installers
@@ -191,8 +245,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 与 Windows job 相同的解析逻辑：把 JSON 配置注入为环境变量，供 cargo 编译期读取。
-      - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量）
+      # 与 Windows job 相同的解析逻辑：把 JSON 配置注入为环境变量，供 cargo 编译期读取；
+      # 额外处理 Android 签名：若 JSON 提供了 keystore，解码落盘并注入签名相关变量。
+      - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量 + 签名 keystore 落盘）
         shell: bash
         env:
           CONFIG_JSON: ${{ github.event.inputs.config_json }}
@@ -201,7 +256,7 @@ jobs:
           PYTHONIOENCODING: "utf-8"
         run: |
           python3 - <<'PY'
-          import os, sys, json, re, urllib.request
+          import os, sys, json, re, base64, pathlib, urllib.request
 
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
           sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -216,8 +271,15 @@ jobs:
               "proxy_https": "",
               "proxy_bypass": "",
               "data_dir_default": "false",
+              "android_keystore_base64": "",
+              "android_key_alias": "",
+              "android_keystore_password": "",
+              "android_key_password": "",
           }
           BOOL_KEYS = {"proxy_enabled", "data_dir_default"}
+          # 签名相关字段不直接进 GITHUB_ENV（keystore 体积大、密码敏感），由下方专门处理
+          SKIP_ENV = {"android_keystore_base64", "android_key_alias",
+                      "android_keystore_password", "android_key_password"}
 
           raw = (os.environ.get("CONFIG_JSON") or "").strip()
           url = (os.environ.get("CONFIG_URL") or "").strip()
@@ -257,17 +319,61 @@ jobs:
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
 
+          # ---------- Android 签名（可选）：JSON 提供的 keystore 优先于仓库 secrets ----------
+          signing = {}
+          ks_b64 = merged["android_keystore_base64"].strip()
+          if ks_b64:
+              alias = merged["android_key_alias"].strip()
+              storepass = merged["android_keystore_password"]
+              if not alias or not storepass:
+                  sys.exit("配置了 android_keystore_base64 时，必须同时提供 android_key_alias 和 android_keystore_password")
+              try:
+                  ks_bytes = base64.b64decode(ks_b64, validate=False)
+              except Exception as e:
+                  sys.exit(f"android_keystore_base64 不是合法 base64：{e}")
+              if len(ks_bytes) < 64:
+                  sys.exit("android_keystore_base64 解码后内容过小，疑似不完整（正常 keystore 至少几百字节）")
+              out_dir = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "android-signing"
+              out_dir.mkdir(parents=True, exist_ok=True)
+              ks_path = out_dir / "release.keystore"
+              ks_path.write_bytes(ks_bytes)
+              keypass = merged["android_key_password"] or storepass
+              for s in (storepass, keypass):
+                  if s:
+                      print(f"::add-mask::{s}")
+              signing = {
+                  "ANDROID_KEYSTORE_PATH": str(ks_path),
+                  "ANDROID_KEY_ALIAS": alias,
+                  "ANDROID_KEYSTORE_PASSWORD": storepass,
+                  "ANDROID_KEY_PASSWORD": keypass,
+              }
+              print(f"Android 签名：使用 JSON 提供的 keystore（{len(ks_bytes)} 字节，已写入 {ks_path}）")
+          else:
+              print("Android 签名：JSON 未提供 keystore（将回落到仓库 secrets / 一次性 CI keystore）")
+
           def mask(u):
               return re.sub(r"(://[^/@\s]+)@", "://***@", u)
 
+          def display(k, v):
+              if k in ("app_url", "icon_url"):
+                  return mask(v)
+              if k in ("android_keystore_password", "android_key_password"):
+                  return "***（已配置）" if v else "（未配置）"
+              if k == "android_keystore_base64":
+                  return f"（已配置，{len(v)} 字符）" if v else "（未配置）"
+              return v
+
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
               for k, v in merged.items():
+                  if k in SKIP_ENV:
+                      continue
                   f.write(f"{k.upper()}={v}\n")
+              for k, v in signing.items():
+                  f.write(f"{k}={v}\n")
 
           print("已注入环境变量：")
           for k, v in merged.items():
-              shown = mask(v) if k in ("app_url", "icon_url") else v
-              print(f"  {k.upper()}={shown}")
+              print(f"  {k.upper()}={display(k, v)}")
           PY
 
       - name: Install Rust toolchain (with Android target)
@@ -331,6 +437,152 @@ jobs:
             echo "无自定义图标，沿用默认"
           fi
 
+      - name: 统一应用名称（Android 桌面名称 ← app_name）
+        # Android 的"安装名称"= 桌面图标下的 label，定义在 gen/android 的 strings.xml
+        #（或 Manifest 内联 android:label）。这里统一改为 app_name，与 Windows 端
+        #（productName）共用同一个 JSON 字段，实现"一个名字、两端一致"。
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, pathlib
+          from xml.sax.saxutils import escape
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = os.environ.get("APP_NAME", "").strip()
+          if not name:
+              print("未配置 app_name，Android 沿用默认名称")
+              raise SystemExit(0)
+          label = escape(name)
+
+          # 1) strings.xml 的 app_name 资源（Manifest 通常以 @string/app_name 引用它）
+          res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")
+          if res.exists():
+              s = res.read_text(encoding="utf-8")
+              s2, n = re.subn(r'(<string\s+name="app_name"\s*>)[^<]*(</string>)',
+                              lambda m: m.group(1) + label + m.group(2), s)
+              if n == 0 and "</resources>" in s:
+                  s2 = s.replace("</resources>",
+                                 f'    <string name="app_name">{label}</string>\n</resources>')
+                  n = 1
+              if n:
+                  res.write_text(s2, encoding="utf-8")
+                  print(f"strings.xml: app_name → {name}")
+              else:
+                  print("::warning::strings.xml 中既无 app_name 资源也无 </resources>，请人工检查")
+          else:
+              print("::warning::未找到 strings.xml")
+
+          # 2) Manifest 若使用内联 label（而非 @string/app_name 引用），直接替换
+          mf = pathlib.Path("gen/android/app/src/main/AndroidManifest.xml")
+          if mf.exists():
+              s = mf.read_text(encoding="utf-8")
+              s2, n = re.subn(r'(android:label=")(?!@string/)[^"]*(")',
+                              lambda m: m.group(1) + label + m.group(2), s)
+              if n:
+                  mf.write_text(s2, encoding="utf-8")
+                  print(f"AndroidManifest: 内联 android:label → {name}")
+          PY
+
+      - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
+        # Tauri 模板的 MainActivity 调用了 enableEdgeToEdge()：WebView 会延伸绘制到
+        # 状态栏/导航栏下方，页面顶部被系统通栏遮挡。这里改写 MainActivity，给内容视图
+        # 注册 WindowInsets 监听，按 systemBars + displayCutout 的实际高度内缩；
+        # 若某机型未启用 edge-to-edge，insets 顶部为 0，不影响原有布局。
+        # gen/android 每次构建现生成，因此每次 init 后都要打一遍补丁。
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys, textwrap
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          root = pathlib.Path("gen/android/app/src/main/java")
+          files = [p for p in root.rglob("MainActivity.*") if p.suffix in (".kt", ".java")]
+          if not files:
+              raise SystemExit("::error::未找到 MainActivity.kt / MainActivity.java")
+          f = files[0]
+          src = f.read_text(encoding="utf-8")
+          if "setOnApplyWindowInsetsListener" in src:
+              print("MainActivity 已包含系统栏适配，跳过改写")
+          else:
+              m = re.search(r"^package\s+([\w.]+)", src, re.M)
+              pkg = m.group(1) if m else ""
+              # Kotlin 模板 import 行尾无分号、Java 有分号，两种都匹配
+              m = re.search(r"^import\s+([\w.]+TauriActivity)\s*;?\s*$", src, re.M)
+              if not m:
+                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的 import，模板可能已变化，请人工确认")
+              base = m.group(1)
+
+              if f.suffix == ".kt":
+                  code = textwrap.dedent(f"""\
+                      package {pkg}
+
+                      import android.os.Bundle
+                      import androidx.core.graphics.Insets
+                      import androidx.core.view.ViewCompat
+                      import androidx.core.view.WindowInsetsCompat
+                      import {base}
+
+                      class MainActivity : TauriActivity() {{
+                          override fun onCreate(savedInstanceState: Bundle?) {{
+                              super.onCreate(savedInstanceState)
+                              // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
+                              ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) {{ v, insets ->
+                                  val bars: Insets = insets.getInsets(
+                                      WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+                                  )
+                                  v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+                                  insets
+                              }}
+                          }}
+                      }}
+                      """)
+              else:
+                  code = textwrap.dedent(f"""\
+                      package {pkg};
+
+                      import android.os.Bundle;
+                      import androidx.core.graphics.Insets;
+                      import androidx.core.view.ViewCompat;
+                      import androidx.core.view.WindowInsetsCompat;
+                      import {base};
+
+                      public class MainActivity extends TauriActivity {{
+                          @Override
+                          protected void onCreate(Bundle savedInstanceState) {{
+                              super.onCreate(savedInstanceState);
+                              // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
+                              ViewCompat.setOnApplyWindowInsetsListener(
+                                      findViewById(android.R.id.content),
+                                      (v, insets) -> {{
+                                          Insets bars = insets.getInsets(
+                                                  WindowInsetsCompat.Type.systemBars()
+                                                          | WindowInsetsCompat.Type.displayCutout());
+                                          v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                                          return insets;
+                                      }});
+                          }}
+                      }}
+                      """)
+              f.write_text(code, encoding="utf-8")
+              print(f"已改写 {f}（内容视图按系统栏 insets 内缩）")
+
+          # 确保 androidx.core 可用（模板的 androidx.activity/appcompat 一般已传递引入；
+          # 兜底：gradle 中既无 androidx.core 也无 appcompat 时补一行依赖）
+          for gname in ("build.gradle.kts", "build.gradle"):
+              g = pathlib.Path("gen/android/app") / gname
+              if not g.exists():
+                  continue
+              t = g.read_text(encoding="utf-8")
+              if ("androidx.core" in t) or ("appcompat" in t):
+                  print(f"{gname} 已含 androidx.core/appcompat 依赖")
+                  break
+              t2, n = re.subn(r"(dependencies\s*\{)",
+                              lambda mm: mm.group(1) + '\n    implementation("androidx.core:core-ktx:1.9.0")',
+                              t, count=1)
+              if n:
+                  g.write_text(t2, encoding="utf-8")
+                  print(f"{gname} 已补充 androidx.core 依赖")
+              break
+          PY
+
       - name: Allow cleartext HTTP (localhost proxy)
         # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，
         # release 构建的 usesCleartextTraffic 默认为 false，必须置 true 否则鉴权代理真机上加载失败。
@@ -346,10 +598,12 @@ jobs:
         run: cargo tauri android build --target aarch64 --apk
 
       - name: 签名 APK（release 包默认未签名，不签名无法安装）
-        # 签名密钥两级策略：
-        #   1) 配置了仓库 secrets（ANDROID_KEYSTORE_BASE64 等）→ 用正式 keystore 签名，
+        # 签名密钥三级策略：
+        #   1) 配置 JSON 里提供了 android_keystore_base64 等 → 用 JSON 的 keystore 签名
+        #      （适合"每个应用各自一把正式密钥"，随配置一起分发）；
+        #   2) 配置了仓库 secrets（ANDROID_KEYSTORE_BASE64 等）→ 用正式 keystore 签名，
         #      各次构建可互相覆盖升级（长期使用/上架建议这种方式）。
-        #   2) 未配置 → 现场用 keytool 生成一次性 keystore 签名。能正常安装使用，
+        #   3) 都没有 → 现场用 keytool 生成一次性 keystore 签名。能正常安装使用，
         #      但每次构建的签名不同，新版无法覆盖安装旧版（需先卸载）。
         shell: bash
         env:
@@ -362,7 +616,18 @@ jobs:
           build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "build-tools: $build_tools"
 
-          if [ -n "$KS_BASE64" ]; then
+          # 1) JSON 提供的 keystore（解析配置步骤已解码落盘并注入 ANDROID_KEYSTORE_* 变量）
+          if [ -n "${ANDROID_KEYSTORE_PATH:-}" ] && [ -f "${ANDROID_KEYSTORE_PATH:-}" ]; then
+            if [ -z "${ANDROID_KEY_ALIAS:-}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]; then
+              echo "::error::JSON 配置了 keystore 但缺少 alias/密码（解析步骤应已校验，请检查配置）"; exit 1
+            fi
+            echo "使用 JSON 配置的 keystore 签名"
+            keystore="$ANDROID_KEYSTORE_PATH"
+            storepass="$ANDROID_KEYSTORE_PASSWORD"
+            keypass="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            alias="$ANDROID_KEY_ALIAS"
+          # 2) 仓库 secrets 提供的正式 keystore
+          elif [ -n "$KS_BASE64" ]; then
             if [ -z "${KS_ALIAS:-}" ] || [ -z "${KS_STORE_PASS:-}" ]; then
               echo "::error::配置了 ANDROID_KEYSTORE_BASE64 时，ANDROID_KEY_ALIAS 和 ANDROID_KEYSTORE_PASSWORD 也必须配置"; exit 1
             fi
@@ -372,8 +637,9 @@ jobs:
             storepass="$KS_STORE_PASS"
             keypass="${KS_KEY_PASS:-$KS_STORE_PASS}"
             alias="$KS_ALIAS"
+          # 3) 一次性 CI keystore
           else
-            echo "::warning::未配置签名 secrets，使用一次性 CI keystore 签名（可安装，但跨构建无法覆盖升级）"
+            echo "::warning::未配置签名信息，使用一次性 CI keystore 签名（可安装，但跨构建无法覆盖升级）"
             keystore="$RUNNER_TEMP/ci.keystore"
             keytool -genkeypair -keystore "$keystore" -alias web2app-ci \
               -keyalg RSA -keysize 2048 -validity 10000 \
@@ -409,7 +675,7 @@ jobs:
           fi
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # artifact 名固定为 android-apk（内容为已签名、可直接安装的 APK）。
           name: android-apk
