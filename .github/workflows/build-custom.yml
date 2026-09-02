@@ -48,11 +48,23 @@ on:
       config_url:
         description: '或填一个返回上述 JSON 的 URL（公开可访问）'
         required: false
+      target:
+        description: '打包目标：全部 / 仅 Windows / 仅 Android'
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - windows
+          - android
 
 jobs:
+  # 用一句话按 target 决定是否跑该 job。target 为 all 或包含对应平台名则跑。
+  # （选择框值恒为 windows/android/all；保留“空串即全打”的兜底兼容。）
   windows:
     name: Build Windows
     runs-on: windows-latest
+    if: ${{ !github.event.inputs.target || contains(github.event.inputs.target, 'windows') || contains(github.event.inputs.target, 'all') }}
     steps:
       - uses: actions/checkout@v7
 
