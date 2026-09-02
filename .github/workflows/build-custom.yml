@@ -1,8 +1,10 @@
 name: 自定义打包（JSON 配置生成应用）
 
 # 手动触发：在仓库 Actions 页点 "Run workflow"，
-#   粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
-#   一次触发同时产出：Windows MSI 安装包、Windows 免安装绿色版(zip)、已签名的 Android APK。
+#   ① 选【打包目标】：全部(all，默认) / 仅 Windows / 仅 Android —— 决定跑哪些打包 job；
+#   ② 粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
+#   默认（all）一次产出：Windows MSI 安装包、Windows 免安装绿色版(zip)、已签名的 Android APK；
+#   选 windows 只产 Windows 两项，选 android 只产 APK。
 #
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
@@ -50,7 +52,7 @@ on:
         required: false
       target:
         description: '打包目标：全部 / 仅 Windows / 仅 Android'
-        required: true
+        required: false
         default: all
         type: choice
         options:
@@ -292,6 +294,7 @@ jobs:
     name: Build Android APK
     runs-on: ubuntu-latest
     continue-on-error: true
+    if: ${{ !github.event.inputs.target || contains(github.event.inputs.target, 'android') || contains(github.event.inputs.target, 'all') }}
     steps:
       - uses: actions/checkout@v7
 
