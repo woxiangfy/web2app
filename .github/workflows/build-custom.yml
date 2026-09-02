@@ -682,6 +682,60 @@ jobs:
           sed -i -E 's/android:usesCleartextTraffic="[^"]*"/android:usesCleartextTraffic="true"/' gen/android/app/src/main/AndroidManifest.xml
           grep -n "usesCleartextTraffic" gen/android/app/src/main/AndroidManifest.xml
 
+      - name: 设置 Android 产物文件名（APK 文件名 ← app_name）
+        # 默认 Tauri 模板的 APK 产物名是通用的 app-universal-release-unsigned.apk。
+        # 这里把 gradle 的 archivesBaseName 设为 app_name，让最终签名后的 APK 文件名
+        # 带上应用名（如 MyApp-universal-release-unsigned.apk），下载时一目了然。
+        # 同时去掉 Windows 文件名非法字符，保证产物路径稳定。
+        env:
+          PYTHONUTF8: "1"
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, sys, pathlib
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          name = (os.environ.get("APP_NAME", "") or "").strip()
+          if not name:
+              print("未配置 app_name，APK 沿用默认文件名")
+              raise SystemExit(0)
+          # 去掉文件名非法字符，压缩空白，去首尾空格/句点
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
+          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          if not safe:
+              safe = "Web2App"
+
+          g = pathlib.Path("gen/android/app/build.gradle.kts")
+          if not g.exists():
+              g = pathlib.Path("gen/android/app/build.gradle")
+          if not g.exists():
+              print("::warning::未找到 app/build.gradle(.kts)，跳过 APK 重命名")
+              raise SystemExit(0)
+
+          src = g.read_text(encoding="utf-8")
+
+          # 已在别处设置过 archivesBaseName / archivesName 则跳过
+          if re.search(r'(archivesBaseName|base\s*\.\s*archivesName)', src):
+              print("build.gradle 已设置 archivesBaseName，跳过")
+              raise SystemExit(0)
+
+          # 在 android { ... } 块内注入 base.archivesName（AGP 7.4+ 推荐写法；
+          # 若模板不支持 base 命名空间则回退到 archivesBaseName）。
+          # 找 android { 块的开头。
+          m = re.search(r'(^|\n)(\s*)android\s*\{', src)
+          if not m:
+              # 没有 android 块（不太可能），退而求其次在文件末尾追加
+              src = src.rstrip() + f'\narchivesBaseName = "{safe}"\n'
+          else:
+              indent = m.group(2) + "    "
+              inject = f'\n{indent}base {{ archivesName.set("{safe}") }}\n'
+              pos = m.end()
+              src = src[:pos] + inject + src[pos:]
+
+          g.write_text(src, encoding="utf-8")
+          print(f"APK 产物名 → {safe}（build.gradle 已注入 archivesName）")
+          PY
+
       - name: 开启 gradle 错误栈（便于定位 assemble 失败原因）
         # 把 org.gradle.stacktrace=all 写进 gen/android/gradle.properties，
         # 若 APK 构建失败，gradle 会直接打印完整错误栈（e: 编译错误 / 资源链接错误等），
@@ -703,7 +757,7 @@ jobs:
         # 注意：tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），
         # 不是 rustup 的完整三元组 aarch64-linux-android。
         # release APK 默认【未签名】，直接安装会提示"无证书/无法安装"，需下一步 zipalign+apksigner 签名。
-        run: cargo tauri android build --target aarch64 --apk 2>&1 | tee "$RUNNER_TEMP/android-build.log"
+        run: cargo tauri android build --target aarch64 --apk
 
       - name: 签名 APK（release 包默认未签名，不签名无法安装）
         # 签名密钥三级策略：
@@ -756,6 +810,69 @@ jobs:
             storepass="androidci"
             keypass="androidci"
             alias="web2app-ci"
+
+            # 把这次一次性 keystore 及其密码/base64/配置打包成 artifact（参考 generate-signing-key.yml），
+            # 让用户下载保存后，之后能"用同一把密钥"继续签名，实现跨构建覆盖升级。
+            # 否则这把一次性密钥只在本次 job 内存在，run 结束后就丢失，之后再也无法覆盖升级。
+            # 这里用独立的 python3 写文件（用 <<'PY' 顶格 heredoc 需重开 run 步骤，故改用 -c 单行），
+            # 避免在 bash 的 if/else 块里再嵌 heredoc 导致的缩进/YAML 块标量冲突。
+            PKG="$RUNNER_TEMP/android-signing-key"
+            mkdir -p "$PKG"
+            cp "$keystore" "$PKG/release.keystore"
+            ks_b64=$(base64 -w0 "$keystore")
+            APP_URL_VAL="${APP_URL:-}"
+            APP_NAME_VAL="${APP_NAME:-Web2App}"
+            TITLE_VAL="${TITLE:-$APP_NAME_VAL}"
+            PKG="$PKG" ALIAS="$alias" STORE="$storepass" KS_B64="$ks_b64" \
+            APP_URL_VAL="$APP_URL_VAL" APP_NAME_VAL="$APP_NAME_VAL" TITLE_VAL="$TITLE_VAL" \
+            python3 -c '
+          import json, os, sys, datetime
+          pkg = os.environ["PKG"]
+          alias = os.environ["ALIAS"]
+          storepass = os.environ["STORE"]
+          ks_b64 = os.environ["KS_B64"]
+          app_url = os.environ["APP_URL_VAL"]
+          app_name = os.environ["APP_NAME_VAL"]
+          title = os.environ["TITLE_VAL"]
+          cfg = {
+              "app_url": app_url,
+              "app_name": app_name,
+              "title": title,
+              "icon_url": "",
+              "proxy_enabled": "false",
+              "proxy_http": "",
+              "proxy_https": "",
+              "proxy_bypass": "",
+              "data_dir_default": "false",
+              "android_keystore_base64": ks_b64,
+              "android_key_alias": alias,
+              "android_keystore_password": storepass,
+              "android_key_password": "",
+          }
+          now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+          info = [
+              "本次打包使用【一次性 CI keystore】签名（因为未提供 JSON/Secrets 签名）",
+              "======================================================",
+              "生成时间 : " + now,
+              "文件     : release.keystore（请长期保存）",
+              "alias    : " + alias,
+              "storepass: " + storepass,
+              "keypass  : " + storepass + "   （与 storepass 相同；android_key_password 留空即可）",
+              "",
+              "keystore base64（单行，供填入 android_keystore_base64 / Secrets）:",
+              ks_b64,
+              "",
+              "【使用提醒】",
+              "1) 本次 APK 是用这把 keystore 签的；若以后想覆盖升级，就必须继续用这一把。",
+              "2) 请把 release.keystore + 上面的密码一起备份到安全处。",
+              "3) 更省心：直接改用 generate-signing-key.yml 生成一把正式密钥，",
+              "   或用下面的 packaging-config.single.json 在下次打包时带上 base64/密码。",
+          ]
+          open(os.path.join(pkg, "keystore-info.txt"), "w", encoding="utf-8").write("\n".join(info) + "\n")
+          open(os.path.join(pkg, "packaging-config.json"), "w", encoding="utf-8").write(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+          open(os.path.join(pkg, "packaging-config.single.json"), "w", encoding="utf-8").write(json.dumps(cfg, ensure_ascii=False, separators=(",", ":")))
+          print("已打包一次性签名材料到 " + pkg)
+          '
           fi
 
           mkdir -p "$RUNNER_TEMP/signed"
@@ -782,13 +899,13 @@ jobs:
             exit 1
           fi
 
-      - name: Upload Android build log (诊断用)
-        # 完整构建日志（含 gradle 错误栈）落盘为 artifact，便于失败时在 Actions 页下载查看根因。
-        if: always()
+      - name: Upload 一次性签名材料（未提供签名时）
+        # 仅当本次走的是"一次性 CI keystore"（JSON/Secrets 都未提供签名）时，
+        # 才会上传这份签名材料，供用户下载保存、以便之后继续用同一把密钥覆盖升级。
         uses: actions/upload-artifact@v7
         with:
-          name: android-build-log
-          path: ${{ runner.temp }}/android-build.log
+          name: android-signing-key
+          path: ${{ runner.temp }}/android-signing-key/
           if-no-files-found: ignore
 
       - name: Upload APK
