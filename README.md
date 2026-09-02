@@ -86,8 +86,10 @@ web2app/
 │   └── settings.html       # 设置界面 UI 源码（编译期被 include_str! 内嵌，经 settings:// 自定义协议加载）
 ├── icons/icon.ico          # 应用图标
 └── .github/workflows/
-    ├── ci.yml              # 提交即自动测试（lint + test + 多平台编译检查）
-    └── release.yml         # 发版即自动编译（Windows 安装包 + Android APK）
+    ├── ci.yml                    # 提交即自动测试（lint + test + 多平台编译检查）
+    ├── release.yml               # 发版即自动编译（Windows 安装包 + Android APK）
+    ├── build-custom.yml          # 手动打包：填配置 JSON，产出 MSI + 绿色版 zip + 已签名 APK
+    └── generate-signing-key.yml  # 手动触发：云端生成一把固定签名 keystore + 密码 + 配置 JSON（全自动，零输入）
 ```
 
 ---
@@ -189,7 +191,9 @@ cargo test --all
 
 ## 自动构建（GitHub Actions）
 
-仓库已内置两条流水线，**无需人为触发**：
+仓库内置 4 条 workflow：2 条**自动**（`ci.yml` / `release.yml`，无需人为触发）+ 2 条**手动**（`generate-signing-key.yml` / `build-custom.yml`，在 Actions 页手动 Run workflow）。
+
+> 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 
 ### 1. 提交即测试 — `.github/workflows/ci.yml`
 
@@ -232,10 +236,9 @@ cargo test --all
 
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
 
-#### Android 正式签名（与上面配置 JSON 的字段对应）
+#### Android 签名（打包时从三层来源取第一份可用的）
 
-手动打包产出的 release APK 默认**未签名**（无法直接安装），CI 会用你提供的签名信息对 APK 做
-zipalign + apksigner 签名。签名密钥沿三层策略**依次取第一份可用的**：
+手动打包产出的 release APK **必须签名**才能安装。签名密钥沿三层策略**依次取第一份可用的**：
 
 | 优先级 | 签名来源 | 适合场景 |
 | --- | --- | --- |
@@ -243,13 +246,37 @@ zipalign + apksigner 签名。签名密钥沿三层策略**依次取第一份可
 | 2 | 仓库 Secrets（`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD`） | 长期使用 / 准备上架，各次构建可互相覆盖升级 |
 | 3 | 都没有 → CI 现场用 keytool 生成**一次性** keystore 签名 | 临时试装；但每次构建签名都不同，**新版无法覆盖安装旧版**（需先卸载） |
 
-**正式签名请务必用方式 1 或 2**，并保留好 keystore 文件与密码——Android 应用升级必须用**同一把密钥**签名，
-密钥一旦丢失，已装应用将永远无法覆盖升级。
+> ⚠️ **正式使用请务必用方式 1 或 2**，并长期保存 keystore 文件与密码。Android 应用升级必须用**同一把密钥**签名，密钥一旦丢失，已装应用将永远无法覆盖升级。
 
-生成并填到 JSON 的完整步骤：
+### 4. 生成签名密钥（推荐）— `.github/workflows/generate-signing-key.yml`
 
-**① 在本机生成一把 keystore**（需 JDK；装过 Android Studio 的话可直接用其自带 keytool，
-例如 `"C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe"`，或先 `export PATH="$PATH:.../jbr/bin"`）：
+> 这是最省心的签名方式：**云端全自动生成一把固定 keystore，零输入、随机密码**，跑一次就把「密钥文件 + 密码 + 已签好名的配置 JSON」打包成一个 artifact 给你下载。
+
+**为什么用它**：手动打包要"签名一致、可覆盖升级"，就需要一把**固定**的 keystore 反复用。
+本 workflow 在云端用 JDK 的 `keytool` 生成这把密钥（随机强密码），并自动填进一份打包配置 JSON，你无需在本机装 JDK、也无需手敲 `keytool` / `base64` 命令。
+
+**用法（3 步）**：
+
+1. Actions → **「生成 Android 签名密钥 (keystore)」** → Run workflow（**无需填任何东西，全自动**）。
+2. 下载 artifact **`android-signing-key`**，里面有 4 个文件：
+   - `release.keystore` —— 密钥库文件本身，请**长期妥善保存**（丢了无法找回）；
+   - `keystore-info.txt` —— alias、keystore 密码、base64（单行）+ 使用提醒；
+   - `packaging-config.json` —— 已把签名 4 项填好的打包配置模板（美化版）；
+   - `packaging-config.single.json` —— 同一配置的单行版，直接粘给 `build-custom.yml` 的 `config_json`。
+3. 打开 `packaging-config.json`，把 `app_url` / `app_name` / `title` 改成你的真实应用（**签名与网址无关**，改了仍有效），
+   然后把 single 版粘进 **build-custom.yml** 打包。
+
+> ⚠️ **每次运行本 workflow 都会生成一把新密钥**。因此只运行一次、保存好这把；不要为了"再拿一把"而重复运行，
+> 否则新旧密钥签的 APK 之间无法覆盖升级（要先卸载）。若希望以后打包**自动**用同一把（不用每次粘 base64），
+> 把 `keystore-info.txt` 里的 base64 / alias / storepass 配成仓库 Secrets（`ANDROID_KEYSTORE_BASE64` /
+> `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD`）即可，`build-custom.yml` 会自动读取。
+
+### 5. 本机手敲 keytool 生成（备选）
+
+如果你不想用上面的云端 workflow，也可以在本机自己生成（需 JDK；装过 Android Studio 的可直接用其自带
+keytool，例如 `"C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe"`，或先 `export PATH="$PATH:.../jbr/bin"`）：
+
+**① 在本机生成一把 keystore**：
 
 ```bash
 keytool -genkeypair -v \
