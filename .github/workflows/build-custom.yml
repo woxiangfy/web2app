@@ -148,8 +148,9 @@ jobs:
       - name: 统一安装名称（app_name → productName）
         # 把 app_name 写入 tauri.conf.json 的 productName，统一 Windows 端的"安装名称"：
         #   MSI 安装包文件名 / 开始菜单与桌面快捷方式 / 控制面板"程序和功能"显示名 / 安装目录。
-        # 同时固定 bundle.mainBinaryName=web2app：主程序 exe 文件名不随 productName 变化，
-        # 下方"免安装绿色版"步骤引用的 target/release/web2app.exe 路径保持稳定。
+        # 同时固定 mainBinaryName=web2app（tauri.conf.json 的【顶层】字段，不是 bundle 下）：
+        # 主程序 exe 文件名不随 productName 变化，下方"免安装绿色版"步骤引用的
+        # target/release/web2app.exe 路径保持稳定。
         env:
           PYTHONUTF8: "1"
         shell: bash
@@ -159,20 +160,16 @@ jobs:
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
           name = os.environ.get("APP_NAME", "").strip()
-          if not name:
-              print("未配置 app_name，沿用 tauri.conf.json 默认名称")
-              raise SystemExit(0)
-          # 去掉 Windows 文件名非法字符；压缩连续空白；去首尾空格与句点
-          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
-          safe = re.sub(r"\s+", " ", safe).strip(" .")
+          # 去掉 Windows 文件名非法字符；压缩连续空白；去首尾空格与句点；空则回落默认名
+          safe = re.sub(r'[\\/:*?"<>|]+', "_", name) if name else ""
+          safe = re.sub(r"\s+", " ", safe).strip(" .") if safe else ""
           if not safe:
-              print("app_name 清洗后为空，沿用默认名称")
-              raise SystemExit(0)
+              safe = "Web2App"
 
           with open("tauri.conf.json", encoding="utf-8") as f:
               conf = json.load(f)
           conf["productName"] = safe
-          conf.setdefault("bundle", {})["mainBinaryName"] = "web2app"
+          conf["mainBinaryName"] = "web2app"
           with open("tauri.conf.json", "w", encoding="utf-8") as f:
               json.dump(conf, f, ensure_ascii=False, indent=2)
               f.write("\n")
@@ -388,7 +385,7 @@ jobs:
           java-version: 17
 
       - name: Set up Android SDK/NDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install NDK & build tools
         run: |
@@ -504,11 +501,24 @@ jobs:
           else:
               m = re.search(r"^package\s+([\w.]+)", src, re.M)
               pkg = m.group(1) if m else ""
-              # Kotlin 模板 import 行尾无分号、Java 有分号，两种都匹配
-              m = re.search(r"^import\s+([\w.]+TauriActivity)\s*;?\s*$", src, re.M)
-              if not m:
-                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的 import，模板可能已变化，请人工确认")
-              base = m.group(1)
+              # 基类（TauriActivity）的引用方式因模板而异：
+              #   - 可能是 `import app.tauri.TauriActivity` 后用简单名 `TauriActivity`
+              #   - 也可能在类声明里直接写全限定名 `app.tauri.TauriActivity()`（新版模板）
+              # 这里从类声明解析出基类，自行决定是否需要 import，避免依赖模板 import 行格式，
+              # 从而兼容不同 tauri-cli 版本生成的模板。
+              cm = re.search(r"class\s+MainActivity\s*(?::\s*|extends\s+)([\w.]+)", src)
+              if not cm:
+                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的继承声明，模板可能已变化，请人工确认")
+              sup = cm.group(1)
+              if "." in sup:
+                  base_import_line = ""            # 已用全限定名，无需 import
+                  base_ref = sup
+              elif f.suffix == ".kt":
+                  base_import_line = "import app.tauri." + sup
+                  base_ref = sup
+              else:
+                  base_import_line = "import app.tauri." + sup + ";"
+                  base_ref = sup
 
               if f.suffix == ".kt":
                   code = textwrap.dedent(f"""\
@@ -518,9 +528,9 @@ jobs:
                       import androidx.core.graphics.Insets
                       import androidx.core.view.ViewCompat
                       import androidx.core.view.WindowInsetsCompat
-                      import {base}
+                      {base_import_line}
 
-                      class MainActivity : TauriActivity() {{
+                      class MainActivity : {base_ref}() {{
                           override fun onCreate(savedInstanceState: Bundle?) {{
                               super.onCreate(savedInstanceState)
                               // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
@@ -542,9 +552,9 @@ jobs:
                       import androidx.core.graphics.Insets;
                       import androidx.core.view.ViewCompat;
                       import androidx.core.view.WindowInsetsCompat;
-                      import {base};
+                      {base_import_line}
 
-                      public class MainActivity extends TauriActivity {{
+                      public class MainActivity extends {base_ref} {{
                           @Override
                           protected void onCreate(Bundle savedInstanceState) {{
                               super.onCreate(savedInstanceState);
@@ -562,7 +572,7 @@ jobs:
                       }}
                       """)
               f.write_text(code, encoding="utf-8")
-              print(f"已改写 {f}（内容视图按系统栏 insets 内缩）")
+              print(f"已改写 {f}（内容视图按系统栏 insets 内缩，避免顶部通栏遮挡）")
 
           # 确保 androidx.core 可用（模板的 androidx.activity/appcompat 一般已传递引入；
           # 兜底：gradle 中既无 androidx.core 也无 appcompat 时补一行依赖）

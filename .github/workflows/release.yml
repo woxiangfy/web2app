@@ -131,7 +131,7 @@ jobs:
           java-version: 17
 
       - name: Set up Android SDK/NDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install NDK & build tools
         run: |
@@ -220,11 +220,24 @@ jobs:
           else:
               m = re.search(r"^package\s+([\w.]+)", src, re.M)
               pkg = m.group(1) if m else ""
-              # Kotlin 模板 import 行尾无分号、Java 有分号，两种都匹配
-              m = re.search(r"^import\s+([\w.]+TauriActivity)\s*;?\s*$", src, re.M)
-              if not m:
-                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的 import，模板可能已变化，请人工确认")
-              base = m.group(1)
+              # 基类（TauriActivity）的引用方式因模板而异：
+              #   - 可能是 `import app.tauri.TauriActivity` 后用简单名 `TauriActivity`
+              #   - 也可能在类声明里直接写全限定名 `app.tauri.TauriActivity()`（新版模板）
+              # 这里从类声明解析出基类，自行决定是否需要 import，避免依赖模板 import 行格式，
+              # 从而兼容不同 tauri-cli 版本生成的模板。
+              cm = re.search(r"class\s+MainActivity\s*(?::\s*|extends\s+)([\w.]+)", src)
+              if not cm:
+                  raise SystemExit("::error::MainActivity 中未找到 TauriActivity 的继承声明，模板可能已变化，请人工确认")
+              sup = cm.group(1)
+              if "." in sup:
+                  base_import_line = ""            # 已用全限定名，无需 import
+                  base_ref = sup
+              elif f.suffix == ".kt":
+                  base_import_line = "import app.tauri." + sup
+                  base_ref = sup
+              else:
+                  base_import_line = "import app.tauri." + sup + ";"
+                  base_ref = sup
 
               if f.suffix == ".kt":
                   code = textwrap.dedent(f"""\
@@ -234,9 +247,9 @@ jobs:
                       import androidx.core.graphics.Insets
                       import androidx.core.view.ViewCompat
                       import androidx.core.view.WindowInsetsCompat
-                      import {base}
+                      {base_import_line}
 
-                      class MainActivity : TauriActivity() {{
+                      class MainActivity : {base_ref}() {{
                           override fun onCreate(savedInstanceState: Bundle?) {{
                               super.onCreate(savedInstanceState)
                               // web2app: 系统栏适配（edge-to-edge 下避免状态栏/导航栏遮挡页面）
@@ -258,9 +271,9 @@ jobs:
                       import androidx.core.graphics.Insets;
                       import androidx.core.view.ViewCompat;
                       import androidx.core.view.WindowInsetsCompat;
-                      import {base};
+                      {base_import_line}
 
-                      public class MainActivity extends TauriActivity {{
+                      public class MainActivity extends {base_ref} {{
                           @Override
                           protected void onCreate(Bundle savedInstanceState) {{
                               super.onCreate(savedInstanceState);
@@ -278,7 +291,7 @@ jobs:
                       }}
                       """)
               f.write_text(code, encoding="utf-8")
-              print(f"已改写 {f}（内容视图按系统栏 insets 内缩）")
+              print(f"已改写 {f}（内容视图按系统栏 insets 内缩，避免顶部通栏遮挡）")
 
           # 确保 androidx.core 可用（模板的 androidx.activity/appcompat 一般已传递引入；
           # 兜底：gradle 中既无 androidx.core 也无 appcompat 时补一行依赖）
