@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
-use crate::{APP_NAME, sanitize_dir_name};
+use crate::{sanitize_dir_name, APP_NAME};
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -86,7 +86,24 @@ fn settings_path(app: &AppHandle) -> Option<PathBuf> {
     // Tauri 默认按 tauri.conf.json 的 identifier（com.example.web2app）生成目录末段，
     // 这里改用清洗后的自定义 app_name，与 WebView2 数据目录保持一致（见 lib.rs）。
     let base = app.path().app_config_dir().ok()?;
-    let root = base.parent().unwrap_or(&base);
+
+    // 桌面端：app_config_dir 形如
+    //   Windows  %APPDATA%\<identifier>
+    //   Linux    ~/.config/<identifier>
+    //   macOS    ~/Library/Application Support/<identifier>
+    // 末段是 identifier，取父目录后再拼上自定义 app_name，让不同 app 的配置互相隔离。
+    #[cfg(not(target_os = "android"))]
+    let root = base.parent().unwrap_or(&base).to_path_buf();
+
+    // Android：Tauri 移动端的 app_config_dir 【不会】再拼 identifier，它直接返回
+    // 本应用私有根目录 /data/data/<package>
+    // （tauri/src/path/android.rs 的 app_config_dir → PathPlugin.kt 的 getConfigDir
+    //  = activity.dataDir）。所以这里【绝不能取 parent】——那会跳到 /data/data，
+    // 既不是本应用可写目录（selinux/权限拒绝），又会和其它包重名冲突。
+    // 正确做法是直接在自身私有目录内建子目录：<dataDir>/<app_name>/settings.json
+    #[cfg(target_os = "android")]
+    let root = base;
+
     let dir = root.join(sanitize_dir_name(APP_NAME));
     Some(dir.join(SETTINGS_FILE))
 }

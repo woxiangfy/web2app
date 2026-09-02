@@ -42,20 +42,20 @@ use settings::{Settings, SettingsState};
 // （proxy 模块是纯 Rust，零平台依赖，跨平台通用），窗口直接导航到代理地址；托盘与快捷键在移动端被
 // cfg 剔除。新窗口（target="_blank"）由 Tauri 移动端自身处理。
 #[cfg(windows)]
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2Deferral, ICoreWebView2_13, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+};
+#[cfg(windows)]
 use webview2_com::{
     BasicAuthenticationRequestedEventHandler, NewWindowRequestedEventHandler,
     WebResourceRequestedEventHandler,
-};
-#[cfg(windows)]
-use webview2_com::Microsoft::Web::WebView2::Win32::{
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, ICoreWebView2_13, ICoreWebView2Deferral,
 };
 // base64 0.22 的 `.encode()` 是 Engine trait 上的方法，必须显式引入该 trait 才能调用
 // （proxy.rs 顶部已 `use base64::Engine;`，main.rs 的 WebView2 钩子里同样需要）。
 #[cfg(windows)]
 use base64::Engine;
 #[cfg(windows)]
-use windows::core::{HSTRING, Interface};
+use windows::core::{Interface, HSTRING};
 // 注意：windows 0.61（webview2-com 0.38 依赖的版本）已把 Win32 的 EventRegistrationToken
 // 重映射为普通 i64，`windows::Win32::System::WinRT::EventRegistrationToken` 路径已不存在，
 // 注册事件时 token 直接用整数 0 即可（见下方 add_BasicAuthenticationRequested / add_NewWindowRequested）。
@@ -108,7 +108,11 @@ macro_rules! env_str {
     ($name:literal, $default:expr) => {{
         match option_env!($name) {
             Some(s) => {
-                if s.is_empty() { $default } else { s }
+                if s.is_empty() {
+                    $default
+                } else {
+                    s
+                }
             }
             None => $default,
         }
@@ -387,22 +391,23 @@ fn attach_webview_hooks(
                     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
                 );
             }
-            let wr_handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
-                if let Some(args) = args {
-                    unsafe {
-                        if let Ok(req) = args.Request() {
-                            // 取请求头集合，就地 SetHeader，WebView2 会用修改后的请求继续发起网络请求。
-                            if let Ok(headers) = req.Headers() {
-                                let _ = headers.SetHeader(
-                                    &HSTRING::from("Authorization"),
-                                    &HSTRING::from(header_val.as_str()),
-                                );
+            let wr_handler =
+                WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
+                    if let Some(args) = args {
+                        unsafe {
+                            if let Ok(req) = args.Request() {
+                                // 取请求头集合，就地 SetHeader，WebView2 会用修改后的请求继续发起网络请求。
+                                if let Ok(headers) = req.Headers() {
+                                    let _ = headers.SetHeader(
+                                        &HSTRING::from("Authorization"),
+                                        &HSTRING::from(header_val.as_str()),
+                                    );
+                                }
                             }
                         }
                     }
-                }
-                Ok(())
-            }));
+                    Ok(())
+                }));
             let mut wr_token = 0i64;
             unsafe {
                 let _ = core.add_WebResourceRequested(&wr_handler, &mut wr_token);
@@ -417,8 +422,8 @@ fn attach_webview_hooks(
                 Ok(c) => c,
                 Err(_) => return,
             };
-            let handler = BasicAuthenticationRequestedEventHandler::create(Box::new(
-                move |_sender, args| {
+            let handler =
+                BasicAuthenticationRequestedEventHandler::create(Box::new(move |_sender, args| {
                     if let Some(args) = args {
                         unsafe {
                             // Deferral：声明“稍后完成”，确保凭据在事件结束前写入。
@@ -435,8 +440,7 @@ fn attach_webview_hooks(
                         }
                     }
                     Ok(())
-                },
-            ));
+                }));
             let mut token = 0i64;
             unsafe {
                 let _ = core13.add_BasicAuthenticationRequested(&handler, &mut token);
@@ -658,7 +662,8 @@ pub fn run() {
             if let Some(sc) = settings::hotkey_to_shortcut(&initial_settings.wake_hotkey) {
                 app.global_shortcut().register(sc)?;
             }
-            app.global_shortcut().register(settings::settings_open_shortcut())?;
+            app.global_shortcut()
+                .register(settings::settings_open_shortcut())?;
         }
 
         Ok(())
@@ -809,8 +814,12 @@ fn save_settings(
     // Android 无全局快捷键，跳过此校验（也不引用 tauri_plugin_global_shortcut 的类型）。
     #[cfg(not(target_os = "android"))]
     let new_sc = {
-        let sc = settings::hotkey_to_shortcut(&new_settings.wake_hotkey)
-            .ok_or_else(|| format!("不支持的按键：{}，请换一个按键", new_settings.wake_hotkey.key))?;
+        let sc = settings::hotkey_to_shortcut(&new_settings.wake_hotkey).ok_or_else(|| {
+            format!(
+                "不支持的按键：{}，请换一个按键",
+                new_settings.wake_hotkey.key
+            )
+        })?;
         if sc == settings::settings_open_shortcut() {
             return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
         }

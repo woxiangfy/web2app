@@ -18,6 +18,11 @@ jobs:
   # 编译期注入：若在仓库 Settings → Secrets and variables → Actions 中设置了
   # APP_URL / APP_NAME 等变量（凭据建议用 Secrets，其余用 Variables；Secrets 优先），
   # 则发布时会用这些值烘焙进二进制；未设置则回落到源码里的默认值。
+  #
+  # 两个名字变量（与手动打包 build-custom.yml 的 JSON 字段对应）：
+  #   APP_NAME  【安装名】Windows 安装包名 / 快捷方式 / 安装目录 / 数据存储目录名
+  #   APP_TITLE 【显示名】Windows 窗口标题 + Android 应用名称（缺省回落 APP_NAME）
+  #   （WINDOW_TITLE 是 APP_TITLE 的旧变量名，仅为兼容保留）
   # ---------------------------------------------------------------------------
   windows:
     name: Build Windows installers
@@ -28,7 +33,10 @@ jobs:
     env:
       APP_URL: ${{ secrets.APP_URL || vars.APP_URL }}
       APP_NAME: ${{ vars.APP_NAME }}
-      WINDOW_TITLE: ${{ vars.WINDOW_TITLE }}
+      APP_TITLE: ${{ vars.APP_TITLE }}
+      # 源码（src/lib.rs）读的编译期变量叫 WINDOW_TITLE，由 APP_TITLE 导出；
+      # 两者都没配时，代码里的 env_str! 会自动回落成 APP_NAME。
+      WINDOW_TITLE: ${{ vars.APP_TITLE || vars.WINDOW_TITLE }}
       DATA_DIR_DEFAULT: ${{ vars.DATA_DIR_DEFAULT }}
       PROXY_ENABLED: ${{ vars.PROXY_ENABLED }}
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
@@ -93,8 +101,8 @@ jobs:
   # Android APK（aarch64）。本作业会在 CI 上【自动生成 gen/android 并交叉编译出 APK】，
   # 因此无需在本地安装 Android SDK/NDK/JDK。gen/ 已被 .gitignore 忽略，每次构建现生成，避免漂移。
   # 尽力而为：失败不影响 Windows 包发布。
-  # init 后会打三处补丁：桌面 label 统一为 APP_NAME（vars）、系统状态栏 insets 适配、
-  # usesCleartextTraffic=true（放行本地 http 代理）。
+  # init 后会打三处补丁：应用名称统一为 APP_TITLE（vars，缺省回落 APP_NAME）、
+  # 系统状态栏 insets 适配、usesCleartextTraffic=true（放行本地 http 代理）。
   #
   # release APK 默认未签名（安装会提示无证书），构建后会自动 zipalign + apksigner 签名：
   #   - 配置了 secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS / ANDROID_KEYSTORE_PASSWORD
@@ -110,7 +118,8 @@ jobs:
     env:
       APP_URL: ${{ secrets.APP_URL || vars.APP_URL }}
       APP_NAME: ${{ vars.APP_NAME }}
-      WINDOW_TITLE: ${{ vars.WINDOW_TITLE }}
+      APP_TITLE: ${{ vars.APP_TITLE }}
+      WINDOW_TITLE: ${{ vars.APP_TITLE || vars.WINDOW_TITLE }}
       DATA_DIR_DEFAULT: ${{ vars.DATA_DIR_DEFAULT }}
       PROXY_ENABLED: ${{ vars.PROXY_ENABLED }}
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
@@ -222,21 +231,32 @@ jobs:
             echo "::warning::未找到 gen/android res 目录，图标可能未应用"
           fi
 
-      - name: 统一应用名称（Android 桌面名称 ← APP_NAME）
-        # 与 build-custom.yml / Windows 端（productName）保持一致：
-        # 若仓库 vars 配置了 APP_NAME，把它写入 Android 工程的桌面 label（strings.xml 的
-        # app_name 或 Manifest 内联 android:label），实现"一个名字、两端一致"。
+      - name: 统一应用名称（Android 应用名称 ← APP_TITLE）
+        # 与 build-custom.yml 保持一致：Android 应用名称（桌面 label）取【显示名】APP_TITLE，
+        # 未配置时回落【安装名】APP_NAME。APP_NAME 只管 Windows 的安装包名/快捷方式/安装目录。
+        # 写在 strings.xml 的 app_name 与 Manifest 内联 android:label 两处。
+        # 注意执行顺序：上面 "APP_NAME → productName" 已让 android init 把安装名烘焙进工程，
+        # 这一步在 init 之后用 APP_TITLE 覆盖，最终生效的是 APP_TITLE。
         run: |
           python3 - <<'PY'
           import os, re, sys, pathlib
-          from xml.sax.saxutils import escape
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-          name = os.environ.get("APP_NAME", "").strip()
+          def esc_res(v):
+              # Android 资源字符串里单引号必须转义为 \'，否则 aapt 报
+              # "Apostrophe not preceded by backslash"（gradle assemble 阶段直接挂）。
+              # 注意不能用 xml.sax.saxutils.escape——它只转义 & < >，不处理单引号。
+              return (v.replace("&", "&amp;")
+                       .replace("<", "&lt;")
+                       .replace(">", "&gt;")
+                       .replace("'", "\\'"))
+
+          # 显示名优先：APP_TITLE → APP_NAME（与 build-custom.yml 的 title → app_name 一致）
+          name = (os.environ.get("APP_TITLE", "") or "").strip() or (os.environ.get("APP_NAME", "") or "").strip()
           if not name:
-              print("未配置 APP_NAME，Android 沿用默认名称")
+              print("未配置 APP_TITLE / APP_NAME，Android 沿用默认名称")
               raise SystemExit(0)
-          label = escape(name)
+          label = esc_res(name)
 
           # 1) strings.xml 的 app_name 资源（Manifest 通常以 @string/app_name 引用它）
           res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")

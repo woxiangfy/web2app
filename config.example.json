@@ -1,0 +1,15 @@
+{
+  "app_url": "https://user:pass@example.com",
+  "app_name": "MyApp",
+  "title": "我的应用",
+  "icon_url": "",
+  "proxy_enabled": "false",
+  "proxy_http": "",
+  "proxy_https": "",
+  "proxy_bypass": "",
+  "data_dir_default": "false",
+  "android_keystore_base64": "",
+  "android_key_alias": "",
+  "android_keystore_password": "",
+  "android_key_password": ""
+}

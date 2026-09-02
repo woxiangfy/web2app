@@ -212,6 +212,26 @@ cargo test --all
 > 想正式签名 Android 包时，在 `release.yml` 的 Android 任务里配置
 > `KEY_ALIAS` / `KEY_PASSWORD` / `KEYSTORE` 等密钥（仓库 Secrets），再启用签名步骤即可。
 
+### 3. 手动打包 — `.github/workflows/build-custom.yml`
+
+在 GitHub Actions 页手动 **Run workflow**，填一份配置 JSON（或填一个返回 JSON 的 URL），
+一次触发同时产出：**Windows MSI 安装包** + **Windows 免安装绿色版 zip** + **已签名 Android APK**。
+无需改源码，就能为不同的网址/名字/图标生成各自独立的安装包。
+
+配置模板见仓库根目录的 **`config.example.json`**（复制到本地改好再粘贴即可）。
+
+两个名字字段的区分（很容易混）：
+
+| 字段 | 含义 | 影响范围 |
+| --- | --- | --- |
+| `app_name` | **安装名**（给系统/安装器看） | Windows 安装包名、开始菜单与桌面快捷方式、安装目录、"程序和功能"显示名；同时也是两端**数据存储目录名** |
+| `title` | **显示名**（给用户看） | **Windows 窗口标题**、**Android 应用名称**（桌面图标下的名字） |
+
+`title` 省略时自动回落为 `app_name`。二者分开后即可实现「安装包叫英文名 `MyApp`、界面叫中文名 `我的应用`」。
+旧字段 `window_title` 等价于 `title`，仅为兼容老配置保留，新配置请直接用 `title`。
+
+> 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
+
 ---
 
 ## 常见问题
@@ -220,6 +240,21 @@ cargo test --all
   `PROXY_HTTP/HTTPS` 的搭配符合「本地反向代理」分支（即启用代理时不填外部代理地址）。
 - **全局快捷键没反应**：检查 `HOTKEY_*` 组合是否与其他软件冲突；代码已严格只在「按下」那一刻触发。
 - **Android 上访问 http 本地代理被拦**：移动端已配置 `INTERNET` 权限并允许 localhost 明文，正常可用。
+- **Android 端应用的数据存在哪？**（下文中 `<pkg>` = `tauri.conf.json` 的 `identifier`，当前为 `com.example.web2app`；
+  `<app_name>` = 打包配置里的 `app_name`，清洗掉非法字符后的值）
+  - **设置文件**：`/data/data/<pkg>/<app_name>/settings.json`
+  - **WebView 数据**（Cookie / localStorage / IndexedDB）：`/data/data/<pkg>/app_webview/`
+  - **缓存**：`/data/data/<pkg>/cache/`
+  - **日志**：`/data/data/<pkg>/logs/`
+
+  注意 Tauri 移动端的 `app_config_dir()` **不会再拼 identifier**，它直接返回应用私有根目录
+  `/data/data/<pkg>`（见 `tauri/src/path/android.rs` → `PathPlugin.kt` 的 `getConfigDir` =
+  `activity.dataDir`），与桌面端「基础目录 + identifier」的行为不同——所以取值后**不能再取 parent**，
+  否则会跳到 `/data/data`（不可写，且与其它包名冲突）。代码已按平台分别处理（见 `src/settings.rs`）。
+
+  这些目录都是**应用私有目录**：未 root / 非 debug 包在文件管理器里看不到，**卸载应用即被系统清空**。
+  排查时可用 `adb shell run-as <pkg> ls files/` 查看。
+  （构建产物 APK 不在手机上，而在构建机的 `gen/android/app/build/outputs/apk/`，CI 签名后上传为 artifact。）
 - **`cargo run` 报 `unknown field package` / `targetSdkVersion` / `permissions`（build script 阶段）**：
   这是 **当前 Tauri 2 版本的 `tauri-build` 对 `bundle.android` 仅识别 `minSdkVersion` 等少量字段**所致
   （`package` / `targetSdkVersion` / `useKotlin` / `permissions` 是较新版本才支持的）。该错误会在桌面构建时

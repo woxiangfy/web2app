@@ -17,7 +17,10 @@
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Request, State, ws::{WebSocket, WebSocketUpgrade}},
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        FromRequestParts, Request, State,
+    },
     http::{header, HeaderMap, HeaderName, StatusCode, Uri},
     response::Response,
     Router,
@@ -50,7 +53,11 @@ pub fn build_basic_auth(upstream: &Url) -> Option<String> {
     if upstream.username().is_empty() {
         return None;
     }
-    let creds = format!("{}:{}", upstream.username(), upstream.password().unwrap_or(""));
+    let creds = format!(
+        "{}:{}",
+        upstream.username(),
+        upstream.password().unwrap_or("")
+    );
     Some(format!(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(creds.as_bytes())
@@ -92,9 +99,7 @@ pub async fn start_proxy(
         upstream_authority,
     };
 
-    let app = Router::new()
-        .fallback(proxy_handler)
-        .with_state(state);
+    let app = Router::new().fallback(proxy_handler).with_state(state);
 
     // 用 tokio::task::spawn 跑 axum server：它返回真正的 tokio JoinHandle，
     // 其 abort_handle() 才能拿到 AbortHandle，便于应用退出时优雅终止该任务。
@@ -135,9 +140,7 @@ async fn proxy_handler(
         let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        return Ok(ws.on_upgrade(move |socket| {
-            handle_websocket(socket, state, uri, headers)
-        }));
+        return Ok(ws.on_upgrade(move |socket| handle_websocket(socket, state, uri, headers)));
     }
 
     // ---------- 普通 HTTP 转发 ----------
@@ -150,7 +153,13 @@ async fn proxy_handler(
 
     let target = state
         .upstream
-        .join(parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"))
+        .join(
+            parts
+                .uri
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/"),
+        )
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let method = parts.method.clone();
@@ -208,7 +217,8 @@ async fn proxy_handler(
         // 让 cookie 落在 localhost 域、与代理会话一致，从而保留登录态（其它属性原样保留）。
         if name.as_str().eq_ignore_ascii_case("set-cookie") {
             if let Ok(v) = value.to_str() {
-                response_builder = response_builder.header(name, rewrite_cookie_domain(v, PROXY_HOST));
+                response_builder =
+                    response_builder.header(name, rewrite_cookie_domain(v, PROXY_HOST));
                 continue;
             }
         }
@@ -222,24 +232,24 @@ async fn proxy_handler(
     Ok(response_builder.body(Body::from(bytes)).unwrap())
 }
 
-async fn handle_websocket(
-    socket: WebSocket,
-    state: ProxyState,
-    uri: Uri,
-    headers: HeaderMap,
-) {
+async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, headers: HeaderMap) {
     let host = state.upstream.host_str().unwrap_or("localhost");
-    let port = state
-        .upstream
-        .port_or_known_default()
-        .unwrap_or_else(|| if state.upstream.scheme() == "https" { 443 } else { 80 });
-    let ws_scheme = if state.upstream.scheme() == "https" { "wss" } else { "ws" };
+    let port = state.upstream.port_or_known_default().unwrap_or_else(|| {
+        if state.upstream.scheme() == "https" {
+            443
+        } else {
+            80
+        }
+    });
+    let ws_scheme = if state.upstream.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    };
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let upstream_url = format!("{}://{}:{}{}", ws_scheme, host, port, path_and_query);
 
-    let mut builder = http::Request::builder()
-        .uri(&upstream_url)
-        .method("GET");
+    let mut builder = http::Request::builder().uri(&upstream_url).method("GET");
 
     // 透传浏览器原 handshake 头。WebSocket 透明代理的关键：浏览器发起握手时带的所有 WS 专用头
     // （Connection: Upgrade、Upgrade: websocket、Sec-WebSocket-Key/Version/Protocol/Extensions）
@@ -314,24 +324,30 @@ async fn handle_websocket(
     }
 }
 
-fn axum_msg_to_tungstenite(msg: axum::extract::ws::Message) -> Option<tokio_tungstenite::tungstenite::Message> {
+fn axum_msg_to_tungstenite(
+    msg: axum::extract::ws::Message,
+) -> Option<tokio_tungstenite::tungstenite::Message> {
     use axum::extract::ws::Message as A;
-    use tokio_tungstenite::tungstenite::Message as T;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::Message as T;
     match msg {
         A::Text(t) => Some(T::Text(t.as_str().into())),
         A::Binary(b) => Some(T::Binary(b)),
         A::Ping(b) => Some(T::Ping(b)),
         A::Pong(b) => Some(T::Pong(b)),
-        A::Close(Some(cf)) => Some(T::Close(Some(tokio_tungstenite::tungstenite::protocol::frame::CloseFrame {
-            code: CloseCode::Iana(cf.code),
-            reason: cf.reason.as_str().into(),
-        }))),
+        A::Close(Some(cf)) => Some(T::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::frame::CloseFrame {
+                code: CloseCode::Iana(cf.code),
+                reason: cf.reason.as_str().into(),
+            },
+        ))),
         A::Close(None) => Some(T::Close(None)),
     }
 }
 
-fn tungstenite_msg_to_axum(msg: tokio_tungstenite::tungstenite::Message) -> Option<axum::extract::ws::Message> {
+fn tungstenite_msg_to_axum(
+    msg: tokio_tungstenite::tungstenite::Message,
+) -> Option<axum::extract::ws::Message> {
     use axum::extract::ws::Message as A;
     use tokio_tungstenite::tungstenite::Message as T;
     match msg {
@@ -410,7 +426,9 @@ mod tests {
     fn hop_by_hop_headers_recognized() {
         assert!(is_hop_by_hop(&HeaderName::from_static("keep-alive")));
         assert!(is_hop_by_hop(&HeaderName::from_static("transfer-encoding")));
-        assert!(is_hop_by_hop(&HeaderName::from_static("proxy-authenticate")));
+        assert!(is_hop_by_hop(&HeaderName::from_static(
+            "proxy-authenticate"
+        )));
         // 这些头必须原样透传（尤其 WebSocket 握手），不应被当作逐跳头丢弃
         assert!(!is_hop_by_hop(&HeaderName::from_static("connection")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("upgrade")));
@@ -432,12 +450,18 @@ mod tests {
     #[test]
     fn cookie_without_domain_untouched() {
         let c = "sid=1; Path=/; HttpOnly";
-        assert_eq!(rewrite_cookie_domain(c, PROXY_HOST), "sid=1; Path=/; HttpOnly");
+        assert_eq!(
+            rewrite_cookie_domain(c, PROXY_HOST),
+            "sid=1; Path=/; HttpOnly"
+        );
     }
 
     #[test]
     fn cookie_domain_with_leading_dot_rewritten() {
         let c = "token=x; Domain=.example.com";
-        assert_eq!(rewrite_cookie_domain(c, PROXY_HOST), "token=x; Domain=127.0.0.1");
+        assert_eq!(
+            rewrite_cookie_domain(c, PROXY_HOST),
+            "token=x; Domain=127.0.0.1"
+        );
     }
 }

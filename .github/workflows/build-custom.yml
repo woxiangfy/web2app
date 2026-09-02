@@ -7,11 +7,18 @@ name: 自定义打包（JSON 配置生成应用）
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
 #   {
 #     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）
-#     "app_name": "MyApp",                   // 统一应用名（默认 Web2App）：
-#                                            //   Windows 安装包名/快捷方式/安装目录、
-#                                            //   Android 桌面名称、运行期窗口标题，全部用它
+#
+#     "app_name": "MyApp",                   // 【安装名】（默认 Web2App）——给系统/安装器看的：
+#                                            //   Windows 安装包名、开始菜单与桌面快捷方式、
+#                                            //   安装目录、"程序和功能"显示名；
+#                                            //   同时也是两端的数据存储目录名（设置文件所在目录）
+#     "title": "我的应用",                    // 【显示名】（默认同 app_name）——给用户看的：
+#                                            //   Windows 端窗口标题、
+#                                            //   Android 端应用名称（桌面图标下的名字）
+#                                            //   （与 app_name 分开，便于"安装包叫英文名、界面叫中文名"）
+#
 #     "icon_url": "https://example.com/logo.png", // 应用图标 PNG 的 URL（默认空=沿用仓库默认图标）
-#     "window_title": "我的应用",             // 窗口标题（默认同 app_name）
+#     "window_title": "我的应用",             // 【已废弃】旧字段，等价于 title，仅保留兼容老配置
 #     "proxy_enabled": "true",               // 是否启用本地反向代理注入鉴权（默认 false）
 #     "proxy_http": "",                      // 外部 HTTP 代理（默认空）
 #     "proxy_https": "",                     // 外部 HTTPS 代理（默认空）
@@ -24,7 +31,10 @@ name: 自定义打包（JSON 配置生成应用）
 #     "android_key_password": ""             // key 密码（可选，默认同 keystore 密码）
 #   }
 #
-# 想"一键生成某个固定应用"：把 config_url 固定指向仓库内一份 .json（如 docs/myapp.json），
+# 仓库根目录的 config.example.json 是一份可直接复制使用的配置模板。
+#（JSON 标准不支持注释，故模板保持纯 JSON；各字段含义见上面这份说明与 README。）
+#
+# 想"一键生成某个固定应用"：把 config_url 固定指向仓库内一份 .json（如 config.example.json），
 # 或把 config_json 直接写死在下面 job 的 env 里，无需改源码即可为每个应用产出独立安装包。
 on:
   workflow_dispatch:
@@ -65,7 +75,10 @@ jobs:
           DEFAULTS = {
               "app_url": "",
               "app_name": "Web2App",
+              # title = 显示名（Windows 窗口标题 / Android 应用名称）；未配置时回落 app_name
+              "title": "",
               "icon_url": "",
+              # window_title 是 title 的旧字段名，保留仅为兼容老配置（读取后统一并入 title）
               "window_title": "",
               "proxy_enabled": "false",
               "proxy_http": "",
@@ -120,6 +133,17 @@ jobs:
               sys.exit("缺少必填字段 app_url")
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
+
+          # title（显示名）与 app_name（安装名）分离：
+          #   title        → Windows 窗口标题、Android 应用名称
+          #   app_name     → 安装包名/快捷方式/安装目录/数据存储目录名
+          # 取值链：title → window_title（旧字段，兼容） → app_name。
+          if not merged["title"] and merged["window_title"]:
+              merged["title"] = merged["window_title"]
+          if not merged["title"]:
+              merged["title"] = merged["app_name"]
+          # 源码（src/lib.rs）读的编译期变量叫 WINDOW_TITLE，这里统一由 title 导出，保证两处一致。
+          merged["window_title"] = merged["title"]
 
           # 打印时隐藏敏感内容，避免泄漏到日志。
           def mask(u):
@@ -261,7 +285,10 @@ jobs:
           DEFAULTS = {
               "app_url": "",
               "app_name": "Web2App",
+              # title = 显示名（Windows 窗口标题 / Android 应用名称）；未配置时回落 app_name
+              "title": "",
               "icon_url": "",
+              # window_title 是 title 的旧字段名，保留仅为兼容老配置（读取后统一并入 title）
               "window_title": "",
               "proxy_enabled": "false",
               "proxy_http": "",
@@ -315,6 +342,17 @@ jobs:
               sys.exit("缺少必填字段 app_url")
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
+
+          # title（显示名）与 app_name（安装名）分离：
+          #   title        → Windows 窗口标题、Android 应用名称
+          #   app_name     → 安装包名/快捷方式/安装目录/数据存储目录名（Android 应用名不再取 app_name）
+          # 取值链：title → window_title（旧字段，兼容） → app_name。
+          if not merged["title"] and merged["window_title"]:
+              merged["title"] = merged["window_title"]
+          if not merged["title"]:
+              merged["title"] = merged["app_name"]
+          # 源码（src/lib.rs）读的编译期变量叫 WINDOW_TITLE，这里统一由 title 导出，保证两处一致。
+          merged["window_title"] = merged["title"]
 
           # ---------- Android 签名（可选）：JSON 提供的 keystore 优先于仓库 secrets ----------
           signing = {}
@@ -488,10 +526,14 @@ jobs:
             echo "::warning::未找到 gen/android res 目录，图标可能未应用"
           fi
 
-      - name: 统一应用名称（Android 桌面名称 ← app_name）
-        # Android 的"安装名称"= 桌面图标下的 label，定义在 gen/android 的 strings.xml
-        #（或 Manifest 内联 android:label）。这里统一改为 app_name，与 Windows 端
-        #（productName）共用同一个 JSON 字段，实现"一个名字、两端一致"。
+      - name: 统一应用名称（Android 应用名称 ← title）
+        # Android 的应用名称（桌面图标下的 label）定义在 gen/android 的 strings.xml
+        #（或 Manifest 内联 android:label）。这里统一取 JSON 的 title（缺省回落 app_name），
+        # 与 Windows 窗口标题同源；app_name 只负责"安装名"（安装包/快捷方式/安装目录），
+        # 两者分离后可实现"安装名用英文、显示名用中文"。
+        #
+        # 注意执行顺序：上面 "app_name → productName" 那一步已经让 android init 把安装名烘焙进了
+        # strings.xml，这一步在 init 之后用 title 覆盖它，因此最终生效的是 title。
         run: |
           python3 - <<'PY'
           import os, re, sys, pathlib
@@ -505,9 +547,11 @@ jobs:
                        .replace(">", "&gt;")
                        .replace("'", "\\'"))
 
-          name = os.environ.get("APP_NAME", "").strip()
+          # Android 应用名称取 title；未配置 title 时回落 app_name（解析步骤已做过该回落，
+          # 这里再兜一次底，防止只配了 app_name 的老配置拿到空名）。
+          name = (os.environ.get("TITLE", "") or "").strip() or (os.environ.get("APP_NAME", "") or "").strip()
           if not name:
-              print("未配置 app_name，Android 沿用默认名称")
+              print("未配置 title/app_name，Android 沿用默认名称")
               raise SystemExit(0)
           label = esc_res(name)
 
