@@ -2,6 +2,7 @@
   "app_url": "https://user:pass@example.com",
   "app_name": "MyApp",
   "title": "我的应用",
+  "extra": { "build": "example", "deploy_env": "prod" },
   "icon_url": "",
   "proxy_enabled": "false",
   "proxy_http": "",

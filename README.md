@@ -234,6 +234,20 @@ cargo test --all
 `title` 省略时自动回落为 `app_name`。二者分开后即可实现「安装包叫英文名 `MyApp`、界面叫中文名 `我的应用`」。
 旧字段 `window_title` 等价于 `title`，仅为兼容老配置保留，新配置请直接用 `title`。
 
+`extra`（可选，**对象**）—— 随打包一起注入到被包裹网页里的自定义配置，前端 JS 可直接读取：
+
+- 会被序列化成 `window.web2appExtra = <你的对象>;` 注入到页面，例如上面的示例会被前端读到：
+
+  ```js
+  // 在你的网页里（被本应用打开后）
+  window.web2appExtra            // => { build: "example", deploy_env: "prod" }
+  window.web2appExtra.deploy_env // => "prod"
+  ```
+
+- 支持嵌套对象、数组、数字、布尔与中文字符串，最终都以合法 JS 对象字面量注入；
+  不填时前端读到 `window.web2appExtra = {}`（空对象）。
+- 典型用途：同一个网页被多个 app 复用，用不同的 `extra` 区分部署环境 / 渠道 / 站点皮肤等。
+
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
 
 #### Android 签名（打包时从三层来源取第一份可用的）

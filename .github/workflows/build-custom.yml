@@ -13,10 +13,13 @@ name: 自定义打包（JSON 配置生成应用）
 #                                            //   安装目录、"程序和功能"显示名；
 #                                            //   同时也是两端的数据存储目录名（设置文件所在目录）
 #     "title": "我的应用",                    // 【显示名】（默认同 app_name）——给用户看的：
-#                                            //   Windows 端窗口标题、
+#                                            //   Windows 端窗口标题、托盘悬停提示、右键菜单"设置"项标题、
 #                                            //   Android 端应用名称（桌面图标下的名字）
 #                                            //   （与 app_name 分开，便于"安装包叫英文名、界面叫中文名"）
 #
+#     "extra": { "k": "v" },                 // 附加参数（默认 {}）：任意 JSON 对象/数组/标量，
+#                                            //   会被注入到被包裹网页，前端 JS 通过
+#                                            //   window.web2appExtra 直接读取
 #     "icon_url": "https://example.com/logo.png", // 应用图标 PNG 的 URL（默认空=沿用仓库默认图标）
 #     "window_title": "我的应用",             // 【已废弃】旧字段，等价于 title，仅保留兼容老配置
 #     "proxy_enabled": "true",               // 是否启用本地反向代理注入鉴权（默认 false）
@@ -77,6 +80,8 @@ jobs:
               "app_name": "Web2App",
               # title = 显示名（Windows 窗口标题 / Android 应用名称）；未配置时回落 app_name
               "title": "",
+              # extra = 任意 JSON（对象/数组/标量），会以 window.web2appExtra 注入网页供前端 JS 读取
+              "extra": {},
               "icon_url": "",
               # window_title 是 title 的旧字段名，保留仅为兼容老配置（读取后统一并入 title）
               "window_title": "",
@@ -92,6 +97,9 @@ jobs:
               "android_key_password": "",
           }
           BOOL_KEYS = {"proxy_enabled", "data_dir_default"}
+          # 需要保持 JSON 结构、写入 GITHUB_ENV 后仍能被 Rust 原样解析的字段（对象/数组）。
+          # extra 注入为 JSON 文本，供源码以 EXTRA 编译期变量内联成 window.web2appExtra。
+          JSON_KEYS = {"extra"}
           # 签名相关字段不写入 GITHUB_ENV（keystore 体积大/含敏感信息，由 Android job 自行落盘处理）
           SKIP_ENV = {"android_keystore_base64", "android_key_alias",
                       "android_keystore_password", "android_key_password"}
@@ -123,6 +131,9 @@ jobs:
                   continue
               if isinstance(v, bool):
                   v = "true" if v else "false"
+              elif isinstance(v, (dict, list)) or k in JSON_KEYS:
+                  # 对象/数组字段：JSON 序列化后存成单行 JSON 文本，写入 env 后 Rust 侧能原样解析
+                  v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
               else:
                   v = str(v)
               merged[k] = v
@@ -133,6 +144,12 @@ jobs:
               sys.exit("缺少必填字段 app_url")
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
+          # JSON 型字段（对象/数组）统一序列化为单行 JSON 文本；默认值 {} 也要转成 "{}"，
+          # 保证写入 GITHUB_ENV 后 Rust 侧能作为 EXTRA 原样解析成合法 JS 对象。
+          for k in JSON_KEYS:
+              v = merged[k]
+              if not isinstance(v, str):
+                  merged[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
 
           # title（显示名）与 app_name（安装名）分离：
           #   title        → Windows 窗口标题、Android 应用名称
@@ -287,6 +304,8 @@ jobs:
               "app_name": "Web2App",
               # title = 显示名（Windows 窗口标题 / Android 应用名称）；未配置时回落 app_name
               "title": "",
+              # extra = 任意 JSON（对象/数组/标量），会以 window.web2appExtra 注入网页供前端 JS 读取
+              "extra": {},
               "icon_url": "",
               # window_title 是 title 的旧字段名，保留仅为兼容老配置（读取后统一并入 title）
               "window_title": "",
@@ -301,6 +320,9 @@ jobs:
               "android_key_password": "",
           }
           BOOL_KEYS = {"proxy_enabled", "data_dir_default"}
+          # 需要保持 JSON 结构、写入 GITHUB_ENV 后仍能被 Rust 原样解析的字段（对象/数组）。
+          # extra 注入为 JSON 文本，供源码以 EXTRA 编译期变量内联成 window.web2appExtra。
+          JSON_KEYS = {"extra"}
           # 签名相关字段不直接进 GITHUB_ENV（keystore 体积大、密码敏感），由下方专门处理
           SKIP_ENV = {"android_keystore_base64", "android_key_alias",
                       "android_keystore_password", "android_key_password"}
@@ -332,6 +354,9 @@ jobs:
                   continue
               if isinstance(v, bool):
                   v = "true" if v else "false"
+              elif isinstance(v, (dict, list)) or k in JSON_KEYS:
+                  # 对象/数组字段：JSON 序列化后存成单行 JSON 文本，写入 env 后 Rust 侧能原样解析
+                  v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
               else:
                   v = str(v)
               merged[k] = v
@@ -342,6 +367,12 @@ jobs:
               sys.exit("缺少必填字段 app_url")
           for k in BOOL_KEYS:
               merged[k] = merged[k].strip().lower()
+          # JSON 型字段（对象/数组）统一序列化为单行 JSON 文本；默认值 {} 也要转成 "{}"，
+          # 保证写入 GITHUB_ENV 后 Rust 侧能作为 EXTRA 原样解析成合法 JS 对象。
+          for k in JSON_KEYS:
+              v = merged[k]
+              if not isinstance(v, str):
+                  merged[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
 
           # title（显示名）与 app_name（安装名）分离：
           #   title        → Windows 窗口标题、Android 应用名称

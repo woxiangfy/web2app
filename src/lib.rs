@@ -43,11 +43,14 @@ use settings::{Settings, SettingsState};
 // cfg 剔除。新窗口（target="_blank"）由 Tauri 移动端自身处理。
 #[cfg(windows)]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Deferral, ICoreWebView2_13, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    ICoreWebView2_11, ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2ContextMenuItem,
+    ICoreWebView2ContextMenuItemCollection, ICoreWebView2Deferral, ICoreWebView2Environment9,
+    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 #[cfg(windows)]
 use webview2_com::{
-    BasicAuthenticationRequestedEventHandler, NewWindowRequestedEventHandler,
+    BasicAuthenticationRequestedEventHandler, ContextMenuRequestedEventHandler,
+    CustomItemSelectedEventHandler, NewWindowRequestedEventHandler,
     WebResourceRequestedEventHandler,
 };
 // base64 0.22 的 `.encode()` 是 Engine trait 上的方法，必须显式引入该 trait 才能调用
@@ -55,7 +58,9 @@ use webview2_com::{
 #[cfg(windows)]
 use base64::Engine;
 #[cfg(windows)]
-use windows::core::{Interface, HSTRING};
+use windows::core::{Interface, HSTRING, PWSTR};
+#[cfg(windows)]
+use windows::Win32::System::Com::{CoTaskMemFree, IStream};
 // 注意：windows 0.61（webview2-com 0.38 依赖的版本）已把 Win32 的 EventRegistrationToken
 // 重映射为普通 i64，`windows::Win32::System::WinRT::EventRegistrationToken` 路径已不存在，
 // 注册事件时 token 直接用整数 0 即可（见下方 add_BasicAuthenticationRequested / add_NewWindowRequested）。
@@ -194,6 +199,11 @@ const APP_NAME: &str = env_str!("APP_NAME", "Web2App");
 // 窗口标题（取自主机名，留空则用下面这个默认标题）
 const WINDOW_TITLE: &str = env_str!("WINDOW_TITLE", APP_NAME);
 
+// 额外参数（编译期注入的 JSON 文本，默认 "{}"）。由手动打包 JSON 的 `extra` 字段提供，
+// 会以 `window.web2appExtra = {...}` 注入到被包裹网页，前端 JS 可直接读取。
+// 必须是合法 JSON（对象/数组/标量皆可），注入时原样内联为 JS 表达式。
+const EXTRA: &str = env_str!("EXTRA", "{}");
+
 // ---------- 开发者工具（F12 调试，仅 Windows WebView2 生效）----------
 // true  = 启用 WebView2 DevTools，运行后按 F12 即可打开开发者工具，查看 Network / Console 排查问题。
 // false = 关闭（发布时建议设为 false）。
@@ -305,6 +315,33 @@ fn toggle_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 读取右键菜单项集合的项数（COM 老式 out 参数封装）。
+#[cfg(windows)]
+fn read_menu_count(col: &ICoreWebView2ContextMenuItemCollection) -> Option<u32> {
+    unsafe {
+        let mut n: u32 = 0;
+        col.Count(&mut n).ok()?;
+        Some(n)
+    }
+}
+
+/// 读取右键菜单项的【非本地化 Name】（英文小驼峰，如 "saveAs"/"print"/"moreTools"）。
+/// WebView2 用 CoTaskMemAlloc 分配该字符串，读完用 CoTaskMemFree 释放，避免内存泄漏。
+#[cfg(windows)]
+fn read_menu_name(item: &ICoreWebView2ContextMenuItem) -> Option<String> {
+    unsafe {
+        let mut p: PWSTR = PWSTR::null();
+        if item.Name(&mut p).is_err() {
+            return None;
+        }
+        let s = p.to_string().ok();
+        if !p.is_null() {
+            CoTaskMemFree(Some(p.0 as *const core::ffi::c_void));
+        }
+        s
+    }
+}
+
 /// 在 Windows 上给主窗口注册 WebView2 原生事件（safe 接口）。
 ///
 /// - 新窗口请求（`target="_blank"` 链接 / JS `window.open()`）：用 `SetNewWindow` 把当前窗口
@@ -326,6 +363,7 @@ fn toggle_window(app: &tauri::AppHandle) {
 /// core/凭据在 handler 存活期间有效。
 #[cfg(windows)]
 fn attach_webview_hooks(
+    app: tauri::AppHandle,
     window: &tauri::WebviewWindow,
     auth_user: String,
     auth_pass: String,
@@ -368,6 +406,94 @@ fn attach_webview_hooks(
         let mut nw_token = 0i64;
         unsafe {
             let _ = core.add_NewWindowRequested(&nw_handler, &mut nw_token);
+        }
+
+        // --- 1b) 右键菜单定制（Windows WebView2 原生 ContextMenuRequested）---
+        // 需求：隐藏默认菜单里的「更多工具」「另存为」「打印」，新增一个「设置」项
+        // （点击后打开与 Shift+F1 相同的设置界面）。
+        // 按【非本地化 Name】（英文小驼峰，与系统语言无关）识别要移除的项，避免依赖中文标签：
+        //   "moreTools"     更多工具（子菜单）
+        //   "save*"         另存为（saveAs 页面 / saveLinkAs 链接 / saveImageAs 图片 / saveMediaAs 媒体）
+        //   "print"         打印
+        // 新增项用 Environment.CreateContextMenuItem 创建 + CustomItemSelected 事件响应，
+        // 再插入 args.MenuItems() 集合末尾。
+        // 注意：右键回调在线程/生命周期上都独立于本注册闭包，故把要用到的 core/app 各自 clone 一份捕获。
+        let app_for_menu = app.clone();
+        let core_for_menu = core.clone(); // base ICoreWebView2，回调里再 cast 到 _2 取 Environment
+        let cm_handler = ContextMenuRequestedEventHandler::create(Box::new(
+            move |_sender, args| {
+                if let Some(args) = args {
+                    unsafe {
+                        // 1) 移除默认项：倒序遍历，命中则 RemoveValueAtIndex（保证索引有效）
+                        if let Ok(items) = args.MenuItems() {
+                            if let Some(count) = read_menu_count(&items) {
+                                let mut i = count;
+                                while i > 0 {
+                                    i -= 1;
+                                    if let Ok(item) = items.GetValueAtIndex(i) {
+                                        if let Some(name) = read_menu_name(&item) {
+                                            let n = name.to_lowercase();
+                                            // "moreTools" 更多工具 / "print" 打印 / "save*" 各类"另存为"
+                                            if n == "moretools" || n == "print" || n.starts_with("save")
+                                            {
+                                                let _ = items.RemoveValueAtIndex(i);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // 2) 追加自定义「设置」菜单项（点击后打开与 Shift+F1 相同的设置界面）
+                        // 需先经 ICoreWebView2_2 取 Environment，再 cast 到 ICoreWebView2Environment9
+                        // 调用 CreateContextMenuItem（该 winmd 在 Environment9 上声明此方法），
+                        // 当前 WebView2 运行时（evergreen）均支持。
+                        if let Ok(core2) = core_for_menu.cast::<ICoreWebView2_2>() {
+                            if let Ok(env) = core2.Environment() {
+                                if let Ok(env9) = env.cast::<ICoreWebView2Environment9>() {
+                                    let label = HSTRING::from("设置");
+                                    if let Ok(setting_item) = env9.CreateContextMenuItem(
+                                        &label,
+                                        None::<&IStream>,
+                                        COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+                                    ) {
+                                        let ah = app_for_menu.clone();
+                                        let sel_handler = CustomItemSelectedEventHandler::create(
+                                            Box::new(move |_sender, _args| {
+                                                let ah2 = ah.clone();
+                                                // 必须在主线程上创建设置窗口（Tauri 窗口构建要求主线程），
+                                                // COM 回调线程不保证是主线程，故经 run_on_main_thread 转派。
+                                                let app3 = ah2.clone();
+                                                let _ = ah2.run_on_main_thread(move || {
+                                                    settings::open_settings_window(&app3);
+                                                });
+                                                Ok(())
+                                            }),
+                                        );
+                                        let mut sel_token = 0i64;
+                                        let _ = setting_item
+                                            .add_CustomItemSelected(&sel_handler, &mut sel_token);
+                                        if let Ok(items) = args.MenuItems() {
+                                            if let Some(count) = read_menu_count(&items) {
+                                                let _ =
+                                                    items.InsertValueAtIndex(count, &setting_item);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+        // 只有较新的 WebView2 运行时才暴露 ICoreWebView2_11（ContextMenuRequested 在此接口上）。
+        // cast 失败（极老运行时）则跳过右键定制，保留默认菜单，不影响其它钩子。
+        if let Ok(core11) = core.cast::<ICoreWebView2_11>() {
+            let mut cm_token = 0i64;
+            unsafe {
+                let _ = core11.add_ContextMenuRequested(&cm_handler, &mut cm_token);
+            }
         }
 
         // --- 2) Basic 鉴权（仅当 URL 带 userinfo、且未走本地反向代理时）---
@@ -693,7 +819,11 @@ pub fn run() {
             // 恢复（WebView2 的 OLE 拖放会吞掉页面内 dragover/drop，polyfill 用鼠标事件合成
             // dragstart/dragover/drop/dragend）。initialization_script 会在每次导航（含初始
             // 文档）前注入，详见文件顶部 DND_POLYFILL 注释。
-            .initialization_script(DND_POLYFILL);
+            .initialization_script(DND_POLYFILL)
+            // 注入打包配置 JSON 里的 `extra`：以 `window.web2appExtra = <JSON>;` 定义在页面
+            // 全局，前端 JS 在脚本执行时直接读取（在每次文档加载前注入，故早于页面业务脚本）。
+            // EXTRA 来自合法 JSON（config.example 的 extra 对象），内联即为合法 JS 表达式。
+            .initialization_script(format!("window.web2appExtra = {};", EXTRA));
 
             if let Some(proxy_args) = &browser_args {
                 b = b.additional_browser_args(proxy_args.as_str());
@@ -724,7 +854,14 @@ pub fn run() {
             // 注册 WebView2 原生事件（新窗口拦截 + Basic 鉴权），函数内部会导航到本地代理 URL。
             let auth_user = parsed.username().to_string();
             let auth_pass = parsed.password().unwrap_or("").to_string();
-            attach_webview_hooks(&w, auth_user, auth_pass, target_url, use_local_proxy);
+            attach_webview_hooks(
+                app.handle().clone(),
+                &w,
+                auth_user,
+                auth_pass,
+                target_url,
+                use_local_proxy,
+            );
             w
         };
 
@@ -869,7 +1006,9 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         )
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip(APP_NAME)
+        // 悬停提示文本用"显示名"title（即 WINDOW_TITLE，CI 里由配置 JSON 的 title 导出），
+        // 而非"安装名"APP_NAME，与窗口标题保持一致。
+        .tooltip(WINDOW_TITLE)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
