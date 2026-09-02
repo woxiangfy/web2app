@@ -2,17 +2,16 @@
 // 避免出现 dead_code 警告导致 `cargo clippy -D warnings` 在 CI 中失败。
 #![allow(dead_code)]
 
-use tauri::{
-    DragDropEvent, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 // 全局快捷键相关类型仅在桌面端使用（Android 无该插件依赖，见 Cargo.toml 的平台 gate）。
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, ShortcutState};
 use url::Url;
 
-// WebView2 拖拽 polyfill（仅 Windows 注入）：在不关闭原生拖放处理器的前提下，
-// 让页面内 HTML5 拖动（[draggable] 元素）恢复。WebView2 的 OLE 拖放会吞掉页面内
-// dragover/drop，polyfill 用鼠标事件合成 dragstart/dragover/drop/dragend。
+// WebView2 拖拽 polyfill（仅 Windows 注入）：主窗口已 disable_drag_drop_handler（见下方建窗处），
+// 从系统拖入文件由 WebView2 原生 drop 交给页面，标准上传区可直接用。页面内 HTML5 拖动
+// （[draggable] 元素 / 列表排序）因 WebView2 对页面内手势的 OLE 干扰仍不可靠，由本 polyfill
+// 用鼠标事件合成 dragstart/dragenter/dragover/dragleave/drop/dragend 完整事件序列。
 // 参考：https://gist.github.com/iain-fraser/01d35885477f4e29a5a638364040d4f2
 const DND_POLYFILL: &str = include_str!("dnd_polyfill.js");
 
@@ -852,11 +851,23 @@ pub fn run() {
             .resizable(true)
             .inner_size(1100.0, 650.0)
             .min_inner_size(400.0, 300.0)
-            // 注入 WebView2 拖拽 polyfill：保留原生拖放处理器（Rust 仍能拿到外部拖入文件
-            // 路径，见下方 RunEvent::WindowEvent 的 DragDrop 分支），同时让页面内 HTML5 拖动
-            // 恢复（WebView2 的 OLE 拖放会吞掉页面内 dragover/drop，polyfill 用鼠标事件合成
-            // dragstart/dragover/drop/dragend）。initialization_script 会在每次导航（含初始
-            // 文档）前注入，详见文件顶部 DND_POLYFILL 注释。
+            // ⚠️ 必须禁用 Tauri 默认的拖放 handler（Windows）。
+            //    Tauri/wry 默认会为窗口装一个 OLE drop target 并 SetAllowExternalDrop(false)，
+            //    副作用有二：
+            //      ① 从系统拖入的文件被 wry 拦截、只回传给 Rust 路径，页面永远收不到原生
+            //         DOM drop（dataTransfer.files 为空）→ 标准网页拖拽上传区不触发上传。
+            //      ② 页面内 HTML5 拖动手势会和这个宿主 OLE drop target 打架：拖动一旦跨过
+            //         某些区域就被宿主抢走/打断，表现成“拖离当前元素就自动松开”。
+            //    禁用后 WebView2 回到默认 AllowExternalDrop=true：系统文件由 WebView2 以原生
+            //    DOM drop(携带真实 File 对象) 交给页面，标准上传区直接可用；页面内 HTML5
+            //    拖动也交给下面注入的 polyfill 单独合成，不再被宿主干扰。
+            //    Tauri 官方文档原文："Disables the drag and drop handler. This is required to
+            //    use HTML5 drag and drop APIs on the frontend on Windows."
+            .disable_drag_drop_handler()
+            // 注入 WebView2 拖拽 polyfill：让页面内 HTML5 拖动（[draggable] 元素/列表排序）恢复。
+            // WebView2 即便不禁用 OLE 也可能吞掉 dragover/drop，polyfill 用鼠标事件合成完整
+            // dragstart/dragenter/dragover/dragleave/drop/dragend 事件序列。initialization_script
+            // 会在每次导航（含初始文档）前注入，详见文件顶部 DND_POLYFILL 注释。
             .initialization_script(DND_POLYFILL)
             // 注入打包配置 JSON 里的 `extra`：以 `window.web2appExtra = <JSON>;` 定义在页面
             // 全局，前端 JS 在脚本执行时直接读取（在每次文档加载前注入，故早于页面业务脚本）。
@@ -974,36 +985,12 @@ pub fn run() {
                         }
                     }
                 }
-                // 外部文件拖入：原生拖放处理器（dragDropEnabled 默认 true）捕获路径，转发给
-                // 被包裹的网页。页面监听 window 上的 DOM 事件即可拿到路径列表：
-                //   window.addEventListener('web2app:files-dropped',
-                //       (e) => { const paths = e.detail.paths; /* 绝对路径数组 */ });
-                // 注：页面内 HTML5 拖动由上面注入的 polyfill 处理，不走此分支；此分支只负责
-                // 把【来自操作系统】拖入的文件路径交给 Rust，再由 Rust 回传网页。
-                RunEvent::WindowEvent {
-                    label,
-                    event: WindowEvent::DragDrop(drag_drop_event),
-                    ..
-                } => {
-                    if label != "main" {
-                        return;
-                    }
-                    if let DragDropEvent::Drop { paths, .. } = drag_drop_event {
-                        let detail = serde_json::json!({
-                            "paths": paths
-                                .iter()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .collect::<Vec<String>>()
-                        });
-                        let js = format!(
-                            "window.dispatchEvent(new CustomEvent('web2app:files-dropped', {{ detail: {} }}));",
-                            detail
-                        );
-                        if let Some(w) = app_handle.get_webview_window("main") {
-                            let _ = w.eval(&js);
-                        }
-                    }
-                }
+                // 外部文件拖入：已在窗口构建时 disable_drag_drop_handler，故此处不会再收到
+                // RunEvent::WindowEvent::DragDrop —— 系统文件的 drop 由 WebView2 以原生 DOM
+                // drop(携带真实 File 对象)直接交给页面，标准网页拖拽上传区(e.dataTransfer.files)
+                // 即可正常工作，无需 Rust 中转。若未来确需“把系统文件路径交给第三方站点且站点
+                // 只监听自定义事件”，再在此处恢复一个 DragDrop 分支（但那样会重新 SetAllowExternalDrop
+                // 并屏蔽页面原生 drop，与“标准上传区可用”冲突，需按站点形态二选一）。
                 // 应用即将退出：记录窗口几何（兜底，覆盖“托盘退出”等不经过关窗的路径），
                 // 优雅终止本地反向代理任务，释放 127.0.0.1 监听端口。
                 RunEvent::ExitRequested { .. } => {
