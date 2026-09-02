@@ -44,6 +44,11 @@
     let startPosition = { x: 0, y: 0 };
     let currentOverElement = null;
     let ghostElement = null;
+    // 整个拖拽会话共享的 DataTransfer：dragstart 里 setData 的数据，必须能在随后的
+    // dragover / drop / dragend 里用 getData 取回（真实浏览器如此）。若每次事件都 new
+    // 一个空的，drop 处理器会读不到 dragstart 写入的数据，导致“能拖、能点，但放不到
+    // 具体位置”。
+    let sessionDataTransfer = null;
 
     /**
      * Searches for the nearest ancestor of the provided element that has the draggable attribute set to true.
@@ -87,11 +92,13 @@
      * Creates a mock drag event.
      * @param {string} type - The type of the drag event (e.g., "dragstart", "dragend", etc.)
      * @param {Object} options - Options to be passed to the event.
+     * @param {Object} [dataTransfer] - 复用的 DataTransfer。一次拖拽会话中所有事件必须共享
+     *   同一个，否则 dragstart 里 setData 的数据在 drop 时取不回。
      * @returns {Event} - A mocked drag event.
      */
-    function createMockDragEvent(type, options) {
+    function createMockDragEvent(type, options, dataTransfer) {
         let event = new Event(type, options);
-        event.dataTransfer = new MockDataTransfer();
+        event.dataTransfer = dataTransfer || new MockDataTransfer();
         return event;
     }
 
@@ -140,13 +147,17 @@
 
         isDragging = true;
 
+        // 会话级共享 DataTransfer：后续 dragover/drop/dragend 都要能读到 dragstart 里
+        // setData 的数据，因此复用同一实例。
+        sessionDataTransfer = new MockDataTransfer();
+
         // Fire dragstart event
         element.dispatchEvent(createMockDragEvent('dragstart', {
             bubbles: true,
             cancelable: true,
             clientX: clientX,
             clientY: clientY
-        }));
+        }, sessionDataTransfer));
     }
 
     /**
@@ -170,14 +181,14 @@
                 currentOverElement.dispatchEvent(createMockDragEvent('drop', {
                     bubbles: true,
                     cancelable: true
-                }));
+                }, sessionDataTransfer));
             }
 
             // Fire dragend event
             draggedElement.dispatchEvent(createMockDragEvent('dragend', {
                 bubbles: true,
                 cancelable: true
-            }));
+            }, sessionDataTransfer));
         }
 
         // 无论是否拖动，都清理 ghost（若存在），避免遮挡层残留导致后续点击被吞
@@ -187,6 +198,7 @@
         pendingElement = null;
         draggedElement = null;
         currentOverElement = null;
+        sessionDataTransfer = null;
     }
 
     if (opts.setPointerCursor) {
@@ -261,7 +273,7 @@
                 cancelable: true,
                 clientX: e.clientX,
                 clientY: e.clientY
-            }));
+            }, sessionDataTransfer));
             currentOverElement = elementBelow;
         }
     });

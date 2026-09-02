@@ -467,6 +467,93 @@ impl Default for ProxyTask {
     }
 }
 
+// =====================================================================
+//  窗口几何持久化（仅桌面端）：记住上次窗口的大小/位置/最大化状态，
+//  下次启动自动恢复。数据目录与 settings 一致（<app_config>/<app_name>/），
+//  独立文件 window-state.json，不与“设置”混在一起（窗口几何随移动频繁变）。
+// =====================================================================
+#[cfg(not(target_os = "android"))]
+mod window_state {
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+    use std::path::PathBuf;
+    use tauri::{AppHandle, Manager, WebviewWindow};
+
+    use crate::sanitize_dir_name;
+    use crate::APP_NAME;
+
+    const FILE: &str = "window-state.json";
+
+    /// 窗口几何快照。x/y = 窗口左上角在屏幕上的坐标（outer），
+    /// width/height = 窗口外框尺寸（outer），均为【物理像素】，
+    /// 以保证保存与 set_position/set_size 一致、跨会话不因 DPI 缩放而错位。
+    #[derive(Serialize, Deserialize, Clone, Copy)]
+    pub struct State {
+        pub x: i32,
+        pub y: i32,
+        pub width: u32,
+        pub height: u32,
+        pub maximized: bool,
+    }
+
+    fn path(app: &AppHandle) -> Option<PathBuf> {
+        // 目录与 settings_path 保持一致：桌面端 app_config_dir 末段是 identifier，
+        // 取父目录后再拼上清洗后的自定义 app_name（不同 app 配置互相隔离）。
+        let base = app.path().app_config_dir().ok()?;
+        let root = base.parent().unwrap_or(&base).to_path_buf();
+        Some(root.join(sanitize_dir_name(APP_NAME)).join(FILE))
+    }
+
+    /// 读取上次保存的几何；文件不存在 / 解析失败返回 None（用默认窗口尺寸）。
+    pub fn load(app: &AppHandle) -> Option<State> {
+        let p = path(app)?;
+        let s = fs::read_to_string(&p).ok()?;
+        serde_json::from_str::<State>(&s).ok()
+    }
+
+    /// 写入窗口几何。
+    pub fn save(app: &AppHandle, st: &State) {
+        let Some(p) = path(app) else { return; };
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(st) {
+            let _ = fs::write(&p, json);
+        }
+    }
+
+    /// 读取主窗口当前几何（若主窗口存在）。
+    pub fn persist_now(app: &AppHandle) {
+        let Some(win) = app.get_webview_window("main") else { return; };
+        if let Some(st) = capture(&win) {
+            save(app, &st);
+        }
+    }
+
+    /// 从给定窗口抓取当前几何。
+    fn capture(win: &WebviewWindow) -> Option<State> {
+        let pos = win.outer_position().ok()?;
+        let size = win.outer_size().ok()?;
+        let maximized = win.is_maximized().unwrap_or(false);
+        Some(State {
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+            maximized,
+        })
+    }
+
+    /// 创建窗口后应用已保存的几何。无保存状态时不做任何事（保留窗口默认尺寸）。
+    pub fn apply(win: &WebviewWindow, st: &State) {
+        let _ = win.set_position(tauri::PhysicalPosition::new(st.x, st.y));
+        let _ = win.set_size(tauri::PhysicalSize::new(st.width, st.height));
+        if st.maximized {
+            let _ = win.maximize();
+        }
+    }
+}
+
 // 移动端（Android/iOS）入口：tauri::mobile_entry_point 会生成 JNI/extern 绑定，
 // 供移动端原生壳调用；桌面端该属性为空操作，等价于一个普通 pub fn。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -628,6 +715,12 @@ pub fn run() {
 
             let w = b.build().expect("创建主窗口失败");
 
+            // 应用上次保存的窗口大小/位置（若有）。仅桌面端。
+            #[cfg(not(target_os = "android"))]
+            if let Some(st) = window_state::load(app.handle()) {
+                window_state::apply(&w, &st);
+            }
+
             // 注册 WebView2 原生事件（新窗口拦截 + Basic 鉴权），函数内部会导航到本地代理 URL。
             let auth_user = parsed.username().to_string();
             let auth_pass = parsed.password().unwrap_or("").to_string();
@@ -649,6 +742,12 @@ pub fn run() {
         .expect("创建主窗口失败");
 
         let _ = &window; // 部分平台窗口创建后即无需再引用，抑制未使用告警
+
+        // 应用上次保存的窗口大小/位置（桌面端非 Windows：Linux/macOS；Windows 已在上面块内应用）。
+        #[cfg(all(not(windows), not(target_os = "android")))]
+        if let Some(st) = window_state::load(app.handle()) {
+            window_state::apply(&window, &st);
+        }
 
         // ---------- 系统托盘与全局快捷键（仅桌面端；Android 无）----------
         #[cfg(not(target_os = "android"))]
@@ -685,6 +784,9 @@ pub fn run() {
                     if label != "main" {
                         return;
                     }
+                    // 记录主窗口当前大小/位置，供下次启动恢复（仅桌面端）。
+                    #[cfg(not(target_os = "android"))]
+                    window_state::persist_now(app_handle);
                     let st = app_handle.state::<SettingsState>();
                     let (tray, min) = {
                         let s = st.0.lock().unwrap();
@@ -727,8 +829,11 @@ pub fn run() {
                         }
                     }
                 }
-                // 应用即将退出：优雅终止本地反向代理任务，释放 127.0.0.1 监听端口。
+                // 应用即将退出：记录窗口几何（兜底，覆盖“托盘退出”等不经过关窗的路径），
+                // 优雅终止本地反向代理任务，释放 127.0.0.1 监听端口。
                 RunEvent::ExitRequested { .. } => {
+                    #[cfg(not(target_os = "android"))]
+                    window_state::persist_now(app_handle);
                     if let Some(abort) = app_handle
                         .state::<ProxyTask>()
                         .0
