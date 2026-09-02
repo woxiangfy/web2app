@@ -1019,9 +1019,10 @@ pub fn run() {
 #[cfg(not(target_os = "android"))]
 fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+    let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let hide_i = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+    let menu = Menu::with_items(app, &[&show_i, &settings_i, &hide_i, &quit_i])?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(
@@ -1041,6 +1042,11 @@ fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
+            }
+            // 托盘右键菜单新增的"设置"项：打开（或聚焦）设置窗口，
+            // 与右键网页菜单的"设置"、全局快捷键 Shift+F1 走同一入口。
+            "settings" => {
+                settings::open_settings_window(app);
             }
             "hide" => {
                 if let Some(w) = app.get_webview_window("main") {

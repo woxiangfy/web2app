@@ -3,7 +3,7 @@ name: 自定义打包
 # 手动触发：在仓库 Actions 页点 "Run workflow"，
 #   ① 勾选本次要打哪些产物（默认全选，互不依赖）：
 #       - Windows 安装版(MSI)    —— 需双击安装、写注册表的正式安装包
-#       - Windows 单文件版(zip)   —— 免安装绿色版（单个 <app_name>.exe 打包）
+#       - Windows 单文件版(zip)   —— 免安装绿色版（最终包 <app_name>-portable.zip，内含单个 <app_name>.exe）
 #       - Android APK             —— 已签名、可直接安装的安卓包
 #   想打哪个就勾哪个；产物分别独立上传到各自的 artifact。
 #   ② 粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
@@ -279,20 +279,26 @@ jobs:
         if: ${{ github.event.inputs.windows_installer == 'false' && github.event.inputs.windows_portable != 'false' }}
         run: cargo tauri build --no-bundle
 
-      - name: 生成 Windows 单文件版（免安装 zip）
-        # 仅当勾选"Windows 单文件版"才执行。把主程序 web2app.exe 复制为 <app_name>.exe
-        # 后打包成 zip，即无需安装的绿色版（依赖系统 WebView2 运行时，Win10/11 自带；
-        # 前端资源已嵌入 exe，无需额外文件）。要求前面两步中至少一步已产出 web2app.exe。
+      - name: 生成 Windows 单文件版（绿色版 exe，上传即得 <app_name>-portable.zip）
+        # 仅当勾选"Windows 单文件版"才执行。把主程序 web2app.exe 复制为 <app_name>.exe。
+        # 【不再手工再压一层 zip】：直接把 exe 交给 upload-artifact 打成单个
+        # <app_name>-portable.zip（GitHub 只包这一层），既避免"zip 套 zip"的双重压缩，
+        # 又让最终下载包的文件名带上 app_name。绿色版免安装，依赖系统自带 WebView2。
+        # 要求前面两步中至少一步已产出 web2app.exe。
         if: ${{ github.event.inputs.windows_portable != 'false' }}
         shell: pwsh
         run: |
+          # 文件名清洗与 productName 一致（去非法字符、压空白、去首尾空格/句点，空则回落默认）
           $name = $env:APP_NAME -replace '[\\/:*?"<>|]', '_'
+          $name = ($name -replace '\s+', ' ').Trim(' .')
+          if (-not $name) { $name = 'Web2App' }
           $exe = "target/release/web2app.exe"
           if (-not (Test-Path $exe)) { throw "未找到主程序 $exe（请确认勾选了安装版或单文件版）" }
-          $portable = "target/release/$name.exe"
-          Copy-Item $exe $portable -Force
-          Compress-Archive -Path $portable -DestinationPath "target/release/$name-portable.zip" -Force
-          Remove-Item $portable -Force
+          Copy-Item $exe "target/release/$name.exe" -Force
+          # 把清洗后的名字写回 GITHUB_ENV，供下方上传步骤拼 artifact 名与文件路径，
+          # 保证两者一致（都用同一个 $name）。
+          Add-Content -Path $env:GITHUB_ENV -Value "PORTABLE_NAME=$name"
+          Write-Output "绿色版 exe 已生成：$name.exe（最终下载包为 $name-portable.zip）"
 
       - name: Upload Windows 安装版 (MSI)
         # MSI 文件名已由 productName 统一（<app_name>_<版本>_x64_zh-CN.msi），无需重命名。
@@ -303,12 +309,14 @@ jobs:
           path: target/release/bundle/msi/*.msi
           if-no-files-found: warn
 
-      - name: Upload Windows 单文件版 (zip)
+      - name: Upload Windows 单文件版（zip，文件名含 app_name）
         if: ${{ github.event.inputs.windows_portable != 'false' }}
         uses: actions/upload-artifact@v7
         with:
-          name: windows-portable
-          path: target/release/*-portable.zip
+          # 动态命名 artifact：下载得到的就是 <app_name>-portable.zip（内含单个 <app_name>.exe）。
+          # 名字取自生成步骤写回的 PORTABLE_NAME，与 exe 文件名保持一致。
+          name: ${{ env.PORTABLE_NAME }}-portable
+          path: target/release/${{ env.PORTABLE_NAME }}.exe
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
