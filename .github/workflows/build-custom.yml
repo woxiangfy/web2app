@@ -387,9 +387,12 @@ jobs:
       - name: Set up Android SDK/NDK
         uses: android-actions/setup-android@v4
 
-      - name: Install NDK & build tools
+      - name: Install NDK
+        # 平台/构建工具的版本跟随 Tauri 模板（见下方 "Initialize Android project" 步骤，
+        # 会在 init 后读取生成工程实际的 compileSdk / buildToolsVersion 再安装对应版本），
+        # 避免模板升级后 compileSdk 变化（如 34→35）而这里写死导致 gradle 配置期失败。
         run: |
-          yes | sdkmanager "ndk;27.0.12077973" "build-tools;34.0.0" "platforms;android-34"
+          yes | sdkmanager "ndk;27.0.12077973"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
@@ -415,13 +418,26 @@ jobs:
           fi
           cargo tauri icon icon-custom.png
 
-      - name: Initialize Android project (gen/android)
+      - name: Initialize Android project (gen/android) + 安装匹配平台
         # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
         # --ci 跳过交互式询问；--skip-targets-install 因为上面已用 rust-toolchain 装了 aarch64 target。
+        # 生成后读取模板实际的 compileSdk / buildToolsVersion，安装对应版本的 platforms 与 build-tools，
+        # 避免写死版本与模板不一致导致 gradle 配置期 "Failed to find Platform SDK with path: android-N"。
         run: |
           if [ ! -d "gen/android" ]; then
             cargo tauri android init --ci --skip-targets-install
           fi
+
+          APP_GRADLE=$(ls gen/android/app/build.gradle.kts gen/android/app/build.gradle 2>/dev/null | head -n1)
+          SDK=34; BT=34.0.0
+          if [ -n "$APP_GRADLE" ]; then
+            v=$(grep -oE 'compileSdk\s*[=:]\s*[0-9]+' "$APP_GRADLE" | grep -oE '[0-9]+' | head -n1)
+            [ -n "$v" ] && SDK=$v
+            b=$(grep -oE 'buildToolsVersion\s*[=:]\s*"[0-9.]+"' "$APP_GRADLE" | grep -oE '[0-9.]+' | head -n1)
+            [ -n "$b" ] && BT=$b
+          fi
+          echo "目标 compileSdk=$SDK buildToolsVersion=$BT"
+          yes | sdkmanager "platforms;android-$SDK" "build-tools;$BT"
 
       - name: 应用自定义图标到 Android 工程
         # 把 `cargo tauri icon` 生成的各分辨率启动图标复制进安卓工程 res 目录，
@@ -599,7 +615,7 @@ jobs:
         # 注意：tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），
         # 不是 rustup 的完整三元组 aarch64-linux-android。
         # release APK 默认【未签名】，直接安装会提示"无证书/无法安装"，需下一步 zipalign+apksigner 签名。
-        run: cargo tauri android build --target aarch64 --apk
+        run: cargo tauri android build --target aarch64 --apk 2>&1 | tee "$RUNNER_TEMP/android-build.log"
 
       - name: 签名 APK（release 包默认未签名，不签名无法安装）
         # 签名密钥三级策略：
@@ -677,6 +693,15 @@ jobs:
             find gen/android/app/build/outputs -type f || true
             exit 1
           fi
+
+      - name: Upload Android build log (诊断用)
+        # 完整构建日志（含 gradle 错误栈）落盘为 artifact，便于失败时在 Actions 页下载查看根因。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-build-log
+          path: ${{ runner.temp }}/android-build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
