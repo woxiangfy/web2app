@@ -294,21 +294,37 @@ cargo test --all
 
 要点：
 
-- **数据格式**（服务端 `tools/encrypt_url.py` 与客户端 `src/resolve.rs` 一致）：
+- **数据格式**（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端 `src/resolve.rs` 一致）：
   `TXT = base64( Nonce(12B) ‖ AES-256-GCM(HKDF(Secret,Nonce), Payload ‖ Ed25519签名) )`，
-  其中 `Payload = URL ‖ 0x00 ‖ 时间戳(8B) ‖ 0x00 ‖ 随机盐(8B)`。
-- **时间戳防重放**：`Payload` 内嵌 Unix 秒时间戳，客户端校验 ±48 小时窗口，超出视为过期/重放。
+  其中 `Payload = URL ‖ 0x00 ‖ 时间戳ts(8B) ‖ 有效期ttl(8B) ‖ 0x00 ‖ 随机盐(8B)`。
+- **有效期（ttl）由服务端生成时决定**：`ttl` 是随密文下发的有效期秒数，
+  - `ttl > 0`：客户端校验 `now - ts <= ttl`，超出即拒绝（防重放/防过期记录）；
+  - `ttl = 0`：**永不失效**，客户端跳过时间校验（适合后端地址长期不变的场景）。
+  这样是否设有效期、设多长，完全由生成密文的一方决定，客户端无需重新编译。
 - **`public_key` 格式**：Ed25519 公钥的**裸 base64（32 字节）**，或 SPKI PEM（`BEGIN PUBLIC KEY`）。
-  推荐直接用 `tools/encrypt_url.py genkey` 生成的 `public_key.b64` 内容。
+  推荐直接用 `genkey` 生成的 `public_key.b64` 内容。
 - **查询通道**：走系统默认 DNS（读 `/etc/resolv.conf` 或 Windows 系统配置）。
 - **降级**：`app_url` 为普通字符串时行为与原来完全一致（忽略 `public_key`）。
 
-> 生成密钥对 + 加密 URL，用仓库里的 `tools/encrypt_url.py`（需 `pip install cryptography`）：
-> ```bash
-> python tools/encrypt_url.py genkey keys          # 生成私钥(服务端持有) + 公钥(客户端)
-> python tools/encrypt_url.py keys/private_key.pem "https://user:pass@host"   # 输出 base64 密文
-> ```
-> 把密文作为某个域名的 TXT 记录值，把 `keys/public_key.b64` 的内容作为配置里的 `public_key`。
+生成密钥对 + 加密 URL，有两种等价方式（私钥格式与密文格式完全互通）：
+
+1. **纯 Rust 工具 `resolve-tool`**（推荐，无需 Python 依赖）：
+   ```bash
+   cargo run --bin resolve-tool -- genkey --out keys   # 生成私钥(服务端持有) + 公钥(客户端)
+   cargo run --bin resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0
+   ```
+   `--ttl 秒`：0 = 永不失效；正数 = 生成后 N 秒内有效（默认 172800 = 48h）。
+
+2. **Python 脚本 `tools/encrypt_url.py`**（需 `pip install cryptography`）：
+   ```bash
+   python tools/encrypt_url.py genkey keys          # 生成私钥 + 公钥
+   python tools/encrypt_url.py keys/private_key.pem "https://user:pass@host" --ttl 0
+   ```
+
+把密文作为某个域名的 TXT 记录值，把 `keys/public_key.b64` 的内容作为配置里的 `public_key`。
+
+> 也可以直接在 GitHub Actions 里跑 **`resolve-keys.yml`** 这个 workflow（手动触发），
+> 它提供「生成密钥对」「生成 TXT 密文」两个操作，全程在 CI 上完成，产出打包成 artifact 下载。
 
 #### Android 签名（打包时从三层来源取第一份可用的）
 

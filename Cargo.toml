@@ -14,6 +14,11 @@ tauri-build = { version = "2", features = [] }
 name = "web2app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 独立命令行工具：服务端用私钥生成 TXT 密文 / 密钥对（与库共享 resolve 逻辑）。
+[[bin]]
+name = "resolve-tool"
+path = "src/bin/resolve-tool.rs"
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 url = "2"
@@ -35,11 +40,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"]
 # 均为纯 Rust、零平台依赖，跨平台（Windows / Android）可用。
 hickory-resolver = "0.26"
 # Ed25519 签名验签（防篡改）：客户端仅持公钥验签，服务端持私钥签名。
-ed25519-dalek = "2"
+# 开启 rand_core（生成密钥对时 SigningKey::generate 需要）。
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 # AES-256-GCM 认证加密（隐藏网址）：用 HKDF-SHA256 从固定 Secret + Nonce 派生密钥。
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+# 服务端生成密文 / 密钥对时用的随机数（Nonce、盐、Ed25519 密钥对）。
+rand = "0.8"
 
 # 仅 Windows：调用 WebView2 原生 API 处理 Basic 鉴权。
 # 版本必须与 Tauri 2.11.x 内部使用的 wry 一致（webview2-com 0.38 / windows 0.61），

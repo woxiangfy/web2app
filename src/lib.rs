@@ -16,7 +16,7 @@ use url::Url;
 const DND_POLYFILL: &str = include_str!("dnd_polyfill.js");
 
 mod proxy;
-mod resolve;
+pub mod resolve;
 mod settings;
 use settings::{Settings, SettingsState};
 

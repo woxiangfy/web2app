@@ -21,10 +21,10 @@
 //!      12 字节 Nonce。以 30~50 字节 URL 计，总密文约 130~150 字节，base64 后约 180~200
 //!      字符，可放入单条 DNS TXT 记录（上限 255 字节）。
 //!
-//! # 数据格式（服务端 `tools/encrypt_url.py` 与客户端必须一致）
+//! # 数据格式（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端必须一致）
 //!
 //! ```text
-//! Payload   = URL || 0x00 || 时间戳(8B, 大端) || 0x00 || 随机盐(8B)
+//! Payload   = URL || 0x00 || 时间戳(8B, 大端) || 有效期ttl(8B, 大端) || 0x00 || 随机盐(8B)
 //! Signature = Ed25519.sign(Payload)                       // 64 字节
 //! Key       = HKDF-SHA256(ikm=Secret, salt=Nonce, info="web2app-resolve")  // 32 字节
 //! Cipher    = AES-256-GCM.encrypt(Key, Nonce, Payload || Signature)  // 附 16 字节 tag
@@ -32,6 +32,14 @@
 //! ```
 //!
 //! 其中 `Secret` 是客户端内置的固定值（编译期常量，服务端与客户端共享）。
+//!
+//! # 有效期（ttl）语义
+//!
+//! `ttl` 是【服务端生成时指定】的有效期时长（单位：秒），随密文一起下发：
+//!   - `ttl > 0`：客户端校验 `now - ts <= ttl`，超出即拒绝（防重放/防过期记录）。
+//!   - `ttl = 0`：表示【永不失效】，客户端跳过时间戳校验（适合后端地址长期不变的场景）。
+//!
+//! 这样是否设置有效期、有效期多长，完全由生成密文的一方决定，客户端无需重新编译。
 
 use aes_gcm::aead::{Aead, KeyInit, Payload as AeadPayload};
 use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
@@ -51,7 +59,7 @@ const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 /// Ed25519 签名长度（64 字节）。
 const SIG_LEN: usize = 64;
-/// Payload 里时间戳 / 随机盐各占 8 字节。
+/// Payload 里时间戳 / 有效期 / 随机盐各占 8 字节。
 const FIELD_LEN: usize = 8;
 
 /// 客户端内置的固定 Secret（与服务端 `tools/encrypt_url.py` 保持一致）。
@@ -110,6 +118,119 @@ fn derive_key(nonce: &[u8]) -> [u8; KEY_LEN] {
     key
 }
 
+// ---------------------------------------------------------------------------
+// 以下为【服务端】方向的函数（供 `resolve-tool` 独立工具使用）：用 Ed25519 私钥
+// 签名 + AES-GCM 加密，生成 TXT 密文。与客户端 `decrypt_txt` 严格对称。
+// ---------------------------------------------------------------------------
+
+/// 构造 Payload：`URL || 0x00 || ts(8B 大端) || ttl(8B 大端) || 0x00 || salt(8B)`。
+fn build_payload(url: &str, ts: u64, ttl: u64, salt: &[u8; 8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(url.len() + 1 + 8 + 8 + 1 + 8);
+    p.extend_from_slice(url.as_bytes());
+    p.push(0x00);
+    p.extend_from_slice(&ts.to_be_bytes());
+    p.extend_from_slice(&ttl.to_be_bytes());
+    p.push(0x00);
+    p.extend_from_slice(salt);
+    p
+}
+
+/// 用 Ed25519 私钥签名 + AES-GCM 加密一个 URL，返回 base64 密文（单行，写入 DNS TXT）。
+///
+/// - `url`：要隐藏的真实地址。
+/// - `ttl`：有效期秒数（>0 按窗口校验；=0 永不失效）。
+/// - `ts`：可选，指定生成时间戳（默认取当前系统时间；测试可传固定值）。
+pub fn sign_and_encrypt(
+    signing_key: &ed25519_dalek::SigningKey,
+    url: &str,
+    ttl: u64,
+    ts: Option<u64>,
+) -> Result<String, String> {
+    use ed25519_dalek::Signer;
+
+    let ts = ts.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
+
+    // 随机 Nonce(12B) + 随机盐(8B)。
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes);
+    let mut salt = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
+
+    let payload = build_payload(url, ts, ttl, &salt);
+
+    // Ed25519 签名（64 字节）。
+    let sig: Signature = signing_key.sign(&payload);
+
+    // AES-GCM 加密 Payload || Signature。
+    let key = derive_key(&nonce_bytes);
+    let cipher_suite = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
+    let cipher = cipher_suite
+        .encrypt(AesNonce::from_slice(&nonce_bytes), AeadPayload {
+            msg: &[payload.as_slice(), sig.to_bytes().as_slice()].concat(),
+            aad: b"",
+        })
+        .map_err(|_| "加密失败".to_string())?;
+
+    // TXT = base64( Nonce(12B) || Cipher )。
+    let mut raw = Vec::with_capacity(NONCE_LEN + cipher.len());
+    raw.extend_from_slice(&nonce_bytes);
+    raw.extend_from_slice(&cipher);
+    Ok(base64::engine::general_purpose::STANDARD.encode(&raw))
+}
+
+/// 生成一对 Ed25519 密钥，返回（私钥 PEM(PKCS#8)，公钥裸 base64 32 字节）。
+///
+/// 私钥采用【纯私钥】PKCS#8 格式（48 字节 DER，仅含 32 字节 seed），与 Python
+/// `cryptography` 的 `Ed25519PrivateKey` 导出格式完全一致，两端私钥可互相导入。
+/// （ed25519-dalek 的 `to_pkcs8_pem` 会额外内嵌公钥成 83 字节 RFC 8410 格式，
+///   Python `cryptography` 老版本读不了，故这里手动构造纯私钥格式。）
+pub fn generate_keypair() -> Result<(String, String), String> {
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let verifying_key = signing_key.verifying_key();
+
+    // 纯私钥 PKCS#8 DER（RFC 5208，Ed25519 的旧式导出格式，48 字节）：
+    //   30 2e                        SEQUENCE (46 字节)
+    //      02 01 00                  INTEGER version = 0
+    //      30 05                     SEQUENCE (AlgorithmIdentifier)
+    //         06 03 2b 65 70         OID 1.3.101.112 (Ed25519)
+    //      04 22                     OCTET STRING (34 字节)
+    //         04 20 <32字节 seed>    Ed25519 私钥（内层 OCTET STRING）
+    let seed = signing_key.to_bytes(); // 32 字节
+    let mut der = Vec::with_capacity(48);
+    der.extend_from_slice(&[0x30, 0x2e]); // SEQUENCE len=46
+    der.extend_from_slice(&[0x02, 0x01, 0x00]); // INTEGER version
+    der.extend_from_slice(&[0x30, 0x05]); // AlgorithmIdentifier
+    der.extend_from_slice(&[0x06, 0x03, 0x2b, 0x65, 0x70]); // OID Ed25519
+    der.extend_from_slice(&[0x04, 0x22]); // OCTET STRING len=34
+    der.extend_from_slice(&[0x04, 0x20]); // 内层 OCTET STRING len=32
+    der.extend_from_slice(&seed);
+
+    let priv_pem = pem_encode("PRIVATE KEY", &der);
+
+    // 公钥裸 base64（32 字节原始公钥），客户端直接填 PUBLIC_KEY。
+    let raw_pub = verifying_key.to_bytes();
+    let pub_b64 = base64::engine::general_purpose::STANDARD.encode(raw_pub);
+
+    Ok((priv_pem, pub_b64))
+}
+
+/// 把 DER 字节编码成 PEM 文本（LF 换行，64 字符一行）。
+fn pem_encode(label: &str, der: &[u8]) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut out = format!("-----BEGIN {label}-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+        out.push('\n');
+    }
+    out.push_str(&format!("-----END {label}-----\n"));
+    out
+}
+
 /// 解密 + 验签一条 TXT 密文，返回真实 URL。
 ///
 /// 流程：base64 解码 → 取前 12 字节 Nonce → HKDF 派生 Key → AES-GCM 解密（认证）→
@@ -150,10 +271,13 @@ fn decrypt_txt(public_key: &VerifyingKey, b64: &str) -> Result<String, String> {
     parse_payload(payload)
 }
 
-/// 解析 Payload，提取 URL 并校验时间戳有效性（防重放）。
+/// 解析 Payload，提取 URL 并校验有效期（防重放）。
 ///
-/// Payload 结构：`URL || 0x00 || ts(8B 大端) || 0x00 || salt(8B)`。
-/// 时间戳为 Unix 秒。允许 ±48 小时的时钟偏差；超出视为过期/重放，拒绝。
+/// Payload 结构：`URL || 0x00 || ts(8B 大端) || ttl(8B 大端) || 0x00 || salt(8B)`。
+/// - `ts` 为 Unix 秒（生成时间）。
+/// - `ttl` 为有效期秒数（服务端生成时指定）；`ttl = 0` 表示永不失效。
+///
+/// 校验：`now - ts <= ttl`（`ttl > 0` 时），超出视为过期/重放，拒绝。
 fn parse_payload(payload: &[u8]) -> Result<String, String> {
     // 找到 URL 后的第一个分隔符 0x00。
     let sep = payload
@@ -168,23 +292,27 @@ fn parse_payload(payload: &[u8]) -> Result<String, String> {
         return Err("Payload 中 URL 为空".to_string());
     }
 
-    // 剩余应为 ts(8) || 0x00 || salt(8)，共 17 字节。
+    // 剩余应为 ts(8) || ttl(8) || 0x00 || salt(8)，共 25 字节。
     let rest = &payload[sep + 1..];
-    if rest.len() != FIELD_LEN + 1 + FIELD_LEN || rest[FIELD_LEN] != 0x00 {
+    if rest.len() != FIELD_LEN + FIELD_LEN + 1 + FIELD_LEN
+        || rest[FIELD_LEN + FIELD_LEN] != 0x00
+    {
         return Err("Payload 尾部结构异常".to_string());
     }
     let ts = u64::from_be_bytes(rest[..FIELD_LEN].try_into().unwrap());
+    let ttl = u64::from_be_bytes(rest[FIELD_LEN..FIELD_LEN + FIELD_LEN].try_into().unwrap());
 
-    // 时间戳校验：允许 ±48 小时时钟偏差，超出则拒绝（防重放过期记录）。
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if now != 0 {
-        let window: u64 = 48 * 3600;
-        let diff = now.abs_diff(ts);
-        if diff > window {
-            return Err(format!("时间戳超出有效期（偏差 {diff}s）"));
+    // 有效期校验：ttl > 0 时才校验时间窗口；ttl = 0 表示永不失效，跳过。
+    if ttl > 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now != 0 {
+            let diff = now.abs_diff(ts);
+            if diff > ttl {
+                return Err(format!("记录已过期（生成于 {ts}，有效期 {ttl}s，偏差 {diff}s）"));
+            }
         }
     }
 
@@ -315,6 +443,37 @@ mod tests {
         assert_eq!(normalize_domain("https://a.com:8443/path"), "a.com");
     }
 
+    // 服务端 sign_and_encrypt → 客户端 decrypt_txt 往返对称性（含 ttl 各种情况）。
+    #[test]
+    fn e2e_sign_encrypt_roundtrip() {
+        let (priv_pem, pub_b64) = generate_keypair().unwrap();
+        let signing_key = {
+            // 从 PEM 解析回 SigningKey（复刻 bin 工具的 load_signing_key 逻辑）。
+            let b64: String = priv_pem
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect();
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .unwrap();
+            let seed_pos = der.windows(2).position(|w| w == [0x04, 0x20]).unwrap() + 2;
+            ed25519_dalek::SigningKey::from_bytes(der[seed_pos..seed_pos + 32].try_into().unwrap())
+        };
+        let key = parse_public_key(&pub_b64).unwrap();
+
+        // ttl = 0（永不失效）
+        let c = sign_and_encrypt(&signing_key, "https://a.com/", 0, None).unwrap();
+        assert_eq!(decrypt_txt(&key, &c).unwrap(), "https://a.com/");
+
+        // ttl = 3600（1 小时，当前时间戳下应有效）
+        let c = sign_and_encrypt(&signing_key, "https://b.com/", 3600, None).unwrap();
+        assert_eq!(decrypt_txt(&key, &c).unwrap(), "https://b.com/");
+
+        // ttl = 3600 但时间戳是 2000 年 → 应因过期被拒绝。
+        let c = sign_and_encrypt(&signing_key, "https://c.com/", 3600, Some(946684800)).unwrap();
+        assert!(decrypt_txt(&key, &c).is_err(), "过期密文应被拒绝");
+    }
+
     #[test]
     fn normalize_domain_with_userinfo() {
         assert_eq!(normalize_domain("https://u:p@a.com"), "a.com");
@@ -333,14 +492,7 @@ mod tests {
 
     #[test]
     fn parse_payload_valid() {
-        // URL "hi" || 0x00 || ts(8) || 0x00 || salt(8)
-        let mut payload = b"https://a.com".to_vec();
-        payload.push(0x00);
-        payload.extend_from_slice(&1700000000u64.to_be_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(&[1u8; 8]);
-        // 但时间戳 1700000000 会超出 ±48h 窗口（现在是 2026 年），改成 now。
-        // 直接测结构解析：把 ts 设为 now。
+        // URL "hi" || 0x00 || ts(8) || ttl(8) || 0x00 || salt(8)
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -348,6 +500,7 @@ mod tests {
         let mut payload = b"https://a.com".to_vec();
         payload.push(0x00);
         payload.extend_from_slice(&now.to_be_bytes());
+        payload.extend_from_slice(&(48u64 * 3600).to_be_bytes()); // ttl = 48h
         payload.push(0x00);
         payload.extend_from_slice(&[1u8; 8]);
         let url = parse_payload(&payload).unwrap();
@@ -365,9 +518,22 @@ mod tests {
         payload.push(0x00);
         // 过期时间戳：2000-01-01
         payload.extend_from_slice(&946684800u64.to_be_bytes());
+        payload.extend_from_slice(&3600u64.to_be_bytes()); // ttl = 1h，早已过期
         payload.push(0x00);
         payload.extend_from_slice(&[1u8; 8]);
         assert!(parse_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn parse_payload_ttl_zero_never_expires() {
+        // ttl = 0 表示永不失效：即使时间戳是 2000 年，也应通过。
+        let mut payload = b"https://a.com".to_vec();
+        payload.push(0x00);
+        payload.extend_from_slice(&946684800u64.to_be_bytes()); // 2000-01-01
+        payload.extend_from_slice(&0u64.to_be_bytes()); // ttl = 0 永不失效
+        payload.push(0x00);
+        payload.extend_from_slice(&[1u8; 8]);
+        assert_eq!(parse_payload(&payload).unwrap(), "https://a.com");
     }
 
     // 端到端：Ed25519 签名 + AES-GCM 解密全链路。
@@ -378,11 +544,11 @@ mod tests {
         let pub_b64 = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
         let key = parse_public_key(pub_b64).unwrap();
 
-        // 同一 URL 三次加密，密文互不相同（每次 Nonce + salt 随机）。
-        let b1 = "uHAZIc6Ya3yqaPS6pjX78V9pfjfTogvReQYt2PSmTYzP9+w+s+V6jfNv7TNxWsIK2L+PudqZCvnWj8HFLc9+jv7jEzlmLsfPGdvF1KjAHRmhAIX90veTewnqplMMSwCTx4sHS7DTef23EcExhL9syxbdh9tTMwzSWMkMcLmRPY5FhHtz";
-        let b2 = "FFYjZ7TE3PeFe/ptLxSC+MdLlqTV7RP3CGSp4gMFwxFWD5mKn4KyZVrXPghUjWky9BoQA1JLCoNo4RKUk7OYr+K/Ej8WmtOo2qEWHxEjltcZBq5k+2mFB2OOFnWmxpvdM0wTjyavgVsLNMe59oehczgcEHkY3m4f6SCIx3M96y9Y51MU";
-        let b3 = "kGlPP+Z7yB4f60kQgHmFswVSJbdiHwYod6OGSlT7fqaz+0sXeKcI24PVdVN7SbCDSYwpt6NofQLTgeFZAVq/AINuupdZQoblIaJkeu1o40Hqk+ihRRNH5k/cGPSHiuTWRn61hZl2dELl1TO8e7eM4LtHXTaR0lkPZm1sRT3hi7xYBLeV";
-        let bili = "IPVnN9sK8qtlmhTg7I21Z3h6G5VynrUwTj3593fIfbWG4uiNJFgEuEYlAUvJOkT93MD4G3XQ482O0cNANJ3fngvh+Du9W/dVji0tLD9BA8xpK2mEPr0iC/DU55N4H4WY5c8iTmY30zAHmBISzUfZROTMQrKBVa5EYjDuqlIh1fQg6KilyHn/";
+        // 同一 URL 三次加密，密文互不相同（每次 Nonce + salt 随机）。ttl=0 永不失效。
+        let b1 = "Ivc+gSeUshcKlXCyqr39RiH/euyPbLjnvTYrk+vze+pgYebyezjJPNEaHBIpZTMZC1beyZuAc+hCJxLLXgA9Ec5QjHPcJgiI6wd6xLGunj2choHitk11Ah+s8Eiavef+K3oeDKVHUtcx3GU2jiC/Nasg02xTdS0pwb3VJXGJ70w5QHkWiDRi/PBHHcc=";
+        let b2 = "D3ajOlwF0LUFEPMSrk8gmM16Xi7ZDOOWSOGacW3LswC9dfyuNYTASNiZDmDTCzZzAN646ttKD6C6T+WKiL9jYhsY3ab3V0L8TUuHDBecOVUK0BbIZKaxlRqsfn2GEEk+KQFCB/xUvyDH9KRs0mzOUwGZUPeXDohglf9Oa+6KplWEpOqtK+WrvT/soi8=";
+        let b3 = "w9GWFwaxTWjKfIKidWY4U9ShDavVgKqM7zM5rm9L7qJ8FfLmW1486ZdcPmEUNazCYjGXT/g42Mlv6nwi+tchpT9nzktd4RfZRqYjBAU3SwRXzFPof5DHvHd7C481+iA9A49tuua7UPeOQB23FZpIPNUp1tRtTTyiXaSVs0om40ssInqSU0lH77AG3x8=";
+        let bili = "c3PSRYrZSj6wkY1vCVf+1W+hYdpmwjk6SO0J+XNP1Hq3NR/O2R5RAQtem5Dq/BQp+opCmj6Lu+MMf7wA/IKPZ0g00Tsr1ILIZXfGlUGP56F9whPhhYh+PGFG8McyvFp85JkDjmfcixaG88PLIhT1qRFTI3+G+ifZJxwKaL/uUOLFvY+RVG+V2suiWMjWbsw=";
 
         // 三次密文互不相同。
         assert_ne!(b1, b2);
@@ -404,19 +570,15 @@ mod tests {
         let key = parse_public_key(pub_b64).unwrap();
 
         let baidu = [
-            "g89an2rm2b/1Vwz0+nDSAeF6DZ4941GjkL74N8lp++aDWIfRTr0bKJekZcLoDfS3YHouKljSXMCVwo7cITtw1XLr5+tTpmr33g2LOR4s0ebAAmKmpJn7XuAF9hIulvTKODp8Oigm6VX8e5KcimD4sSB9Kdv/4B6QB3QjiT60dyENUDXn",
-            "+7gte9anWPy6EHMoPodEhdxzO5HYdM8tsK+rkmpOux0rGdF8zZbxQn3hAjnkF6rHK0NkVe08R/kd+65Gkqxbj4fMXu0PdceigSMNJ6+Evo2Todd77a70Uh5PkzfKpLqt9rBemhe20FndnuVeCWKyR6jpuO3YnZulwoN+n/y9mLsahVdd",
-            "LPjBa9jn+Y/It2uGv5QDst8nkRhlqNE+3ILDcJFecYzo+j98N/CXlL5i9qHh6j5lw7ZMKvBF/Rb4cgfhTs3od/UvW7mzGFkw5EXZHYUgKNOTI6MIKLwRQmvz2xBkJNs9vcN6UvDW4kazgI40azjgcDwQs87/cqrZdQsbJVnpIYwgV4Ua",
+            "Ivc+gSeUshcKlXCyqr39RiH/euyPbLjnvTYrk+vze+pgYebyezjJPNEaHBIpZTMZC1beyZuAc+hCJxLLXgA9Ec5QjHPcJgiI6wd6xLGunj2choHitk11Ah+s8Eiavef+K3oeDKVHUtcx3GU2jiC/Nasg02xTdS0pwb3VJXGJ70w5QHkWiDRi/PBHHcc=",
+            "D3ajOlwF0LUFEPMSrk8gmM16Xi7ZDOOWSOGacW3LswC9dfyuNYTASNiZDmDTCzZzAN646ttKD6C6T+WKiL9jYhsY3ab3V0L8TUuHDBecOVUK0BbIZKaxlRqsfn2GEEk+KQFCB/xUvyDH9KRs0mzOUwGZUPeXDohglf9Oa+6KplWEpOqtK+WrvT/soi8=",
+            "w9GWFwaxTWjKfIKidWY4U9ShDavVgKqM7zM5rm9L7qJ8FfLmW1486ZdcPmEUNazCYjGXT/g42Mlv6nwi+tchpT9nzktd4RfZRqYjBAU3SwRXzFPof5DHvHd7C481+iA9A49tuua7UPeOQB23FZpIPNUp1tRtTTyiXaSVs0om40ssInqSU0lH77AG3x8=",
         ];
         let bili = [
-            "rDgqUKGuYDX/Mjomyju01ddfIuYvzrRj691/aScI/REZLaCtgZvJKGG1BfKh3X03beHTsJECPREv9r7DBvPUVrvHrB0Z0sHrUsQ9WwzWMZhz1UKhWtfW6MCgw6KOLZEsVi0doAJVUNFRPqgJfKxnUj882sqW/RvtV3+c6S1OOGhrQngbKooe",
-            "Mj8+co+cXnAc1hJKWIu48i3lXTboM+0826yUMc9YEjTFiEXszEYKswmRNB/qpm53XvUJix18rK+MTK5tSkFUrZFicIU+SNaju1GAztStPIzEo37ERCeuUR3ru5RrUlO7Q1iJhDfrrOvB67jWR7cWvjePFf4hrSidNw1BhQTZvMmVHWg3pr6M",
-            "UhzokyePYRIg5ZBI/ma5Xawgj8noNcazeAjNuMzh/fDkxX7RWyzvedJXEcn48Xq3wpxDT5/0YZh/7uVAEpiJ+oaRH93aaocmHDiWesx3n2HuvH4BEzYzMLu1tAPIJOAcGEsneuqSyCCa+30lDG+nZ7qM3atOaFxtiEdYdtWJRRqcI5PveZiO",
+            "c3PSRYrZSj6wkY1vCVf+1W+hYdpmwjk6SO0J+XNP1Hq3NR/O2R5RAQtem5Dq/BQp+opCmj6Lu+MMf7wA/IKPZ0g00Tsr1ILIZXfGlUGP56F9whPhhYh+PGFG8McyvFp85JkDjmfcixaG88PLIhT1qRFTI3+G+ifZJxwKaL/uUOLFvY+RVG+V2suiWMjWbsw=",
         ];
         let example = [
-            "HI2Gbh5Yqj+HBK23nCF8Q373/T0TTYu0/ocmz1zhIe/X+dYuv2d/JpLevwNqeBOvgwThNC3llc6K75rfUDg09RW5Mr+RblQIucOT4ypLm5EH1uNu00WhOZkPsTGCNIaWuAOSrshZKjG37vxrmKP2cLzQtyYaloSinVqtkL3zndnb8w==",
-            "O16LFsygqCBh5seo0rJzdoBqgpfZ+GYQwrq2w4Va6FKmz7QmIMy3GmFwB2Unqysv0ycz61WGoziR6cSfEa/lAaIuS9t0HWwGQ2ClV+9HPrQSUj+iOgUlFKXFrDSr5LzvoUQWYKytUH/MdEPBT29b0Mle5Flnm+7Te6c25wuyvNpXQg==",
-            "BTm2pvPHi7xnvVq60N8JKJT+xX2ne8rOZ09n222JaGYxj/zpqF3FbLwhTJ7/pUyzZtpLe5+j7TK4V2Kg8yKhwWm4lKK9rrw5+eLmjkfNq3ZiZWaME4eTX72pKjj7swzE4kqowi8BPZJ1qLqMG43lETIeXiU59YQKAgKqrdHyLYG9Uw==",
+            "hcqBZDDLey30KUF+L8PkjPIweNEUFQdu2ZXtoZg9tW35YP5UD4kB41crP4bv767vKGHYqB8vH5YgsnzP4lN3MurevuYwjAUc2XdcdzuEvT6EYebQH0Sd8zVi/ACIb8Q118H4FrQpYny3zmSZHicgKe8K7Twd8SToo+XhXg68y4dIoQpCwoYROjaK",
         ];
 
         for c in baidu {
@@ -468,7 +630,7 @@ mod tests {
     fn e2e_tamper_detected() {
         let pub_b64 = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
         let key = parse_public_key(pub_b64).unwrap();
-        let b1 = "uHAZIc6Ya3yqaPS6pjX78V9pfjfTogvReQYt2PSmTYzP9+w+s+V6jfNv7TNxWsIK2L+PudqZCvnWj8HFLc9+jv7jEzlmLsfPGdvF1KjAHRmhAIX90veTewnqplMMSwCTx4sHS7DTef23EcExhL9syxbdh9tTMwzSWMkMcLmRPY5FhHtz";
+        let b1 = "Ivc+gSeUshcKlXCyqr39RiH/euyPbLjnvTYrk+vze+pgYebyezjJPNEaHBIpZTMZC1beyZuAc+hCJxLLXgA9Ec5QjHPcJgiI6wd6xLGunj2choHitk11Ah+s8Eiavef+K3oeDKVHUtcx3GU2jiC/Nasg02xTdS0pwb3VJXGJ70w5QHkWiDRi/PBHHcc=";
 
         // 正常可解。
         assert_eq!(decrypt_txt(&key, b1).unwrap(), "https://www.baidu.com/");

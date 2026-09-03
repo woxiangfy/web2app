@@ -8,16 +8,20 @@
   4. 密文尽可能短：约 130~150 字节，base64 后约 180~200 字符，单条 DNS TXT 可放下。
 
 数据格式（与客户端 src/resolve.rs 保持一致）：
-  Payload   = URL || 0x00 || 时间戳(8B 大端) || 0x00 || 随机盐(8B)
+  Payload   = URL || 0x00 || 时间戳(8B 大端) || 有效期ttl(8B 大端) || 0x00 || 随机盐(8B)
   Signature = Ed25519.sign(Payload)                            # 64 字节
   Key       = HKDF-SHA256(ikm=Secret, salt=Nonce, info="web2app-resolve")
   Cipher    = AES-256-GCM.encrypt(Key, Nonce, Payload || Signature)   # 附 16 字节 tag
   TXT 值    = base64( Nonce(12B) || Cipher )
 
+有效期（ttl）语义：由【生成时】决定，随密文下发。
+  - ttl > 0：客户端校验 now - ts <= ttl，超出即拒绝（防重放）。
+  - ttl = 0：永不失效（客户端跳过时间校验）。
+
 用法：
-  python encrypt_url.py genkey <output_dir>            # 生成 Ed25519 密钥对
-  python encrypt_url.py <private_key.pem> <url>        # 加密单个 URL
-  python encrypt_url.py <private_key.pem> --batch < urls.txt   # 批量加密
+  python encrypt_url.py genkey <output_dir>                    # 生成 Ed25519 密钥对
+  python encrypt_url.py <private_key.pem> <url> [--ttl 秒]     # 加密单个 URL（ttl 默认 172800=48h）
+  python encrypt_url.py <private_key.pem> --batch [--ttl 秒] < urls.txt   # 批量加密
 
 输出：base64 密文（单行，可直接写入 DNS TXT 记录）。
 """
@@ -38,6 +42,7 @@ SECRET = b"web2app-fixed-secret-2026"
 HKDF_INFO = b"web2app-resolve"
 NONCE_LEN = 12
 KEY_LEN = 32
+DEFAULT_TTL = 48 * 3600  # 默认有效期 48 小时
 
 
 def derive_key(nonce: bytes) -> bytes:
@@ -46,14 +51,19 @@ def derive_key(nonce: bytes) -> bytes:
     return hk.derive(SECRET)
 
 
-def encrypt_url(priv_key: Ed25519PrivateKey, url: str, ts: int | None = None) -> str:
-    """加密 + 签名一个 URL，返回 base64 密文（单行）。"""
+def encrypt_url(priv_key: Ed25519PrivateKey, url: str, ts: int | None = None,
+                ttl: int = DEFAULT_TTL) -> str:
+    """加密 + 签名一个 URL，返回 base64 密文（单行）。
+
+    ttl 为有效期秒数（服务端生成时指定）：>0 按窗口校验，=0 永不失效。
+    """
     url_b = url.encode("utf-8")
     ts = ts if ts is not None else int(time.time())
     salt = os.urandom(8)
 
-    # Payload = URL || 0x00 || ts(8B 大端) || 0x00 || salt(8B)
-    payload = url_b + b"\x00" + ts.to_bytes(8, "big") + b"\x00" + salt
+    # Payload = URL || 0x00 || ts(8B 大端) || ttl(8B 大端) || 0x00 || salt(8B)
+    payload = (url_b + b"\x00" + ts.to_bytes(8, "big")
+               + ttl.to_bytes(8, "big") + b"\x00" + salt)
 
     # Ed25519 签名（64 字节）
     sig = priv_key.sign(payload)
@@ -137,15 +147,38 @@ def main() -> int:
     key_path = sys.argv[1]
     priv = load_private_key(key_path)
 
+    # 解析 --ttl 参数（单位：秒）。支持放在任意位置。
+    ttl = DEFAULT_TTL
+    args = sys.argv[2:]
+    if "--ttl" in args:
+        i = args.index("--ttl")
+        if i + 1 >= len(args):
+            print("--ttl 需要跟一个秒数（整数）", file=sys.stderr)
+            return 2
+        try:
+            ttl = int(args[i + 1])
+        except ValueError:
+            print(f"--ttl 必须是整数秒数，收到：{args[i + 1]}", file=sys.stderr)
+            return 2
+        if ttl < 0:
+            print("--ttl 不能为负数", file=sys.stderr)
+            return 2
+        # 去掉 --ttl 和它的值
+        del args[i:i + 2]
+
     urls = []
-    if sys.argv[2] == "--batch":
+    if args and args[0] == "--batch":
         urls = [line.strip() for line in sys.stdin if line.strip()]
     else:
-        urls = sys.argv[2:]
+        urls = args
+
+    if not urls:
+        print("未提供要加密的 URL", file=sys.stderr)
+        return 2
 
     for url in urls:
-        cipher = encrypt_url(priv, url)
-        print(f"# {url}")
+        cipher = encrypt_url(priv, url, ttl=ttl)
+        print(f"# {url}  (ttl={ttl}s)")
         print(cipher)
         print()
 
