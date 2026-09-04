@@ -12,10 +12,12 @@
 //!
 //! 用法：
 //!   resolve-tool genkey [--out DIR]             生成密钥对，写 private_key.pem + public_key.b64
-//!   resolve-tool encrypt <private_key.pem> <url> [--ttl 秒]
-//!      用私钥加密一个 URL，stdout 输出 base64 密文（单行）
+//!   resolve-tool encrypt <private_key.pem> <url1> [<url2> ...] [--ttl 秒]
+//!      用私钥加密一个或多个 URL，stdout 逐个输出 base64 密文
 //!   resolve-tool encrypt --batch <private_key.pem> [--ttl 秒]
 //!      从 stdin 逐行读 URL，批量加密
+//!   resolve-tool all <url1> [<url2> ...] [--out DIR] [--ttl 秒]
+//!      一键：生成密钥对 + 立即加密一组 URL，同时输出密钥对文件与密文
 //!
 //! 说明：
 //!   --ttl 有效期秒数，默认 172800（48h）；0 表示永不失效。
@@ -31,14 +33,18 @@ resolve-tool —— 动态解析服务端工具（Ed25519 签名 + AES-256-GCM�
   resolve-tool genkey [--out DIR]
       生成 Ed25519 密钥对，写 DIR/private_key.pem 与 DIR/public_key.b64（默认 .）
 
-  resolve-tool encrypt <private_key.pem> <url> [--ttl 秒]
-      用私钥加密单个 URL，stdout 输出 base64 密文（单行，写入 DNS TXT）
+  resolve-tool encrypt <private_key.pem> <url1> [<url2> ...] [--ttl 秒]
+      用私钥加密一个或多个 URL，stdout 逐个输出 base64 密文（单行，写入 DNS TXT）
 
   resolve-tool encrypt --batch <private_key.pem> [--ttl 秒]
       从 stdin 逐行读 URL，批量加密
 
+  resolve-tool all <url1> [<url2> ...] [--out DIR] [--ttl 秒]
+      一键：生成密钥对 + 立即加密一组 URL，同时输出密钥对文件与密文
+
 参数：
   --ttl  有效期秒数（默认 172800=48h；0=永不失效）
+  --out  输出目录（genkey / all 用，默认 .）
 "
     );
 }
@@ -63,16 +69,25 @@ fn parse_ttl(args: &[String]) -> Result<u64, String> {
 /// 兼容两种来源：本工具 `genkey` 生成的纯私钥（48 字节 DER）、以及 Python
 /// `cryptography` 导出的 `Ed25519PrivateKey`（同样 48 字节纯私钥 DER）。
 /// 也兼容 ed25519-dalek 的 `to_pkcs8_pem` 输出的 RFC 8410 格式（83 字节，带内嵌公钥）。
+///
+/// 解析对空白【完全健壮】：不假设 PEM 的 base64 正文单独成行。做法是去掉 `-----BEGIN/END`
+/// 头尾标记后，把剩余内容里的所有空白（换行、回车、空格、Tab）全部剔除，剩下的即为
+/// base64 正文。这样即使私钥在多行传递时被折叠成一行（如 `-----BEGIN ... base64 ... -----END`），
+/// 也能正确提取。
 fn load_signing_key(path: &str) -> Result<ed25519_dalek::SigningKey, String> {
     let pem = std::fs::read_to_string(path).map_err(|e| format!("读取私钥失败：{e}"))?;
-    let pem = pem.trim();
 
-    // 提取 PEM body 的 base64。
-    let b64: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect();
-    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim())
+    // 去掉 PEM 头尾标记（可能被折叠在一行里，用字符串替换而非按行过滤）。
+    let mut body = pem.replace("-----BEGIN PRIVATE KEY-----", "");
+    body = body.replace("-----END PRIVATE KEY-----", "");
+    // 兼容 ed25519-dalek 的 RFC 8410 标签（`to_pkcs8_pem` 用 "PRIVATE KEY"，但个别工具
+    // 可能输出 "PRIVATE KEY" 变体；这里再兜底去掉常见的 "BEGIN/END" 标记）。
+    body = body.replace("-----BEGIN", "").replace("-----END", "");
+    body = body.replace("PRIVATE KEY", "");
+
+    // 去掉所有空白字符，剩下的就是 base64 正文。
+    let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64)
         .map_err(|e| format!("私钥 PEM base64 解码失败：{e}"))?;
 
     // Ed25519 私钥 seed（32 字节）位于 DER 末尾：
@@ -82,8 +97,8 @@ fn load_signing_key(path: &str) -> Result<ed25519_dalek::SigningKey, String> {
     //     OCTET STRING 长度 32）后紧跟的 32 字节即 seed。
     if der.len() < 34 {
         return Err(format!(
-            "私钥 DER 长度异常（解码后 {} 字节，应为 48 字节纯私钥）。\
-             若私钥粘贴时换行被折叠成一行，请确认 PEM 的 base64 正文与 BEGIN/END 行各自独立成行",
+            "私钥 DER 长度异常（解码后 {} 字节，应为 48 字节纯私钥）。请确认粘贴的是完整的 \
+             Ed25519 私钥 PEM（含 BEGIN/END 行）",
             der.len()
         ));
     }
@@ -102,7 +117,8 @@ fn load_signing_key(path: &str) -> Result<ed25519_dalek::SigningKey, String> {
     Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
 }
 
-fn cmd_genkey(out_dir: &str) -> Result<(), String> {
+/// 生成密钥对并写入 out_dir，返回（私钥路径，公钥路径，公钥 base64）。
+fn generate_and_write_keypair(out_dir: &str) -> Result<(String, String, String), String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("创建目录 {out_dir} 失败：{e}"))?;
     let (priv_pem, pub_b64) = resolve_core::generate_keypair()?;
 
@@ -112,12 +128,78 @@ fn cmd_genkey(out_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("写私钥失败：{e}"))?;
     std::fs::write(&pub_path, pub_b64.as_bytes())
         .map_err(|e| format!("写公钥失败：{e}"))?;
+    Ok((priv_path.display().to_string(), pub_path.display().to_string(), pub_b64))
+}
 
-    println!("私钥（服务端持有，切勿公开）: {}", priv_path.display());
-    println!("公钥裸 base64（客户端 PUBLIC_KEY）: {}", pub_path.display());
+fn cmd_genkey(out_dir: &str) -> Result<(), String> {
+    let (priv_path, pub_path, pub_b64) = generate_and_write_keypair(out_dir)?;
+
+    println!("私钥（服务端持有，切勿公开）: {priv_path}");
+    println!("公钥裸 base64（客户端 PUBLIC_KEY）: {pub_path}");
     println!();
     println!("公钥内容：");
     println!("{pub_b64}");
+    Ok(())
+}
+
+/// 一键：生成密钥对 + 立即用新私钥加密一组 URL。
+/// args 形如：[all, <url1>, <url2>, ..., (--out DIR), (--ttl N)]
+fn cmd_all(args: &[String]) -> Result<(), String> {
+    let ttl = parse_ttl(args)?;
+
+    // 解析 --out 与位置参数（URL 列表）。
+    let mut out = String::from(".");
+    let mut urls: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--ttl" {
+            i += 2;
+            continue;
+        } else if a == "--out" {
+            match args.get(i + 1) {
+                Some(v) => {
+                    out = v.clone();
+                    i += 2;
+                }
+                None => return Err("--out 需要一个目录路径".to_string()),
+            }
+        } else {
+            urls.push(a.clone());
+            i += 1;
+        }
+    }
+
+    if urls.is_empty() {
+        return Err("未提供要加密的 URL".to_string());
+    }
+
+    // 生成密钥对并写文件。
+    let (priv_path, pub_path, pub_b64) = generate_and_write_keypair(&out)?;
+
+    // 从刚写的私钥文件重新加载 SigningKey（复用同一套解析逻辑）。
+    let signing_key = load_signing_key(&priv_path)?;
+
+    // 逐个加密。
+    let mut ciphers: Vec<String> = Vec::new();
+    for url in &urls {
+        let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
+        ciphers.push(cipher);
+    }
+
+    println!("========== 密钥对 ==========");
+    println!("私钥: {priv_path}");
+    println!("公钥: {pub_path}");
+    println!();
+    println!("公钥内容（填 build-custom.yml 的 public_key）：");
+    println!("{pub_b64}");
+    println!();
+    println!("========== TXT 密文（共 {} 条，均可用于 DNS TXT） ==========", ciphers.len());
+    for (url, cipher) in urls.iter().zip(ciphers.iter()) {
+        println!("# {url}  (ttl={ttl}s)");
+        println!("{cipher}");
+        println!();
+    }
     Ok(())
 }
 
@@ -213,6 +295,7 @@ fn main() -> ExitCode {
             cmd_genkey(&out)
         }
         "encrypt" => cmd_encrypt(&args[1..]),
+        "all" => cmd_all(&args[1..]),
         _ => {
             print_usage();
             return ExitCode::from(2);

@@ -3,7 +3,7 @@ name: 动态解析工具（生成密钥对 / 生成 TXT 密文）
 # 手动触发：在 Actions 页选本 workflow → "Run workflow"，选要执行的操作。
 #
 # 【这个 workflow 是干什么的】
-#   为「app_url = 域名数组 + DNS TXT 动态解析」功能提供服务端工具，两个独立操作：
+#   为「app_url = 域名数组 + DNS TXT 动态解析」功能提供服务端工具，三个独立操作：
 #
 #   ① 生成密钥对（genkey）
 #       生成一把 Ed25519 密钥对：
@@ -12,9 +12,13 @@ name: 动态解析工具（生成密钥对 / 生成 TXT 密文）
 #       下载后：公钥随应用分发（打进去），私钥留着自己生成密文用。
 #
 #   ② 生成 TXT 密文（encrypt）
-#       用一把已有的私钥，对一个真实 URL 做 Ed25519 签名 + AES-256-GCM 加密，
-#       输出 base64 密文（单行），把它写入某个跳板域名的 DNS TXT 记录即可。
+#       用一把已有的私钥，对一个或多个真实 URL 做 Ed25519 签名 + AES-256-GCM 加密，
+#       输出一组 base64 密文（每行一条，均可写入某个跳板域名的 DNS TXT 记录）。
 #       支持指定有效期 ttl（秒）：>0 表示生成后 ttl 秒内有效；0 表示永不失效。
+#
+#   ③ 一键生成密钥对 + 密文（all）
+#       同时生成密钥对，并立即用它加密一组 URL，一次拿到「私钥 + 公钥 + 一组密文」，
+#       适合首次部署一次性备齐。
 #
 # 【与 Python 工具等价】本 workflow 用纯 Rust 的 `resolve-tool`（crates/resolve-tool，独立 crate，
 #   仅依赖 resolve-core，不编译 Tauri），与 tools/encrypt_url.py 完全互通（私钥格式、密文格式一致），
@@ -30,14 +34,15 @@ on:
         options:
           - genkey（生成密钥对）
           - encrypt（生成 TXT 密文）
+          - all（一键生成密钥对 + 密文）
       private_key:
         description: '【encrypt 用】Ed25519 私钥 PEM 全文（含 BEGIN/END 行）'
         required: false
       url:
-        description: '【encrypt 用】要加密的真实 URL（如 https://example.com）'
+        description: '【encrypt / all 用】要加密的真实 URL，多个用空格或换行分隔（如 https://a.com https://b.com）'
         required: false
       ttl:
-        description: '【encrypt 用】有效期秒数（0=永不失效；默认 172800=48h）'
+        description: '【encrypt / all 用】有效期秒数（0=永不失效；默认 172800=48h）'
         required: false
         default: '172800'
 
@@ -119,7 +124,7 @@ jobs:
           PRIVATE_KEY_JSON: ${{ toJSON(github.event.inputs.private_key) }}
         run: |
           if [ -z "$URL" ]; then
-            echo "::error::必须提供 url（要加密的真实 URL）"; exit 1
+            echo "::error::必须提供 url（要加密的真实 URL，可用空格分隔多个）"; exit 1
           fi
           if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
             echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
@@ -137,7 +142,7 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
         run: |
-          cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" "$URL" --ttl "$TTL" \
+          cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl "$TTL" \
             | tee "$RUNNER_TEMP/cipher.txt"
 
       - name: 导出密文 + 使用说明
@@ -146,18 +151,17 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
         run: |
-          CIPHER=$(grep -v '^#' "$RUNNER_TEMP/cipher.txt" | tr -d '[:space:]')
           {
-            echo "TXT 密文（写入 DNS TXT 记录的单行 base64）"
+            echo "TXT 密文（每条均可写入 DNS TXT 记录）"
             echo "======================================================"
             echo "URL : $URL"
             echo "ttl : $TTL 秒（0=永不失效）"
             echo ""
-            echo "密文："
-            echo "$CIPHER"
+            echo "密文（一组，逐条对应上面的 URL）："
+            grep -v '^#' "$RUNNER_TEMP/cipher.txt" | tr -d '[:space:]' | grep -v '^$'
             echo ""
             echo "【如何设置 DNS TXT】"
-            echo "  在你的跳板域名（如 txttest1.example.com）下新增一条 TXT 记录，值为上面这行密文。"
+            echo "  在你的跳板域名下新增 TXT 记录，值为上面任意一条密文。"
             echo "  注意：TXT 记录值要用双引号包起来（DNS 控制台一般会自动加）。"
             echo ""
             echo "【如何打包使用】"
@@ -173,4 +177,76 @@ jobs:
         with:
           name: resolve-cipher
           path: ${{ runner.temp }}/cipher-info.txt
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # ③ 一键生成密钥对 + 密文
+  # ---------------------------------------------------------------------------
+  all:
+    name: 一键生成密钥对 + 密文
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'all（一键生成密钥对 + 密文）' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: 校验输入
+        shell: bash
+        env:
+          URL: ${{ github.event.inputs.url }}
+          TTL: ${{ github.event.inputs.ttl }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "::error::必须提供 url（要加密的真实 URL，可用空格分隔多个）"; exit 1
+          fi
+          if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
+            echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
+          fi
+
+      - name: 一键生成密钥对 + 密文（resolve-tool all）
+        shell: bash
+        env:
+          URL: ${{ github.event.inputs.url }}
+          TTL: ${{ github.event.inputs.ttl }}
+        run: |
+          cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl "$TTL" \
+            | tee "$RUNNER_TEMP/resolve-all/result.txt"
+
+      - name: 附上使用说明
+        shell: bash
+        env:
+          URL: ${{ github.event.inputs.url }}
+          TTL: ${{ github.event.inputs.ttl }}
+        run: |
+          cat >> "$RUNNER_TEMP/resolve-all/README.txt" <<'EOF'
+          Ed25519 密钥对 + TXT 密文（一次性生成，用于 app_url 域名数组 + DNS TXT 动态解析）
+
+          文件说明：
+            private_key.pem   —— 私钥（服务端持有）。切勿公开/提交仓库。
+            public_key.b64    —— 公钥裸 base64。打包时填进 build-custom.yml 的 public_key。
+            result.txt        —— 生成的密文（一组多条，每条均可写入 DNS TXT 记录）。
+
+          使用流程：
+            1) 把 result.txt 里的某条密文写入某个跳板域名的 DNS TXT 记录；
+            2) 打包时 app_url 填该域名的数组形式，public_key 填 public_key.b64 的内容；
+            3) 运行时应用会查 TXT → 验签 + 解密 → 得到真实 URL。
+
+          安全提醒：
+            * public_key 公开无害；private_key 泄露 = 任何人可伪造密文劫持网址，请妥善备份。
+          EOF
+          {
+            echo ""
+            echo "本次输入：URL = $URL ，ttl = $TTL 秒（0=永不失效）"
+          } >> "$RUNNER_TEMP/resolve-all/README.txt"
+
+      - name: 上传密钥对 + 密文
+        uses: actions/upload-artifact@v7
+        with:
+          name: resolve-all
+          path: ${{ runner.temp }}/resolve-all/
           if-no-files-found: error
