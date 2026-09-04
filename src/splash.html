@@ -1,0 +1,45 @@
+<!doctype html>
+<!--
+  启动页（splash）：主窗口创建后立刻加载的本地页面。
+  · 经自定义协议 splash://localhost/ 提供，零网络请求，首帧即可见。
+  · 用途：覆盖「进程已启动 → 首个页面开始加载」这段原本完全没有反馈的空白等待
+    （域名解析、本地反向代理启动、WebView 初始化等都发生在这段时间里）。
+  · 真实地址准备好后，Rust 侧会导航到目标地址；新文档由 initialization_script 注入的
+    同一套加载层（overlay 模式）接续显示，因此观感上是一条连续的「加载中」，不会闪白。
+  · 两个占位符由 src/loading.rs 在运行时替换：
+      __WEB2APP_TITLE__      窗口标题（已做 HTML 转义）
+      __WEB2APP_LOADING_JS__ src/loading.js 全文
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>__WEB2APP_TITLE__</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      /* 抄底底色：脚本执行前的一两帧也保持与加载层一致的观感，避免白闪。 */
+      html {
+        background: #f7f8fa;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #14181f;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      window.__web2appLoadingMode = 'splash';
+    </script>
+    <script>
+      /*__WEB2APP_LOADING_JS__*/
+    </script>
+  </body>
+</html>

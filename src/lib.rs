@@ -20,6 +20,9 @@ pub mod resolve;
 mod settings;
 use settings::{Settings, SettingsState};
 
+// 启动过渡：本地启动页（splash 自定义协议）+ 注入到每个文档的加载层脚本。
+mod loading;
+
 // Windows 专属：直接调用 WebView2 原生 API 处理 Basic 鉴权与新窗口请求。
 // 注意：Tauri 的 on_web_resource_request 只支持 tauri:// 协议，对外部 https 网址不触发，
 // 所以鉴权必须走 WebView2 原生事件。
@@ -602,6 +605,157 @@ fn attach_webview_hooks(
     });
 }
 
+// =====================================================================
+//  启动过渡：后台准备真实地址 → 就绪后导航
+// ---------------------------------------------------------------------
+//  setup() 只负责「建窗 + 加载本地启动页」，真正的耗时操作（域名解析、启动本地反向代理）
+//  放到这里的后台线程：这样"加载中…"从窗口出现的第一帧就可见，而不是等准备全部做完。
+//  准备完成后回到主线程发起导航；失败则在启动页上展示错误与重试入口。
+// =====================================================================
+
+/// 窗口/WebView 的默认底色，与加载层（src/loading.js）的浅色底一致。
+/// 用于盖住 WebView 初始化与导航提交瞬间的白闪，使"启动页 → 加载层 → 正式页面"全程平滑。
+const SPLASH_BG: tauri::window::Color = tauri::window::Color(0xf7, 0xf8, 0xfa, 255);
+
+/// 启动期在后台线程准备出来的导航信息。
+struct Navigation {
+    /// WebView 最终要访问的地址（启用本地反向代理时形如 http://127.0.0.1:<port>）。
+    url: String,
+    /// Basic 鉴权账号密码（从网址 userinfo 中拆出，供 Windows WebView2 钩子兜底）。
+    user: String,
+    pass: String,
+    /// 是否走了本地反向代理（决定 Windows 上是否还需要注册原生鉴权钩子）。
+    use_local_proxy: bool,
+    /// 本地反向代理任务的终止句柄，存入 ProxyTask 以便退出或重试时优雅关闭。
+    proxy_abort: Option<tokio::task::AbortHandle>,
+}
+
+/// 是否启用【本地反向代理】。
+///
+/// Windows：需“启用代理且没有配置外部代理”（有外部代理时走 `--proxy-server`）。
+/// 移动端 / 其它平台：不支持 `--proxy-server`，因此只要“启用代理”就一律走本地反向代理。
+/// 由编译期常量决定，纯计算、零开销；setup（建窗参数）与 bootstrap（后台准备）共用。
+#[cfg(windows)]
+fn local_proxy_enabled() -> bool {
+    PROXY_ENABLED && build_proxy_args().is_none()
+}
+#[cfg(not(windows))]
+fn local_proxy_enabled() -> bool {
+    PROXY_ENABLED
+}
+
+/// 启动流程入口：后台准备 → 主线程导航 / 报错。
+///
+/// 允许被重复调用（启动页上的"重试"即 splash://localhost/retry → 这里），
+/// 因此进入时先终止上一轮残留的本地反向代理，避免端口泄漏。
+pub(crate) fn bootstrap(app: tauri::AppHandle) {
+    let use_local_proxy = local_proxy_enabled();
+    std::thread::spawn(move || {
+        // 重试场景：清掉上一轮可能仍在监听的代理任务。
+        let stale = app
+            .state::<ProxyTask>()
+            .0
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(abort) = stale {
+            abort.abort();
+        }
+
+        match prepare_navigation(use_local_proxy) {
+            Ok(nav) => {
+                let a = app.clone();
+                let _ = app.run_on_main_thread(move || navigate_main(&a, nav));
+            }
+            Err(msg) => {
+                eprintln!("[bootstrap] {msg}");
+                let a = app.clone();
+                // 启动页仍然显示着，直接把错误态推上去（含重试按钮），
+                // 不再像早期版本那样 std::process::exit —— 用户至少能看到发生了什么。
+                let _ = app.run_on_main_thread(move || loading::show_error(&a, "加载失败", &msg));
+            }
+        }
+    });
+}
+
+/// 解析真实地址并按需启动本地反向代理（在后台线程执行，可能耗时）。
+fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
+    // 若 APP_URL 是【域名数组】，则依次对这些域名做 DNS TXT 查询 + Ed25519 验签
+    // + AES-GCM 解密得到真实 URL；全部失败时返回可展示的错误文案。
+    let resolved_url: String = if let Some(domains) = resolve::parse_domains(APP_URL) {
+        let domains: Vec<String> = domains
+            .into_iter()
+            .map(|d| resolve::normalize_domain(&d))
+            .collect();
+        resolve::resolve_url_from_domains(&domains, PUBLIC_KEY)
+            .map_err(|_| "服务器连接失败，请检查网络后重试".to_string())?
+    } else {
+        APP_URL.to_string()
+    };
+
+    let parsed = Url::parse(&resolved_url)
+        .map_err(|e| format!("应用配置的网址不合法（{e}）：{resolved_url}"))?;
+
+    let (url, proxy_abort) = if use_local_proxy {
+        // 自身实现的本地反向代理：给每个请求（含 WebSocket 握手）注入 Authorization。
+        let (u, abort) = tauri::async_runtime::block_on(proxy::start_proxy(&parsed))
+            .map_err(|e| format!("本地代理启动失败：{e}"))?;
+        (u, Some(abort))
+    } else {
+        // 直连 / 外部代理：导航到去掉 userinfo 的上游地址（鉴权由原生事件或外部代理注入）。
+        (strip_userinfo(&parsed), None)
+    };
+
+    Ok(Navigation {
+        url,
+        user: parsed.username().to_string(),
+        pass: parsed.password().unwrap_or("").to_string(),
+        use_local_proxy,
+        proxy_abort,
+    })
+}
+
+/// 在主线程发起首次导航（准备工作已在后台线程完成）。
+fn navigate_main(app: &tauri::AppHandle, nav: Navigation) {
+    // 代理句柄先入库，保证退出 / 重试时能优雅终止。
+    if let Some(abort) = nav.proxy_abort {
+        if let Ok(mut g) = app.state::<ProxyTask>().0.lock() {
+            *g = Some(abort);
+        }
+    }
+
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    // Windows：必须先注册 WebView2 钩子（新窗口拦截 + Basic 鉴权）再导航，否则窗口首批
+    // 请求会漏掉 Authorization 注入；attach_webview_hooks 内部在钩子注册完成后才发起导航。
+    // 导航产生的新文档由加载层（overlay 模式）接力覆盖空白期，内容就绪后淡出。
+    #[cfg(windows)]
+    attach_webview_hooks(
+        app.clone(),
+        &window,
+        nav.user,
+        nav.pass,
+        nav.url,
+        nav.use_local_proxy,
+    );
+
+    // 其它平台（Android 等）：没有 WebView2，直接导航；鉴权统一由本地反向代理注入。
+    #[cfg(not(windows))]
+    {
+        let _ = (&nav.user, &nav.pass, &nav.use_local_proxy);
+        match Url::parse(&nav.url) {
+            Ok(url) => {
+                if let Err(e) = window.navigate(url) {
+                    loading::show_error(app, "加载失败", &format!("无法打开页面：{e}"));
+                }
+            }
+            Err(_) => loading::show_error(app, "加载失败", "应用配置的地址不合法"),
+        }
+    }
+}
+
 /// 托管本地反向代理任务的 AbortHandle，便于应用退出时优雅终止它（释放 127.0.0.1 监听端口）。
 struct ProxyTask(std::sync::Mutex<Option<tokio::task::AbortHandle>>);
 
@@ -729,6 +883,10 @@ mod window_state {
 pub fn run() {
     // 桌面端注册全局快捷键插件；移动端没有该能力，跳过。
     let builder = tauri::Builder::default()
+        // 本地启动页：splash://localhost/。主窗口创建时立刻加载它（零网络、首帧即显示
+        // "加载中…"），把域名解析 / 本地反向代理启动等耗时操作挪到后台线程（见 bootstrap），
+        // 消除"进程已启动但窗口还没出来"这段完全无反馈的等待。
+        .register_uri_scheme_protocol(loading::SPLASH_SCHEME, loading::handle_splash)
         .register_uri_scheme_protocol("settings", |_ctx, _req| {
             // 编译期把 dist/settings.html 内嵌，经自定义协议提供设置页。
             // 这样不依赖 devUrl（tauri dev 会把 App 相对路径代理到 devUrl，
@@ -796,30 +954,6 @@ pub fn run() {
         let initial_settings = settings::load_settings(app.handle());
         *app.state::<SettingsState>().0.lock().unwrap() = initial_settings.clone();
 
-        // 解析默认网址，拆出账号密码（用于 Basic 鉴权）。
-        // 若 APP_URL 是【域名数组】（app_url 为数组时），则运行时依次对这些域名做 DNS TXT
-        // 查询 + Ed25519 验签 + AES-GCM 解密，得到真实 URL；全部失败则报"服务器连接失败"。
-        let resolved_url: String = if let Some(domains) = resolve::parse_domains(APP_URL) {
-            let domains: Vec<String> = domains
-                .into_iter()
-                .map(|d| resolve::normalize_domain(&d))
-                .collect();
-            resolve::resolve_url_from_domains(&domains, PUBLIC_KEY).unwrap_or_else(|_| {
-                // 全部域名解析/解密失败：直接退出进程并报错，避免弹出一个打不开的窗口。
-                eprintln!("[resolve] 服务器连接失败（所有域名均无法解析出真实地址）");
-                std::process::exit(1);
-            })
-        } else {
-            APP_URL.to_string()
-        };
-
-        let parsed = Url::parse(&resolved_url)
-            .unwrap_or_else(|e| panic!("APP_URL 不是合法网址（{e}）：{resolved_url}"));
-
-        // 去掉 userinfo 的“干净”上游地址，用于【直连 / 外部代理】两种场景的导航 URL
-        // （鉴权交给 WebView2 原生事件兜底，见 attach_webview_hooks）。
-        let clean_url = strip_userinfo(&parsed);
-
         // ============ 代理模式决策（由 PROXY_ENABLED / PROXY_HTTP / PROXY_HTTPS 共同决定）============
         //  PROXY_ENABLED = false
         //      → 不启用任何代理，WebView 直接导航到真实上游地址。
@@ -837,45 +971,42 @@ pub fn run() {
             None
         };
 
-        // 是否启用本地反向代理：Windows 上需“启用代理且无外部代理配置”；移动端只要“启用代理”即可。
-        #[cfg(windows)]
-        let use_local_proxy = PROXY_ENABLED && browser_args.is_none();
-        #[cfg(not(windows))]
-        let use_local_proxy = PROXY_ENABLED;
 
-        let mut proxy_abort: Option<tokio::task::AbortHandle> = None;
-        let target_url: String = if use_local_proxy {
-            // 自身实现的本地反向代理：给每个请求（含 WebSocket 握手）注入 Authorization。
-            let (url, abort) = tauri::async_runtime::block_on(proxy::start_proxy(&parsed))?;
-            proxy_abort = Some(abort);
-            url
-        } else {
-            // 直连 / 外部代理：直接导航到去掉 userinfo 的上游地址（鉴权由原生事件或代理注入）。
-            clean_url
-        };
-
-        // 把代理任务的 AbortHandle 存入托管状态，供退出时优雅终止。
-        if let Some(abort) = proxy_abort {
-            app.state::<ProxyTask>().0.lock().unwrap().replace(abort);
-        }
+        // ⚠️ 解析真实地址、启动本地反向代理等【耗时操作不在这里做】——它们被挪到后台线程的
+        //    bootstrap() 里（见本函数末尾）。原因：这段工作可能包含 DNS 查询，耗时不可控，
+        //    而在此之前主窗口连影子都没有，用户只会看到"点了图标却毫无反应"。
+        //    现在的顺序是：先建窗 → 立刻显示启动页"加载中…" → 后台准备 → 就绪后导航。
 
         // ---------- 创建主窗口 ----------
-        // Windows：先用 about:blank 建窗，等所有 WebView2 钩子注册完成后再手动 Navigate 到目标地址，
-        //          避免窗口 build 时抢先发出的首批请求漏掉 Authorization 注入（确定性，消除竞态）。
-        // 其他平台（Android 等）：没有 WebView2，直接把窗口导航到目标地址（本地代理或上游）。
+        // 首帧加载的是本地启动页 splash://localhost/（零网络请求），而不是目标网址：
+        //   ① 窗口一出现就有"加载中…"的明确反馈，不会出现空白等待；
+        //   ② 目标地址就绪后由 bootstrap 导航过去，期间启动页持续可见，观感连续；
+        //   ③ 真实页面的空白期由 initialization_script 注入的加载层（overlay 模式）接力覆盖。
+        // 两个平台统一走这条路径，行为一致。
+        let mut wb = WebviewWindowBuilder::new(
+            app,
+            "main",
+            WebviewUrl::CustomProtocol(loading::splash_url()),
+        )
+        .title(WINDOW_TITLE)
+        .resizable(true)
+        .inner_size(1100.0, 650.0)
+        .min_inner_size(400.0, 300.0)
+        // 窗口/WebView 的默认底色取加载层的底色：盖住 WebView 初始化与导航提交瞬间的白闪，
+        // 让"启动页 → 加载层 → 正式页面"全程不出现突兀的画面跳变。
+        .background_color(SPLASH_BG)
+        // 加载层：在每个新文档的 document-created 阶段铺满视口，页面渲染出内容后淡出。
+        .initialization_script(loading::OVERLAY_SCRIPT)
+        // 注入打包配置 JSON 里的 `extra`：以 `window.web2appExtra = <JSON>;` 定义在页面
+        // 全局，前端 JS 在脚本执行时直接读取（在每次文档加载前注入，故早于页面业务脚本）。
+        // EXTRA 来自合法 JSON（config.example 的 extra 对象），内联即为合法 JS 表达式。
+        .initialization_script(format!("window.web2appExtra = {};", EXTRA));
+
         #[cfg(windows)]
-        let window = {
-            let mut b = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::External(Url::parse("about:blank").unwrap()),
-            )
-            .title(WINDOW_TITLE)
-            .resizable(true)
-            .inner_size(1100.0, 650.0)
-            .min_inner_size(400.0, 300.0)
-            // ⚠️ 必须禁用 Tauri 默认的拖放 handler（Windows）。
-            //    Tauri/wry 默认会为窗口装一个 OLE drop target 并 SetAllowExternalDrop(false)，
+        {
+            wb = wb
+                // ⚠️ 必须禁用 Tauri 默认的拖放 handler（Windows）。
+                //    Tauri/wry 默认会为窗口装一个 OLE drop target 并 SetAllowExternalDrop(false)，
             //    副作用有二：
             //      ① 从系统拖入的文件被 wry 拦截、只回传给 Rust 路径，页面永远收不到原生
             //         DOM drop（dataTransfer.files 为空）→ 标准网页拖拽上传区不触发上传。
@@ -891,72 +1022,45 @@ pub fn run() {
             // WebView2 即便不禁用 OLE 也可能吞掉 dragover/drop，polyfill 用鼠标事件合成完整
             // dragstart/dragenter/dragover/dragleave/drop/dragend 事件序列。initialization_script
             // 会在每次导航（含初始文档）前注入，详见文件顶部 DND_POLYFILL 注释。
-            .initialization_script(DND_POLYFILL)
-            // 注入打包配置 JSON 里的 `extra`：以 `window.web2appExtra = <JSON>;` 定义在页面
-            // 全局，前端 JS 在脚本执行时直接读取（在每次文档加载前注入，故早于页面业务脚本）。
-            // EXTRA 来自合法 JSON（config.example 的 extra 对象），内联即为合法 JS 表达式。
-            .initialization_script(format!("window.web2appExtra = {};", EXTRA));
+            .initialization_script(DND_POLYFILL);
+        }
 
-            if let Some(proxy_args) = &browser_args {
-                b = b.additional_browser_args(proxy_args.as_str());
+        #[cfg(windows)]
+        if let Some(proxy_args) = &browser_args {
+            wb = wb.additional_browser_args(proxy_args.as_str());
+        }
+
+        // 数据目录：true = WebView2 系统默认（紧挨 exe，安装版可能因无写权限而失败）；
+        // false = %LOCALAPPDATA%\{自定义 app_name}（始终可写，推荐）。
+        // Tauri 默认按 tauri.conf.json 的 identifier（com.example.web2app）生成目录末段，
+        // 这里改用清洗后的自定义 app_name，使不同 app 的存储目录互不干扰且直观。
+        // 用 if-let 而非 `?`：app_local_data_dir 在极少数环境可能返回 Err，直接 `?` 会让整个
+        // 启动失败崩溃；拿不到就退回到 WebView2 默认位置，保证能启动。
+        #[cfg(windows)]
+        if !DATA_DIR_DEFAULT {
+            if let Ok(dir) = app.path().app_local_data_dir() {
+                // dir 形如 %LOCALAPPDATA%/com.example.web2app，用自定义 app_name 替换末段
+                let base = dir.parent().unwrap_or(&dir);
+                let new_dir = base.join(sanitize_dir_name(APP_NAME));
+                wb = wb.data_directory(new_dir);
             }
-            // 数据目录：true = WebView2 系统默认（紧挨 exe，安装版可能因无写权限而失败）；
-            // false = %LOCALAPPDATA%\{自定义 app_name}（始终可写，推荐）。
-            // Tauri 默认按 tauri.conf.json 的 identifier（com.example.web2app）生成目录末段，
-            // 这里改用清洗后的自定义 app_name，使不同 app 的存储目录互不干扰且直观。
-            // 用 if-let 而非 `?`：app_local_data_dir 在极少数环境可能返回 Err，直接 `?` 会让整个
-            // 启动失败崩溃；拿不到就退回到 WebView2 默认位置，保证能启动。
-            if !DATA_DIR_DEFAULT {
-                if let Ok(dir) = app.path().app_local_data_dir() {
-                    // dir 形如 %LOCALAPPDATA%/com.example.web2app，用自定义 app_name 替换末段
-                    let base = dir.parent().unwrap_or(&dir);
-                    let new_dir = base.join(sanitize_dir_name(APP_NAME));
-                    b = b.data_directory(new_dir);
-                }
-            }
+        }
 
-            let w = b.build().expect("创建主窗口失败");
+        let window = wb.build().expect("创建主窗口失败");
 
-            // 应用上次保存的窗口大小/位置（若有）。仅桌面端。
-            #[cfg(not(target_os = "android"))]
-            if let Some(st) = window_state::load(app.handle()) {
-                window_state::apply(&w, &st);
-            }
-
-            // 注册 WebView2 原生事件（新窗口拦截 + Basic 鉴权），函数内部会导航到本地代理 URL。
-            let auth_user = parsed.username().to_string();
-            let auth_pass = parsed.password().unwrap_or("").to_string();
-            attach_webview_hooks(
-                app.handle().clone(),
-                &w,
-                auth_user,
-                auth_pass,
-                target_url,
-                use_local_proxy,
-            );
-            w
-        };
-
-        #[cfg(not(windows))]
-        let window = WebviewWindowBuilder::new(
-            app,
-            "main",
-            WebviewUrl::External(Url::parse(&target_url).unwrap()),
-        )
-        .title(WINDOW_TITLE)
-        .resizable(true)
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(400.0, 300.0)
-        .build()
-        .expect("创建主窗口失败");
-
-        let _ = &window; // 部分平台窗口创建后即无需再引用，抑制未使用告警
-
-        // 应用上次保存的窗口大小/位置（桌面端非 Windows：Linux/macOS；Windows 已在上面块内应用）。
-        #[cfg(all(not(windows), not(target_os = "android")))]
+        // 应用上次保存的窗口大小/位置（若有）。仅桌面端。
+        #[cfg(not(target_os = "android"))]
         if let Some(st) = window_state::load(app.handle()) {
             window_state::apply(&window, &st);
         }
+
+        // 立即显示：此刻加载的是本地启动页，"加载中…"已经呈现在用户眼前。
+        // 接下来所有耗时准备（域名解析、启动本地反向代理、注册 WebView2 钩子、首次导航）
+        // 都发生在这层提示之下，用户不会再经历无反馈的等待。
+        let _ = window.show();
+
+        // 后台线程准备真实地址，就绪后导航过去（失败则在启动页上给出错误 + 重试入口）。
+        bootstrap(app.handle().clone());
 
         // ---------- 系统托盘与全局快捷键（仅桌面端；Android 无）----------
         #[cfg(not(target_os = "android"))]
