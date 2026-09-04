@@ -3654,6 +3654,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
 
 [[package]]
+name = "resolve-core"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "hkdf",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "resolve-tool"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "ed25519-dalek",
+ "resolve-core",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5407,21 +5430,17 @@ dependencies = [
 name = "web2app"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "axum",
  "base64 0.23.1",
  "bytes",
- "ed25519-dalek",
  "futures-util",
  "hickory-resolver",
- "hkdf",
  "http",
  "http-body-util",
- "rand 0.8.8",
  "reqwest 0.12.28",
+ "resolve-core",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",

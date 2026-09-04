@@ -4,8 +4,11 @@
 //!   1. 密钥对（Ed25519 私钥 PEM + 公钥裸 base64）
 //!   2. TXT 密文（私钥签名 + AES-256-GCM 加密，写入 DNS TXT）
 //!
-//! 与客户端 `src/resolve.rs` 的解密逻辑严格对称；与 `tools/encrypt_url.py` 等价，
+//! 与客户端 `resolve-core` 的解密逻辑严格对称；与 `tools/encrypt_url.py` 等价，
 //! 提供纯 Rust 版本，方便在 CI（无需 Python cryptography 依赖）里使用。
+//!
+//! 本 crate 只依赖 `resolve-core`（纯 Rust），**不依赖 Tauri**，因此可在 ubuntu-latest
+//! 等没有 glib-2.0 开发库的 Linux runner 上直接 `cargo run` 编译，无需装系统库。
 //!
 //! 用法：
 //!   resolve-tool genkey [--out DIR]             生成密钥对，写 private_key.pem + public_key.b64
@@ -97,7 +100,7 @@ fn load_signing_key(path: &str) -> Result<ed25519_dalek::SigningKey, String> {
 
 fn cmd_genkey(out_dir: &str) -> Result<(), String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("创建目录 {out_dir} 失败：{e}"))?;
-    let (priv_pem, pub_b64) = web2app_lib::resolve::generate_keypair()?;
+    let (priv_pem, pub_b64) = resolve_core::generate_keypair()?;
 
     let priv_path = std::path::Path::new(out_dir).join("private_key.pem");
     let pub_path = std::path::Path::new(out_dir).join("public_key.b64");
@@ -166,7 +169,7 @@ fn cmd_encrypt(args: &[String]) -> Result<(), String> {
     }
 
     for url in &urls {
-        let cipher = web2app_lib::resolve::sign_and_encrypt(&signing_key, url, ttl, None)?;
+        let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
         println!("# {url}  (ttl={ttl}s)");
         println!("{cipher}");
         println!();

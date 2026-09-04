@@ -16,8 +16,9 @@ name: 动态解析工具（生成密钥对 / 生成 TXT 密文）
 #       输出 base64 密文（单行），把它写入某个跳板域名的 DNS TXT 记录即可。
 #       支持指定有效期 ttl（秒）：>0 表示生成后 ttl 秒内有效；0 表示永不失效。
 #
-# 【与 Python 工具等价】本 workflow 用纯 Rust 的 `resolve-tool`（src/bin/resolve-tool.rs），
-#   与 tools/encrypt_url.py 完全互通（私钥格式、密文格式一致），无需 Python cryptography 依赖。
+# 【与 Python 工具等价】本 workflow 用纯 Rust 的 `resolve-tool`（crates/resolve-tool，独立 crate，
+#   仅依赖 resolve-core，不编译 Tauri），与 tools/encrypt_url.py 完全互通（私钥格式、密文格式一致），
+#   无需 Python cryptography 依赖。
 
 on:
   workflow_dispatch:
@@ -60,7 +61,7 @@ jobs:
       - name: 生成密钥对（resolve-tool genkey）
         shell: bash
         run: |
-          cargo run --bin resolve-tool -- genkey --out "$RUNNER_TEMP/resolve-keys"
+          cargo run -p resolve-tool -- genkey --out "$RUNNER_TEMP/resolve-keys"
 
       - name: 附上使用说明
         shell: bash
@@ -133,7 +134,7 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
         run: |
-          cargo run --bin resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" "$URL" --ttl "$TTL" \
+          cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" "$URL" --ttl "$TTL" \
             | tee "$RUNNER_TEMP/cipher.txt"
 
       - name: 导出密文 + 使用说明

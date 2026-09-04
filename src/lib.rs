@@ -983,7 +983,7 @@ pub fn run() {
         //   ② 目标地址就绪后由 bootstrap 导航过去，期间启动页持续可见，观感连续；
         //   ③ 真实页面的空白期由 initialization_script 注入的加载层（overlay 模式）接力覆盖。
         // 两个平台统一走这条路径，行为一致。
-        let mut wb = WebviewWindowBuilder::new(
+        let wb = WebviewWindowBuilder::new(
             app,
             "main",
             WebviewUrl::CustomProtocol(loading::splash_url()),
@@ -1002,11 +1002,11 @@ pub fn run() {
         // EXTRA 来自合法 JSON（config.example 的 extra 对象），内联即为合法 JS 表达式。
         .initialization_script(format!("window.web2appExtra = {};", EXTRA));
 
+        // Windows 专属链：禁用拖放 handler + 注入拖拽 polyfill（shadowing 重绑定，避免 unused_mut）。
         #[cfg(windows)]
-        {
-            wb = wb
-                // ⚠️ 必须禁用 Tauri 默认的拖放 handler（Windows）。
-                //    Tauri/wry 默认会为窗口装一个 OLE drop target 并 SetAllowExternalDrop(false)，
+        let wb = wb
+            // ⚠️ 必须禁用 Tauri 默认的拖放 handler（Windows）。
+            //    Tauri/wry 默认会为窗口装一个 OLE drop target 并 SetAllowExternalDrop(false)，
             //    副作用有二：
             //      ① 从系统拖入的文件被 wry 拦截、只回传给 Rust 路径，页面永远收不到原生
             //         DOM drop（dataTransfer.files 为空）→ 标准网页拖拽上传区不触发上传。
@@ -1023,12 +1023,12 @@ pub fn run() {
             // dragstart/dragenter/dragover/dragleave/drop/dragend 事件序列。initialization_script
             // 会在每次导航（含初始文档）前注入，详见文件顶部 DND_POLYFILL 注释。
             .initialization_script(DND_POLYFILL);
-        }
 
         #[cfg(windows)]
-        if let Some(proxy_args) = &browser_args {
-            wb = wb.additional_browser_args(proxy_args.as_str());
-        }
+        let wb = match &browser_args {
+            Some(proxy_args) => wb.additional_browser_args(proxy_args.as_str()),
+            None => wb,
+        };
 
         // 数据目录：true = WebView2 系统默认（紧挨 exe，安装版可能因无写权限而失败）；
         // false = %LOCALAPPDATA%\{自定义 app_name}（始终可写，推荐）。
@@ -1037,14 +1037,19 @@ pub fn run() {
         // 用 if-let 而非 `?`：app_local_data_dir 在极少数环境可能返回 Err，直接 `?` 会让整个
         // 启动失败崩溃；拿不到就退回到 WebView2 默认位置，保证能启动。
         #[cfg(windows)]
-        if !DATA_DIR_DEFAULT {
-            if let Ok(dir) = app.path().app_local_data_dir() {
+        let wb = if !DATA_DIR_DEFAULT {
+            match app.path().app_local_data_dir() {
                 // dir 形如 %LOCALAPPDATA%/com.example.web2app，用自定义 app_name 替换末段
-                let base = dir.parent().unwrap_or(&dir);
-                let new_dir = base.join(sanitize_dir_name(APP_NAME));
-                wb = wb.data_directory(new_dir);
+                Ok(dir) => {
+                    let base = dir.parent().unwrap_or(&dir);
+                    let new_dir = base.join(sanitize_dir_name(APP_NAME));
+                    wb.data_directory(new_dir)
+                }
+                Err(_) => wb,
             }
-        }
+        } else {
+            wb
+        };
 
         let window = wb.build().expect("创建主窗口失败");
 

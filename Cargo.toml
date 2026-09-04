@@ -5,6 +5,11 @@ description = "web2app — a desktop/mobile webview app (Rust + Tauri) that embe
 edition = "2021"
 rust-version = "1.70"
 
+# 多 crate 工作区：把纯加密核心（resolve-core）与命令行工具（resolve-tool）拆出，
+# 使 resolve-tool 不必编译 Tauri 全量依赖（避免 Linux CI 上拉入 glib-sys 等系统库）。
+[workspace]
+members = ["crates/resolve-core", "crates/resolve-tool"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -14,17 +19,16 @@ tauri-build = { version = "2", features = [] }
 name = "web2app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# 独立命令行工具：服务端用私钥生成 TXT 密文 / 密钥对（与库共享 resolve 逻辑）。
-[[bin]]
-name = "resolve-tool"
-path = "src/bin/resolve-tool.rs"
-
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 url = "2"
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# 纯加密核心（Ed25519 签名 + AES-256-GCM），与 resolve-tool 共用。拆成独立 crate 后，
+# resolve-tool 只需链接它即可，不必编译本 crate 的 Tauri 全量依赖。
+resolve-core = { path = "crates/resolve-core" }
 
 # 本地反向代理（HTTP + WebSocket）所需依赖，用于绕过 WebView2 不对 WebSocket 触发
 # WebResourceRequested / BasicAuthenticationRequested 的限制。proxy 模块是纯 Rust、零平台依赖，
@@ -37,17 +41,8 @@ http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
 
 # 动态解析真实 URL（app_url 为域名数组时）：DNS TXT 查询 + Ed25519 验签 + AEAD 解密。
-# 均为纯 Rust、零平台依赖，跨平台（Windows / Android）可用。
+# DNS 查询在本 crate（依赖 tauri 异步运行时），加解密/验签逻辑在 resolve-core（纯 Rust）。
 hickory-resolver = "0.26"
-# Ed25519 签名验签（防篡改）：客户端仅持公钥验签，服务端持私钥签名。
-# 开启 rand_core（生成密钥对时 SigningKey::generate 需要）。
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-# AES-256-GCM 认证加密（隐藏网址）：用 HKDF-SHA256 从固定 Secret + Nonce 派生密钥。
-aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
-# 服务端生成密文 / 密钥对时用的随机数（Nonce、盐、Ed25519 密钥对）。
-rand = "0.8"
 
 # 仅 Windows：调用 WebView2 原生 API 处理 Basic 鉴权。
 # 版本必须与 Tauri 2.11.x 内部使用的 wry 一致（webview2-com 0.38 / windows 0.61），

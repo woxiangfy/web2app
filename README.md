@@ -294,7 +294,7 @@ cargo test --all
 
 要点：
 
-- **数据格式**（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端 `src/resolve.rs` 一致）：
+- **数据格式**（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端 `resolve-core`（`crates/resolve-core`）一致）：
   `TXT = base64( Nonce(12B) ‖ AES-256-GCM(HKDF(Secret,Nonce), Payload ‖ Ed25519签名) )`，
   其中 `Payload = URL ‖ 0x00 ‖ 时间戳ts(8B) ‖ 有效期ttl(8B) ‖ 0x00 ‖ 随机盐(8B)`。
 - **有效期（ttl）由服务端生成时决定**：`ttl` 是随密文下发的有效期秒数，
@@ -308,10 +308,10 @@ cargo test --all
 
 生成密钥对 + 加密 URL，有两种等价方式（私钥格式与密文格式完全互通）：
 
-1. **纯 Rust 工具 `resolve-tool`**（推荐，无需 Python 依赖）：
+1. **纯 Rust 工具 `resolve-tool`**（推荐，无需 Python 依赖；独立 crate，不编译 Tauri）：
    ```bash
-   cargo run --bin resolve-tool -- genkey --out keys   # 生成私钥(服务端持有) + 公钥(客户端)
-   cargo run --bin resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0
+   cargo run -p resolve-tool -- genkey --out keys   # 生成私钥(服务端持有) + 公钥(客户端)
+   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0
    ```
    `--ttl 秒`：0 = 永不失效；正数 = 生成后 N 秒内有效（默认 172800 = 48h）。
 

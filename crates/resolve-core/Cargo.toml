@@ -1,0 +1,16 @@
+[package]
+name = "resolve-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "纯 Rust 的 Ed25519 签名 + AES-256-GCM 加解密核心（无 Tauri / 无平台依赖），供主 crate 与 resolve-tool 共用"
+
+[dependencies]
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"

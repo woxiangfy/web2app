@@ -1,0 +1,15 @@
+[package]
+name = "resolve-tool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "动态解析服务端命令行工具：生成 Ed25519 密钥对 / 生成 DNS TXT 密文（纯 Rust，无 Tauri 依赖）"
+
+[[bin]]
+name = "resolve-tool"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.23"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+resolve-core = { path = "../resolve-core" }
