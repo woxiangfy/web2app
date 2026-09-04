@@ -81,7 +81,11 @@ fn load_signing_key(path: &str) -> Result<ed25519_dalek::SigningKey, String> {
     //     从内层 OCTET STRING 开始，但公钥跟在后面。统一做法：定位 `04 20`（内层
     //     OCTET STRING 长度 32）后紧跟的 32 字节即 seed。
     if der.len() < 34 {
-        return Err("私钥 DER 长度异常".to_string());
+        return Err(format!(
+            "私钥 DER 长度异常（解码后 {} 字节，应为 48 字节纯私钥）。\
+             若私钥粘贴时换行被折叠成一行，请确认 PEM 的 base64 正文与 BEGIN/END 行各自独立成行",
+            der.len()
+        ));
     }
     let mut seed_pos = None;
     for i in 0..der.len().saturating_sub(1) {

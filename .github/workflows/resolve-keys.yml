@@ -108,25 +108,28 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: 校验输入
+      - name: 校验输入 + 写入私钥
         shell: bash
         env:
-          PRIVATE_KEY: ${{ github.event.inputs.private_key }}
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          # 关键：用 toJSON 把多行私钥编码成 JSON 字符串（换行→\n 字面量）。
+          # 若直接 `env: PRIVATE_KEY: ${{ github.event.inputs.private_key }}`，多行值会被
+          # YAML 折叠（换行→空格），PEM 压成一行 → base64 body 被过滤 → DER 长度 0 报错。
+          PRIVATE_KEY_JSON: ${{ toJSON(github.event.inputs.private_key) }}
         run: |
-          if [ -z "$PRIVATE_KEY" ]; then
-            echo "::error::必须提供 private_key（Ed25519 私钥 PEM 全文）"; exit 1
-          fi
           if [ -z "$URL" ]; then
             echo "::error::必须提供 url（要加密的真实 URL）"; exit 1
           fi
-          # ttl 合法性
           if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
             echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
           fi
-          # 私钥写到临时文件（不打印到日志）
-          printf '%s\n' "$PRIVATE_KEY" > "$RUNNER_TEMP/private_key.pem"
+          # 从 JSON 字符串还原私钥的真实换行，写入临时文件（不打印到日志）。
+          printf '%s' "$PRIVATE_KEY_JSON" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin))' \
+            > "$RUNNER_TEMP/private_key.pem"
+          if ! grep -q "BEGIN PRIVATE KEY" "$RUNNER_TEMP/private_key.pem"; then
+            echo "::error::private_key 缺少 BEGIN PRIVATE KEY 头（可能为空或格式错误）"; exit 1
+          fi
 
       - name: 生成 TXT 密文（resolve-tool encrypt）
         shell: bash
