@@ -11,16 +11,19 @@ use hickory_resolver::Resolver;
 // 从 resolve-core 复用纯加密核心，并向上层 re-export 关键 API。
 pub use resolve_core::{
     decrypt_txt, generate_keypair, normalize_domain, parse_domains, parse_public_key,
-    sign_and_encrypt, RESOLVE_FAILED,
+    sign_and_encrypt, RESOLVE_FAILED, VerifyingKey,
 };
 
-/// 查询一个域名的 TXT 记录（拼接所有字符串段，返回首个非空值）。
+/// 查询一个域名的【所有】 TXT 记录（每条拼接其字符串段），返回全部非空值。
+///
+/// 一个域名可挂多条 TXT（对应「同一 URL 的多份密文」），客户端应对每条都尝试解密，
+/// 任一成功即可。故这里返回 Vec 而非单条。
 ///
 /// 走系统默认 DNS。hickory-resolver 0.26 起移除了同步便捷方法 `Resolver::from_system_conf`，
 /// 改为：`system_conf::read_system_conf()` 读系统配置 → `Resolver::builder_with_config` 构建
 /// （泛型 `Resolver<P>`，provider 用 `TokioRuntimeProvider`）→ `txt_lookup` 是 async，用
 /// `tauri::async_runtime::block_on` 驱动。
-fn query_txt(domain: &str) -> Result<String, String> {
+fn query_txt_all(domain: &str) -> Result<Vec<String>, String> {
     // 读取系统 DNS 配置（/etc/resolv.conf 或 Windows 注册表）。
     let (config, _opts) =
         read_system_conf().map_err(|e| format!("读取系统 DNS 配置失败：{e}"))?;
@@ -33,7 +36,8 @@ fn query_txt(domain: &str) -> Result<String, String> {
     let lookup = tauri::async_runtime::block_on(resolver.txt_lookup(domain))
         .map_err(|e| format!("查询 {domain} TXT 记录失败：{e}"))?;
 
-    // 遍历 answers 里的每条记录，拼接 TXT 的所有字符串段；返回第一个非空结果。
+    // 遍历 answers 里的每条记录，拼接 TXT 的所有字符串段；收集全部非空结果。
+    let mut results: Vec<String> = Vec::new();
     for record in lookup.answers() {
         if let hickory_resolver::proto::rr::RData::TXT(txt) = &record.data {
             let mut joined = String::new();
@@ -47,15 +51,43 @@ fn query_txt(domain: &str) -> Result<String, String> {
             }
             let joined = joined.trim().to_string();
             if !joined.is_empty() {
-                return Ok(joined);
+                results.push(joined);
             }
         }
     }
-    Err(format!("域名 {domain} 无 TXT 记录"))
+    if results.is_empty() {
+        return Err(format!("域名 {domain} 无 TXT 记录"));
+    }
+    Ok(results)
+}
+
+/// 对一组 TXT 密文逐条解密 + 验签，返回第一条能解出【非空 URL】的结果。
+///
+/// 纯函数（不碰 DNS），便于单测。任一成功即返回，全部失败返回 `Err`。
+fn decrypt_first_valid_txt(
+    public_key: &resolve_core::VerifyingKey,
+    txts: &[String],
+) -> Result<String, String> {
+    for txt in txts {
+        match decrypt_txt(public_key, txt) {
+            Ok(url) => {
+                let url = url.trim().to_string();
+                if !url.is_empty() {
+                    return Ok(url);
+                }
+            }
+            Err(_e) => {
+                // 单条 TXT 解密/验签失败（别的公钥签的、已过期、被篡改）——继续下一条。
+            }
+        }
+    }
+    Err("所有 TXT 记录均无法解出有效 URL".to_string())
 }
 
 /// 依次尝试一组域名：查询 TXT → 解密 + 验签 → 得到真实 URL。
-/// 任一环节失败则尝试下一个域名；全部失败返回 `RESOLVE_FAILED`。
+///
+/// 对每个域名：读取其【全部】 TXT 记录，逐条尝试解密 + 验签，任一成功即返回；
+/// 该域名所有 TXT 都失败则尝试下一个域名；全部失败返回 `RESOLVE_FAILED`。
 pub fn resolve_url_from_domains(
     domains: &[String],
     public_key_pem: &str,
@@ -67,24 +99,18 @@ pub fn resolve_url_from_domains(
         if domain.is_empty() {
             continue;
         }
-        let txt = match query_txt(domain) {
+        let txts = match query_txt_all(domain) {
             Ok(t) => t,
             Err(_e) => {
-                // 单个域名失败：记录后尝试下一个。
+                // 单个域名查询失败：记录后尝试下一个域名。
                 eprintln!("[resolve] 域名 {domain} 解析失败，尝试下一个");
                 continue;
             }
         };
-        match decrypt_txt(&public_key, &txt) {
-            Ok(url) => {
-                let url = url.trim().to_string();
-                if !url.is_empty() {
-                    return Ok(url);
-                }
-                eprintln!("[resolve] 域名 {domain} 解密结果为空，尝试下一个");
-            }
+        match decrypt_first_valid_txt(&public_key, &txts) {
+            Ok(url) => return Ok(url),
             Err(_e) => {
-                eprintln!("[resolve] 域名 {domain} 解密/验签失败，尝试下一个");
+                eprintln!("[resolve] 域名 {domain} 的所有 TXT 均无法解出有效 URL，尝试下一个");
             }
         }
     }
@@ -126,5 +152,66 @@ mod tests {
         ];
         let url = resolve_url_from_domains(&domains, TEST_PUB_B64).unwrap();
         assert_eq!(url, "https://www.baidu.com/");
+    }
+
+    // ---- 纯逻辑单测（不依赖 DNS）----
+
+    /// 同一 URL 多份密文：第 1 条是垃圾、第 2 条有效、第 3 条是别的公钥签的，
+    /// `decrypt_first_valid_txt` 应跳过无效项、命中第 2 条有效密文。
+    #[test]
+    fn decrypt_first_valid_txt_skips_bad_and_hits_valid() {
+        let (priv_pem, pub_b64) = resolve_core::generate_keypair().unwrap();
+        let signing_key = load_signing_key_str(&priv_pem);
+        let public_key = parse_public_key(&pub_b64).unwrap();
+
+        // 同一 URL 生成 3 份密文。
+        let good2 = resolve_core::sign_and_encrypt(&signing_key, "https://real.example.com/", 0, None)
+            .unwrap();
+
+        // 用另一把公钥签一条密文，模拟「别的公钥签的 / 被篡改」。
+        let (other_priv, _) = resolve_core::generate_keypair().unwrap();
+        let other_key = load_signing_key_str(&other_priv);
+        let other_signed =
+            resolve_core::sign_and_encrypt(&other_key, "https://evil.example.com/", 0, None).unwrap();
+
+        let txts = vec![
+            "绝对不是合法密文".to_string(), // 第 1 条：垃圾，base64 解码即失败
+            good2,                       // 第 2 条：有效
+            other_signed,                // 第 3 条：别的公钥，验签失败
+        ];
+
+        let url = decrypt_first_valid_txt(&public_key, &txts).unwrap();
+        assert_eq!(url, "https://real.example.com/");
+    }
+
+    /// 所有 TXT 都无效时，返回 Err。
+    #[test]
+    fn decrypt_first_valid_txt_all_bad_returns_err() {
+        let (_, pub_b64) = resolve_core::generate_keypair().unwrap();
+        let public_key = parse_public_key(&pub_b64).unwrap();
+        let txts = vec!["垃圾1".to_string(), "垃圾2".to_string()];
+        assert!(decrypt_first_valid_txt(&public_key, &txts).is_err());
+    }
+
+    /// 从 PEM 文本解析 SigningKey（测试用，复用 resolve-tool 的健壮解析思路）。
+    fn load_signing_key_str(pem: &str) -> resolve_core::SigningKey {
+        let body: String = pem
+            .replace("-----BEGIN PRIVATE KEY-----", "")
+            .replace("-----END PRIVATE KEY-----", "")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body).unwrap();
+        let mut seed_pos = None;
+        for i in 0..der.len().saturating_sub(1) {
+            if der[i] == 0x04 && der[i + 1] == 0x20 {
+                seed_pos = Some(i + 2);
+                break;
+            }
+        }
+        let seed: [u8; 32] = der[seed_pos.unwrap()..seed_pos.unwrap() + 32]
+            .try_into()
+            .unwrap();
+        resolve_core::SigningKey::from_bytes(&seed)
     }
 }

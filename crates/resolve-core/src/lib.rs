@@ -31,9 +31,13 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload as AeadPayload};
 use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
 use base64::Engine;
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, Verifier};
 use hkdf::Hkdf;
 use sha2::Sha256;
+
+// 重新导出签名相关类型，让上层（主 crate）无需直接依赖 ed25519-dalek 就能标注
+// `decrypt_txt` 等公开 API 的参数/返回类型（如 `&VerifyingKey`、`SigningKey`）。
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 
 /// 解析失败的统一错误文案（用户可见）。
 pub const RESOLVE_FAILED: &str = "服务器连接失败";
