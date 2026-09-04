@@ -312,8 +312,12 @@ cargo test --all
    ```bash
    cargo run -p resolve-tool -- genkey --out keys   # 生成私钥(服务端持有) + 公钥(客户端)
    cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0
+   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0 --count 3
    ```
    `--ttl 秒`：0 = 永不失效；正数 = 生成后 N 秒内有效（默认 172800 = 48h）。
+   `--count N`：每个 URL 生成 N 份密文（随机 Nonce/盐，密文不同但解密结果相同），可把同一个
+   地址分发到多个域名 / 多条 DNS TXT 记录。
+   也可用 `all` 一键生成密钥对 + 密文：`cargo run -p resolve-tool -- all "https://..." --out keys --count 3`。
 
 2. **Python 脚本 `tools/encrypt_url.py`**（需 `pip install cryptography`）：
    ```bash
@@ -324,7 +328,8 @@ cargo test --all
 把密文作为某个域名的 TXT 记录值，把 `keys/public_key.b64` 的内容作为配置里的 `public_key`。
 
 > 也可以直接在 GitHub Actions 里跑 **`resolve-keys.yml`** 这个 workflow（手动触发），
-> 它提供「生成密钥对」「生成 TXT 密文」两个操作，全程在 CI 上完成，产出打包成 artifact 下载。
+> 它提供「生成密钥对」「生成 TXT 密文」「一键生成密钥对 + 密文」三个操作，全程在 CI 上完成，
+> 产出打包成 artifact 下载。
 
 #### Android 签名（打包时从三层来源取第一份可用的）
 

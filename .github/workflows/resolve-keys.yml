@@ -15,6 +15,8 @@ name: 动态解析工具（生成密钥对 / 生成 TXT 密文）
 #       用一把已有的私钥，对一个或多个真实 URL 做 Ed25519 签名 + AES-256-GCM 加密，
 #       输出一组 base64 密文（每行一条，均可写入某个跳板域名的 DNS TXT 记录）。
 #       支持指定有效期 ttl（秒）：>0 表示生成后 ttl 秒内有效；0 表示永不失效。
+#       支持指定 count（份数）：每个 URL 生成多份密文（随机 Nonce/盐，密文不同但解密
+#       结果相同），可把同一个地址分发到多个域名 / 多条 TXT 记录。
 #
 #   ③ 一键生成密钥对 + 密文（all）
 #       同时生成密钥对，并立即用它加密一组 URL，一次拿到「私钥 + 公钥 + 一组密文」，
@@ -41,6 +43,10 @@ on:
       url:
         description: '【encrypt / all 用】要加密的真实 URL，多个用空格或换行分隔（如 https://a.com https://b.com）'
         required: false
+      count:
+        description: '【encrypt / all 用】每个 URL 生成的密文份数（同一 URL 的多份密文解密结果相同，可分发到多个域名/多条 TXT；默认 1）'
+        required: false
+        default: '1'
       ttl:
         description: '【encrypt / all 用】有效期秒数（0=永不失效；默认 172800=48h）'
         required: false
@@ -118,6 +124,7 @@ jobs:
         env:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          COUNT: ${{ github.event.inputs.count }}
           # 关键：用 toJSON 把多行私钥编码成 JSON 字符串（换行→\n 字面量）。
           # 若直接 `env: PRIVATE_KEY: ${{ github.event.inputs.private_key }}`，多行值会被
           # YAML 折叠（换行→空格），PEM 压成一行 → base64 body 被过滤 → DER 长度 0 报错。
@@ -128,6 +135,9 @@ jobs:
           fi
           if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
             echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
+          fi
+          if ! echo "$COUNT" | grep -Eq '^[0-9]+$' || [ "$COUNT" -lt 1 ]; then
+            echo "::error::count 必须是正整数，收到：$COUNT"; exit 1
           fi
           # 从 JSON 字符串还原私钥的真实换行，写入临时文件（不打印到日志）。
           printf '%s' "$PRIVATE_KEY_JSON" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin))' \
@@ -141,8 +151,9 @@ jobs:
         env:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          COUNT: ${{ github.event.inputs.count }}
         run: |
-          cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl "$TTL" \
+          cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl "$TTL" --count "$COUNT" \
             | tee "$RUNNER_TEMP/cipher.txt"
 
       - name: 导出密文 + 使用说明
@@ -150,12 +161,14 @@ jobs:
         env:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          COUNT: ${{ github.event.inputs.count }}
         run: |
           {
             echo "TXT 密文（每条均可写入 DNS TXT 记录）"
             echo "======================================================"
             echo "URL : $URL"
             echo "ttl : $TTL 秒（0=永不失效）"
+            echo "份数: 每个 URL 生成 $COUNT 份（同一 URL 的多份密文解密结果相同）"
             echo ""
             echo "密文（一组，逐条对应上面的 URL）："
             grep -v '^#' "$RUNNER_TEMP/cipher.txt" | tr -d '[:space:]' | grep -v '^$'
@@ -200,6 +213,7 @@ jobs:
         env:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          COUNT: ${{ github.event.inputs.count }}
         run: |
           if [ -z "$URL" ]; then
             echo "::error::必须提供 url（要加密的真实 URL，可用空格分隔多个）"; exit 1
@@ -207,14 +221,22 @@ jobs:
           if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
             echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
           fi
+          if ! echo "$COUNT" | grep -Eq '^[0-9]+$' || [ "$COUNT" -lt 1 ]; then
+            echo "::error::count 必须是正整数，收到：$COUNT"; exit 1
+          fi
 
       - name: 一键生成密钥对 + 密文（resolve-tool all）
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          COUNT: ${{ github.event.inputs.count }}
         run: |
-          cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl "$TTL" \
+          # 先建目录再 tee：否则 `tee .../resolve-all/result.txt` 会在目录尚未被
+          # resolve-tool create_dir_all 创建时（首次编译需十几秒）打开失败 → 退出码 1，
+          # 管道退出码取 tee 的 → 整个 step 报 exit code 1（即使 all 本身已成功产出）。
+          mkdir -p "$RUNNER_TEMP/resolve-all"
+          cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl "$TTL" --count "$COUNT" \
             | tee "$RUNNER_TEMP/resolve-all/result.txt"
 
       - name: 附上使用说明
@@ -222,6 +244,7 @@ jobs:
         env:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
+          COUNT: ${{ github.event.inputs.count }}
         run: |
           cat >> "$RUNNER_TEMP/resolve-all/README.txt" <<'EOF'
           Ed25519 密钥对 + TXT 密文（一次性生成，用于 app_url 域名数组 + DNS TXT 动态解析）
@@ -241,7 +264,7 @@ jobs:
           EOF
           {
             echo ""
-            echo "本次输入：URL = $URL ，ttl = $TTL 秒（0=永不失效）"
+            echo "本次输入：URL = $URL ，ttl = $TTL 秒（0=永不失效），每 URL 份数 = $COUNT"
           } >> "$RUNNER_TEMP/resolve-all/README.txt"
 
       - name: 上传密钥对 + 密文

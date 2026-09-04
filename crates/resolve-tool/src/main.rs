@@ -12,15 +12,17 @@
 //!
 //! 用法：
 //!   resolve-tool genkey [--out DIR]             生成密钥对，写 private_key.pem + public_key.b64
-//!   resolve-tool encrypt <private_key.pem> <url1> [<url2> ...] [--ttl 秒]
-//!      用私钥加密一个或多个 URL，stdout 逐个输出 base64 密文
-//!   resolve-tool encrypt --batch <private_key.pem> [--ttl 秒]
-//!      从 stdin 逐行读 URL，批量加密
-//!   resolve-tool all <url1> [<url2> ...] [--out DIR] [--ttl 秒]
-//!      一键：生成密钥对 + 立即加密一组 URL，同时输出密钥对文件与密文
+//!   resolve-tool encrypt <private_key.pem> <url> [--ttl 秒] [--count N]
+//!      用私钥加密一个 URL，stdout 输出 base64 密文；--count N 表示同一 URL 生成 N 份密文
+//!   resolve-tool encrypt --batch <private_key.pem> [--ttl 秒] [--count N]
+//!      从 stdin 逐行读 URL，每个 URL 生成 N 份密文
+//!   resolve-tool all <url> [--out DIR] [--ttl 秒] [--count N]
+//!      一键：生成密钥对 + 立即加密一个 URL（生成 N 份密文），同时输出密钥对文件与密文
 //!
 //! 说明：
-//!   --ttl 有效期秒数，默认 172800（48h）；0 表示永不失效。
+//!   --ttl   有效期秒数，默认 172800（48h）；0 表示永不失效。
+//!   --count 每个 URL 生成的密文份数（默认 1）。每份用不同的随机 Nonce/盐，密文不同，
+//!           但解密后是同一个 URL，可分发到多个域名 / 多条 DNS TXT 记录。
 
 use std::process::ExitCode;
 
@@ -33,18 +35,20 @@ resolve-tool —— 动态解析服务端工具（Ed25519 签名 + AES-256-GCM�
   resolve-tool genkey [--out DIR]
       生成 Ed25519 密钥对，写 DIR/private_key.pem 与 DIR/public_key.b64（默认 .）
 
-  resolve-tool encrypt <private_key.pem> <url1> [<url2> ...] [--ttl 秒]
-      用私钥加密一个或多个 URL，stdout 逐个输出 base64 密文（单行，写入 DNS TXT）
+  resolve-tool encrypt <private_key.pem> <url> [--ttl 秒] [--count N]
+      用私钥加密一个 URL，stdout 输出 base64 密文（单行，写入 DNS TXT）。
+      --count N 让同一 URL 生成 N 份不同密文（不同随机 Nonce/盐），可分发到多个域名。
 
-  resolve-tool encrypt --batch <private_key.pem> [--ttl 秒]
-      从 stdin 逐行读 URL，批量加密
+  resolve-tool encrypt --batch <private_key.pem> [--ttl 秒] [--count N]
+      从 stdin 逐行读 URL，每个 URL 生成 N 份密文
 
-  resolve-tool all <url1> [<url2> ...] [--out DIR] [--ttl 秒]
-      一键：生成密钥对 + 立即加密一组 URL，同时输出密钥对文件与密文
+  resolve-tool all <url> [--out DIR] [--ttl 秒] [--count N]
+      一键：生成密钥对 + 立即加密一个 URL（N 份密文），同时输出密钥对文件与密文
 
 参数：
-  --ttl  有效期秒数（默认 172800=48h；0=永不失效）
-  --out  输出目录（genkey / all 用，默认 .）
+  --ttl   有效期秒数（默认 172800=48h；0=永不失效）
+  --count 每个 URL 生成的密文份数（默认 1）
+  --out   输出目录（genkey / all 用，默认 .）
 "
     );
 }
@@ -62,6 +66,25 @@ fn parse_ttl(args: &[String]) -> Result<u64, String> {
         }
     }
     Ok(48 * 3600)
+}
+
+fn parse_count(args: &[String]) -> Result<u64, String> {
+    // 找 --count，返回其后的正整数；不存在则默认 1。
+    for (i, a) in args.iter().enumerate() {
+        if a == "--count" {
+            let v = args
+                .get(i + 1)
+                .ok_or_else(|| "--count 需要一个正整数".to_string())?;
+            let n = v
+                .parse::<u64>()
+                .map_err(|_| format!("--count 必须是正整数，收到：{v}"))?;
+            if n == 0 {
+                return Err("--count 必须 >= 1".to_string());
+            }
+            return Ok(n);
+        }
+    }
+    Ok(1)
 }
 
 /// 从 PEM（PKCS#8 纯私钥格式）解析 Ed25519 私钥。
@@ -142,10 +165,11 @@ fn cmd_genkey(out_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 一键：生成密钥对 + 立即用新私钥加密一组 URL。
-/// args 形如：[all, <url1>, <url2>, ..., (--out DIR), (--ttl N)]
+/// 一键：生成密钥对 + 立即用新私钥加密一个 URL（N 份密文）。
+/// args 形如：[all, <url>, (--out DIR), (--ttl N), (--count N)]
 fn cmd_all(args: &[String]) -> Result<(), String> {
     let ttl = parse_ttl(args)?;
+    let count = parse_count(args)?;
 
     // 解析 --out 与位置参数（URL 列表）。
     let mut out = String::from(".");
@@ -153,7 +177,7 @@ fn cmd_all(args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if a == "--ttl" {
+        if a == "--ttl" || a == "--count" {
             i += 2;
             continue;
         } else if a == "--out" {
@@ -180,11 +204,13 @@ fn cmd_all(args: &[String]) -> Result<(), String> {
     // 从刚写的私钥文件重新加载 SigningKey（复用同一套解析逻辑）。
     let signing_key = load_signing_key(&priv_path)?;
 
-    // 逐个加密。
+    // 逐个 URL、每个 URL 生成 count 份密文。
     let mut ciphers: Vec<String> = Vec::new();
     for url in &urls {
-        let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
-        ciphers.push(cipher);
+        for _ in 0..count {
+            let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
+            ciphers.push(cipher);
+        }
     }
 
     println!("========== 密钥对 ==========");
@@ -194,27 +220,36 @@ fn cmd_all(args: &[String]) -> Result<(), String> {
     println!("公钥内容（填 build-custom.yml 的 public_key）：");
     println!("{pub_b64}");
     println!();
-    println!("========== TXT 密文（共 {} 条，均可用于 DNS TXT） ==========", ciphers.len());
-    for (url, cipher) in urls.iter().zip(ciphers.iter()) {
-        println!("# {url}  (ttl={ttl}s)");
-        println!("{cipher}");
-        println!();
+    println!(
+        "========== TXT 密文（共 {} 条，均可用于 DNS TXT） ==========",
+        ciphers.len()
+    );
+    let mut idx = 0;
+    for url in &urls {
+        for _ in 0..count {
+            let cipher = &ciphers[idx];
+            println!("# {url}  (ttl={ttl}s, 第 {} 份)", idx % count as usize + 1);
+            println!("{cipher}");
+            println!();
+            idx += 1;
+        }
     }
     Ok(())
 }
 
 fn cmd_encrypt(args: &[String]) -> Result<(), String> {
-    // args 形如：[encrypt, <private_key.pem>, <url>, (--ttl N)]
-    //          或 [encrypt, --batch, <private_key.pem>, (--ttl N)]
+    // args 形如：[encrypt, <private_key.pem>, <url>, (--ttl N), (--count N)]
+    //          或 [encrypt, --batch, <private_key.pem>, (--ttl N), (--count N)]
     let ttl = parse_ttl(args)?;
+    let count = parse_count(args)?;
 
     let mut positional: Vec<&String> = Vec::new();
     let mut batch = false;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if a == "--ttl" {
-            i += 2; // 跳过 --ttl 及其值
+        if a == "--ttl" || a == "--count" {
+            i += 2; // 跳过选项及其值
             continue;
         } else if a == "--batch" {
             batch = true;
@@ -255,10 +290,16 @@ fn cmd_encrypt(args: &[String]) -> Result<(), String> {
     }
 
     for url in &urls {
-        let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
-        println!("# {url}  (ttl={ttl}s)");
-        println!("{cipher}");
-        println!();
+        for n in 0..count {
+            let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
+            if count > 1 {
+                println!("# {url}  (ttl={ttl}s, 第 {} 份)", n + 1);
+            } else {
+                println!("# {url}  (ttl={ttl}s)");
+            }
+            println!("{cipher}");
+            println!();
+        }
     }
     Ok(())
 }
