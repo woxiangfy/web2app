@@ -37,8 +37,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
-# 与客户端 src/resolve.rs 中的常量保持一致。
-SECRET = b"web2app-fixed-secret-2026"
+# 与客户端 crates/resolve-core/src/lib.rs 中的常量保持一致。
+# Secret 支持通过环境变量 RESOLVE_SECRET 覆盖，未设置时用默认值（向后兼容旧密文）。
+# 注意：改 Secret 会让旧 Secret 加密的密文无法被解密，服务端与客户端必须同步切换。
+SECRET = os.environ.get("RESOLVE_SECRET", "web2app-fixed-secret-2026").encode("utf-8")
 HKDF_INFO = b"web2app-resolve"
 NONCE_LEN = 12
 KEY_LEN = 32

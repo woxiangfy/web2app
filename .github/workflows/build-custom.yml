@@ -38,6 +38,10 @@ name: 自定义打包
 #                                            //   做 DNS TXT 查询，TXT 值是一段 base64 密文，用本公钥
 #                                            //   验签 + AES-GCM 解密得到真实 URL。任一域名解析/解密/验签
 #                                            //   失败自动尝试下一个，全部失败报"服务器连接失败"。
+#     "resolve_secret": "my-secret-2026",    // （可选，默认内置值）AES 对称加密 Secret，需与服务端
+#                                            //   生成 TXT 密文时用的 Secret 一致。默认空=用代码内置默认值
+#                                            //   （向后兼容旧密文）。填了就为本次产物单独指定 Secret，
+#                                            //   使每个包不再共享同一个固定密钥串（提高反编译门槛）。
 #     "data_dir_default": "false",           // WebView2 数据目录（默认 false=LOCALAPPDATA）
 #     "android_keystore_base64": "...",      // Android 签名 keystore(.jks/.keystore) 的 base64（可选，
 #                                            //   优先于仓库 secrets；正式签名，跨构建可覆盖升级）
@@ -125,6 +129,8 @@ jobs:
               # Ed25519 公钥（裸 base64 或 SPKI PEM）。当 app_url 为【域名数组】时，运行时对每个域名
               # 做 DNS TXT 查询，用本公钥验签 + AES-GCM 解密 TXT 值得到真实 URL。
               "public_key": "",
+              # AES 对称加密 Secret（可选，默认空=用代码内置默认值）。与服务端生成 TXT 密文时一致。
+              "resolve_secret": "",
               # Android 签名（仅 Android job 使用，这里合并进配置避免"未知字段"告警）
               "android_keystore_base64": "",
               "android_key_alias": "",
@@ -189,6 +195,8 @@ jobs:
               if not merged["app_url"]:
                   sys.exit("缺少必填字段 app_url")
           merged["icon_url"] = merged["icon_url"].strip()
+          # resolve_secret：去首尾空白（空串 = 用代码内置默认值，向后兼容旧密文）。
+          merged["resolve_secret"] = merged["resolve_secret"].strip()
           # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
           # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
           if merged["public_key"]:
@@ -225,7 +233,7 @@ jobs:
           def display(k, v):
               if k in ("app_url", "icon_url"):
                   return mask(v)
-              if k in ("android_keystore_password", "android_key_password"):
+              if k in ("android_keystore_password", "android_key_password", "resolve_secret"):
                   return "***（已配置）" if v else "（未配置）"
               if k == "android_keystore_base64":
                   return f"（已配置，{len(v)} 字符）" if v else "（未配置）"
@@ -403,6 +411,8 @@ jobs:
               # Ed25519 公钥（裸 base64 或 SPKI PEM）。当 app_url 为【域名数组】时，运行时对每个域名
               # 做 DNS TXT 查询，用本公钥验签 + AES-GCM 解密 TXT 值得到真实 URL。
               "public_key": "",
+              # AES 对称加密 Secret（可选，默认空=用代码内置默认值）。与服务端生成 TXT 密文时一致。
+              "resolve_secret": "",
               "android_keystore_base64": "",
               "android_key_alias": "",
               "android_keystore_password": "",
@@ -466,6 +476,8 @@ jobs:
               if not merged["app_url"]:
                   sys.exit("缺少必填字段 app_url")
           merged["icon_url"] = merged["icon_url"].strip()
+          # resolve_secret：去首尾空白（空串 = 用代码内置默认值，向后兼容旧密文）。
+          merged["resolve_secret"] = merged["resolve_secret"].strip()
           # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
           # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
           if merged["public_key"]:
@@ -533,7 +545,7 @@ jobs:
           def display(k, v):
               if k in ("app_url", "icon_url"):
                   return mask(v)
-              if k in ("android_keystore_password", "android_key_password"):
+              if k in ("android_keystore_password", "android_key_password", "resolve_secret"):
                   return "***（已配置）" if v else "（未配置）"
               if k == "android_keystore_base64":
                   return f"（已配置，{len(v)} 字符）" if v else "（未配置）"

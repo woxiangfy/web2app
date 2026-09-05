@@ -9,6 +9,7 @@
   "proxy_https": "",
   "proxy_bypass": "",
   "public_key": "",
+  "resolve_secret": "",
   "data_dir_default": "false",
   "android_keystore_base64": "",
   "android_key_alias": "",

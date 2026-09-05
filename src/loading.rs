@@ -61,10 +61,10 @@ pub fn handle_splash(
     req: Request<Vec<u8>>,
 ) -> Response<Cow<'static, [u8]>> {
     if req.uri().path().trim_end_matches('/') == RETRY_PATH {
-        crate::bootstrap(ctx.app_handle().clone());
+        crate::bootstrap::bootstrap(ctx.app_handle().clone());
     }
 
-    let html = splash_html(crate::WINDOW_TITLE);
+    let html = splash_html(crate::config::WINDOW_TITLE);
     Response::builder()
         .header("Content-Type", "text/html; charset=utf-8")
         // 启动页是即时生成的，禁止缓存，确保"重试"拿到的是干净状态。

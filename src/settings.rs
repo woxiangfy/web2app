@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
-use crate::{sanitize_dir_name, APP_NAME};
+use crate::config::{sanitize_dir_name, APP_NAME};
 
 const SETTINGS_FILE: &str = "settings.json";
 

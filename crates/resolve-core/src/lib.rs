@@ -53,9 +53,23 @@ const SIG_LEN: usize = 64;
 /// Payload 里时间戳 / 有效期 / 随机盐各占 8 字节。
 const FIELD_LEN: usize = 8;
 
-/// 客户端内置的固定 Secret（与服务端 `tools/encrypt_url.py` 保持一致）。
-/// 注意：这**不是**保密凭据——它会被打进客户端二进制，攻击者反编译可得。
-const SECRET: &[u8] = b"web2app-fixed-secret-2026";
+/// 对称加密的 Secret（与服务端 `tools/encrypt_url.py` 保持一致）。
+///
+/// 可在编译期通过环境变量 `RESOLVE_SECRET` 注入，未设置时回落到默认值。
+///
+/// 安全说明：对称加密要求「客户端必须能解密」，因此该 Secret 无论以何种形式提供，
+/// 最终都会进入客户端二进制——**有决心反编译的攻击者仍可提取**。把它从硬编码常量
+/// 改为编译期 env 注入，收益在于：每个打包产物可用不同的 Secret（而非所有包共享
+/// 同一个固定串）；源码 / 二进制常量池里不再出现一个明显、可搜索的固定密钥串，
+/// 挡住「随手 `strings` 一把」的低成本扒取。
+///
+/// 这只是**提高门槛**，不是根治（客户端持密钥的物理上限）。真正可靠的保护需换架构
+/// （如运行时经 TLS 从服务端下发 URL，客户端不内置解密密钥）。
+/// 注意：改 Secret 会令「旧 Secret 加密的密文」无法解密，服务端与客户端必须同步切换。
+const SECRET: &[u8] = match option_env!("RESOLVE_SECRET") {
+    Some(s) if !s.is_empty() => s.as_bytes(),
+    _ => b"web2app-fixed-secret-2026",
+};
 
 /// 从一段 PEM 文本或裸 base64 解析出 Ed25519 公钥（32 字节原始公钥）。
 ///
@@ -82,8 +96,14 @@ pub fn parse_public_key(pem: &str) -> Result<VerifyingKey, String> {
         if der.len() < 32 {
             return Err("公钥 DER 长度异常".to_string());
         }
-        let raw = &der[der.len() - 32..];
-        return VerifyingKey::from_bytes(raw.try_into().unwrap())
+        // 健壮切片：长度已 >= 32，但用 get() 而非索引 + unwrap，杜绝任何越界 panic 隐患。
+        let raw = der
+            .get(der.len() - 32..)
+            .ok_or_else(|| "公钥 DER 切片越界".to_string())?;
+        let raw: &[u8; 32] = raw
+            .try_into()
+            .map_err(|_| "公钥 DER 长度异常".to_string())?;
+        return VerifyingKey::from_bytes(raw)
             .map_err(|e| format!("Ed25519 公钥解析失败：{e}"));
     }
 

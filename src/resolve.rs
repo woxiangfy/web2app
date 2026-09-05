@@ -23,15 +23,24 @@ pub use resolve_core::{
 /// 改为：`system_conf::read_system_conf()` 读系统配置 → `Resolver::builder_with_config` 构建
 /// （泛型 `Resolver<P>`，provider 用 `TokioRuntimeProvider`）→ `txt_lookup` 是 async，用
 /// `tauri::async_runtime::block_on` 驱动。
-fn query_txt_all(domain: &str) -> Result<Vec<String>, String> {
+/// 构建一次 DNS Resolver，供整轮解析复用。
+///
+/// 原来的实现每查一个域名都重建 Resolver（重新读系统配置、重建内部 reactor），
+/// 既浪费又无法共享连接池；这里改为只建一次，多个域名共享同一个实例。
+fn build_resolver() -> Result<Resolver<TokioRuntimeProvider>, String> {
     // 读取系统 DNS 配置（/etc/resolv.conf 或 Windows 注册表）。
     let (config, _opts) =
         read_system_conf().map_err(|e| format!("读取系统 DNS 配置失败：{e}"))?;
-
-    let resolver = Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+    Resolver::builder_with_config(config, TokioRuntimeProvider::default())
         .build()
-        .map_err(|e| format!("初始化 DNS 解析器失败：{e}"))?;
+        .map_err(|e| format!("初始化 DNS 解析器失败：{e}"))
+}
 
+/// 用给定的 Resolver 查询一个域名的【所有】 TXT 记录。
+fn query_txt_all(
+    resolver: &Resolver<TokioRuntimeProvider>,
+    domain: &str,
+) -> Result<Vec<String>, String> {
     // txt_lookup 是 async，用 Tauri 的异步运行时阻塞驱动。
     let lookup = tauri::async_runtime::block_on(resolver.txt_lookup(domain))
         .map_err(|e| format!("查询 {domain} TXT 记录失败：{e}"))?;
@@ -94,12 +103,15 @@ pub fn resolve_url_from_domains(
 ) -> Result<String, String> {
     let public_key = parse_public_key(public_key_pem)?;
 
+    // Resolver 只构建一次，多个域名复用（原实现每域重建，浪费系统配置读取与 reactor 初始化）。
+    let resolver = build_resolver()?;
+
     for domain in domains {
         let domain = domain.trim();
         if domain.is_empty() {
             continue;
         }
-        let txts = match query_txt_all(domain) {
+        let txts = match query_txt_all(&resolver, domain) {
             Ok(t) => t,
             Err(_e) => {
                 // 单个域名查询失败：记录后尝试下一个域名。
