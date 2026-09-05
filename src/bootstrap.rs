@@ -7,7 +7,9 @@
 use tauri::Manager;
 use url::Url;
 
-use crate::config::{build_proxy_args, APP_URL, PROXY_ENABLED, PUBLIC_KEY};
+use crate::config::{APP_URL, PROXY_ENABLED, PUBLIC_KEY};
+#[cfg(windows)]
+use crate::config::build_proxy_args;
 
 /// 窗口/WebView 的默认底色，与加载层（src/loading.js）的浅色底一致。
 /// 用于盖住 WebView 初始化与导航提交瞬间的白闪，使"启动页 → 加载层 → 正式页面"全程平滑。

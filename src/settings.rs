@@ -5,9 +5,13 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State};
+#[cfg(not(target_os = "android"))]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+#[cfg(not(target_os = "android"))]
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use crate::config::{sanitize_dir_name, APP_NAME};
 
@@ -124,8 +128,8 @@ pub fn load_settings(app: &AppHandle) -> Settings {
     Settings::default()
 }
 
-/// 写入设置到 app config 目录下的 settings.json。
-pub fn save_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
+/// 写入设置到 app config 目录下的 settings.json（纯持久化，不含运行时副作用）。
+pub fn persist_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let path = settings_path(app).ok_or_else(|| "无法获取配置目录".to_string())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -153,4 +157,83 @@ pub fn open_settings_window(app: &AppHandle) {
         .resizable(false)
         .position(420.0, 180.0)
         .build();
+}
+
+/// 读取当前设置（供设置页 / 前端调用）。
+#[tauri::command]
+pub(crate) fn get_settings(state: State<SettingsState>) -> Settings {
+    state.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// 保存设置：校验 + 应用运行时变更（快捷键/托盘）+ 持久化。
+///
+/// 注意：此命令在 Android 端同样注册（设置功能跨平台），但全局快捷键 / 托盘等
+/// 桌面专属逻辑已用 `#[cfg(not(target_os = "android"))]` 剔除，移动端只做持久化。
+#[tauri::command]
+pub(crate) fn save_settings(
+    app: tauri::AppHandle,
+    state: State<SettingsState>,
+    new_settings: Settings,
+) -> Result<(), String> {
+    // 1)+2) 桌面端：唤醒快捷键可留空（表示“不设置快捷键”）；若填写则必须可被解析，
+    // 且不能与“打开设置(Shift+F1)”冲突。Android 无全局快捷键，跳过此校验
+    // （也不引用 tauri_plugin_global_shortcut 的类型）。
+    #[cfg(not(target_os = "android"))]
+    let new_sc = {
+        let key = new_settings.wake_hotkey.key.trim();
+        if key.is_empty() {
+            // 空 key = 未启用唤醒快捷键
+            None
+        } else {
+            let sc = hotkey_to_shortcut(&new_settings.wake_hotkey).ok_or_else(|| {
+                format!(
+                    "不支持的按键：{}，请换一个按键",
+                    new_settings.wake_hotkey.key
+                )
+            })?;
+            if sc == settings_open_shortcut() {
+                return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
+            }
+            Some(sc)
+        }
+    };
+
+    let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
+    let old = guard.clone();
+
+    // 3) 桌面端：应用运行时的快捷键 / 托盘变更
+    #[cfg(not(target_os = "android"))]
+    {
+        let old_sc = hotkey_to_shortcut(&old.wake_hotkey);
+        if new_sc != old_sc {
+            if let Some(os) = old_sc {
+                let _ = app.global_shortcut().unregister(os);
+            }
+            if let Some(ns) = new_sc {
+                app.global_shortcut()
+                    .register(ns)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if new_settings.tray_enabled != old.tray_enabled {
+            if new_settings.tray_enabled {
+                crate::tray::create_tray(&app).map_err(|e| e.to_string())?;
+            } else {
+                app.remove_tray_by_id("main-tray");
+            }
+        }
+    }
+
+    // 4) 持久化 + 更新托管状态
+    persist_settings(&app, &new_settings).map_err(|e| e.to_string())?;
+    *guard = new_settings;
+    Ok(())
+}
+
+/// 关闭设置窗口。
+#[tauri::command]
+pub(crate) fn close_settings_window(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.close();
+    }
 }

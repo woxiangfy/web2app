@@ -73,9 +73,9 @@ pub fn run() {
         .manage(ProxyTask::default())
         .manage(SettingsState::default())
         .invoke_handler(tauri::generate_handler![
-            tray::get_settings,
-            tray::save_settings,
-            tray::close_settings_window
+            settings::get_settings,
+            settings::save_settings,
+            settings::close_settings_window
         ]);
 
     #[cfg(not(target_os = "android"))]

@@ -1,12 +1,12 @@
-//! 系统托盘、窗口切换与设置命令（仅桌面端）。
+//! 系统托盘与窗口切换（仅桌面端）。
+//!
+//! 注意：设置相关命令（get_settings / save_settings / close_settings_window）不在此处——
+//! 它们是跨平台功能，已移入 [`crate::settings`] 无条件编译；本模块只保留纯桌面端的
+//! 托盘与窗口切换逻辑。
 
-use tauri::{Manager, State};
-
-#[cfg(not(target_os = "android"))]
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri::Manager;
 
 use crate::config::WINDOW_TITLE;
-use crate::settings::{Settings, SettingsState};
 
 /// 切换主窗口：正常可见则隐藏；最小化或已隐藏则恢复并显示置顶（仅桌面端）。
 pub(crate) fn toggle_window(app: &tauri::AppHandle) {
@@ -82,77 +82,4 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn get_settings(state: State<SettingsState>) -> Settings {
-    state.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
-}
-
-#[tauri::command]
-pub(crate) fn save_settings(
-    app: tauri::AppHandle,
-    state: State<SettingsState>,
-    new_settings: Settings,
-) -> Result<(), String> {
-    // 1)+2) 桌面端：唤醒快捷键可留空（表示“不设置快捷键”）；若填写则必须可被解析，
-    // 且不能与“打开设置(Shift+F1)”冲突。Android 无全局快捷键，跳过此校验
-    // （也不引用 tauri_plugin_global_shortcut 的类型）。
-    #[cfg(not(target_os = "android"))]
-    let new_sc = {
-        let key = new_settings.wake_hotkey.key.trim();
-        if key.is_empty() {
-            // 空 key = 未启用唤醒快捷键
-            None
-        } else {
-            let sc = crate::settings::hotkey_to_shortcut(&new_settings.wake_hotkey).ok_or_else(|| {
-                format!(
-                    "不支持的按键：{}，请换一个按键",
-                    new_settings.wake_hotkey.key
-                )
-            })?;
-            if sc == crate::settings::settings_open_shortcut() {
-                return Err("唤醒快捷键不能与“打开设置(Shift+F1)”冲突，请换一个".into());
-            }
-            Some(sc)
-        }
-    };
-
-    let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
-    let old = guard.clone();
-
-    // 3) 桌面端：应用运行时的快捷键 / 托盘变更
-    #[cfg(not(target_os = "android"))]
-    {
-        let old_sc = crate::settings::hotkey_to_shortcut(&old.wake_hotkey);
-        if new_sc != old_sc {
-            if let Some(os) = old_sc {
-                let _ = app.global_shortcut().unregister(os);
-            }
-            if let Some(ns) = new_sc {
-                app.global_shortcut()
-                    .register(ns)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        if new_settings.tray_enabled != old.tray_enabled {
-            if new_settings.tray_enabled {
-                create_tray(&app).map_err(|e| e.to_string())?;
-            } else {
-                app.remove_tray_by_id("main-tray");
-            }
-        }
-    }
-
-    // 4) 持久化 + 更新托管状态
-    crate::settings::save_settings(&app, &new_settings).map_err(|e| e.to_string())?;
-    *guard = new_settings;
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn close_settings_window(app: tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.close();
-    }
 }
