@@ -365,7 +365,10 @@ pub fn run() {
 ///
 /// `target_label` 由调用方决定：单窗口模式为 `"main"`，多页签模式为宿主窗口 label。
 /// 这样 `window_state::persist_label` 记录的也是正确窗口的几何。
-#[cfg(not(target_os = "android"))]
+///
+/// ⚠️ 本函数【不可】加 `cfg(not(target_os = "android"))`：Android 也会走到这里读
+/// SettingsState 判断托盘语义（托盘未启用时等价于允许关闭）。只有「窗口几何持久化」
+/// 依赖的 `window_state` 模块才是桌面端专属，故 cfg 下沉到那一行。
 fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi) {
     let target_label: String = {
         #[cfg(windows)]
@@ -382,7 +385,8 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
         }
     };
 
-    // 记录主窗口当前大小/位置，供下次启动恢复。
+    // 记录主窗口当前大小/位置，供下次启动恢复（仅桌面端；Android 无窗口几何持久化）。
+    #[cfg(not(target_os = "android"))]
     window_state::persist_label(app_handle, &target_label);
 
     let st = app_handle.state::<SettingsState>();

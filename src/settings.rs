@@ -199,6 +199,8 @@ pub(crate) fn save_settings(
     };
 
     let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
+    // `old` 只用于桌面端的快捷键 / 托盘 diff；Android 无这两项，故一并隔离，避免 unused 警告。
+    #[cfg(not(target_os = "android"))]
     let old = guard.clone();
 
     // 3) 桌面端：应用运行时的快捷键 / 托盘变更

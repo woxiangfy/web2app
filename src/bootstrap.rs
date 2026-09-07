@@ -86,6 +86,10 @@ pub(crate) fn bootstrap_for_label(app: tauri::AppHandle, label: String) {
 }
 
 /// 启动流程核心：后台准备 → 主线程导航 / 报错。
+///
+/// `is_first` 目前只有 Windows 多页签模式用到（缓存解析结果），非 Windows 下不引用，
+/// 故用 cfg_attr 局部放宽 unused_variables，避免 Android / iOS 编译告警。
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn bootstrap_inner(app: tauri::AppHandle, label: String, is_first: bool) {
     let use_local_proxy = local_proxy_enabled();
     std::thread::spawn(move || {

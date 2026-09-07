@@ -79,14 +79,18 @@ jobs:
         run: cargo check --all-targets
 
   # ---------------------------------------------------------------------------
-  # 3) Android 端交叉编译检查（aarch64-linux-android，尽力而为，不阻断流水线）
-  #    前置：需要 NDK。本作业验证 Rust 能针对 Android 目标编译通过。
+  # 3) Android 端交叉编译检查（aarch64-linux-android）【阻断流水线】
+  #    ⚠️ 曾经这里挂着 continue-on-error: true，结果 cfg 隔离不完整导致的
+  #    Android 编译错误（如 handle_main_close 被 cfg(not(android)) 剔除却在
+  #    非隔离代码里被调用 → E0425）一路漏到打包 workflow 才暴露。
+  #    ubuntu-latest 预装 Android NDK，本作业已验证可稳定运行 → 改为阻断。
+  #    另：Linux 作业走的是 cfg(not(windows)) 分支，与 Android 的
+  #    cfg(target_os="android") 分支并不等价，两者不可互相替代。
   #    注意：它只编译 Rust，不产出 APK（APK 由 release.yml 在发布时产出）。
   # ---------------------------------------------------------------------------
   check-android:
     name: Check (Android aarch64)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -102,9 +106,13 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Install NDK
+        # setup-android 会预置一个更新的 NDK 并写好 ANDROID_NDK_ROOT；若只设
+        # ANDROID_NDK_HOME 会与它不一致，cargo-ndk 报 "doesn't match" 警告。
+        # 这里把两个变量统一指向同一个（版本锁定的）NDK，消除歧义。
         run: |
           yes | sdkmanager "ndk;27.0.12077973"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
