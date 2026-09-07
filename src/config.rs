@@ -13,6 +13,7 @@
 //!   PROXY_HTTP       外部 HTTP 代理地址（留空=走自身代理）；仅 Windows
 //!   PROXY_HTTPS      外部 HTTPS 代理地址（留空=同 HTTP）
 //!   PROXY_BYPASS     不走代理的地址（分号分隔）
+//!   TABS_ENABLED     true/false 是否启用多页签（tab）模式（仅 Windows）
 //! 例：APP_URL="https://u:p@example.com" APP_NAME="MyApp" cargo build --release
 
 // const 上下文可用的字符串相等判断：`str` 的 `==` 与 `match` 在常量求值中不可用
@@ -163,6 +164,14 @@ pub(crate) const PROXY_HTTP: &str = env_str!("PROXY_HTTP", "");
 pub(crate) const PROXY_HTTPS: &str = env_str!("PROXY_HTTPS", "");
 // 不走代理的地址（分号分隔），可留空 ""
 pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.0.1;<-loopback>");
+
+// ---------- 多页签（tab）模式（仅 Windows）----------
+// true  = 启用多页签：一个宿主窗口 + 顶部标签栏，每个 tab 是独立 WebView（同账号共享数据目录），
+//         可随时新建/切换/关闭；target="_blank" / window.open() 直接新开一个 tab。
+// false = 单窗口（默认），行为与历史版本一致。
+// 该能力仅在 Windows 实现（依赖多 WebviewWindow 叠放 + WebView2 共享数据目录），
+// 移动端按 target_os 剔除，本常量在移动端也一并保留但由 cfg 门控引用，避免 dead_code 警告。
+pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
 
 // ---------- 全局快捷键（按下切换 显示/隐藏 窗口，仅桌面端）----------
 // 用下面三个开关组合修饰键，再指定一个主键。

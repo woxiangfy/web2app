@@ -21,6 +21,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
 | 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效） | Windows |
 | 新窗口拦截 | `target="_blank"` / `window.open()` 强制在当前窗口打开 | Windows |
+| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一数据目录（同账号），可随时新建/切换/关闭；`target="_blank"` 直接新开 tab | Windows |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
@@ -265,6 +266,17 @@ cargo test --all
 - 典型用途：同一个网页被多个 app 复用，用不同的 `extra` 区分部署环境 / 渠道 / 站点皮肤等。
 
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
+
+`tabs_enabled`（可选，**字符串布尔**，默认 `"false"`）—— 多页签（tab）模式开关，**仅 Windows 生效**：
+
+- 设为 `"true"` 后，应用不再是一个单一窗口，而是「一个宿主窗口 + 顶部标签栏」，每个 tab 是独立的 WebView、**共享同一份数据目录**（同账号，cookie / localStorage 天然互通）。
+- tab 可随时新建（标签栏「+」按钮）、切换、关闭；网页里的 `target="_blank"` / `window.open()` 会**直接新开一个 tab**（而非在当前窗口跳转）。
+- Android 端忽略此字段（移动端无多页签能力）。
+- 该开关等价于编译期环境变量 `TABS_ENABLED`；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。
+
+```json
+{ "app_url": "https://u:p@host", "tabs_enabled": "true" }
+```
 
 #### 动态解析真实 URL（`app_url` 数组 + `public_key` 公钥解密）
 

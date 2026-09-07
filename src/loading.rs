@@ -77,8 +77,10 @@ pub fn handle_splash(
 ///
 /// 用 `eval` 而不是 IPC：加载层可能被注入到任意第三方页面，走 eval 不依赖任何权限配置。
 /// 整个表达式包在 try/catch 里，页面尚未就绪时静默失败即可。
-pub fn show_error(app: &AppHandle, title: &str, detail: &str) {
-    let Some(w) = app.get_webview_window("main") else {
+///
+/// `label`：目标窗口 label（单窗口为 `"main"`，多页签为 `tab-N`）。
+pub fn show_error(app: &AppHandle, label: &str, title: &str, detail: &str) {
+    let Some(w) = app.get_webview_window(label) else {
         return;
     };
     let js = format!(
@@ -90,15 +92,17 @@ pub fn show_error(app: &AppHandle, title: &str, detail: &str) {
 }
 
 /// 通知加载层页面已就绪，可以淡出了（正常路径由 JS 自行判定，这里给 Rust 侧一个兜底入口）。
-pub fn hide(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("main") else {
+///
+/// `label`：目标窗口 label（单窗口为 `"main"`，多页签为 `tab-N`）。
+pub fn hide(app: &AppHandle, label: &str) {
+    let Some(w) = app.get_webview_window(label) else {
         return;
     };
     let _ = w.eval("try{window.__web2appLoading&&window.__web2appLoading.hide();}catch(e){}");
 }
 
 /// 把字符串转成可安全嵌入 JS 源码的双引号字符串字面量（含两侧引号）。
-fn js_str(s: &str) -> String {
+pub(crate) fn js_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

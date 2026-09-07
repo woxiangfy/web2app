@@ -1,0 +1,190 @@
+<!doctype html>
+<!--
+  多页签宿主页（shell）：经自定义协议 shell://localhost/ 提供，仅 Windows 多页签模式使用。
+  · 本页只渲染顶部标签栏，不承载网页内容；真正的网页在各自独立的 tab 窗口中。
+  · 标签栏高度必须与 src/tabs.rs 的 TAB_BAR_HEIGHT（38px）一致，否则 tab 内容会与标签栏重叠/留缝。
+  · 通过 Tauri IPC 与 Rust 交互：create_tab / switch_tab / close_tab / get_tabs / set_tab_title。
+  · Rust 侧通过 window.__web2appTabs.render(items) 推送 tab 列表（含激活态）刷新。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>标签栏</title>
+    <style>
+      :root {
+        --bar-h: 38px;
+        --bg: #f7f8fa;
+        --bg-dark: #14181f;
+        --tab-bg: transparent;
+        --tab-active: #ffffff;
+        --tab-active-dark: #2a3340;
+        --border: #e3e6ea;
+        --border-dark: #2c3440;
+        --text: #2c3440;
+        --text-dark: #e6ebf2;
+        --muted: #8892a0;
+        --accent: #378add;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      @media (prefers-color-scheme: dark) {
+        html, body { background: var(--bg-dark); color: var(--text-dark); }
+      }
+      .bar {
+        display: flex;
+        align-items: stretch;
+        height: var(--bar-h);
+        -webkit-app-region: drag; /* 让标签栏空白处可拖动窗口（无边框窗口） */
+      }
+      .tabs {
+        display: flex;
+        align-items: stretch;
+        flex: 1;
+        overflow-x: auto;
+        overflow-y: hidden;
+        min-width: 0;
+      }
+      .tab {
+        -webkit-app-region: no-drag; /* 标签本身可点击，不参与拖动 */
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 12px;
+        max-width: 180px;
+        min-width: 60px;
+        cursor: pointer;
+        border-right: 1px solid var(--border);
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        position: relative;
+      }
+      @media (prefers-color-scheme: dark) {
+        .tab { border-right-color: var(--border-dark); }
+      }
+      .tab .label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
+      }
+      .tab.active {
+        background: var(--tab-active);
+        color: var(--text);
+      }
+      @media (prefers-color-scheme: dark) {
+        .tab.active { background: var(--tab-active-dark); color: var(--text-dark); }
+      }
+      .tab .close {
+        -webkit-app-region: no-drag;
+        width: 16px; height: 16px;
+        line-height: 16px;
+        text-align: center;
+        border-radius: 4px;
+        font-size: 12px;
+        color: var(--muted);
+        flex: none;
+      }
+      .tab .close:hover {
+        background: rgba(0,0,0,0.08);
+        color: var(--text);
+      }
+      @media (prefers-color-scheme: dark) {
+        .tab .close:hover { background: rgba(255,255,255,0.12); color: var(--text-dark); }
+      }
+      .add {
+        -webkit-app-region: no-drag;
+        width: 38px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 16px;
+        border-left: 1px solid var(--border);
+      }
+      @media (prefers-color-scheme: dark) {
+        .add { border-left-color: var(--border-dark); }
+      }
+      .add:hover { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <div class="tabs" id="tabs"></div>
+      <div class="add" id="add" title="新建页签">+</div>
+    </div>
+
+    <script>
+      const { invoke } = window.__TAURI__ && window.__TAURI__.core
+        ? window.__TAURI__.core
+        : { invoke: () => Promise.reject(new Error("Tauri IPC 不可用")) };
+
+      const tabsEl = document.getElementById("tabs");
+      const addEl = document.getElementById("add");
+
+      // 当前 tab 列表（由 render() 维护）
+      let items = [];
+
+      function render(nextItems) {
+        items = Array.isArray(nextItems) ? nextItems : [];
+        tabsEl.innerHTML = "";
+        items.forEach((t) => {
+          const el = document.createElement("div");
+          el.className = "tab" + (t.active ? " active" : "");
+          el.dataset.label = t.label;
+
+          const label = document.createElement("span");
+          label.className = "label";
+          label.textContent = t.title || t.label;
+          label.title = t.title || t.label;
+
+          const close = document.createElement("span");
+          close.className = "close";
+          close.textContent = "×";
+          close.title = "关闭页签";
+
+          el.appendChild(label);
+          el.appendChild(close);
+          tabsEl.appendChild(el);
+        });
+      }
+
+      // 事件委托：切换 / 关闭
+      tabsEl.addEventListener("click", (e) => {
+        const tab = e.target.closest(".tab");
+        if (!tab) return;
+        const label = tab.dataset.label;
+        if (e.target.classList.contains("close")) {
+          invoke("close_tab", { label });
+        } else {
+          invoke("switch_tab", { label });
+        }
+      });
+
+      // 新建页签
+      addEl.addEventListener("click", () => {
+        invoke("create_tab");
+      });
+
+      // 初始化：拉取当前 tab 列表
+      invoke("get_tabs").then((list) => {
+        render(list.map(([label, title, active]) => ({ label, title, active })));
+      }).catch(() => {});
+
+      // 暴露给 Rust：Rust 侧 push_tabs_to_shell 会调用 window.__web2appTabs.render(items)
+      window.__web2appTabs = { render };
+    </script>
+  </body>
+</html>

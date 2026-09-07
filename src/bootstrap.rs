@@ -16,16 +16,21 @@ use crate::config::build_proxy_args;
 pub(crate) const SPLASH_BG: tauri::window::Color = tauri::window::Color(0xf7, 0xf8, 0xfa, 255);
 
 /// 启动期在后台线程准备出来的导航信息。
-struct Navigation {
+///
+/// `Clone`：多页签模式下，首次启动解析出的导航信息会被缓存到 `TabManager.navigation`，
+/// 新建 tab 时克隆复用（本地代理单实例共享，`proxy_abort` 仍由 `ProxyTask` 唯一持有，
+/// 此处克隆出的句柄仅作导航用途、不重复入库，见 `navigate_window`）。
+#[derive(Clone)]
+pub(crate) struct Navigation {
     /// WebView 最终要访问的地址（启用本地反向代理时形如 http://127.0.0.1:<port>）。
-    url: String,
+    pub(crate) url: String,
     /// Basic 鉴权账号密码（从网址 userinfo 中拆出，供 Windows WebView2 钩子兜底）。
-    user: String,
-    pass: String,
+    pub(crate) user: String,
+    pub(crate) pass: String,
     /// 是否走了本地反向代理（决定 Windows 上是否还需要注册原生鉴权钩子）。
-    use_local_proxy: bool,
+    pub(crate) use_local_proxy: bool,
     /// 本地反向代理任务的终止句柄，存入 ProxyTask 以便退出或重试时优雅关闭。
-    proxy_abort: Option<tokio::task::AbortHandle>,
+    pub(crate) proxy_abort: Option<tokio::task::AbortHandle>,
 }
 
 /// 托管本地反向代理任务的 AbortHandle，便于应用退出时优雅终止它（释放 127.0.0.1 监听端口）。
@@ -65,7 +70,23 @@ fn strip_userinfo(url: &Url) -> String {
 ///
 /// 允许被重复调用（启动页上的"重试"即 splash://localhost/retry → 这里），
 /// 因此进入时先终止上一轮残留的本地反向代理，避免端口泄漏。
+///
+/// 单窗口模式：导航到 `"main"` 窗口。
+/// 多页签模式：导航到首个 tab（label 由调用方传入，见 `bootstrap_for_label`）。
 pub(crate) fn bootstrap(app: tauri::AppHandle) {
+    bootstrap_inner(app, "main".to_string(), true);
+}
+
+/// 启动/重试流程入口，参数化目标窗口 label。
+///
+/// `is_first` = true 表示首次启动（结果会缓存到 TabManager，供后续新 tab 复用）；
+/// false 表示重试或新 tab 兜底（不缓存，走完整重新解析）。
+pub(crate) fn bootstrap_for_label(app: tauri::AppHandle, label: String) {
+    bootstrap_inner(app, label, false);
+}
+
+/// 启动流程核心：后台准备 → 主线程导航 / 报错。
+fn bootstrap_inner(app: tauri::AppHandle, label: String, is_first: bool) {
     let use_local_proxy = local_proxy_enabled();
     std::thread::spawn(move || {
         // 重试场景：清掉上一轮可能仍在监听的代理任务。
@@ -81,15 +102,25 @@ pub(crate) fn bootstrap(app: tauri::AppHandle) {
 
         match prepare_navigation(use_local_proxy) {
             Ok(nav) => {
+                // 首次启动成功：缓存导航信息供后续新 tab 复用（仅 Windows 多页签模式有 TabManager）。
+                #[cfg(windows)]
+                if is_first && crate::tabs::tabs_enabled() {
+                    if let Ok(mut cache) = app.state::<crate::tabs::TabManager>().navigation.lock() {
+                        *cache = Some(nav.clone());
+                    }
+                }
                 let a = app.clone();
-                let _ = app.run_on_main_thread(move || navigate_main(&a, nav));
+                let l = label.clone();
+                let _ = app.run_on_main_thread(move || navigate_main(&a, &l, nav));
             }
             Err(msg) => {
                 eprintln!("[bootstrap] {msg}");
                 let a = app.clone();
+                let l = label.clone();
                 // 启动页仍然显示着，直接把错误态推上去（含重试按钮），
                 // 不再像早期版本那样 std::process::exit —— 用户至少能看到发生了什么。
-                let _ = app.run_on_main_thread(move || crate::loading::show_error(&a, "加载失败", &msg));
+                let _ = app
+                    .run_on_main_thread(move || crate::loading::show_error(&a, &l, "加载失败", &msg));
             }
         }
     });
@@ -133,15 +164,22 @@ fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
 }
 
 /// 在主线程发起首次导航（准备工作已在后台线程完成）。
-fn navigate_main(app: &tauri::AppHandle, nav: Navigation) {
+///
+/// `label`：目标窗口 label（单窗口为 `"main"`，多页签为 `tab-N`）。
+fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
     // 代理句柄先入库，保证退出 / 重试时能优雅终止。
+    // 多页签模式下：本地代理是单实例共享，句柄只由首次启动入库一次；后续 tab 复用的
+    // Navigation 里的 proxy_abort 是同一个句柄的克隆，重复入库会覆盖，属无害但应避免。
+    // 这里用「仅当 ProxyTask 当前为空才入库」保证只入一次。
     if let Some(abort) = nav.proxy_abort {
         if let Ok(mut g) = app.state::<ProxyTask>().0.lock() {
-            *g = Some(abort);
+            if g.is_none() {
+                *g = Some(abort);
+            }
         }
     }
 
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_webview_window(label) else {
         return;
     };
 
@@ -165,10 +203,26 @@ fn navigate_main(app: &tauri::AppHandle, nav: Navigation) {
         match Url::parse(&nav.url) {
             Ok(url) => {
                 if let Err(e) = window.navigate(url) {
-                    crate::loading::show_error(app, "加载失败", &format!("无法打开页面：{e}"));
+                    crate::loading::show_error(app, label, "加载失败", &format!("无法打开页面：{e}"));
                 }
             }
-            Err(_) => crate::loading::show_error(app, "加载失败", "应用配置的地址不合法"),
+            Err(_) => crate::loading::show_error(app, label, "加载失败", "应用配置的地址不合法"),
         }
     }
+}
+
+/// 对给定的窗口执行导航（挂 WebView2 钩子 + 导航）。
+///
+/// 与 `navigate_main` 的区别：不负责代理句柄入库（复用缓存时句柄已入过库），
+/// 供多页签模式新建 tab 时复用缓存导航信息。仅 Windows 有意义（tabs 模块整体 cfg(windows)）。
+#[cfg(windows)]
+pub(crate) fn navigate_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, nav: Navigation) {
+    crate::webview_hooks::attach_webview_hooks(
+        app.clone(),
+        window,
+        nav.user,
+        nav.pass,
+        nav.url,
+        nav.use_local_proxy,
+    );
 }

@@ -8,9 +8,20 @@ use tauri::Manager;
 
 use crate::config::WINDOW_TITLE;
 
+/// 返回「主窗口」的 label：多页签模式下是宿主窗口，单窗口模式下是 "main"。
+fn main_window_label() -> &'static str {
+    #[cfg(windows)]
+    {
+        if crate::tabs::tabs_enabled() {
+            return crate::tabs::HOST_LABEL;
+        }
+    }
+    "main"
+}
+
 /// 切换主窗口：正常可见则隐藏；最小化或已隐藏则恢复并显示置顶（仅桌面端）。
 pub(crate) fn toggle_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window(main_window_label()) {
         let visible = window.is_visible().unwrap_or(false);
         let minimized = window.is_minimized().unwrap_or(false);
         if visible && !minimized {
@@ -47,7 +58,7 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip(WINDOW_TITLE)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
-                if let Some(w) = app.get_webview_window("main") {
+                if let Some(w) = app.get_webview_window(main_window_label()) {
                     let _ = w.unminimize();
                     let _ = w.show();
                     let _ = w.set_focus();
@@ -59,7 +70,7 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 crate::settings::open_settings_window(app);
             }
             "hide" => {
-                if let Some(w) = app.get_webview_window("main") {
+                if let Some(w) = app.get_webview_window(main_window_label()) {
                     let _ = w.hide();
                 }
             }

@@ -49,9 +49,12 @@ pub fn save(app: &AppHandle, st: &State) {
     }
 }
 
-/// 读取主窗口当前几何（若主窗口存在）。
-pub fn persist_now(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("main") else { return; };
+/// 读取指定 label 窗口当前几何（若该窗口存在）。
+///
+/// 单窗口模式主窗口为 `"main"`；多页签模式主窗口是宿主窗口（label 为 `tabs::HOST_LABEL`），
+/// 由调用方传入实际 label。
+pub fn persist_label(app: &AppHandle, label: &str) {
+    let Some(win) = app.get_webview_window(label) else { return; };
     if let Some(st) = capture(&win) {
         save(app, &st);
     }

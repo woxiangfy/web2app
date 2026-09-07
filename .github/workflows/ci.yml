@@ -70,6 +70,14 @@ jobs:
       - name: Cargo check (Windows target)
         run: cargo check --all-targets
 
+      - name: Cargo check (Windows, 多页签模式)
+        # 验证 TABS_ENABLED=true 的多页签（tab）代码路径也能在 Windows 下编译通过。
+        # 该路径默认不参与编译（开关默认 false），故单独加一步显式检查，避免改动 tabs 代码后
+        # 只在真机打包时才暴露编译错误。
+        env:
+          TABS_ENABLED: "true"
+        run: cargo check --all-targets
+
   # ---------------------------------------------------------------------------
   # 3) Android 端交叉编译检查（aarch64-linux-android，尽力而为，不阻断流水线）
   #    前置：需要 NDK。本作业验证 Rust 能针对 Android 目标编译通过。
@@ -91,7 +99,7 @@ jobs:
         run: cargo install cargo-ndk
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install NDK
         run: |

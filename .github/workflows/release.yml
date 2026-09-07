@@ -43,6 +43,8 @@ jobs:
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
+      # 多页签（tab）模式（仅 Windows 生效；Android 端忽略）。仓库变量 TABS_ENABLED=true 开启。
+      TABS_ENABLED: ${{ vars.TABS_ENABLED }}
     steps:
       - uses: actions/checkout@v7
 
@@ -127,6 +129,7 @@ jobs:
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
+      TABS_ENABLED: ${{ vars.TABS_ENABLED }}
     steps:
       - uses: actions/checkout@v7
 

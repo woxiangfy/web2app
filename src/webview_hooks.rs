@@ -100,13 +100,30 @@ pub(crate) fn attach_webview_hooks(
             }
         }
 
-        // --- 1) 新窗口请求：强制在当前窗口打开 ---
+        // --- 1) 新窗口请求：多页签模式新开 tab；单窗口模式强制在当前窗口打开 ---
         let core_for_nw = core.clone();
+        let app_for_nw = app.clone();
         let nw_handler = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
             if let Some(args) = args {
                 unsafe {
-                    let _ = args.SetNewWindow(&core_for_nw);
-                    let _ = args.SetHandled(true);
+                    // 多页签模式：target="_blank" / window.open() 直接新开一个 tab。
+                    if crate::tabs::tabs_enabled() {
+                        // ⚠️ 不能在 COM 回调里【直接】建窗——回调运行在主线程，直接建窗会嵌套
+                        // 事件循环导致卡死。先切到后台线程，再经 run_on_main_thread 排队到
+                        // 下一个事件循环轮次建窗（与右键菜单「设置」的处理同理）。
+                        let app_spawn = app_for_nw.clone();
+                        let _ = std::thread::spawn(move || {
+                            let app_main = app_spawn.clone();
+                            let _ = app_spawn.run_on_main_thread(move || {
+                                crate::tabs::open_new_tab_from_request(&app_main);
+                            });
+                        });
+                        let _ = args.SetHandled(true);
+                    } else {
+                        // 单窗口模式：保持历史行为——强制在当前窗口打开。
+                        let _ = args.SetNewWindow(&core_for_nw);
+                        let _ = args.SetHandled(true);
+                    }
                 }
             }
             Ok(())
