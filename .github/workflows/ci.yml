@@ -78,6 +78,12 @@ jobs:
           TABS_ENABLED: "true"
         run: cargo check --all-targets
 
+      - name: Clippy (Windows)
+        # ⚠️ 不可省略：Ubuntu 的 clippy 作业编译的是 Linux 目标，`#[cfg(windows)]` 的
+        # 代码（tabs.rs / webview_hooks.rs）根本不参与编译，其中的 clippy 问题（如
+        # let_unit_value）在 Linux 上永远发现不了。Windows 端必须单独跑一次 clippy。
+        run: cargo clippy --all-targets -- -D warnings
+
   # ---------------------------------------------------------------------------
   # 3) Android 端交叉编译检查（aarch64-linux-android）【阻断流水线】
   #    ⚠️ 曾经这里挂着 continue-on-error: true，结果 cfg 隔离不完整导致的

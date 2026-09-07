@@ -182,7 +182,8 @@ pub(crate) const HOTKEY_ALT: bool = true;
 #[cfg(not(target_os = "android"))]
 pub(crate) const HOTKEY_SHIFT: bool = false;
 #[cfg(not(target_os = "android"))]
-pub(crate) const HOTKEY_KEY: tauri_plugin_global_shortcut::Code = tauri_plugin_global_shortcut::Code::Digit4; // 数字键 4，配合 Alt → Alt+4
+pub(crate) const HOTKEY_KEY: tauri_plugin_global_shortcut::Code =
+    tauri_plugin_global_shortcut::Code::Digit4; // 数字键 4，配合 Alt → Alt+4
 
 /// 根据编译时写死的常量生成 Chromium 代理启动参数；未启用则返回 None（仅 Windows WebView2 使用）。
 #[cfg(windows)]

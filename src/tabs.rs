@@ -170,7 +170,9 @@ pub(crate) fn spawn_tab(app: &tauri::AppHandle) -> Result<String, String> {
     };
 
     // 建窗后无需持有句柄——后续导航 / 布局通过 get_webview_window(label) 重新获取。
-    let _window = window.build().map_err(|e| format!("创建 tab 窗口失败：{e}"))?;
+    let _window = window
+        .build()
+        .map_err(|e| format!("创建 tab 窗口失败：{e}"))?;
 
     // 记录 tab 信息。
     {
@@ -332,7 +334,10 @@ fn push_tabs_to_shell(app: &tauri::AppHandle) {
         if i > 0 {
             items.push(',');
         }
-        let title = titles.get(&t.label).cloned().unwrap_or_else(|| t.title.clone());
+        let title = titles
+            .get(&t.label)
+            .cloned()
+            .unwrap_or_else(|| t.title.clone());
         let title_js = crate::loading::js_str(&title);
         let active_js = if i == active { "true" } else { "false" };
         items.push_str(&format!(
@@ -344,9 +349,8 @@ fn push_tabs_to_shell(app: &tauri::AppHandle) {
     }
     items.push(']');
 
-    let js = format!(
-        "try{{window.__web2appTabs&&window.__web2appTabs.render({items});}}catch(e){{}}"
-    );
+    let js =
+        format!("try{{window.__web2appTabs&&window.__web2appTabs.render({items});}}catch(e){{}}");
     let _ = host.eval(&js);
 }
 
@@ -365,8 +369,9 @@ pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow
         .map_err(|e| format!("创建宿主窗口失败：{e}"))?;
 
     // 宿主窗口拖动 / 缩放时，tab 窗口跟随。
+    // 注意：`on_window_event` 返回 `()`，不能写 `let _ = ...`（会触发 clippy::let_unit_value）。
     let app_handle = app.clone();
-    let _ = host.on_window_event(move |event| {
+    host.on_window_event(move |event| {
         use tauri::WindowEvent;
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
             relayout(&app_handle);
@@ -406,7 +411,10 @@ pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
     tabs.iter()
         .enumerate()
         .map(|(i, t)| {
-            let title = titles.get(&t.label).cloned().unwrap_or_else(|| t.title.clone());
+            let title = titles
+                .get(&t.label)
+                .cloned()
+                .unwrap_or_else(|| t.title.clone());
             (t.label.clone(), title, i == active)
         })
         .collect()

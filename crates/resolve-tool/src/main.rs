@@ -147,11 +147,13 @@ fn generate_and_write_keypair(out_dir: &str) -> Result<(String, String, String),
 
     let priv_path = std::path::Path::new(out_dir).join("private_key.pem");
     let pub_path = std::path::Path::new(out_dir).join("public_key.b64");
-    std::fs::write(&priv_path, priv_pem.as_bytes())
-        .map_err(|e| format!("写私钥失败：{e}"))?;
-    std::fs::write(&pub_path, pub_b64.as_bytes())
-        .map_err(|e| format!("写公钥失败：{e}"))?;
-    Ok((priv_path.display().to_string(), pub_path.display().to_string(), pub_b64))
+    std::fs::write(&priv_path, priv_pem.as_bytes()).map_err(|e| format!("写私钥失败：{e}"))?;
+    std::fs::write(&pub_path, pub_b64.as_bytes()).map_err(|e| format!("写公钥失败：{e}"))?;
+    Ok((
+        priv_path.display().to_string(),
+        pub_path.display().to_string(),
+        pub_b64,
+    ))
 }
 
 fn cmd_genkey(out_dir: &str) -> Result<(), String> {

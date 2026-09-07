@@ -7,9 +7,9 @@
 use tauri::Manager;
 use url::Url;
 
-use crate::config::{APP_URL, PROXY_ENABLED, PUBLIC_KEY};
 #[cfg(windows)]
 use crate::config::build_proxy_args;
+use crate::config::{APP_URL, PROXY_ENABLED, PUBLIC_KEY};
 
 /// 窗口/WebView 的默认底色，与加载层（src/loading.js）的浅色底一致。
 /// 用于盖住 WebView 初始化与导航提交瞬间的白闪，使"启动页 → 加载层 → 正式页面"全程平滑。
@@ -109,7 +109,8 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, is_first: bool) {
                 // 首次启动成功：缓存导航信息供后续新 tab 复用（仅 Windows 多页签模式有 TabManager）。
                 #[cfg(windows)]
                 if is_first && crate::tabs::tabs_enabled() {
-                    if let Ok(mut cache) = app.state::<crate::tabs::TabManager>().navigation.lock() {
+                    if let Ok(mut cache) = app.state::<crate::tabs::TabManager>().navigation.lock()
+                    {
                         *cache = Some(nav.clone());
                     }
                 }
@@ -123,8 +124,9 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, is_first: bool) {
                 let l = label.clone();
                 // 启动页仍然显示着，直接把错误态推上去（含重试按钮），
                 // 不再像早期版本那样 std::process::exit —— 用户至少能看到发生了什么。
-                let _ = app
-                    .run_on_main_thread(move || crate::loading::show_error(&a, &l, "加载失败", &msg));
+                let _ = app.run_on_main_thread(move || {
+                    crate::loading::show_error(&a, &l, "加载失败", &msg)
+                });
             }
         }
     });
@@ -207,7 +209,12 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
         match Url::parse(&nav.url) {
             Ok(url) => {
                 if let Err(e) = window.navigate(url) {
-                    crate::loading::show_error(app, label, "加载失败", &format!("无法打开页面：{e}"));
+                    crate::loading::show_error(
+                        app,
+                        label,
+                        "加载失败",
+                        &format!("无法打开页面：{e}"),
+                    );
                 }
             }
             Err(_) => crate::loading::show_error(app, label, "加载失败", "应用配置的地址不合法"),
@@ -220,7 +227,11 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
 /// 与 `navigate_main` 的区别：不负责代理句柄入库（复用缓存时句柄已入过库），
 /// 供多页签模式新建 tab 时复用缓存导航信息。仅 Windows 有意义（tabs 模块整体 cfg(windows)）。
 #[cfg(windows)]
-pub(crate) fn navigate_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, nav: Navigation) {
+pub(crate) fn navigate_window(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    nav: Navigation,
+) {
     crate::webview_hooks::attach_webview_hooks(
         app.clone(),
         window,

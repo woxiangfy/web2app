@@ -11,7 +11,7 @@ use hickory_resolver::Resolver;
 // 从 resolve-core 复用纯加密核心，并向上层 re-export 关键 API。
 pub use resolve_core::{
     decrypt_txt, generate_keypair, normalize_domain, parse_domains, parse_public_key,
-    sign_and_encrypt, RESOLVE_FAILED, VerifyingKey,
+    sign_and_encrypt, VerifyingKey, RESOLVE_FAILED,
 };
 
 /// 查询一个域名的【所有】 TXT 记录（每条拼接其字符串段），返回全部非空值。
@@ -29,8 +29,7 @@ pub use resolve_core::{
 /// 既浪费又无法共享连接池；这里改为只建一次，多个域名共享同一个实例。
 fn build_resolver() -> Result<Resolver<TokioRuntimeProvider>, String> {
     // 读取系统 DNS 配置（/etc/resolv.conf 或 Windows 注册表）。
-    let (config, _opts) =
-        read_system_conf().map_err(|e| format!("读取系统 DNS 配置失败：{e}"))?;
+    let (config, _opts) = read_system_conf().map_err(|e| format!("读取系统 DNS 配置失败：{e}"))?;
     Resolver::builder_with_config(config, TokioRuntimeProvider::default())
         .build()
         .map_err(|e| format!("初始化 DNS 解析器失败：{e}"))
@@ -177,19 +176,21 @@ mod tests {
         let public_key = parse_public_key(&pub_b64).unwrap();
 
         // 同一 URL 生成 3 份密文。
-        let good2 = resolve_core::sign_and_encrypt(&signing_key, "https://real.example.com/", 0, None)
-            .unwrap();
+        let good2 =
+            resolve_core::sign_and_encrypt(&signing_key, "https://real.example.com/", 0, None)
+                .unwrap();
 
         // 用另一把公钥签一条密文，模拟「别的公钥签的 / 被篡改」。
         let (other_priv, _) = resolve_core::generate_keypair().unwrap();
         let other_key = load_signing_key_str(&other_priv);
         let other_signed =
-            resolve_core::sign_and_encrypt(&other_key, "https://evil.example.com/", 0, None).unwrap();
+            resolve_core::sign_and_encrypt(&other_key, "https://evil.example.com/", 0, None)
+                .unwrap();
 
         let txts = vec![
             "绝对不是合法密文".to_string(), // 第 1 条：垃圾，base64 解码即失败
-            good2,                       // 第 2 条：有效
-            other_signed,                // 第 3 条：别的公钥，验签失败
+            good2,                          // 第 2 条：有效
+            other_signed,                   // 第 3 条：别的公钥，验签失败
         ];
 
         let url = decrypt_first_valid_txt(&public_key, &txts).unwrap();
@@ -213,7 +214,8 @@ mod tests {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body).unwrap();
+        let der =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body).unwrap();
         let mut seed_pos = None;
         for i in 0..der.len().saturating_sub(1) {
             if der[i] == 0x04 && der[i + 1] == 0x20 {

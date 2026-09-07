@@ -40,7 +40,9 @@ pub fn load(app: &AppHandle) -> Option<State> {
 
 /// 写入窗口几何。
 pub fn save(app: &AppHandle, st: &State) {
-    let Some(p) = path(app) else { return; };
+    let Some(p) = path(app) else {
+        return;
+    };
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -54,7 +56,9 @@ pub fn save(app: &AppHandle, st: &State) {
 /// 单窗口模式主窗口为 `"main"`；多页签模式主窗口是宿主窗口（label 为 `tabs::HOST_LABEL`），
 /// 由调用方传入实际 label。
 pub fn persist_label(app: &AppHandle, label: &str) {
-    let Some(win) = app.get_webview_window(label) else { return; };
+    let Some(win) = app.get_webview_window(label) else {
+        return;
+    };
     if let Some(st) = capture(&win) {
         save(app, &st);
     }

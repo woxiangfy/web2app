@@ -9,9 +9,9 @@ use tauri::{AppHandle, Manager, State};
 #[cfg(not(target_os = "android"))]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(target_os = "android"))]
-use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-#[cfg(not(target_os = "android"))]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
+#[cfg(not(target_os = "android"))]
+use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
 use crate::config::{sanitize_dir_name, APP_NAME};
 

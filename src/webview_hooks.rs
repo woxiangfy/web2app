@@ -16,8 +16,8 @@
 //! Android 等移动端：没有 WebView2，鉴权统一走本地反向代理，本模块在移动端被 cfg 剔除。
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2_11, ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2ContextMenuItem,
-    ICoreWebView2ContextMenuItemCollection, ICoreWebView2Deferral, ICoreWebView2Environment9,
+    ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection, ICoreWebView2Deferral,
+    ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_13, ICoreWebView2_2,
     COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{
@@ -136,8 +136,8 @@ pub(crate) fn attach_webview_hooks(
         // --- 1b) 右键菜单定制 ---
         let app_for_menu = app.clone();
         let core_for_menu = core.clone();
-        let cm_handler = ContextMenuRequestedEventHandler::create(Box::new(
-            move |_sender, args| {
+        let cm_handler =
+            ContextMenuRequestedEventHandler::create(Box::new(move |_sender, args| {
                 if let Some(args) = args {
                     unsafe {
                         if let Ok(items) = args.MenuItems() {
@@ -148,7 +148,9 @@ pub(crate) fn attach_webview_hooks(
                                     if let Ok(item) = items.GetValueAtIndex(i) {
                                         if let Some(name) = read_menu_name(&item) {
                                             let n = name.to_lowercase();
-                                            if n == "moretools" || n == "print" || n.starts_with("save")
+                                            if n == "moretools"
+                                                || n == "print"
+                                                || n.starts_with("save")
                                             {
                                                 let _ = items.RemoveValueAtIndex(i);
                                             }
@@ -180,9 +182,12 @@ pub(crate) fn attach_webview_hooks(
                                                 let app_spawn = ah.clone();
                                                 let _ = std::thread::spawn(move || {
                                                     let app_main = app_spawn.clone();
-                                                    let _ = app_spawn.run_on_main_thread(move || {
-                                                        crate::settings::open_settings_window(&app_main);
-                                                    });
+                                                    let _ =
+                                                        app_spawn.run_on_main_thread(move || {
+                                                            crate::settings::open_settings_window(
+                                                                &app_main,
+                                                            );
+                                                        });
                                                 });
                                                 Ok(())
                                             }),
@@ -203,8 +208,7 @@ pub(crate) fn attach_webview_hooks(
                     }
                 }
                 Ok(())
-            },
-        ));
+            }));
         // 只有较新的 WebView2 运行时才暴露 ICoreWebView2_11（ContextMenuRequested 在此接口上）。
         // cast 失败（极老运行时）则跳过右键定制，保留默认菜单，不影响其它钩子。
         if let Ok(core11) = core.cast::<ICoreWebView2_11>() {

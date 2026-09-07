@@ -52,7 +52,7 @@ mod tray;
 #[cfg(not(target_os = "android"))]
 mod window_state;
 
-use settings::{SettingsState};
+use settings::SettingsState;
 
 // 移动端（Android/iOS）入口：tauri::mobile_entry_point 会生成 JNI/extern 绑定，
 // 供移动端原生壳调用；桌面端该属性为空操作，等价于一个普通 pub fn。
@@ -154,8 +154,10 @@ pub fn run() {
     let builder = builder.setup(move |app| {
         // 载入持久化设置（文件不存在时使用默认值），写入托管状态供运行时读取。
         let initial_settings = settings::load_settings(app.handle());
-        *app.state::<SettingsState>().0.lock().unwrap_or_else(|p| p.into_inner()) =
-            initial_settings.clone();
+        *app.state::<SettingsState>()
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = initial_settings.clone();
 
         // ============ 代理模式决策（由 PROXY_ENABLED / PROXY_HTTP / PROXY_HTTPS 共同决定）============
         //  PROXY_ENABLED = false
@@ -239,8 +241,7 @@ pub fn run() {
         // 多页签模式（仅 Windows）：建宿主窗口 + 首 tab。
         #[cfg(windows)]
         if tabs::tabs_enabled() {
-            let host = tabs::create_host_window(app.handle())
-                .expect("创建宿主窗口失败");
+            let host = tabs::create_host_window(app.handle()).expect("创建宿主窗口失败");
             // 应用上次保存的窗口几何（宿主窗口复用主窗口的几何持久化）。
             if let Some(st) = window_state::load(app.handle()) {
                 window_state::apply(&host, &st);

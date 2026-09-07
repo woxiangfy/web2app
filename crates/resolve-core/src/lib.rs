@@ -103,8 +103,7 @@ pub fn parse_public_key(pem: &str) -> Result<VerifyingKey, String> {
         let raw: &[u8; 32] = raw
             .try_into()
             .map_err(|_| "公钥 DER 长度异常".to_string())?;
-        return VerifyingKey::from_bytes(raw)
-            .map_err(|e| format!("Ed25519 公钥解析失败：{e}"));
+        return VerifyingKey::from_bytes(raw).map_err(|e| format!("Ed25519 公钥解析失败：{e}"));
     }
 
     // 裸 base64：32 字节原始公钥。
@@ -170,12 +169,16 @@ pub fn sign_and_encrypt(
 
     // AES-GCM 加密 Payload || Signature。
     let key = derive_key(&nonce_bytes);
-    let cipher_suite = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
+    let cipher_suite =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
     let cipher = cipher_suite
-        .encrypt(AesNonce::from_slice(&nonce_bytes), AeadPayload {
-            msg: &[payload.as_slice(), sig.to_bytes().as_slice()].concat(),
-            aad: b"",
-        })
+        .encrypt(
+            AesNonce::from_slice(&nonce_bytes),
+            AeadPayload {
+                msg: &[payload.as_slice(), sig.to_bytes().as_slice()].concat(),
+                aad: b"",
+            },
+        )
         .map_err(|_| "加密失败".to_string())?;
 
     // TXT = base64( Nonce(12B) || Cipher )。
@@ -242,11 +245,18 @@ pub fn decrypt_txt(public_key: &VerifyingKey, b64: &str) -> Result<String, Strin
     let nonce = AesNonce::from_slice(nonce_bytes);
 
     let key = derive_key(nonce_bytes);
-    let cipher_suite = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
+    let cipher_suite =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
 
     // 解密 + 认证。认证失败（密文被篡改）会在此抛错。
     let plain = cipher_suite
-        .decrypt(nonce, AeadPayload { msg: cipher, aad: b"" })
+        .decrypt(
+            nonce,
+            AeadPayload {
+                msg: cipher,
+                aad: b"",
+            },
+        )
         .map_err(|_| "密文认证失败（数据被篡改）".to_string())?;
 
     // 明文 = Payload || Signature(64 字节)。
@@ -284,9 +294,7 @@ pub fn parse_payload(payload: &[u8]) -> Result<String, String> {
 
     // 剩余应为 ts(8) || ttl(8) || 0x00 || salt(8)，共 25 字节。
     let rest = &payload[sep + 1..];
-    if rest.len() != FIELD_LEN + FIELD_LEN + 1 + FIELD_LEN
-        || rest[FIELD_LEN + FIELD_LEN] != 0x00
-    {
+    if rest.len() != FIELD_LEN + FIELD_LEN + 1 + FIELD_LEN || rest[FIELD_LEN + FIELD_LEN] != 0x00 {
         return Err("Payload 尾部结构异常".to_string());
     }
     let ts = u64::from_be_bytes(rest[..FIELD_LEN].try_into().unwrap());
@@ -301,7 +309,9 @@ pub fn parse_payload(payload: &[u8]) -> Result<String, String> {
         if now != 0 {
             let diff = now.abs_diff(ts);
             if diff > ttl {
-                return Err(format!("记录已过期（生成于 {ts}，有效期 {ttl}s，偏差 {diff}s）"));
+                return Err(format!(
+                    "记录已过期（生成于 {ts}，有效期 {ttl}s，偏差 {diff}s）"
+                ));
             }
         }
     }
@@ -460,7 +470,10 @@ mod tests {
         assert_eq!(decrypt_txt(&key, b1).unwrap(), "https://www.baidu.com/");
         assert_eq!(decrypt_txt(&key, b2).unwrap(), "https://www.baidu.com/");
         assert_eq!(decrypt_txt(&key, b3).unwrap(), "https://www.baidu.com/");
-        assert_eq!(decrypt_txt(&key, bili).unwrap(), "https://www.bilibili.com/");
+        assert_eq!(
+            decrypt_txt(&key, bili).unwrap(),
+            "https://www.bilibili.com/"
+        );
     }
 
     // 交叉验证：Python 端生成的密文，Rust 端解密结果必须一致。
@@ -501,11 +514,16 @@ mod tests {
 
         assert_eq!(decrypt_txt(&key, b1).unwrap(), "https://www.baidu.com/");
 
-        let raw = base64::engine::general_purpose::STANDARD.decode(b1).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b1)
+            .unwrap();
         let mut tampered = raw.clone();
         let idx = NONCE_LEN;
         tampered[idx] ^= 0x01;
         let tampered_b64 = base64::engine::general_purpose::STANDARD.encode(&tampered);
-        assert!(decrypt_txt(&key, &tampered_b64).is_err(), "篡改密文应被拒绝");
+        assert!(
+            decrypt_txt(&key, &tampered_b64).is_err(),
+            "篡改密文应被拒绝"
+        );
     }
 }
