@@ -237,9 +237,12 @@ async fn proxy_handler(
 
     let mut response_builder = Response::builder().status(proxied_resp.status());
     for (name, value) in proxied_resp.headers() {
-        // 跳过逐跳头，以及 Content-Length：reqwest 默认自动解压，解压后 body 已变长，而上游带来的
-        // Content-Length 仍是压缩时的大小；交给 axum/hyper 按实际 bytes 重新计算，避免响应被错误截断。
-        if is_hop_by_hop(name) || name.as_str().eq_ignore_ascii_case("content-length") {
+        // 仅跳过逐跳头。Content-Length 与 Content-Encoding 都必须【原样转发】：本代理的 reqwest
+        // 未开启 gzip/brotli/deflate 解压特性（见 Cargo.toml），响应体会按上游原样流式透传——
+        // 体的字节长度恒等于上游 Content-Length，转发该头是正确的。一旦跳过 Content-Length，响应
+        // 会退化为 chunked 且无长度；多数资源可容错，但 WebView2 内嵌 PDF 查看器严重依赖
+        // Content-Length，缺了它就渲染空白（这是"笔记内 PDF 预览失效"的回归根因）。
+        if is_hop_by_hop(name) {
             continue;
         }
         // 上游若给 Set-Cookie 写了 `Domain=<真实host>`，而 WebView 当前连的是 127.0.0.1，浏览器会因
@@ -255,9 +258,10 @@ async fn proxy_handler(
         response_builder = response_builder.header(name, value);
     }
 
-    // 响应体流式化：不再 `bytes()` 全量缓冲，边收边转给 WebView。长度未知时 hyper
-    // 自动用 chunked 分块传输（WebView2 原生支持）；Content-Length 已在上面跳过，
-    // 避免流中断时客户端按旧长度挂起等待。
+    // 响应体流式化：不再 `bytes()` 全量缓冲，边收边转给 WebView。我们已把上游的
+    // Content-Length 原样转发上来（本代理不解压，流式长度恒等于该值），因此 hyper 会按
+    // Content-Length 直接发送，不额外分块；仅当上游本来就没有长度时（如上游自身 chunked）
+    // 才由 hyper 自动分块。
     Ok(response_builder
         .body(Body::from_stream(proxied_resp.bytes_stream()))
         .unwrap())
@@ -672,6 +676,15 @@ mod tests {
         // ① GET 大文件：验证鉴权注入 + cookie 重写 + 流式响应无截断
         let resp = client.get(&proxy_url).send().await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // 回归断言：Content-Length 必须被原样转发（此前流式化改造把它跳过了，
+        // 导致响应退化为无长度 chunked，WebView2 内嵌 PDF 查看器因此渲染空白）。
+        let forwarded_len = resp
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+        assert_eq!(forwarded_len, Some(1024 * 1024), "Content-Length 应原样转发为 1MB");
 
         let mut cookie_seen = false;
         for c in resp.headers().get_all("set-cookie") {
