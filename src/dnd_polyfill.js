@@ -141,8 +141,20 @@
             ev.screenY = y || 0;
             ev.dataTransfer = dt;
         }
-        // 兜底确保 dataTransfer 一定存在（原生 DragEvent 可能重建出新的空实例）
-        if (!ev.dataTransfer) ev.dataTransfer = dt;
+        // 【关键·根因修复】强制让每个合成事件共享同一个会话 DataTransfer。
+        // Chromium 的 `new DragEvent({ dataTransfer })` 会丢弃传入的 dt，重新造一个全新的空
+        // native DataTransfer；所以上面“传 dt + if(!ev.dataTransfer) 兜底”都救不回——它从来不是 null。
+        // 而 fancytree dnd5 在 dragover/drop 里读 `dataTransfer.getData(...)` 与 `effectAllowed`
+        // 来识别“这是不是自己节点的拖拽”：每次都是空 DT → 永远被认成外来拖拽 → 拒绝插入前后位。
+        // 这就是“能拖起却拖不到其他元素前后、一松手像被释放”的根因。这里用 defineProperty 无条件
+        // 覆写，让 dragstart 里页面 setData 的数据在 drop 时仍能 getData 回来。
+        try {
+            Object.defineProperty(ev, 'dataTransfer', {
+                value: dt, configurable: true, writable: true
+            });
+        } catch (e3) {
+            try { ev.dataTransfer = dt; } catch (e4) { /* 极端环境保留浏览器默认 */ }
+        }
         // 打上"合成事件"标记：捕获阶段拦截原生 dragstart 时放行它（见 addEventListener('dragstart')）。
         ev.__synthetic = true;
 
@@ -280,6 +292,8 @@
         // 会话共享 DataTransfer：dragstart 里页面 setData 的数据，
         // 要在之后的 dragover/drop 里能 getData 回来。
         sessionDataTransfer = makeDataTransfer();
+        // 声明允许的拖放效果：fancytree dnd5 会读它决定是否接受 drop（复制/移动）。
+        try { sessionDataTransfer.effectAllowed = 'move'; } catch (e) { /* 忽略 */ }
 
         // 视觉 ghost
         try {
