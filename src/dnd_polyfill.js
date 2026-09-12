@@ -143,6 +143,8 @@
         }
         // 兜底确保 dataTransfer 一定存在（原生 DragEvent 可能重建出新的空实例）
         if (!ev.dataTransfer) ev.dataTransfer = dt;
+        // 打上"合成事件"标记：捕获阶段拦截原生 dragstart 时放行它（见 addEventListener('dragstart')）。
+        ev.__synthetic = true;
 
         // 补齐 pageX/pageY（含滚动偏移，与真实拖拽事件一致）。
         // pageX/pageY 在原型上是只读 getter，直接赋值在 strict 模式会抛错，
@@ -350,6 +352,18 @@
     }
 
     /* ---------------- 事件监听 ---------------- */
+
+    // 【关键】捕获阶段拦截"原生" HTML5 dragstart。
+    // WebView2 的病根：即使页面元素 draggable=true，原生拖拽一旦被宿主 OLE 接管，指针一离开
+    // 源元素就会被系统级立即取消（表现为"拖了一下就自动释放/回弹"）。而 fancytree 等库可能在
+    // mousedown 之后又把 draggable 加回来，导致仅靠 mousedown 里置 draggable=false 拦不住原生拖拽。
+    // 这里改成对每个原生 dragstart：preventDefault + stopPropagation，从源头掐掉 OLE 接管；
+    // 只放行带 __synthetic 标记（本 polyfill 派发）的合成事件，由下面的鼠标模拟统一驱动拖放。
+    document.addEventListener('dragstart', function (e) {
+        if (e.__synthetic) return;
+        if (e.preventDefault) e.preventDefault();
+        if (e.stopPropagation) e.stopPropagation();
+    }, true);
 
     document.addEventListener('mousedown', function (e) {
         if (e.button !== 0) return;               // 仅左键

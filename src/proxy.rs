@@ -203,6 +203,38 @@ async fn proxy_handler(
 
     let proxied_resp = rb.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
+    // 诊断日志：只打印"关心"的响应——非 200 / 重定向 / PDF / 二进制文件。正常页面的大量
+    // JS/CSS 静默跳过，噪音可控。用于排查 PDF 预览（能否拿到 200 + 正确 MIME/Content-Disposition）
+    // 与拖动改序（moveBranchTo 走 WS，见 handle_websocket 日志）。
+    let dbg_path = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let dbg_ct = proxied_resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let dbg_cd = proxied_resp
+        .headers()
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let dbg_status = proxied_resp.status();
+    let is_interesting = dbg_status != StatusCode::OK
+        || dbg_status.is_redirection()
+        || dbg_ct.to_ascii_lowercase().contains("pdf")
+        || dbg_ct.to_ascii_lowercase().contains("octet-stream");
+    if is_interesting {
+        eprintln!(
+            "[proxy] {method} {dbg_path} -> {dbg_status} [content-type: {dbg_ct}] [content-disposition: {dbg_cd}]"
+        );
+    }
+
     let mut response_builder = Response::builder().status(proxied_resp.status());
     for (name, value) in proxied_resp.headers() {
         // 跳过逐跳头，以及 Content-Length：reqwest 默认自动解压，解压后 body 已变长，而上游带来的
@@ -232,6 +264,11 @@ async fn proxy_handler(
 }
 
 async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, headers: HeaderMap) {
+    let dbg_path = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
     let host = state.upstream.host_str().unwrap_or("localhost");
     let port = state.upstream.port_or_known_default().unwrap_or_else(|| {
         if state.upstream.scheme() == "https" {
@@ -275,6 +312,16 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
     builder = builder.header("X-Forwarded-Host", host);
     builder = builder.header("X-Forwarded-For", "127.0.0.1");
 
+    // 重写 WS 上游握手的 Origin 头：WebView 连的是本地代理（127.0.0.1:随机端口），浏览器自发
+    // 的 Origin 自然是 `http://127.0.0.1:端口`。而 Trilium 等后端常对 WS 握手做 Origin 校验
+    // （防跨站 hijack），对照自身宿主；Origin 与真实宿主不一致时可能拒连——后果就是"页面能开
+    // 但实时联动/拖动改序(moveBranchTo 走 WS)失效"。这里把 Origin 改写为等价"浏览器直连上游"
+    // 的源 `{scheme}://{host[:port]}`，规避该拒绝。覆盖时机在透传循环之后，以覆盖浏览器原值。
+    builder = builder.header(
+        "Origin",
+        format!("{}://{}", state.upstream.scheme(), state.upstream_authority).as_str(),
+    );
+
     // 代理对鉴权拥有最终决定权：强制写入 Authorization（覆盖任何已有值），确保 WebSocket 握手
     // 一定携带合法 Basic 头（这正是当初做本地代理的原因——WebView2 原生事件对 WS 不生效）。
     if let Some(auth) = &state.auth_header {
@@ -286,13 +333,16 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
         Err(_) => return,
     };
 
-    let (upstream_ws, _resp) = match tokio_tungstenite::connect_async(request).await {
+    let (upstream_ws, resp) = match tokio_tungstenite::connect_async(request).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("代理上游 WebSocket 连接失败: {}", e);
+            eprintln!("[proxy] WS 上游握手失败 {dbg_path}: {e}");
             return;
         }
     };
+    // 诊断日志：打印上游握手实际状态。正常应为 101 Switching Protocols；若返回 4xx/5xx，
+    // 说明上游在握手阶段就拒绝了（鉴权 / Origin / 路由），可据此定位拖动改序失效。
+    eprintln!("[proxy] WS 握手 {dbg_path} -> {}", resp.status());
 
     let (mut client_write, mut client_read) = socket.split();
     let (mut upstream_write, mut upstream_read) = upstream_ws.split();
