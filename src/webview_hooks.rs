@@ -18,16 +18,18 @@
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection, ICoreWebView2Deferral,
     ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_13, ICoreWebView2_2,
-    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    ICoreWebView2_4, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{
     BasicAuthenticationRequestedEventHandler, ContextMenuRequestedEventHandler,
-    CustomItemSelectedEventHandler, NewWindowRequestedEventHandler,
+    CustomItemSelectedEventHandler, DownloadStartingEventHandler, NewWindowRequestedEventHandler,
     WebResourceRequestedEventHandler,
 };
 // base64 0.22 的 `.encode()` 是 Engine trait 上的方法，必须显式引入该 trait 才能调用
 // （proxy.rs 顶部已 `use base64::Engine;`，这里的 WebView2 钩子里同样需要）。
 use base64::Engine;
+use tauri::Manager;
 use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::System::Com::{CoTaskMemFree, IStream};
 
@@ -56,6 +58,121 @@ fn read_menu_name(item: &ICoreWebView2ContextMenuItem) -> Option<String> {
         }
         s
     }
+}
+
+/// 极简 percent-decode：把 `%XX` 还原为字节后按 UTF-8 解码。
+/// 非法编码（如孤立 `%`、非十六进制位）或非 UTF-8 字节序列返回 None。
+/// （依赖树中 url crate 的 percent_encoding 模块未开 feature，这里自实现，零新依赖。）
+fn percent_decode_utf8(s: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hi = chars.next()?.to_digit(16)?;
+            let lo = chars.next()?.to_digit(16)?;
+            bytes.push((hi * 16 + lo) as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// 从 `Content-Disposition` 头提取文件名（RFC 6266）。
+/// 优先 `filename*=UTF-8''<percent-encoded>`（RFC 5987，中文文件名走这个），
+/// 其次 `filename="..."` / `filename=...`。解析不到返回 None。
+fn content_disposition_filename(cd: &str) -> Option<String> {
+    // filename*=UTF-8''...（大小写不敏感前缀；ASCII 前缀长度与原串一致，可安全按长度切片）
+    for part in cd.split(';') {
+        let p = part.trim();
+        let lower = p.to_ascii_lowercase();
+        if lower.starts_with("filename*=utf-8''") {
+            let encoded = &p["filename*=utf-8''".len()..];
+            let decoded = percent_decode_utf8(encoded)?;
+            if !decoded.is_empty() {
+                return Some(decoded);
+            }
+        }
+    }
+    // filename="..." 或 filename=...
+    for part in cd.split(';') {
+        let p = part.trim();
+        let lower = p.to_ascii_lowercase();
+        if lower.starts_with("filename=") {
+            let name = p["filename=".len()..].trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 从下载 URL 的路径末段提取文件名（percent-decode 后返回）；路径无文件名时返回 None。
+fn url_path_filename(uri: &str) -> Option<String> {
+    let u = url::Url::parse(uri).ok()?;
+    let last = u.path().rsplit('/').find(|s| !s.is_empty())?;
+    let decoded = percent_decode_utf8(last)?;
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
+}
+
+/// 清洗文件名：把 Windows 路径非法字符与控制在 0x20 以下的字符替换为下划线，
+/// 去掉首尾空白与末尾句点；结果为空时回落默认名 "download"。
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 32 => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 计算下载的默认落盘路径：系统下载目录 + 文件名（Content-Disposition → URL 末段 → "download"）。
+/// 拿不到系统下载目录时返回 None，调用方维持 WebView2 默认行为。
+fn default_download_path(
+    app: &tauri::AppHandle,
+    uri: &Option<String>,
+    cd: &Option<String>,
+) -> Option<std::path::PathBuf> {
+    let dir = app.path().download_dir().ok()?;
+    let name = cd
+        .as_deref()
+        .and_then(content_disposition_filename)
+        .or_else(|| uri.as_deref().and_then(url_path_filename))
+        .map(|n| sanitize_filename(&n))
+        .unwrap_or_else(|| "download".to_string());
+    Some(dir.join(name))
+}
+
+/// 让窗口的 WebView2 直接导航到指定 URL。
+///
+/// 用途：多页签模式中，新 tab 已由 `spawn_tab` 默认导航到缓存主地址后，如需改导航到
+/// `target="_blank"` 的目标 URL，用本函数做【第二次导航】。鉴权/新窗口/下载钩子已在首次
+/// `attach_webview_hooks` 时注册过，这里只导航、不重复挂事件（重复挂载会让同一事件被
+/// 处理两遍，例如一个下载请求触发两次下载）。
+pub(crate) fn navigate_webview(window: &tauri::WebviewWindow, url: &str) {
+    let url_owned = url.to_string();
+    let _ = window.with_webview(move |wv| {
+        // wry 的 with_webview 闭包返回 ()，这里手动处理 Result，不向调用方传播。
+        if let Ok(core) = unsafe { wv.controller().CoreWebView2() } {
+            unsafe {
+                let _ = core.Navigate(&HSTRING::from(url_owned.as_str()));
+            }
+        }
+    });
 }
 
 /// 在 Windows 上给主窗口注册 WebView2 原生事件（safe 接口）。
@@ -106,6 +223,17 @@ pub(crate) fn attach_webview_hooks(
         let nw_handler = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
             if let Some(args) = args {
                 unsafe {
+                    // 读出页面请求的目标 URL（window.open / target="_blank" 指向的地址），
+                    // 供多页签模式新开的 tab 导航到对应路径；读不出（内存分配失败等）则回落主地址。
+                    let mut uri_pw = PWSTR::null();
+                    let uri = args
+                        .Uri(&mut uri_pw)
+                        .ok()
+                        .and_then(|_| uri_pw.to_string().ok());
+                    if !uri_pw.is_null() {
+                        CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
+                    }
+
                     // 多页签模式：target="_blank" / window.open() 直接新开一个 tab。
                     if crate::tabs::tabs_enabled() {
                         // ⚠️ 不能在 COM 回调里【直接】建窗——回调运行在主线程，直接建窗会嵌套
@@ -115,7 +243,7 @@ pub(crate) fn attach_webview_hooks(
                         let _ = std::thread::spawn(move || {
                             let app_main = app_spawn.clone();
                             let _ = app_spawn.run_on_main_thread(move || {
-                                crate::tabs::open_new_tab_from_request(&app_main);
+                                crate::tabs::open_new_tab_from_request(&app_main, uri);
                             });
                         });
                         let _ = args.SetHandled(true);
@@ -218,6 +346,49 @@ pub(crate) fn attach_webview_hooks(
             }
         }
 
+        // --- 1c) 下载支持：把下载拦截到系统下载目录，不弹 WebView2 默认下载栏 ---
+        // 需要 ICoreWebView2_4（较新运行时才暴露 DownloadStarting）；cast 失败（极老运行时）
+        // 则跳过，保持 WebView2 默认下载行为，不影响其它钩子。
+        // 文件名优先取 Content-Disposition（filename*/filename），否则取 URL 路径末段，
+        // 均做 Windows 非法字符清洗；拿不到系统下载目录时放弃设置路径（走默认行为）。
+        let app_for_dl = app.clone();
+        let dl_handler = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
+            if let Some(args) = args {
+                unsafe {
+                    if let Ok(op) = args.DownloadOperation() {
+                        let mut uri_pw = PWSTR::null();
+                        let mut cd_pw = PWSTR::null();
+                        let uri = op
+                            .Uri(&mut uri_pw)
+                            .ok()
+                            .and_then(|_| uri_pw.to_string().ok());
+                        let cd = op
+                            .ContentDisposition(&mut cd_pw)
+                            .ok()
+                            .and_then(|_| cd_pw.to_string().ok());
+                        // WebView2 用 CoTaskMemAlloc 分配这些字符串，用完必须释放，避免内存泄漏。
+                        if !uri_pw.is_null() {
+                            CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
+                        }
+                        if !cd_pw.is_null() {
+                            CoTaskMemFree(Some(cd_pw.0 as *const core::ffi::c_void));
+                        }
+                        if let Some(path) = default_download_path(&app_for_dl, &uri, &cd) {
+                            let _ = args
+                                .SetResultFilePath(&HSTRING::from(path.to_string_lossy().as_ref()));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }));
+        if let Ok(core4) = core.cast::<ICoreWebView2_4>() {
+            let mut dl_token = 0i64;
+            unsafe {
+                let _ = core4.add_DownloadStarting(&dl_handler, &mut dl_token);
+            }
+        }
+
         // --- 2) Basic 鉴权（仅当 URL 带 userinfo、且未走本地反向代理时）---
         if !user.is_empty() && !use_local_proxy {
             let creds = format!("{}:{}", user, pass);
@@ -286,4 +457,68 @@ pub(crate) fn attach_webview_hooks(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_disposition_rfc5987_utf8_filename() {
+        // 中文文件名走 filename*=UTF-8''<percent-encoded>
+        let cd = "attachment; filename=\"fallback.txt\"; filename*=UTF-8''%E6%8A%A5%E8%A1%A8.xlsx";
+        assert_eq!(
+            content_disposition_filename(cd).as_deref(),
+            Some("报表.xlsx"),
+            "应优先取 filename*（RFC 5987）"
+        );
+    }
+
+    #[test]
+    fn content_disposition_quoted_and_plain_filename() {
+        assert_eq!(
+            content_disposition_filename("attachment; filename=\"report v2.pdf\"").as_deref(),
+            Some("report v2.pdf")
+        );
+        assert_eq!(
+            content_disposition_filename("attachment; filename=plain.txt").as_deref(),
+            Some("plain.txt")
+        );
+    }
+
+    #[test]
+    fn content_disposition_without_filename_returns_none() {
+        assert_eq!(content_disposition_filename("inline"), None);
+        assert_eq!(content_disposition_filename("attachment; name=x.bin"), None);
+    }
+
+    #[test]
+    fn url_path_filename_from_last_segment() {
+        assert_eq!(
+            url_path_filename("https://host/a/b/report.xlsx?token=1").as_deref(),
+            Some("report.xlsx"),
+            "应取路径末段并忽略 query"
+        );
+        assert_eq!(
+            url_path_filename("https://host/附件%20%2B%20名.xls").as_deref(),
+            Some("附件 + 名.xls"),
+            "路径段应做 percent-decode"
+        );
+        assert_eq!(url_path_filename("https://host/"), None, "根路径无文件名");
+        assert_eq!(url_path_filename("not a url"), None);
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_windows_illegal_chars() {
+        assert_eq!(
+            sanitize_filename(r#"a<b>c:d"e/f\g|h?i*j"#),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        // 末尾句点 / 空白是 Windows 非法结尾，应剥掉；控制字符替换为下划线
+        assert_eq!(sanitize_filename("report.txt. "), "report.txt");
+        assert_eq!(sanitize_filename("a\tb"), "a_b");
+        // 全部非法 → 空 → 回落默认名
+        assert_eq!(sanitize_filename("..."), "download");
+        assert_eq!(sanitize_filename(""), "download");
+    }
 }

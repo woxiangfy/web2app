@@ -198,12 +198,13 @@ pub(crate) fn save_settings(
         }
     };
 
-    let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
-    // `old` 只用于桌面端的快捷键 / 托盘 diff；Android 无这两项，故一并隔离，避免 unused 警告。
+    // 1) 锁内一次性克隆旧设置，随即释放锁（临界区极小，只有一次 clone）。
+    //    `old` 只用于桌面端的快捷键 / 托盘 diff；Android 无这两项，故一并隔离，避免 unused 警告。
     #[cfg(not(target_os = "android"))]
-    let old = guard.clone();
+    let old = state.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
-    // 3) 桌面端：应用运行时的快捷键 / 托盘变更
+    // 2) 桌面端：应用运行时的快捷键 / 托盘变更（锁外执行——全局快捷键注册、
+    //    托盘创建/销毁可能涉及系统调用，不应在持锁期间做）。
     #[cfg(not(target_os = "android"))]
     {
         let old_sc = hotkey_to_shortcut(&old.wake_hotkey);
@@ -212,9 +213,14 @@ pub(crate) fn save_settings(
                 let _ = app.global_shortcut().unregister(os);
             }
             if let Some(ns) = new_sc {
-                app.global_shortcut()
-                    .register(ns)
-                    .map_err(|e| e.to_string())?;
+                if let Err(e) = app.global_shortcut().register(ns) {
+                    // 新快捷键注册失败（已被其它程序占用等）：回滚到旧快捷键，
+                    // 避免“旧的已注销、新的没注册上”的空窗——应用从此失去唤醒能力。
+                    if let Some(os) = old_sc {
+                        let _ = app.global_shortcut().register(os);
+                    }
+                    return Err(format!("快捷键注册失败（可能已被其它程序占用）：{e}"));
+                }
             }
         }
         if new_settings.tray_enabled != old.tray_enabled {
@@ -226,8 +232,12 @@ pub(crate) fn save_settings(
         }
     }
 
-    // 4) 持久化 + 更新托管状态
+    // 3) 持久化（锁外执行：磁盘 I/O 是最耗时的一步，不应阻塞其它读设置的线程）。
     persist_settings(&app, &new_settings).map_err(|e| e.to_string())?;
+
+    // 4) 重新加锁写入新设置（临界区极小）。副作用 / 持久化任一失败时走 `?` 提前返回，
+    //    与旧行为一致：不写内存态，下次 get_settings 仍是旧值。
+    let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
     *guard = new_settings;
     Ok(())
 }
@@ -237,5 +247,82 @@ pub(crate) fn save_settings(
 pub(crate) fn close_settings_window(app: tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotkey_serde_roundtrip() {
+        let h = Hotkey {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            key: "Digit4".into(),
+        };
+        let json = serde_json::to_string(&h).unwrap();
+        let back: Hotkey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ctrl, h.ctrl);
+        assert_eq!(back.alt, h.alt);
+        assert_eq!(back.shift, h.shift);
+        assert_eq!(back.key, h.key);
+    }
+
+    #[test]
+    fn settings_serde_roundtrip_preserves_flags() {
+        let s = Settings {
+            wake_hotkey: Hotkey {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                key: "KeyA".into(),
+            },
+            tray_enabled: true,
+            minimize_on_close: true,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.wake_hotkey.key, "KeyA");
+        assert!(back.wake_hotkey.ctrl);
+        assert!(back.tray_enabled);
+        assert!(back.minimize_on_close);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn hotkey_to_shortcut_valid_key() {
+        let h = Hotkey {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            key: "Digit4".into(),
+        };
+        let sc = hotkey_to_shortcut(&h).expect("合法按键应能转换");
+        // 该版本 global-shortcut 的 Display 输出修饰键为小写（"alt+Digit4"）。
+        assert_eq!(sc.to_string(), "alt+Digit4");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn hotkey_to_shortcut_empty_or_invalid_returns_none() {
+        let empty = Hotkey {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key: String::new(),
+        };
+        assert!(hotkey_to_shortcut(&empty).is_none(), "空 key 表示未启用");
+        let bogus = Hotkey {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            key: "NotARealKey".into(),
+        };
+        assert!(
+            hotkey_to_shortcut(&bogus).is_none(),
+            "无法解析的键名应返回 None"
+        );
     }
 }

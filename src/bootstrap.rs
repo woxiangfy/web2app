@@ -31,6 +31,9 @@ pub(crate) struct Navigation {
     pub(crate) use_local_proxy: bool,
     /// 本地反向代理任务的终止句柄，存入 ProxyTask 以便退出或重试时优雅关闭。
     pub(crate) proxy_abort: Option<tokio::task::AbortHandle>,
+    /// 上游真实主机（host[:port]，来自解析出的 APP_URL），供多页签判断
+    /// `NewWindowRequested` 的目标 URL 是否与上游同源（决定是否路由到该路径）。
+    pub(crate) upstream_host: Option<String>,
 }
 
 /// 托管本地反向代理任务的 AbortHandle，便于应用退出时优雅终止它（释放 127.0.0.1 监听端口）。
@@ -166,6 +169,7 @@ fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
         pass: parsed.password().unwrap_or("").to_string(),
         use_local_proxy,
         proxy_abort,
+        upstream_host: parsed.host_str().map(str::to_string),
     })
 }
 
@@ -240,4 +244,27 @@ pub(crate) fn navigate_window(
         nav.url,
         nav.use_local_proxy,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_userinfo_removes_credentials_keeps_rest() {
+        let u = Url::parse("https://alice:secret@example.com/path?q=1#frag").unwrap();
+        assert_eq!(strip_userinfo(&u), "https://example.com/path?q=1#frag");
+    }
+
+    #[test]
+    fn strip_userinfo_without_userinfo_unchanged() {
+        let u = Url::parse("https://example.com:8443/a").unwrap();
+        assert_eq!(strip_userinfo(&u), "https://example.com:8443/a");
+    }
+
+    #[test]
+    fn strip_userinfo_keeps_ipv6_authority() {
+        let u = Url::parse("http://user:pw@[::1]:8080/x").unwrap();
+        assert_eq!(strip_userinfo(&u), "http://[::1]:8080/x");
+    }
 }

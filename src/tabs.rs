@@ -443,13 +443,50 @@ pub(crate) fn set_tab_title(app: tauri::AppHandle, label: String, title: String)
 
 /// 处理来自 WebView2 `NewWindowRequested` 的新窗口请求（target="_blank" / window.open()）。
 ///
-/// 仅多页签模式下有意义：不拦截到当前窗，而是新建一个 tab。返回是否已消费该请求。
-/// 由 webview_hooks 在合适时机调用（不能在 COM 回调里直接建窗，需切线程，见 webview_hooks）。
+/// 仅多页签模式下有意义：不拦截到当前窗，而是新建一个 tab。
+/// `target_url` 是页面请求的目标地址（COM 读取失败时为 None）。
+///
+/// 同源策略：目标 URL 与上游（APP_URL 解析出的真实主机）【同源】时才导航到目标路径
+/// （本地代理 / 直连都能正确路由）；跨域目标（外部站点链接）维持“打开主地址”的默认行为，
+/// 避免把外部站点错误路由到内部上游，或在直连鉴权模式下向外部站点注入本应用凭据。
 #[cfg(windows)]
-pub(crate) fn open_new_tab_from_request(app: &tauri::AppHandle) {
-    // 直接建 tab；新窗口的 URL 由 WebView2 在导航时自动带上，
-    // 但当前实现统一导航到缓存的「主地址」——因为 NewWindowRequested 时拿到的 target URL
-    // 未必是最终地址（可能带相对路径），且同账号场景下通常希望每个 tab 打开的都是应用主页。
-    // 更精细的「按 target URL 开对应 tab」留待后续迭代。
-    let _ = spawn_tab(app);
+pub(crate) fn open_new_tab_from_request(app: &tauri::AppHandle, target_url: Option<String>) {
+    // 先建 tab（默认导航到缓存的主地址，并挂好鉴权/新窗口/下载钩子），拿到 label。
+    let label = match spawn_tab(app) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let Some(target) = target_url else { return };
+    let Some(window) = app.get_webview_window(&label) else {
+        return;
+    };
+    let nav = app
+        .state::<TabManager>()
+        .navigation
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let Some(nav) = nav else { return };
+
+    // 同源校验：目标主机必须等于上游主机，否则维持主地址（外部链接不进代理）。
+    let Ok(tu) = url::Url::parse(&target) else {
+        return;
+    };
+    let Some(upstream_host) = nav.upstream_host.as_deref() else {
+        return;
+    };
+    if tu.host_str() != Some(upstream_host) {
+        return;
+    }
+
+    // 把目标 URL 的 path+query 拼到导航地址（本地代理入口 / 直连地址）后做第二次导航。
+    let pq = match tu.query() {
+        Some(q) => format!("{}?{}", tu.path(), q),
+        None => tu.path().to_string(),
+    };
+    let Ok(base) = url::Url::parse(&nav.url) else {
+        return;
+    };
+    let Ok(joined) = base.join(&pq) else { return };
+    crate::webview_hooks::navigate_webview(&window, joined.as_str());
 }

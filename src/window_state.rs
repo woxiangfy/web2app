@@ -20,6 +20,8 @@ pub struct State {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// 旧版配置文件可能没有该字段：缺省按 false 解析（窗口不被误判为最大化）。
+    #[serde(default)]
     pub maximized: bool,
 }
 
@@ -108,4 +110,34 @@ pub fn apply(win: &WebviewWindow, st: &State) {
     // 3) 几何有效：恢复位置与尺寸。
     let _ = win.set_position(tauri::PhysicalPosition::new(st.x, st.y));
     let _ = win.set_size(tauri::PhysicalSize::new(st.width, st.height));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_serde_roundtrip_preserves_all_fields() {
+        let st = State {
+            x: 100,
+            y: 200,
+            width: 800,
+            height: 600,
+            maximized: true,
+        };
+        let json = serde_json::to_string(&st).unwrap();
+        let back: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.x, 100);
+        assert_eq!(back.y, 200);
+        assert_eq!(back.width, 800);
+        assert_eq!(back.height, 600);
+        assert!(back.maximized);
+    }
+
+    #[test]
+    fn state_parse_accepts_missing_maximized_as_false() {
+        // 兼容旧版配置文件（无 maximized 字段时 serde 默认补 false）。
+        let back: State = serde_json::from_str(r#"{"x":1,"y":2,"width":3,"height":4}"#).unwrap();
+        assert!(!back.maximized);
+    }
 }

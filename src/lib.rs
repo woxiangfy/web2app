@@ -285,11 +285,20 @@ pub fn run() {
             }
 
             // 注册全局快捷键：① 唤醒主窗口（取自设置） ② 打开设置界面（固定 Shift+F1）
+            // ⚠️ 注册失败【不能】用 `?` 上抛：快捷键可能已被其它程序占用（或注册表被改），
+            // 此时应用其它功能（窗口/托盘/代理）仍可正常使用，降级为“无该快捷键”并打日志，
+            // 而非整个应用启动失败。占用冲突是最常见的桌面场景，不是“环境不支持”。
             if let Some(sc) = settings::hotkey_to_shortcut(&initial_settings.wake_hotkey) {
-                app.global_shortcut().register(sc)?;
+                if let Err(e) = app.global_shortcut().register(sc) {
+                    eprintln!("[shortcut] 唤醒快捷键注册失败（可能已被其它程序占用）：{e}");
+                }
             }
-            app.global_shortcut()
-                .register(settings::settings_open_shortcut())?;
+            if let Err(e) = app
+                .global_shortcut()
+                .register(settings::settings_open_shortcut())
+            {
+                eprintln!("[shortcut] 设置快捷键(Shift+F1)注册失败（可能已被其它程序占用）：{e}");
+            }
         }
 
         Ok(())

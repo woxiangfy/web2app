@@ -84,6 +84,12 @@ jobs:
         # let_unit_value）在 Linux 上永远发现不了。Windows 端必须单独跑一次 clippy。
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Run tests (Windows)
+        # 同理，`#[cfg(windows)]` 的单元/集成测试（如 proxy.rs 的流式转发、cookie 重写、
+        # WebView2 鉴权注入）只在 Windows 目标下编译并执行，Linux 作业覆盖不到，
+        # 必须在此显式运行，否则 Windows 专属回归会在本地漏检。
+        run: cargo test --all
+
   # ---------------------------------------------------------------------------
   # 3) Android 端交叉编译检查（aarch64-linux-android）【阻断流水线】
   #    ⚠️ 曾经这里挂着 continue-on-error: true，结果 cfg 隔离不完整导致的

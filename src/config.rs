@@ -224,3 +224,57 @@ pub(crate) fn build_proxy_args() -> Option<String> {
     }
     Some(args)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn str_eq_matches_equal_strings() {
+        assert!(str_eq("abc", "abc"));
+        assert!(!str_eq("abc", "abd"));
+        assert!(!str_eq("abc", "ab"));
+        assert!(!str_eq("", "a"));
+        assert!(str_eq("", ""));
+    }
+
+    #[test]
+    fn sanitize_dir_name_replaces_illegal_chars() {
+        assert_eq!(
+            sanitize_dir_name(r#"a<b>c:d"e/f\g|h?i*j"#),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+    }
+
+    #[test]
+    fn sanitize_dir_name_collapses_whitespace() {
+        // 空格/全角空白压缩为单个空格，且去首尾。
+        assert_eq!(sanitize_dir_name("  My   App  "), "My App");
+        // 控制字符（tab/换行 < 32）走"替换为下划线"分支，不参与空白压缩。
+        assert_eq!(sanitize_dir_name("a\tb\nc"), "a_b_c");
+    }
+
+    #[test]
+    fn sanitize_dir_name_trims_dots_and_falls_back() {
+        assert_eq!(sanitize_dir_name("..App.."), "App");
+        // 非法字符映射为下划线后非空 → 不回退默认名（只有结果为空才回退）。
+        assert_eq!(sanitize_dir_name("***"), "___");
+        // 全部是空白 → 压缩后为空 → 回落默认名
+        assert_eq!(sanitize_dir_name("   "), "Web2App");
+        assert_eq!(sanitize_dir_name(""), "Web2App");
+    }
+
+    #[test]
+    fn sanitize_dir_name_keeps_unicode() {
+        assert_eq!(sanitize_dir_name("我的应用"), "我的应用");
+        assert_eq!(sanitize_dir_name("我的/应用"), "我的_应用");
+    }
+
+    // build_proxy_args 依赖编译期常量 PROXY_ENABLED（默认 false），
+    // 单测只能验证「未启用 → None」分支；启用分支由 CI 注入 env 编译验证。
+    #[cfg(windows)]
+    #[test]
+    fn build_proxy_args_none_when_disabled() {
+        assert!(build_proxy_args().is_none());
+    }
+}

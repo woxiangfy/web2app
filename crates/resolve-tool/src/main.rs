@@ -353,3 +353,102 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    /// 把内容写到系统临时目录下的唯一文件，返回路径（测试结束前由调用方清理）。
+    fn write_temp_pem(content: &str, tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "resolve-tool-test-{}-{tag}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_signing_key_pure_private_pem() {
+        let (priv_pem, _pub_b64) = resolve_core::generate_keypair().unwrap();
+        let path = write_temp_pem(&priv_pem, "pure");
+        let key = load_signing_key(path.to_str().unwrap()).expect("纯私钥 PEM 应能解析");
+        assert_eq!(key.to_bytes().len(), 32);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_signing_key_folded_single_line() {
+        // 头尾标记与 base64 被折叠成一行（多行传输损坏的常见形态）也应能解析。
+        let (priv_pem, _pub_b64) = resolve_core::generate_keypair().unwrap();
+        let folded = priv_pem.replace('\n', "");
+        let path = write_temp_pem(&folded, "folded");
+        let key = load_signing_key(path.to_str().unwrap()).expect("折叠单行 PEM 应能解析");
+        assert_eq!(key.to_bytes().len(), 32);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_signing_key_rfc8410_with_embedded_pubkey() {
+        // RFC 8410 格式（83 字节内容，seed 后内嵌公钥）：解析应跳过内嵌公钥、取到 seed。
+        let (_, pub_b64) = resolve_core::generate_keypair().unwrap();
+        let pub_raw =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &pub_b64).unwrap();
+        let seed = [7u8; 32];
+        let mut der = Vec::new();
+        der.extend_from_slice(&[0x30, 0x53]); // SEQUENCE len=83
+        der.extend_from_slice(&[0x02, 0x01, 0x00]); // INTEGER version
+        der.extend_from_slice(&[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70]); // Ed25519 OID
+        der.extend_from_slice(&[0x04, 0x22]); // OCTET STRING len=34
+        der.extend_from_slice(&[0x04, 0x20]); // 内层 OCTET STRING len=32
+        der.extend_from_slice(&seed);
+        der.extend_from_slice(&[0xa1, 0x23, 0x03, 0x21, 0x00]); // [1] BIT STRING 32 字节
+        der.extend_from_slice(&pub_raw);
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n");
+        let path = write_temp_pem(&pem, "rfc8410");
+        let key = load_signing_key(path.to_str().unwrap()).expect("RFC8410 应能解析");
+        assert_eq!(key.to_bytes(), seed);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_signing_key_invalid_returns_err() {
+        let path = write_temp_pem("这不是 PEM", "garbage");
+        assert!(load_signing_key(path.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parse_ttl_default_and_custom() {
+        assert_eq!(parse_ttl(&[]).unwrap(), 48 * 3600, "默认 48h");
+        assert_eq!(
+            parse_ttl(&["--ttl".to_string(), "60".to_string()]).unwrap(),
+            60
+        );
+        assert!(
+            parse_ttl(&["--ttl".to_string(), "abc".to_string()]).is_err(),
+            "非整数应报错"
+        );
+        assert!(parse_ttl(&["--ttl".to_string()]).is_err(), "缺少数值应报错");
+    }
+
+    #[test]
+    fn parse_count_default_and_custom() {
+        assert_eq!(parse_count(&[]).unwrap(), 1, "默认 1 份");
+        assert_eq!(
+            parse_count(&["--count".to_string(), "3".to_string()]).unwrap(),
+            3
+        );
+        assert!(
+            parse_count(&["--count".to_string(), "0".to_string()]).is_err(),
+            "0 不允许"
+        );
+        assert!(
+            parse_count(&["--count".to_string(), "x".to_string()]).is_err(),
+            "非整数应报错"
+        );
+    }
+}

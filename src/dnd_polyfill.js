@@ -101,47 +101,77 @@
      *  合成拖拽事件。优先 `new DragEvent(type, init)` —— Chromium 的
      *  DragEventInit 原生支持 clientX/clientY/screenX/screenY/dataTransfer，
      *  这样坐标能真正落到事件对象上（旧实现把坐标塞进 EventInit 导致
-     *  undefined）。极旧环境若无 DragEvent 再退化为 Event + 手动补坐标。
+     *  undefined)。极旧环境若无 DragEvent 再退化为 Event + 手动补坐标。
+     *
+     *  关键修补：原生拖拽事件的 pageX/pageY = clientX/clientY + 页面滚动偏移。
+     *  但【合成】DragoEvent 的 pageX/pageY 由 Chromium 从 clientX/clientY 推导，
+     *  【不含滚动偏移】。而 Trilium 的树（jquery.fancytree + dnd5 扩展）计算插入
+     *  位置正是用 `event.pageY` 对照目标行的文档坐标 `$target.offset().top`：
+     *
+     *      relPosY = (event.pageY - $target.offset().top) / $target.height();
+     *      // relPosY<=0.25 插到该行前；0.25~0.75 作为子节点；>=0.75 插到该行后
+     *
+     *  一旦树或窗口发生滚动，clientY 与 pageY 便不一致；若 pageY 缺了滚动偏移，
+     *  relPosY 就按错的行内相对位置计算 → hitMode 判定错误 → 重排到错误位置或失效。
+     *  因此这里强制给每个合成事件补齐 pageX/pageY（用手写属性遮蔽只读 getter，
+     *  strict 模式下用 defineProperty 避免对 getter-only 原型属性赋值抛错）。
      * ------------------------------------------------------------------ */
     function buildDragEvent(type, x, y) {
-        var init = {
-            bubbles: true,
-            cancelable: true,
-            view: window
-        };
         var dt = sessionDataTransfer || makeDataTransfer();
 
         // 会话 DataTransfer 需要在事件构造时就注入（dataTransfer 只能由浏览器
         // 或 DragEventInit 提供；事后给 Event 赋 dataTransfer 属性在多数库仍可读，
-        // 但用原生 DragEvent 更稳妥）。因此这里传一个占位 dt；若下方无法构造，
-        // 统一在返回前把 dt 挂到 event.dataTransfer。
+        // 但用原生 DragEvent 更稳妥）。因此这里传一个占位 dt。
+        var ev;
         if (typeof DragEvent === 'function') {
             try {
-                var ev = new DragEvent(type, {
+                ev = new DragEvent(type, {
                     bubbles: true, cancelable: true, view: window,
                     dataTransfer: dt,
                     clientX: x, clientY: y,
                     screenX: (x || 0), screenY: (y || 0)
                 });
-                // 兜底确保 dataTransfer 一定存在
-                if (!ev.dataTransfer) ev.dataTransfer = dt;
-                return ev;
-            } catch (e) { /* fallthrough to manual */ }
+            } catch (e) { ev = null; } // 构造失败则回退到下面手动补坐标
         }
+        if (!ev) {
+            ev = new Event(type, { bubbles: true, cancelable: true });
+            if (x !== undefined) ev.clientX = x;
+            if (y !== undefined) ev.clientY = y;
+            ev.screenX = x || 0;
+            ev.screenY = y || 0;
+            ev.dataTransfer = dt;
+        }
+        // 兜底确保 dataTransfer 一定存在（原生 DragEvent 可能重建出新的空实例）
+        if (!ev.dataTransfer) ev.dataTransfer = dt;
 
-        var event = new Event(type, { bubbles: true, cancelable: true });
-        if (x !== undefined) event.clientX = x;
-        if (y !== undefined) event.clientY = y;
-        event.screenX = x || 0;
-        event.screenY = y || 0;
-        event.dataTransfer = dt;
-        return event;
+        // 补齐 pageX/pageY（含滚动偏移，与真实拖拽事件一致）。
+        // pageX/pageY 在原型上是只读 getter，直接赋值在 strict 模式会抛错，
+        // 用 defineProperty 造一个遮蔽它的实例自有数据属性。
+        var sx = window.pageXOffset || document.documentElement.scrollLeft || 0;
+        var sy = window.pageYOffset || document.documentElement.scrollTop || 0;
+        try {
+            Object.defineProperty(ev, 'pageX', {
+                value: (x === undefined ? sx : x + sx),
+                configurable: true, writable: true
+            });
+            Object.defineProperty(ev, 'pageY', {
+                value: (y === undefined ? sy : y + sy),
+                configurable: true, writable: true
+            });
+        } catch (e2) { /* 个别环境不可覆盖时忽略，保留客户端坐标 */ }
+        return ev;
     }
 
-    /** 找出最近的 draggable="true" 祖先 */
+    /** 找出最近的 draggable 祖先。
+     *  兼容两种写法：`draggable="true"` 内容属性，或 DOM 属性 `el.draggable = true`
+     *  （fancytree 等库用属性赋值，属性虽会反射回内容属性，这里双保险更稳妥）。 */
+    function isDraggable(element) {
+        if (element.getAttribute && element.getAttribute('draggable') === 'true') return true;
+        try { return element.draggable === true; } catch (e) { return false; }
+    }
     function findDraggableAncestor(element) {
         while (element && element !== document.body && element.nodeType === 1) {
-            if (element.getAttribute && element.getAttribute('draggable') === 'true') {
+            if (isDraggable(element)) {
                 return element;
             }
             element = element.parentElement;

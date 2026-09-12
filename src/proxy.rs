@@ -27,7 +27,6 @@ use axum::{
 };
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use http_body_util::BodyExt;
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -143,13 +142,8 @@ async fn proxy_handler(
         return Ok(ws.on_upgrade(move |socket| handle_websocket(socket, state, uri, headers)));
     }
 
-    // ---------- 普通 HTTP 转发 ----------
+    // ---------- 普通 HTTP 转发（流式，避免大文件全量缓冲到内存）----------
     let (parts, body) = req.into_parts();
-    let body_bytes = body
-        .collect()
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-        .to_bytes();
 
     let target = state
         .upstream
@@ -199,11 +193,15 @@ async fn proxy_handler(
         rb = rb.header("Authorization", auth.as_str());
     }
 
-    let proxied_resp = rb
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    // 请求体流式化：不再 `collect()` 全量缓冲，边收边转给上游。
+    // 用 `Body::wrap_stream`（只需流 Send + 'static，axum Body 满足），无长度信息时
+    // 自动以 chunked 分块上传（HTTP/1.1 标准，主流服务器均支持）。内存峰值从
+    // 「请求体大小」降到常数级。注意：reqwest 0.12 没有已知长度流的构造器
+    // （`Body::sized` 是 0.13 才有的），故统一走 wrap_stream。
+    let body_stream = body.into_data_stream();
+    rb = rb.body(reqwest::Body::wrap_stream(body_stream));
+
+    let proxied_resp = rb.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let mut response_builder = Response::builder().status(proxied_resp.status());
     for (name, value) in proxied_resp.headers() {
@@ -225,11 +223,12 @@ async fn proxy_handler(
         response_builder = response_builder.header(name, value);
     }
 
-    let bytes = proxied_resp
-        .bytes()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    Ok(response_builder.body(Body::from(bytes)).unwrap())
+    // 响应体流式化：不再 `bytes()` 全量缓冲，边收边转给 WebView。长度未知时 hyper
+    // 自动用 chunked 分块传输（WebView2 原生支持）；Content-Length 已在上面跳过，
+    // 避免流中断时客户端按旧长度挂起等待。
+    Ok(response_builder
+        .body(Body::from_stream(proxied_resp.bytes_stream()))
+        .unwrap())
 }
 
 async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, headers: HeaderMap) {
@@ -392,8 +391,12 @@ fn rewrite_cookie_domain(cookie: &str, proxy_host: &str) -> String {
     }
     for part in parts {
         let p = part.trim();
-        // 仅重写 Domain 属性；其值为 ASCII，可安全用字节切片前缀判断。
-        if p.len() >= 7 && p[..7].eq_ignore_ascii_case("domain=") {
+        // 仅重写 Domain 属性。⚠️ 不能用 `p[..7]` 直接切片：若属性含多字节 UTF-8
+        // （上游返回的不规范 cookie 值），字节 7 可能落在字符中间 → 切片 panic。
+        // 用 `get(..7)` 返回 Option 再做大小写无关比较，非 ASCII 属性安全放行。
+        if p.get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("domain="))
+        {
             out.push(format!("Domain={}", proxy_host));
         } else {
             out.push(p.to_string());
@@ -463,5 +466,202 @@ mod tests {
             rewrite_cookie_domain(c, PROXY_HOST),
             "token=x; Domain=127.0.0.1"
         );
+    }
+
+    #[test]
+    fn cookie_multibyte_attr_no_panic() {
+        // 回归：旧实现 `p[..7]` 字节切片在多字节 UTF-8 且长度 >= 7 的属性上会 panic
+        //（字节 7 落在「文」字中间）。新实现必须安全放行并原样保留非 Domain 属性。
+        let c = "sid=1; 中文文=value; Path=/";
+        let r = rewrite_cookie_domain(c, PROXY_HOST);
+        assert!(r.contains("sid=1"), "cookie 名值对应保留");
+        assert!(r.contains("中文文=value"), "多字节属性应原样保留而非 panic");
+        assert!(r.contains("Path=/"));
+        assert!(!r.contains("Domain="), "不应误写 Domain");
+    }
+
+    #[test]
+    fn axum_to_tungstenite_all_message_kinds() {
+        use axum::extract::ws::{CloseFrame as AClose, Message as A, Utf8Bytes as AUtf8};
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::Message as T;
+
+        let t = axum_msg_to_tungstenite(A::Text(AUtf8::from("hi"))).unwrap();
+        assert_eq!(t, T::Text("hi".into()));
+
+        let t = axum_msg_to_tungstenite(A::Binary(bytes::Bytes::from(vec![1, 2, 3]))).unwrap();
+        assert!(matches!(t, T::Binary(b) if b.as_ref() == [1, 2, 3]));
+
+        let t = axum_msg_to_tungstenite(A::Ping(bytes::Bytes::from(vec![9]))).unwrap();
+        assert!(matches!(t, T::Ping(b) if b.as_ref() == [9]));
+
+        let t = axum_msg_to_tungstenite(A::Pong(bytes::Bytes::from(vec![8]))).unwrap();
+        assert!(matches!(t, T::Pong(b) if b.as_ref() == [8]));
+
+        let t = axum_msg_to_tungstenite(A::Close(Some(AClose {
+            code: 1000,
+            reason: AUtf8::from("bye"),
+        })))
+        .unwrap();
+        match t {
+            T::Close(Some(cf)) => {
+                assert_eq!(cf.code, CloseCode::Iana(1000));
+                assert_eq!(cf.reason.as_str(), "bye");
+            }
+            other => panic!("期望 Close(Some)，实际 {other:?}"),
+        }
+
+        let t = axum_msg_to_tungstenite(A::Close(None)).unwrap();
+        assert!(matches!(t, T::Close(None)));
+    }
+
+    #[test]
+    fn tungstenite_to_axum_all_message_kinds() {
+        use axum::extract::ws::Message as A;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::frame::{
+            coding::Data as OpData, coding::OpCode, CloseFrame as TClose, Frame,
+        };
+        use tokio_tungstenite::tungstenite::Message as T;
+
+        let a = tungstenite_msg_to_axum(T::Text("yo".into())).unwrap();
+        assert_eq!(a, A::Text("yo".into()));
+
+        let a = tungstenite_msg_to_axum(T::Binary(bytes::Bytes::from(vec![7, 8]))).unwrap();
+        assert!(matches!(a, A::Binary(b) if b.as_ref() == [7, 8]));
+
+        let a = tungstenite_msg_to_axum(T::Ping(bytes::Bytes::from(vec![1]))).unwrap();
+        assert!(matches!(a, A::Ping(b) if b.as_ref() == [1]));
+
+        let a = tungstenite_msg_to_axum(T::Pong(bytes::Bytes::from(vec![2]))).unwrap();
+        assert!(matches!(a, A::Pong(b) if b.as_ref() == [2]));
+
+        let a = tungstenite_msg_to_axum(T::Close(Some(TClose {
+            code: CloseCode::Normal,
+            reason: "done".into(),
+        })))
+        .unwrap();
+        match a {
+            A::Close(Some(cf)) => {
+                assert_eq!(cf.code, 1000);
+                assert_eq!(cf.reason.as_str(), "done");
+            }
+            other => panic!("期望 Close(Some)，实际 {other:?}"),
+        }
+
+        let a = tungstenite_msg_to_axum(T::Close(None)).unwrap();
+        assert!(matches!(a, A::Close(None)));
+
+        // 原始数据帧（frame）在代理层不转发（上游重打包为完整消息）。
+        let framed = tungstenite_msg_to_axum(T::Frame(Frame::message(
+            bytes::Bytes::from("x"),
+            OpCode::Data(OpData::Text),
+            true,
+        )));
+        assert!(framed.is_none(), "Frame 不应被转换成 axum Message");
+    }
+
+    // ---- 端到端集成测试：真实本地反向代理 + mock 上游 ----
+    // 验证三条核心语义：① 代理给每个请求强制注入 Authorization: Basic 头；
+    // ② 上游 Set-Cookie 的 Domain=真实host 被重写为 127.0.0.1；
+    // ③ 大响应体（1MB）经流式转发完整到达、chunked 上传体原样到达（无截断）。
+
+    #[tokio::test]
+    async fn proxy_e2e_auth_cookie_and_streaming() {
+        use std::sync::{Arc, Mutex};
+
+        // ---- mock 上游：记录收到的 Authorization 头，返回 cookie + 大 body ----
+        let auth_seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let auth_seen2 = auth_seen.clone();
+        let big: Vec<u8> = vec![0xAB; 1024 * 1024]; // 1MB
+
+        let app = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let auth_seen2 = auth_seen2.clone();
+                    let big = big.clone();
+                    async move {
+                        if let Some(v) = headers.get("authorization") {
+                            if let Ok(s) = v.to_str() {
+                                *auth_seen2.lock().unwrap() = Some(s.to_string());
+                            }
+                        }
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(big));
+                        resp.headers_mut().insert(
+                            "set-cookie",
+                            axum::http::HeaderValue::from_str(
+                                "session=abc; Domain=real.example.com; Path=/; HttpOnly",
+                            )
+                            .unwrap(),
+                        );
+                        resp
+                    }
+                }),
+            )
+            // echo 路由：原样返回请求体，验证代理的 chunked 上传流式转发。
+            .route(
+                "/echo",
+                axum::routing::post(|body: axum::body::Bytes| async move {
+                    axum::body::Body::from(body)
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // ---- 启动本地反向代理，上游指向 mock 服务器 ----
+        let app_url = url::Url::parse(&format!("http://alice:secret@{}", addr)).unwrap();
+        let (proxy_url, abort) = super::start_proxy(&app_url).await.unwrap();
+
+        let client = reqwest::Client::new();
+
+        // ① GET 大文件：验证鉴权注入 + cookie 重写 + 流式响应无截断
+        let resp = client.get(&proxy_url).send().await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let mut cookie_seen = false;
+        for c in resp.headers().get_all("set-cookie") {
+            let s = c.to_str().unwrap();
+            if s.contains("session=abc") {
+                assert!(
+                    s.contains("Domain=127.0.0.1"),
+                    "cookie Domain 应被重写为代理主机，实际：{s}"
+                );
+                assert!(
+                    s.contains("Path=/") && s.contains("HttpOnly"),
+                    "其余属性应保留：{s}"
+                );
+                cookie_seen = true;
+            }
+        }
+        assert!(cookie_seen, "应收到 session cookie");
+
+        let bytes = resp.bytes().await.unwrap();
+        assert_eq!(bytes.len(), 1024 * 1024, "1MB 响应应完整到达（流式无截断）");
+        assert!(bytes.iter().all(|&b| b == 0xAB));
+
+        let seen = auth_seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.as_deref(),
+            Some("Basic YWxpY2U6c2VjcmV0"),
+            "上游应收到 alice:secret 的 Basic 头"
+        );
+
+        // ② POST chunked 上传：请求体经代理流式转发后原样到达
+        let payload: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+        let echo = client
+            .post(format!("{proxy_url}echo"))
+            .body(payload.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(echo.status(), axum::http::StatusCode::OK);
+        assert_eq!(echo.bytes().await.unwrap(), payload, "上传体应原样回传");
+
+        abort.abort();
     }
 }
