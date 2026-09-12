@@ -164,9 +164,13 @@
     </div>
 
     <script>
-      const { invoke } = window.__TAURI__ && window.__TAURI__.core
-        ? window.__TAURI__.core
-        : { invoke: () => Promise.reject(new Error("Tauri IPC 不可用")) };
+      // IPC 桥：优先使用 Tauri 底层注入的 __TAURI_INTERNALS__.invoke（自定义协议页 settings://
+      // 同样用它，稳定可用），其次 __TAURI__.core.invoke（withGlobalTauri）。两种都拿不到时
+      // 降级为“恒拒绝”，配合各调用的 catch 静默失败，避免抛错中断标签栏渲染。
+      const invoke =
+        (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) ||
+        (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) ||
+        (() => Promise.reject(new Error("Tauri IPC 不可用")));
 
       const tabsEl = document.getElementById("tabs");
       const addEl = document.getElementById("add");

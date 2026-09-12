@@ -31,8 +31,8 @@ pub(crate) const TAB_PREFIX: &str = "tab-";
 /// shell 自定义协议名（宿主窗口加载的标签栏页）。
 pub(crate) const SHELL_SCHEME: &str = "shell";
 
-/// 标签栏高度（物理像素）。tab 窗口 top 对齐到宿主窗口标签栏下方，即 top = 宿主 y + TAB_BAR_HEIGHT。
-/// 该值与 shell.html 里的标签栏 CSS 高度保持一致，否则 tab 内容会与标签栏重叠或留缝。
+/// 标签栏高度（**逻辑**像素）。该值与 shell.html 里的标签栏 CSS 高度保持一致，
+/// 否则 tab 内容会与标签栏重叠或留缝。relayout 计算物理像素时再乘 DPI 缩放系数。
 pub(crate) const TAB_BAR_HEIGHT: i32 = 38;
 
 /// 一个 tab 的运行时信息。
@@ -136,6 +136,9 @@ pub(crate) fn spawn_tab(app: &tauri::AppHandle) -> Result<String, String> {
     let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(WINDOW_TITLE)
         .decorations(false)
+        // ⚠️ 标签不占独立任务栏按钮：只有宿主窗口出现在任务栏，视觉上是一个整体窗口。
+        // （若任由每个 tab 出任务栏按钮，会看到“多个相同图标”重复，用户侧反馈的“有两个窗口”。）
+        .skip_taskbar(true)
         .resizable(false)
         .background_color(crate::bootstrap::SPLASH_BG)
         .initialization_script(crate::loading::OVERLAY_SCRIPT)
@@ -230,6 +233,10 @@ fn activate_tab(app: &tauri::AppHandle, label: &str) {
 
     // 通知前端标签栏刷新激活态。
     push_tabs_to_shell(app);
+
+    // 重新布局：把目标 tab 吸附到宿主内容区并铺满（新建 tab 后也必须立即执行一次，
+    // 否则 tab 窗口停留在建窗时的默认小尺寸，正文四周出现大片空隙——用户反馈“没铺满”）。
+    relayout(app);
 }
 
 /// 关闭指定 tab：销毁窗口、移除记录，若关闭的是激活 tab 则激活相邻 tab。
@@ -300,8 +307,12 @@ fn relayout(app: &tauri::AppHandle) {
     };
 
     // 内容区：宿主窗口 outer 即客户区（无边框），减去标签栏高度。
-    let content_top = pos.y + TAB_BAR_HEIGHT;
-    let content_height = (size.height as i32 - TAB_BAR_HEIGHT).max(0);
+    // outer_position/outer_size 都是物理像素，而 shell.css 的标签栏高度是 38 逻辑像素，
+    // 必须乘 DPI 缩放换算成物理值，否则高分屏下内容偏移/高度算错 → “内容不满/重叠”。
+    let scale = host.scale_factor().unwrap_or(1.0);
+    let bar_phys = ((TAB_BAR_HEIGHT as f64) * scale).round() as i32;
+    let content_top = pos.y + bar_phys;
+    let content_height = (size.height as i32 - bar_phys).max(0);
 
     let tabs = app
         .state::<TabManager>()
