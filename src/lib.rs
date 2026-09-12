@@ -79,7 +79,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             settings::get_settings,
             settings::save_settings,
-            settings::close_settings_window
+            settings::close_settings_window,
+            history_nav
         ]);
 
     // 多页签模式（仅 Windows）：注册 shell 标签栏协议 + TabManager 状态 + tab 相关 IPC 命令。
@@ -211,7 +212,12 @@ pub fn run() {
                 // use HTML5 drag and drop APIs on the frontend on Windows."
                 .disable_drag_drop_handler()
                 // 注入 WebView2 拖拽 polyfill：让页面内 HTML5 拖动（[draggable] 元素/列表排序）恢复。
-                .initialization_script(include_str!("dnd_polyfill.js"));
+                .initialization_script(include_str!("dnd_polyfill.js"))
+                // 去掉系统标题栏（decorations(false)），改由注入的自绘标题栏 titlebar.js 提供
+                // “后退/前进 + 最小化/最大化/关闭”按钮（仅单窗口模式生效；多页签模式见
+                // tabs.rs 的宿主窗口 + shell.html 标签栏）。依赖 withGlobalTauri 暴露的 __TAURI__。
+                .decorations(false)
+                .initialization_script(include_str!("titlebar.js"));
 
             #[cfg(windows)]
             let wb = match &browser_args {
@@ -410,4 +416,50 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
             let _ = w.hide();
         }
     }
+}
+
+/// 标题栏「后退 / 前进」命令：对【当前】窗体对应的 webview 执行历史导航。
+///
+/// 目标窗体的确定：
+/// - 多页签模式（仅 Windows）：当前激活的 tab 窗口（标题栏按钮在宿主标签栏左侧）。
+/// - 单窗口模式：主窗 "main"（自绘标题栏注入到主窗每个文档）。
+///
+/// 统一用 [`tauri::WebviewWindow::eval`] 在目标 webview 内执行 `window.history.back()` /
+/// `window.history.forward()`，命中 WebView 自己的会话历史（SPA 路由 / 前进后退均有效）。
+#[tauri::command]
+fn history_nav(app: tauri::AppHandle, direction: String) -> Result<(), String> {
+    // 确定目标 webview label。
+    let target_label: String = {
+        #[cfg(windows)]
+        if tabs::tabs_enabled() {
+            let state = app.state::<tabs::TabManager>();
+            let active = *state.active.lock().unwrap_or_else(|p| p.into_inner());
+            let labels = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+            labels
+                .get(active)
+                .map(|t| t.label.clone())
+                .unwrap_or_else(|| "main".to_string())
+        } else {
+            "main".to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            "main".to_string()
+        }
+    };
+
+    let Some(window) = app.get_webview_window(&target_label) else {
+        return Err(format!("历史导航失败：窗口 {target_label} 不存在"));
+    };
+
+    // 仅接受 'back' / 'forward' 两个方向，防误传。
+    let script = match direction.as_str() {
+        "back" => "try{window.history.back();}catch(e){}",
+        "forward" => "try{window.history.forward();}catch(e){}",
+        _ => return Err("无效的历史导航方向（仅支持 back / forward）".to_string()),
+    };
+
+    window
+        .eval(script)
+        .map_err(|e| format!("历史导航失败：{e}"))
 }

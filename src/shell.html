@@ -118,10 +118,47 @@
         .add { border-left-color: var(--border-dark); }
       }
       .add:hover { color: var(--accent); }
+      /* 前进/后退按钮（标题栏左侧，紧贴标签栏） */
+      .nav {
+        -webkit-app-region: no-drag; /* 按钮可点击，不参与拖动 */
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 0 6px;
+        flex: none;
+        border-right: 1px solid var(--border);
+      }
+      @media (prefers-color-scheme: dark) {
+        .nav { border-right-color: var(--border-dark); }
+      }
+      .nav-btn {
+        -webkit-app-region: no-drag;
+        width: 28px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1;
+        cursor: pointer;
+        flex: none;
+      }
+      .nav-btn:hover { background: rgba(0,0,0,0.06); color: var(--text); }
+      @media (prefers-color-scheme: dark) {
+        .nav-btn:hover { background: rgba(255,255,255,0.12); color: var(--text-dark); }
+      }
     </style>
   </head>
   <body>
     <div class="bar">
+      <div class="nav">
+        <button type="button" class="nav-btn" id="back" title="后退">←</button>
+        <button type="button" class="nav-btn" id="fwd" title="前进">→</button>
+      </div>
       <div class="tabs" id="tabs"></div>
       <div class="add" id="add" title="新建页签">+</div>
     </div>
@@ -176,6 +213,14 @@
       // 新建页签
       addEl.addEventListener("click", () => {
         invoke("create_tab");
+      });
+
+      // 前进 / 后退：控制【当前激活 tab】的 webview 历史（history_nav 由 Rust 定位目标窗体）。
+      document.getElementById("back").addEventListener("click", () => {
+        invoke("history_nav", { direction: "back" }).catch(() => {});
+      });
+      document.getElementById("fwd").addEventListener("click", () => {
+        invoke("history_nav", { direction: "forward" }).catch(() => {});
       });
 
       // 初始化：拉取当前 tab 列表
