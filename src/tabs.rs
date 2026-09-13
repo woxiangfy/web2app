@@ -360,6 +360,39 @@ pub(crate) fn spawn_tab_with_target(
         window
     };
 
+    // ⚠️⚠️ tab 窗口必须设成宿主窗口的 **owned window**（owner，不是 child / parent 定位）。
+    //
+    // 为什么（用户反馈「点标签栏空白处，页签下的网页会被隐藏，点标签才出来」的根因）：
+    // 宿主（标签栏）与 tab（网页内容）是两个**互相独立**的顶层窗口。不设 owner 时二者在
+    // z-order 上完全平等，于是**点宿主的任何位置**——包括标签栏里页签右侧那段空白拖动区
+    // （`.tabs` 是 `-webkit-app-region: drag`）——都会让 Windows 激活宿主并把它抬到 tab
+    // 之上。宿主的客户区在标签栏下方是一大片空底色，正好把 tab 的网页整个盖住 → 用户看到
+    // 「页签下的网页被隐藏了」；再点一下页签时 `activate_tab` 里的 `set_focus()` 又把 tab
+    // 抬起来 → 网页「又出来了」。所以这个现象看起来像随机闪烁，实际是确定的 z-order 关系。
+    //
+    // MSDN（owned windows）：owned window **永远在自己 owner 之上**，且 owner 最小化时由
+    // 系统隐藏、owner 销毁时由系统销毁。因此设上 owner 后，这类遮挡从根上不可能发生，
+    // 不需要在每次宿主获得焦点时手动 reorder 窗口（那种做法会打断拖动、还会抢焦点）。
+    //
+    // 实现细节：tao 的 `Parent::OwnedBy` 会给窗口加上 `POPUP`（不再有 WS_THICKFRAME /
+    // 任务栏按钮）。对本应用正合适：tab 本来就是 `decorations(false) + resizable(false)
+    // + shadow(false)`，客户区 == 窗口矩形，[`place_tab`] 的闭环校准照常收敛。
+    //
+    // ⚠️ 已知副作用（勿删此注释）：owner 最小化时**系统会自己隐藏** owned 窗口，而 tao 的
+    // 窗口过程不处理 `WM_SHOWWINDOW`，它的 `VISIBLE` 标志可能与真实可见性短暂脱节；
+    // 好在 `sync_tabs_with_host` 会在宿主每次 `Resized`（含最小化/还原）后重新
+    // `set_tabs_visible`，两边的标志随即被纠正回来，闭环自洽。
+    let window = match app.get_webview_window(HOST_LABEL) {
+        Some(host) => match window.owner(&host) {
+            Ok(w) => w,
+            Err(e) => {
+                unregister_tab(app, &label);
+                return Err(format!("设置 tab 窗口的 owner（宿主窗口）失败：{e}"));
+            }
+        },
+        None => window,
+    };
+
     // 建窗后无需持有句柄——后续导航 / 布局通过 get_webview_window(label) 重新获取。
     // 建窗失败：回滚上面写入的占位登记，保持列表与真实窗口一致。
     let _window = match window.build() {
