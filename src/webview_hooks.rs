@@ -16,9 +16,9 @@
 //! Android 等移动端：没有 WebView2，鉴权统一走本地反向代理，本模块在移动端被 cfg 剔除。
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection, ICoreWebView2Deferral,
-    ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_13, ICoreWebView2_2,
-    ICoreWebView2_4, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+    ICoreWebView2, ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection,
+    ICoreWebView2Deferral, ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_13,
+    ICoreWebView2_2, ICoreWebView2_4, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{
@@ -32,6 +32,9 @@ use base64::Engine;
 use tauri::Manager;
 use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::System::Com::{CoTaskMemFree, IStream};
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::config::DEVTOOLS_ENABLED;
 
@@ -157,10 +160,11 @@ fn default_download_path(
     Some(dir.join(name))
 }
 
-/// 在 Windows 上给主窗口注册 WebView2 原生事件（safe 接口）。
+/// 在 Windows 上给目标窗口注册 WebView2 原生事件（safe 接口）。
 ///
-/// - 新窗口请求（`target="_blank"` 链接 / JS `window.open()`）：用 `SetNewWindow` 把当前窗口
-///   设为新窗口目标，强制在当前窗口打开，且 `window.open()` 返回值有效。
+/// - 新窗口请求（`target="_blank"` 链接 / JS `window.open()`）：多页签模式下新开一个 tab
+///   （落点见 [`crate::tabs::open_new_tab_from_request`]）；单窗口模式下用 `SetNewWindow`
+///   把当前窗口设为新窗口目标，强制在当前窗口打开且 `window.open()` 返回值有效。
 /// - Basic 鉴权（URL 带 userinfo 时）：
 ///   1) `WebResourceRequested` 拦截【每一个子资源请求】（css/js/xhr/fetch），主动注入 `Authorization`
 ///      头，这是“始终鉴权”的可靠做法，子资源不会丢凭据；
@@ -168,10 +172,19 @@ fn default_download_path(
 ///      任何漏网请求收到 401 时自动应答账号密码。
 /// - 右键菜单：隐藏「更多工具」「另存为」「打印」，新增「设置」项。
 ///
-/// 内部必要的 COM FFI 调用用局部 `unsafe` 块包裹，并收敛在此函数里，避免散落到业务代码。
-/// 安全性依据：wry 在窗口 build 时已同步等待 WebView2 controller 就绪，`CoreWebView2()` 必返回
-/// Ok；事件处理器由 webview2_com 的 `create` 构造为 COM 对象，`add_*` 会正确 AddRef，闭包捕获的
-/// core/凭据在 handler 存活期间有效。
+/// 本函数只负责**调度**，真正的注册逻辑在 [`register_webview_hooks`]。
+///
+/// 调度方式（踩过的坑，务必保持）：在**后台线程**里循环调用 `window.with_webview`，
+/// 每次只尝试一次，拿到 `CoreWebView2` 就注册并结束；拿不到就隔 50ms 再试，最多 5s。
+///
+/// ⚠️ 绝不能改成在主线程里同步 sleep 轮询等 controller：`tauri_runtime_wry` 的
+/// `send_user_message` 在**主线程**调用时是**内联同步执行**闭包的（源码即
+/// `if current_thread().id() == context.main_thread_id { handle_user_message(..) }`），
+/// 主线程的闭包里一 sleep，消息泵就停了；而 WebView2 的 controller 恰恰要靠这个消息泵
+/// 派发创建回调（`CreateCoreWebView2EnvironmentWithOptions` 是异步的）→ 死锁，等到超时
+/// 也拿不到 controller，钩子全部注册不上，界面还白卡 5 秒。（这正是上一版“改了等于没改”
+/// 的原因。）从后台线程调用 `with_webview` 时 `send_user_message` 走 `proxy.send_event`
+/// 分支（异步投递），主线程执行完闭包立刻返回，消息泵继续转，controller 才有机会就绪。
 pub(crate) fn attach_webview_hooks(
     app: tauri::AppHandle,
     window: &tauri::WebviewWindow,
@@ -179,256 +192,298 @@ pub(crate) fn attach_webview_hooks(
     auth_pass: String,
     use_local_proxy: bool,
 ) {
-    let user = auth_user;
-    let pass = auth_pass;
-    // 闭包是 FnOnce 且 capture 不进 window —— 把 label 拷出来用于错误日志。
+    // label 拷出来用于错误日志；window 需要 clone 进后台线程（闭包要 'static）。
     let window_label = window.label().to_string();
+    let window = window.clone();
 
-    let _ = window.with_webview(move |wv| {
-        // 5 s 内轮询等 CoreWebView2 就绪（wry 的 WebView2 controller 创建是异步的，
-        // 创建窗口 → attach 之间经常存在时序差）。
-        //
-        // 历史实现这里 `Err` 直接 return——结果「弹窗新 tab 永远停在 app_url + 鉴权/
-        // 新窗口/下载钩子全失效」。多页签模式下 Rust 同步建窗再 attach，wry 的
-        // WebView2 controller 异步创建（CreateCoreWebView2EnvironmentWithOptions 是 async）
-        // 经常没就绪就调到这里 → `CoreWebView2()` 返 Err → 函数 return。
-        let core = {
-            let started = std::time::Instant::now();
-            loop {
-                match unsafe { wv.controller().CoreWebView2() } {
-                    Ok(c) => break c,
-                    Err(_) => {
-                        if started.elapsed() > std::time::Duration::from_secs(5) {
-                            eprintln!(
-                                "[webview_hooks] CoreWebView2 在 5s 内未就绪，跳过窗口 {window_label} 的钩子注册"
-                            );
-                            return;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // 每次尝试用一个独立的 done 标志：`with_webview` 是异步投递的，
+            // 只能靠它判断「闭包是否真的执行到了注册那一步」。
+            let done = Arc::new(AtomicBool::new(false));
+            let done_in = done.clone();
+            let app_in = app.clone();
+            let user_in = auth_user.clone();
+            let pass_in = auth_pass.clone();
+            let label_in = window_label.clone();
+
+            let sent = window.with_webview(move |wv| {
+                // controller 未就绪：不注册也不标记 done，交给外层下一轮重试。
+                let core = match unsafe { wv.controller().CoreWebView2() } {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                register_webview_hooks(
+                    &app_in,
+                    core,
+                    &user_in,
+                    &pass_in,
+                    use_local_proxy,
+                    &label_in,
+                );
+                done_in.store(true, Ordering::SeqCst);
+            });
+
+            if sent.is_err() {
+                // 窗口已销毁 / 事件循环已退出：再试也没意义。
+                return;
             }
-        };
+            if done.load(Ordering::SeqCst) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "[webview_hooks] CoreWebView2 在 5s 内未就绪，窗口 {window_label} 的钩子未注册"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+}
 
-        // --- 0) 开发者工具（F12）---
-        if DEVTOOLS_ENABLED {
-            if let Ok(settings) = unsafe { core.Settings() } {
-                unsafe {
-                    let _ = settings.SetAreDevToolsEnabled(true);
-                }
+/// 在已就绪的 `CoreWebView2` 上真正注册各个事件处理器。
+///
+/// 由 [`attach_webview_hooks`] 在主线程（即 `with_webview` 闭包内）调用。
+/// COM 事件处理器由 webview2_com 的 `create` 构造，`add_*` 会正确 AddRef；
+/// 闭包捕获的 core / 凭据在 handler 存活期间有效。
+///
+/// ⚠️ 本函数一旦被调用就**绝不允许提前 return**：调用方用它是否执行完来判断「注册完成」，
+/// 提前 return 会被误判为「没注册」并触发重试 → 事件处理器被重复挂载。运行时接口版本
+/// 太老（cast 失败）属于环境不支持，跳过即可，不是错误。
+fn register_webview_hooks(
+    app: &tauri::AppHandle,
+    core: ICoreWebView2,
+    user: &str,
+    pass: &str,
+    use_local_proxy: bool,
+    window_label: &str,
+) {
+    // COM 事件处理器的闭包必须 'static：把借用的凭据拷成 owned String。
+    // （下面所有逻辑与拿到 owned String 时完全一致，`user.as_str()` 仍然可用。）
+    let user = user.to_string();
+    let pass = pass.to_string();
+
+    // --- 0) 开发者工具（F12）---
+    if DEVTOOLS_ENABLED {
+        if let Ok(settings) = unsafe { core.Settings() } {
+            unsafe {
+                let _ = settings.SetAreDevToolsEnabled(true);
             }
         }
+    }
 
-        // --- 1) 新窗口请求：多页签模式新开 tab；单窗口模式强制在当前窗口打开 ---
-        let core_for_nw = core.clone();
-        let app_for_nw = app.clone();
-        let nw_handler = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
-            if let Some(args) = args {
-                unsafe {
-                    // 读出页面请求的目标 URL（window.open / target="_blank" 指向的地址），
-                    // 供多页签模式新开的 tab 导航到对应路径；读不出（内存分配失败等）则回落主地址。
-                    let mut uri_pw = PWSTR::null();
-                    let uri = args
-                        .Uri(&mut uri_pw)
-                        .ok()
-                        .and_then(|_| uri_pw.to_string().ok());
-                    if !uri_pw.is_null() {
-                        CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
-                    }
+    // --- 1) 新窗口请求：多页签模式新开 tab；单窗口模式强制在当前窗口打开 ---
+    let core_for_nw = core.clone();
+    let app_for_nw = app.clone();
+    let label_for_nw = window_label.to_string();
+    let nw_handler = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
+        if let Some(args) = args {
+            unsafe {
+                // 读出页面请求的目标 URL（window.open / target="_blank" 指向的地址），
+                // 供多页签模式新开的 tab 导航到对应路径；读不出（内存分配失败等）则回落主地址。
+                let mut uri_pw = PWSTR::null();
+                let uri = args
+                    .Uri(&mut uri_pw)
+                    .ok()
+                    .and_then(|_| uri_pw.to_string().ok());
+                if !uri_pw.is_null() {
+                    CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
+                }
 
-                    // 多页签模式：target="_blank" / window.open() 直接新开一个 tab。
-                    if crate::tabs::tabs_enabled() {
-                        // ⚠️ 不能在 COM 回调里【直接】建窗——回调运行在主线程，直接建窗会嵌套
-                        // 事件循环导致卡死。先切到后台线程，再经 run_on_main_thread 排队到
-                        // 下一个事件循环轮次建窗（与右键菜单「设置」的处理同理）。
-                        let app_spawn = app_for_nw.clone();
-                        let _ = std::thread::spawn(move || {
-                            let app_main = app_spawn.clone();
-                            let _ = app_spawn.run_on_main_thread(move || {
-                                crate::tabs::open_new_tab_from_request(&app_main, uri);
-                            });
+                // 多页签模式：target="_blank" / window.open() 直接新开一个 tab。
+                if crate::tabs::tabs_enabled() {
+                    // ⚠️ 不能在 COM 回调里【直接】建窗——回调运行在主线程，直接建窗会嵌套
+                    // 事件循环导致卡死。先切到后台线程，再经 run_on_main_thread 排队到
+                    // 下一个事件循环轮次建窗（与右键菜单「设置」的处理同理）。
+                    // 诊断日志：确认弹窗拦截生效，以及 WebView2 给出的目标 URL。
+                    // （`resolve_popup_url` 完全依赖它；读不到时会回落主地址。）
+                    eprintln!(
+                        "[webview_hooks] 窗口 {label_for_nw} 拦截到新窗口请求：{}",
+                        uri.as_deref().unwrap_or("<无法读取>")
+                    );
+                    let app_spawn = app_for_nw.clone();
+                    let _ = std::thread::spawn(move || {
+                        let app_main = app_spawn.clone();
+                        let _ = app_spawn.run_on_main_thread(move || {
+                            crate::tabs::open_new_tab_from_request(&app_main, uri);
                         });
-                        let _ = args.SetHandled(true);
-                    } else {
-                        // 单窗口模式：保持历史行为——强制在当前窗口打开。
-                        let _ = args.SetNewWindow(&core_for_nw);
-                        let _ = args.SetHandled(true);
-                    }
+                    });
+                    let _ = args.SetHandled(true);
+                } else {
+                    // 单窗口模式：保持历史行为——强制在当前窗口打开。
+                    let _ = args.SetNewWindow(&core_for_nw);
+                    let _ = args.SetHandled(true);
                 }
             }
-            Ok(())
-        }));
-        let mut nw_token = 0i64;
-        unsafe {
-            let _ = core.add_NewWindowRequested(&nw_handler, &mut nw_token);
         }
+        Ok(())
+    }));
+    let mut nw_token = 0i64;
+    unsafe {
+        let _ = core.add_NewWindowRequested(&nw_handler, &mut nw_token);
+    }
 
-        // --- 1b) 右键菜单定制 ---
-        let app_for_menu = app.clone();
-        let core_for_menu = core.clone();
-        let cm_handler =
-            ContextMenuRequestedEventHandler::create(Box::new(move |_sender, args| {
-                if let Some(args) = args {
-                    unsafe {
-                        if let Ok(items) = args.MenuItems() {
-                            if let Some(count) = read_menu_count(&items) {
-                                let mut i = count;
-                                while i > 0 {
-                                    i -= 1;
-                                    if let Ok(item) = items.GetValueAtIndex(i) {
-                                        if let Some(name) = read_menu_name(&item) {
-                                            let n = name.to_lowercase();
-                                            if n == "moretools"
-                                                || n == "print"
-                                                || n.starts_with("save")
-                                            {
-                                                let _ = items.RemoveValueAtIndex(i);
-                                            }
-                                        }
+    // --- 1b) 右键菜单定制 ---
+    let app_for_menu = app.clone();
+    let core_for_menu = core.clone();
+    let cm_handler = ContextMenuRequestedEventHandler::create(Box::new(move |_sender, args| {
+        if let Some(args) = args {
+            unsafe {
+                if let Ok(items) = args.MenuItems() {
+                    if let Some(count) = read_menu_count(&items) {
+                        let mut i = count;
+                        while i > 0 {
+                            i -= 1;
+                            if let Ok(item) = items.GetValueAtIndex(i) {
+                                if let Some(name) = read_menu_name(&item) {
+                                    let n = name.to_lowercase();
+                                    if n == "moretools" || n == "print" || n.starts_with("save") {
+                                        let _ = items.RemoveValueAtIndex(i);
                                     }
                                 }
                             }
                         }
-                        // 追加自定义「设置」菜单项（点击后打开与 Shift+F1 相同的设置界面）
-                        if let Ok(core2) = core_for_menu.cast::<ICoreWebView2_2>() {
-                            if let Ok(env) = core2.Environment() {
-                                if let Ok(env9) = env.cast::<ICoreWebView2Environment9>() {
-                                    let label = HSTRING::from("设置");
-                                    if let Ok(setting_item) = env9.CreateContextMenuItem(
-                                        &label,
-                                        None::<&IStream>,
-                                        COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
-                                    ) {
-                                        let ah = app_for_menu.clone();
-                                        let sel_handler = CustomItemSelectedEventHandler::create(
-                                            Box::new(move |_sender, _args| {
-                                                // ⚠️ 关键：不能在 COM 回调里【直接】调用 run_on_main_thread。
-                                                // WebView2 的 CustomItemSelected/ContextMenuRequested 回调就运行在
-                                                // 【主线程】上，而 tauri 的 run_on_main_thread 检测到"已在主线程"时
-                                                // 会【同步内联】执行闭包，导致嵌套建窗 → 进程卡死。
-                                                // 解法：先切到后台线程，让 run_on_main_thread 从【非主线程】走
-                                                // event_loop proxy 排队，等 COM 分发退栈后的下一个事件循环轮次
-                                                // 才在主线程建窗（等价于 Shift+F1 的调用上下文，安全）。
-                                                let app_spawn = ah.clone();
-                                                let _ = std::thread::spawn(move || {
-                                                    let app_main = app_spawn.clone();
-                                                    let _ =
-                                                        app_spawn.run_on_main_thread(move || {
-                                                            crate::settings::open_settings_window(
-                                                                &app_main,
-                                                            );
-                                                        });
-                                                });
-                                                Ok(())
-                                            }),
-                                        );
-                                        let mut sel_token = 0i64;
-                                        let _ = setting_item
-                                            .add_CustomItemSelected(&sel_handler, &mut sel_token);
-                                        if let Ok(items) = args.MenuItems() {
-                                            if let Some(count) = read_menu_count(&items) {
-                                                let _ =
-                                                    items.InsertValueAtIndex(count, &setting_item);
-                                            }
-                                        }
+                    }
+                }
+                // 追加自定义「设置」菜单项（点击后打开与 Shift+F1 相同的设置界面）
+                if let Ok(core2) = core_for_menu.cast::<ICoreWebView2_2>() {
+                    if let Ok(env) = core2.Environment() {
+                        if let Ok(env9) = env.cast::<ICoreWebView2Environment9>() {
+                            let label = HSTRING::from("设置");
+                            if let Ok(setting_item) = env9.CreateContextMenuItem(
+                                &label,
+                                None::<&IStream>,
+                                COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+                            ) {
+                                let ah = app_for_menu.clone();
+                                let sel_handler = CustomItemSelectedEventHandler::create(Box::new(
+                                    move |_sender, _args| {
+                                        // ⚠️ 关键：不能在 COM 回调里【直接】调用 run_on_main_thread。
+                                        // WebView2 的 CustomItemSelected/ContextMenuRequested 回调就运行在
+                                        // 【主线程】上，而 tauri 的 run_on_main_thread 检测到"已在主线程"时
+                                        // 会【同步内联】执行闭包，导致嵌套建窗 → 进程卡死。
+                                        // 解法：先切到后台线程，让 run_on_main_thread 从【非主线程】走
+                                        // event_loop proxy 排队，等 COM 分发退栈后的下一个事件循环轮次
+                                        // 才在主线程建窗（等价于 Shift+F1 的调用上下文，安全）。
+                                        let app_spawn = ah.clone();
+                                        let _ = std::thread::spawn(move || {
+                                            let app_main = app_spawn.clone();
+                                            let _ = app_spawn.run_on_main_thread(move || {
+                                                crate::settings::open_settings_window(&app_main);
+                                            });
+                                        });
+                                        Ok(())
+                                    },
+                                ));
+                                let mut sel_token = 0i64;
+                                let _ = setting_item
+                                    .add_CustomItemSelected(&sel_handler, &mut sel_token);
+                                if let Ok(items) = args.MenuItems() {
+                                    if let Some(count) = read_menu_count(&items) {
+                                        let _ = items.InsertValueAtIndex(count, &setting_item);
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }));
+    // 只有较新的 WebView2 运行时才暴露 ICoreWebView2_11（ContextMenuRequested 在此接口上）。
+    // cast 失败（极老运行时）则跳过右键定制，保留默认菜单，不影响其它钩子。
+    if let Ok(core11) = core.cast::<ICoreWebView2_11>() {
+        let mut cm_token = 0i64;
+        unsafe {
+            let _ = core11.add_ContextMenuRequested(&cm_handler, &mut cm_token);
+        }
+    }
+
+    // --- 1c) 下载支持：把下载拦截到系统下载目录，不弹 WebView2 默认下载栏 ---
+    // 需要 ICoreWebView2_4（较新运行时才暴露 DownloadStarting）；cast 失败（极老运行时）
+    // 则跳过，保持 WebView2 默认下载行为，不影响其它钩子。
+    // 文件名优先取 Content-Disposition（filename*/filename），否则取 URL 路径末段，
+    // 均做 Windows 非法字符清洗；拿不到系统下载目录时放弃设置路径（走默认行为）。
+    let app_for_dl = app.clone();
+    let dl_handler = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
+        if let Some(args) = args {
+            unsafe {
+                if let Ok(op) = args.DownloadOperation() {
+                    let mut uri_pw = PWSTR::null();
+                    let mut cd_pw = PWSTR::null();
+                    let uri = op
+                        .Uri(&mut uri_pw)
+                        .ok()
+                        .and_then(|_| uri_pw.to_string().ok());
+                    let cd = op
+                        .ContentDisposition(&mut cd_pw)
+                        .ok()
+                        .and_then(|_| cd_pw.to_string().ok());
+                    // WebView2 用 CoTaskMemAlloc 分配这些字符串，用完必须释放，避免内存泄漏。
+                    if !uri_pw.is_null() {
+                        CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
+                    }
+                    if !cd_pw.is_null() {
+                        CoTaskMemFree(Some(cd_pw.0 as *const core::ffi::c_void));
+                    }
+                    if let Some(path) = default_download_path(&app_for_dl, &uri, &cd) {
+                        let _ =
+                            args.SetResultFilePath(&HSTRING::from(path.to_string_lossy().as_ref()));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }));
+    if let Ok(core4) = core.cast::<ICoreWebView2_4>() {
+        let mut dl_token = 0i64;
+        unsafe {
+            let _ = core4.add_DownloadStarting(&dl_handler, &mut dl_token);
+        }
+    }
+
+    // --- 2) Basic 鉴权（仅当 URL 带 userinfo、且未走本地反向代理时）---
+    if !user.is_empty() && !use_local_proxy {
+        let creds = format!("{}:{}", user, pass);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
+        let header_val = format!("Basic {}", b64);
+
+        unsafe {
+            let _ = core.AddWebResourceRequestedFilter(
+                &HSTRING::from("*"),
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+            );
+        }
+        let wr_handler =
+            WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
+                if let Some(args) = args {
+                    unsafe {
+                        if let Ok(req) = args.Request() {
+                            if let Ok(headers) = req.Headers() {
+                                let _ = headers.SetHeader(
+                                    &HSTRING::from("Authorization"),
+                                    &HSTRING::from(header_val.as_str()),
+                                );
                             }
                         }
                     }
                 }
                 Ok(())
             }));
-        // 只有较新的 WebView2 运行时才暴露 ICoreWebView2_11（ContextMenuRequested 在此接口上）。
-        // cast 失败（极老运行时）则跳过右键定制，保留默认菜单，不影响其它钩子。
-        if let Ok(core11) = core.cast::<ICoreWebView2_11>() {
-            let mut cm_token = 0i64;
-            unsafe {
-                let _ = core11.add_ContextMenuRequested(&cm_handler, &mut cm_token);
-            }
+        let mut wr_token = 0i64;
+        unsafe {
+            let _ = core.add_WebResourceRequested(&wr_handler, &mut wr_token);
         }
 
-        // --- 1c) 下载支持：把下载拦截到系统下载目录，不弹 WebView2 默认下载栏 ---
-        // 需要 ICoreWebView2_4（较新运行时才暴露 DownloadStarting）；cast 失败（极老运行时）
-        // 则跳过，保持 WebView2 默认下载行为，不影响其它钩子。
-        // 文件名优先取 Content-Disposition（filename*/filename），否则取 URL 路径末段，
-        // 均做 Windows 非法字符清洗；拿不到系统下载目录时放弃设置路径（走默认行为）。
-        let app_for_dl = app.clone();
-        let dl_handler = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
-            if let Some(args) = args {
-                unsafe {
-                    if let Ok(op) = args.DownloadOperation() {
-                        let mut uri_pw = PWSTR::null();
-                        let mut cd_pw = PWSTR::null();
-                        let uri = op
-                            .Uri(&mut uri_pw)
-                            .ok()
-                            .and_then(|_| uri_pw.to_string().ok());
-                        let cd = op
-                            .ContentDisposition(&mut cd_pw)
-                            .ok()
-                            .and_then(|_| cd_pw.to_string().ok());
-                        // WebView2 用 CoTaskMemAlloc 分配这些字符串，用完必须释放，避免内存泄漏。
-                        if !uri_pw.is_null() {
-                            CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
-                        }
-                        if !cd_pw.is_null() {
-                            CoTaskMemFree(Some(cd_pw.0 as *const core::ffi::c_void));
-                        }
-                        if let Some(path) = default_download_path(&app_for_dl, &uri, &cd) {
-                            let _ = args
-                                .SetResultFilePath(&HSTRING::from(path.to_string_lossy().as_ref()));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }));
-        if let Ok(core4) = core.cast::<ICoreWebView2_4>() {
-            let mut dl_token = 0i64;
-            unsafe {
-                let _ = core4.add_DownloadStarting(&dl_handler, &mut dl_token);
-            }
-        }
-
-        // --- 2) Basic 鉴权（仅当 URL 带 userinfo、且未走本地反向代理时）---
-        if !user.is_empty() && !use_local_proxy {
-            let creds = format!("{}:{}", user, pass);
-            let b64 = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
-            let header_val = format!("Basic {}", b64);
-
-            unsafe {
-                let _ = core.AddWebResourceRequestedFilter(
-                    &HSTRING::from("*"),
-                    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-                );
-            }
-            let wr_handler =
-                WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
-                    if let Some(args) = args {
-                        unsafe {
-                            if let Ok(req) = args.Request() {
-                                if let Ok(headers) = req.Headers() {
-                                    let _ = headers.SetHeader(
-                                        &HSTRING::from("Authorization"),
-                                        &HSTRING::from(header_val.as_str()),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Ok(())
-                }));
-            let mut wr_token = 0i64;
-            unsafe {
-                let _ = core.add_WebResourceRequested(&wr_handler, &mut wr_token);
-            }
-
-            // 2b) 兜底：任何收到 401 的请求自动应答账号密码（Deferral 规范写法）。
-            let core13 = match core.cast::<ICoreWebView2_13>() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
+        // 2b) 兜底：任何收到 401 的请求自动应答账号密码（Deferral 规范写法）。
+        //
+        // ⚠️ cast 失败（极老运行时）时**不能**提前 return：调用方靠「本函数是否跑完」
+        // 判断注册是否成功，提前 return 会被误判成“没注册”并重试，导致上面已挂的
+        // WebResourceRequested 等处理器被重复挂载。这里只跳过这一段即可。
+        if let Ok(core13) = core.cast::<ICoreWebView2_13>() {
             let handler =
                 BasicAuthenticationRequestedEventHandler::create(Box::new(move |_sender, args| {
                     if let Some(args) = args {
@@ -451,18 +506,10 @@ pub(crate) fn attach_webview_hooks(
                 let _ = core13.add_BasicAuthenticationRequested(&handler, &mut token);
             }
         }
+    }
 
-        // --- 3) 所有钩子已注册完毕；首次导航由调用方通过 `WebviewWindow::navigate`
-        // 触发（wry 内部会等 controller 就绪再调 WebView2 的 Navigation，比这里直接
-        // `core.Navigate` 更可靠）。
-        //
-        // ⚠️ 历史实现就在此处调 `core.Navigate(target_url)`——但 `with_webview` 闭包在
-        // controller 尚未就绪时直接 return，导致：
-        //   · 钩子未注册 → 鉴权 / 新窗口 / 下载等全部失效；
-        //   · Navigate 未触发 → tab 停在 builder 默认入口 `index.html`（即用户看到的
-        //     『弹窗永远停在 app_url』）。
-        // 故移除此处的 Navigate，由 [`crate::bootstrap::navigate_window`] 在外部统一触发。
-    });
+    // --- 3) 注册完毕。本函数不负责导航：首次导航由调用方用
+    // `WebviewWindow::navigate` 触发（见 [`crate::bootstrap::navigate_window`]）。
 }
 
 #[cfg(test)]

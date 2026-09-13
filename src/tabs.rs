@@ -109,10 +109,9 @@ pub(crate) fn handle_shell(
 
 /// 宿主窗口「内容区」（标签栏下方）的物理像素矩形：左上角 `(x, y)` 与尺寸 `(w, h)`。
 ///
-/// ⚠️ 必须用**客户区**（inner）几何，而不是窗口矩形（outer）：宿主窗口虽然 `decorations(false)`，
-/// 但 `resizable(true)` 时 Windows 仍保留不可见的调整边框（WS_THICKFRAME，高分屏下每边 8~16 物理
-/// 像素）。历史的 `outer_position/outer_size` 算法让 tab 窗口比宿主客户区**更宽、更靠下** →
-/// 内容右/下溢出宿主边框，露在桌面或任务栏上（用户反馈的“两个窗体不一致”）。
+/// 用宿主**客户区**（inner_position/inner_size）作为基准：宿主与 tab 统一 `shadow(false)`
+/// 后窗口矩形 == 客户区，两者等价；客户区语义在特殊窗口状态下更稳（如窗口刚创建、
+/// 尚未显示时），且与 [`place_tab`] 里 `inner_position/inner_size` 的读回值同一坐标系。
 fn host_content_rect(app: &tauri::AppHandle) -> Option<(i32, i32, u32, u32)> {
     let host = app.get_webview_window(HOST_LABEL)?;
     // 最小化时 Windows 会把客户区尺寸报成 0（或极小的最小化尺寸），此时不能拿它去
@@ -132,15 +131,53 @@ fn host_content_rect(app: &tauri::AppHandle) -> Option<(i32, i32, u32, u32)> {
     Some((pos.x, content_top, size.width, content_height))
 }
 
-/// tab 窗口「窗口矩形」相对「客户区」的偏移 `(dx, dy)`，即不可见边框的厚度。
+/// 把 tab 窗口的**客户区**精确摆放到物理像素矩形 `(x, y, width, height)`。
 ///
-/// `set_position` 设置的是**窗口矩形**位置（tao `set_outer_position`），而我们要把 tab 的
-/// **客户区**对齐到宿主内容区，故需减去该偏移。无边框无阴影窗口为 (0, 0)，带阴影的无边框
-/// 窗口在 Windows 上非 0（tao 的 `set_size` 走 `set_inner_size`，已自行补偿尺寸方向的偏移）。
-fn frame_offset(window: &WebviewWindow) -> (i32, i32) {
-    match (window.outer_position(), window.inner_position()) {
-        (Ok(outer), Ok(inner)) => (outer.x - inner.x, outer.y - inner.y),
-        _ => (0, 0),
+/// 用**闭环校准**而不是一次性换算：`set_position` / `set_size` 各自还要经过 tao → Win32
+/// 的一层换算（无边框窗口的 insets、DPI 取整、`min_inner_size` 约束等），任何一步与实际
+/// 不符都会让 tab 偏出宿主边缘（即用户看到的「两个窗体不一致」）。这里直接
+/// 「设置 → 读回 → 补偿误差」，不依赖任何关于边框厚度的假设，几轮内必然收敛。
+///
+/// 前提：宿主与 tab 都 `shadow(false)`，窗口矩形 == 客户区。若某天恢复阴影，
+/// `set_position`（窗口矩形语义）与 `inner_position`（客户区语义）不再等值，本函数也照样
+/// 收敛，只是多迭代一次。
+fn place_tab(window: &WebviewWindow, x: i32, y: i32, width: u32, height: u32) {
+    // ① 尺寸：先设一次，再按读回的客户区尺寸补偿误差。
+    let mut tw = width as i32;
+    let mut th = height as i32;
+    for _ in 0..3 {
+        let _ = window.set_size(tauri::PhysicalSize::new(tw.max(1) as u32, th.max(1) as u32));
+        match window.inner_size() {
+            Ok(size) => {
+                let ew = width as i32 - size.width as i32;
+                let eh = height as i32 - size.height as i32;
+                if ew == 0 && eh == 0 {
+                    break;
+                }
+                tw += ew;
+                th += eh;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // ② 位置：让**客户区**左上角正好落在 (x, y)。
+    let mut tx = x;
+    let mut ty = y;
+    for _ in 0..3 {
+        let _ = window.set_position(tauri::PhysicalPosition::new(tx, ty));
+        match window.inner_position() {
+            Ok(inner) => {
+                let ex = x - inner.x;
+                let ey = y - inner.y;
+                if ex == 0 && ey == 0 {
+                    break;
+                }
+                tx += ex;
+                ty += ey;
+            }
+            Err(_) => break,
+        }
     }
 }
 
@@ -249,6 +286,10 @@ pub(crate) fn spawn_tab_with_target(
     let mut window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title(WINDOW_TITLE)
         .decorations(false)
+        // ⚠️ 必须与宿主窗口用**完全相同**的 `shadow(false)`：两边都不内缩客户区，
+        // 窗口矩形 == 客户区，[`place_tab`] 的坐标换算才成立。
+        // 详见 [`create_host_window`] 里对 MARKER_UNDECORATED_SHADOW 的说明。
+        .shadow(false)
         // ⚠️ 标签不占独立任务栏按钮：只有宿主窗口出现在任务栏，视觉上是一个整体窗口。
         // （若任由每个 tab 出任务栏按钮，会看到“多个相同图标”重复，用户侧反馈的“有两个窗口”。）
         .skip_taskbar(true)
@@ -355,6 +396,10 @@ fn activate_tab(app: &tauri::AppHandle, label: &str) {
             }
         }
     }
+
+    // ②b 显示后再校准一次：窗口从隐藏变可见时，Win32 会按“可见”状态重算窗口矩形
+    // （隐藏窗口读到的部分几何仍是创建时的占位值），这一次调用保证最终落点精确。
+    relayout(app);
 
     // ③ 顺手清掉不在册的 tab 窗口（历史遗留幽灵窗口 / 关闭被拦截的残骸）。
     purge_orphan_tabs(app);
@@ -510,26 +555,17 @@ fn sync_tabs_with_host(app: &tauri::AppHandle) {
 
 /// 重新计算所有 tab 窗口的位置与尺寸，使其**精确**贴合宿主窗口内容区（标签栏下方）。
 ///
-/// 在宿主窗口 Moved / Resized / DPI 变化事件、tab 增删时调用。
-///
-/// 坐标语义（很重要，历史 bug 就出在这里）：
-/// - 用宿主**客户区**（inner_position/inner_size）而非窗口矩形（outer_*）：宿主虽
-///   `decorations(false)` 但 `resizable(true)`，Windows 下仍有不可见调整边框，
-///   outer 比客户区大一圈 → tab 窗口溢出宿主右/下边缘（“两个窗体不一致”）。
-/// - tab 侧：`set_size` 设置的是**客户区**尺寸（tao `set_inner_size` 会自行补偿无边框窗口的
-///   隐藏偏移），而 `set_position` 设置的是**窗口矩形**位置 → 需减去该窗口自身的
-///   `outer - inner` 偏移，才能让客户区左上角正好落在宿主内容区左上角。
+/// 在宿主窗口 Moved / Resized / DPI 变化事件、tab 增删时调用；每个 tab 的落点由
+/// [`place_tab`] 闭环校准到像素级（历史实现用 `outer - inner` 一次性换算，只要 tao 的
+/// 边框假设与实际不符就会整体偏移，正是「两个窗体不一致」的直接原因）。
 fn relayout(app: &tauri::AppHandle) {
     let Some((x, y, width, height)) = host_content_rect(app) else {
         return;
     };
 
-    let labels = tab_labels(app);
-    for label in labels {
+    for label in tab_labels(app) {
         if let Some(w) = app.get_webview_window(&label) {
-            let (dx, dy) = frame_offset(&w);
-            let _ = w.set_position(tauri::PhysicalPosition::new(x - dx, y - dy));
-            let _ = w.set_size(tauri::PhysicalSize::new(width, height));
+            place_tab(&w, x, y, width, height);
         }
     }
 }
@@ -582,13 +618,25 @@ pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow
     let host = WebviewWindowBuilder::new(app, HOST_LABEL, shell_url())
         .title(WINDOW_TITLE)
         .decorations(false)
-        // ⚠️ resizable(false) 必须：宿主 + tab 都是 `decorations(false) + resizable(true)` 时，
-        // Windows 会保留不可见的 WS_THICKFRAME（拖动可触屏模拟），导致宿主 outer 包含 thick
-        // frame 而 tab 没有（或反之），双方 outer/inner 几何不一致 → tab 内容凸出宿主
-        // 右/下边缘（“两个窗体不一致”）。统一 `.resizable(false)` 后双方都无 thick frame，
-        // outer = inner = 用户期望值，relayout 用的 `set_position/set_size` 可让 tab 严格对齐。
-        // 副作用：用户**无法**用鼠标拖窗边框 resize——但宿主是 `decorations(false)` 没边框可拖，
-        // 调整大小由应用层通过 Rust 命令触发（启动时从 `window_state` 恢复）即可。
+        // ⚠️ `.shadow(false)` 是宿主与 tab 对齐的关键，别删。
+        //
+        // 无边框窗口在 tao 里默认带 `MARKER_UNDECORATED_SHADOW`（来自 `decoration_shadow`
+        // 的默认值 true）。该标志会让 `WM_NCCALCSIZE` 把客户区**向内缩一圈**：
+        // `tao::platform_impl::windows::util::calculate_window_insets` →
+        // `calculate_insets_for_dpi(dpi)`，每边 = SM_CXSIZEFRAME + SM_CXPADDEDBORDER
+        // （150% 缩放下约 11 物理像素，两边合计 22）—— 这就是用户截图里 tab 与宿主
+        // 「差 22 像素」的来源。
+        //
+        // ⚠️ 该内缩**只和 DPI 有关，和窗口的 `resizable` 无关**（源码里只有 dpi 参与计算），
+        // 所以曾经试图「统一 resizable 让两边一致」是无效改动。真正有效的开关是 `shadow`：
+        // 关掉后 MARKER_UNDECORATED_SHADOW 为 false，NCCALCSIZE 不再内缩，
+        // 窗口矩形 == 客户区（outer == inner），宿主与 tab 的几何天然一致。
+        //
+        // 代价：窗口不再有系统投影。对「多窗口叠放伪装成标签页」来说反而是好事——
+        // tab 窗口若各自带阴影，会互相盖到对方的标签栏/内容上。
+        // 另：`resizable(false)` 后不能用鼠标拖边框改变大小；调整尺寸由应用层通过 Rust
+        // 命令触发（启动时从 `window_state` 恢复）即可。
+        .shadow(false)
         .resizable(false)
         .inner_size(1100.0, 650.0)
         .min_inner_size(400.0, 300.0)

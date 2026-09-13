@@ -684,7 +684,11 @@ mod tests {
             .get(axum::http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<usize>().ok());
-        assert_eq!(forwarded_len, Some(1024 * 1024), "Content-Length 应原样转发为 1MB");
+        assert_eq!(
+            forwarded_len,
+            Some(1024 * 1024),
+            "Content-Length 应原样转发为 1MB"
+        );
 
         let mut cookie_seen = false;
         for c in resp.headers().get_all("set-cookie") {

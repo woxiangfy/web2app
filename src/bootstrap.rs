@@ -82,18 +82,25 @@ pub(crate) fn bootstrap(app: tauri::AppHandle) {
 
 /// 启动/重试流程入口，参数化目标窗口 label。
 ///
-/// `is_first` = true 表示首次启动（结果会缓存到 TabManager，供后续新 tab 复用）；
-/// false 表示重试或新 tab 兜底（不缓存，走完整重新解析）。
+/// ⚠️ 与 [`bootstrap`] 一样**必须缓存**解析结果（`cache_navigation = true`）。多页签模式下
+/// 首个 tab 恰恰是由 `tabs::spawn_tab` 走这条路径创建的（`bootstrap()` 只在单窗口模式被调用），
+/// 曾经这里传 `false` 导致 `TabManager.navigation` **永远为 None**，连锁后果三连：
+///   1) [`crate::tabs::resolve_popup_url`] 拿不到入口/上游主机 → 一律返回 None →
+///      `target="_blank"` 新 tab 全部落在主地址（用户反馈的“弹窗打开的网址一直是 app_url”）；
+///   2) 每新建一个 tab 都重新 DNS 解析 + 重新起一个本地反向代理（新端口），
+///      而 `bootstrap_inner` 开头又会 abort 掉 ProxyTask 里的旧代理 → 已在用的旧 tab 断连；
+///   3) 新建 tab 明显变慢。
 pub(crate) fn bootstrap_for_label(app: tauri::AppHandle, label: String) {
-    bootstrap_inner(app, label, false);
+    bootstrap_inner(app, label, true);
 }
 
 /// 启动流程核心：后台准备 → 主线程导航 / 报错。
 ///
-/// `is_first` 目前只有 Windows 多页签模式用到（缓存解析结果），非 Windows 下不引用，
-/// 故用 cfg_attr 局部放宽 unused_variables，避免 Android / iOS 编译告警。
+/// `cache_navigation`：是否把本次解析结果写入 `TabManager.navigation` 供后续新 tab 复用。
+/// 只有 Windows 多页签模式用到（该字段在非 Windows 下不引用），故用 cfg_attr 局部放宽
+/// unused_variables，避免 Android / iOS 编译告警。
 #[cfg_attr(not(windows), allow(unused_variables))]
-fn bootstrap_inner(app: tauri::AppHandle, label: String, is_first: bool) {
+fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool) {
     let use_local_proxy = local_proxy_enabled();
     std::thread::spawn(move || {
         // 重试场景：清掉上一轮可能仍在监听的代理任务。
@@ -109,9 +116,10 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, is_first: bool) {
 
         match prepare_navigation(use_local_proxy) {
             Ok(nav) => {
-                // 首次启动成功：缓存导航信息供后续新 tab 复用（仅 Windows 多页签模式有 TabManager）。
+                // 解析成功：缓存导航信息供后续新 tab 复用（仅 Windows 多页签模式有 TabManager）。
+                // 重试场景覆盖旧缓存也是正确的——重试后端口/地址可能已变，缓存必须跟着更新。
                 #[cfg(windows)]
-                if is_first && crate::tabs::tabs_enabled() {
+                if cache_navigation && crate::tabs::tabs_enabled() {
                     if let Ok(mut cache) = app.state::<crate::tabs::TabManager>().navigation.lock()
                     {
                         *cache = Some(nav.clone());
