@@ -3,13 +3,15 @@
   多页签宿主页（shell）：经自定义协议 shell://localhost/ 提供，仅 Windows 多页签模式使用。
   · 本页只渲染顶部标签栏，不承载网页内容；真正的网页在各自独立的 tab 窗口中。
   · 标签栏高度必须与 src/tabs.rs 的 TAB_BAR_HEIGHT（38px）一致，否则 tab 内容会与标签栏重叠/留缝。
-  · 通过 Tauri IPC 与 Rust 交互：create_tab / switch_tab / close_tab / get_tabs / set_tab_title。
+  · 通过 Tauri IPC 与 Rust 交互：switch_tab / close_tab / get_tabs / set_tab_title /
+    minimize_host / close_host（新建 tab 改由页面内 target="_blank" 触发，标签栏不再有「+」）。
+  · 宿主窗口是 decorations(false)，系统标题栏不存在 → 最小化 / 关闭按钮由本页右侧自绘。
   · Rust 侧通过 window.__web2appTabs.render(items) 推送 tab 列表（含激活态）刷新。
 -->
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+<html lang="zh-CN" data-page-node-id="JIII7qWwDRGwHRqbGIOito">
+  <head data-page-node-id="lnd3TOd3uomPf1dS2i51hw">
+    <meta charset="utf-8" data-page-node-id="KUHL4bGzOrdP9xlnFoHztd" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="7eJOBrRgSka4xtygB6lRQq" />
     <title>标签栏</title>
     <style>
       :root {
@@ -24,7 +26,6 @@
         --text: #2c3440;
         --text-dark: #e6ebf2;
         --muted: #8892a0;
-        --accent: #378add;
       }
       * { box-sizing: border-box; }
       html, body {
@@ -54,6 +55,8 @@
         overflow-x: auto;
         overflow-y: hidden;
         min-width: 0;
+        /* 标签条空白处也可拖动窗口（标签自身 no-drag）。 */
+        -webkit-app-region: drag;
       }
       .tab {
         -webkit-app-region: no-drag; /* 标签本身可点击，不参与拖动 */
@@ -102,22 +105,38 @@
       @media (prefers-color-scheme: dark) {
         .tab .close:hover { background: rgba(255,255,255,0.12); color: var(--text-dark); }
       }
-      .add {
+      /* 窗口控制按钮（宿主窗口 decorations(false)，标题栏自绘：最小化 / 关闭） */
+      .win {
         -webkit-app-region: no-drag;
-        width: 38px;
-        flex: none;
         display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        color: var(--muted);
-        font-size: 16px;
+        align-items: stretch;
+        flex: none;
         border-left: 1px solid var(--border);
       }
       @media (prefers-color-scheme: dark) {
-        .add { border-left-color: var(--border-dark); }
+        .win { border-left-color: var(--border-dark); }
       }
-      .add:hover { color: var(--accent); }
+      .win-btn {
+        -webkit-app-region: no-drag;
+        width: 44px;
+        height: var(--bar-h);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .win-btn svg { display: block; }
+      .win-btn:hover { background: rgba(0, 0, 0, 0.07); color: var(--text); }
+      @media (prefers-color-scheme: dark) {
+        .win-btn:hover { background: rgba(255, 255, 255, 0.12); color: var(--text-dark); }
+      }
+      /* 关闭按钮 hover 用系统级红底白字（Windows 习惯），提醒这是个破坏性操作。 */
+      .win-btn.close-win:hover { background: #e81123; color: #ffffff; }
       /* 前进/后退按钮（标题栏左侧，紧贴标签栏） */
       .nav {
         -webkit-app-region: no-drag; /* 按钮可点击，不参与拖动 */
@@ -153,14 +172,26 @@
       }
     </style>
   </head>
-  <body>
-    <div class="bar">
-      <div class="nav">
-        <button type="button" class="nav-btn" id="back" title="后退">←</button>
-        <button type="button" class="nav-btn" id="fwd" title="前进">→</button>
+  <body data-page-node-id="ok8jltRgEaIQw7abMofPsm">
+    <div class="bar" data-page-node-id="WjskdykZvV2Rc1L9k4HDQs">
+      <div class="nav" data-page-node-id="RLhAVr5hL8x4I0fqBX6cBR">
+        <button type="button" class="nav-btn" id="back" title="后退" data-page-node-id="09J1yHRpS3jJA1V5kG8ojO">←</button>
+        <button type="button" class="nav-btn" id="fwd" title="前进" data-page-node-id="fZEej0vvDaXThKeqP014Mt">→</button>
       </div>
-      <div class="tabs" id="tabs"></div>
-      <div class="add" id="add" title="新建页签">+</div>
+      <div class="tabs" id="tabs" data-page-node-id="TDPnkUkXLZCnbhAH8vXIDB"></div>
+      <!-- 自绘窗口按钮：宿主窗口 decorations(false)，没有系统标题栏，必须自己提供 -->
+      <div class="win" data-page-node-id="4c1EakNzINA6jx5On2ZTWG">
+        <button type="button" class="win-btn" id="min" title="最小化" aria-label="最小化" data-page-node-id="HE1ESqr3C2a3CAfLATNjQ4">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" data-page-node-id="EnMHy0trtmGKFRSoiBmDsn">
+            <path d="M0 5 H10" stroke="currentColor" stroke-width="1" fill="none" data-page-node-id="CIk85oSwl0GvquGSzpKwcf" />
+          </svg>
+        </button>
+        <button type="button" class="win-btn close-win" id="closeHost" title="关闭" aria-label="关闭" data-page-node-id="tJyan1JzUnXKDGoLoMWDyU">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" data-page-node-id="wBAtaGhMXAiFC3Tp3hNIfi">
+            <path d="M0 0 L10 10 M10 0 L0 10" stroke="currentColor" stroke-width="1" fill="none" data-page-node-id="HmPoN7FqSrlHtn3yoHp8Tu" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     <script>
@@ -173,7 +204,6 @@
         (() => Promise.reject(new Error("Tauri IPC 不可用")));
 
       const tabsEl = document.getElementById("tabs");
-      const addEl = document.getElementById("add");
 
       // 当前 tab 列表（由 render() 维护）
       let items = [];
@@ -214,9 +244,13 @@
         }
       });
 
-      // 新建页签
-      addEl.addEventListener("click", () => {
-        invoke("create_tab");
+      // 窗口控制：最小化 / 关闭（关闭走 Rust 侧「托盘隐藏 or 退出」的统一语义）。
+      // 新建页签的「+」按钮已移除——新 tab 由页面内 target="_blank" / window.open() 触发。
+      document.getElementById("min").addEventListener("click", () => {
+        invoke("minimize_host").catch(() => {});
+      });
+      document.getElementById("closeHost").addEventListener("click", () => {
+        invoke("close_host").catch(() => {});
       });
 
       // 前进 / 后退：控制【当前激活 tab】的 webview 历史（history_nav 由 Rust 定位目标窗体）。

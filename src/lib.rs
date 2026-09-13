@@ -94,7 +94,9 @@ pub fn run() {
                 tabs::switch_tab,
                 tabs::close_tab,
                 tabs::get_tabs,
-                tabs::set_tab_title
+                tabs::set_tab_title,
+                tabs::minimize_host,
+                tabs::close_host
             ]);
         b
     };
@@ -149,6 +151,12 @@ pub fn run() {
             let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
+        }
+        // 多页签模式：tab 窗口是独立顶层窗口，宿主恢复显示时要一并把当前 tab 显示出来
+        // （否则只看到标签栏，内容区是空的）。
+        #[cfg(windows)]
+        if tabs::tabs_enabled() {
+            tabs::set_tabs_visible(app, true);
         }
     }));
 
@@ -414,6 +422,19 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
         api.prevent_close();
         if let Some(w) = app_handle.get_webview_window(&target_label) {
             let _ = w.hide();
+        }
+        // 多页签模式：tab 窗口是独立顶层窗口，宿主隐藏时**必须一并隐藏**，
+        // 否则桌面上会残留没有标签栏的“孤儿内容窗口”，用户会以为应用卡死了。
+        #[cfg(windows)]
+        if crate::tabs::tabs_enabled() {
+            crate::tabs::set_tabs_visible(app_handle, false);
+        }
+    } else {
+        // 允许关闭（不隐藏到托盘）：tab 窗口同样不会随宿主销毁，必须显式清掉，
+        // 否则「标签栏关了、内容还在」且 Tauri 因为仍有窗口而不触发退出。
+        #[cfg(windows)]
+        if crate::tabs::tabs_enabled() {
+            crate::tabs::destroy_all_tabs(app_handle);
         }
     }
 }

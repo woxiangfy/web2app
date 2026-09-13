@@ -157,24 +157,6 @@ fn default_download_path(
     Some(dir.join(name))
 }
 
-/// 让窗口的 WebView2 直接导航到指定 URL。
-///
-/// 用途：多页签模式中，新 tab 已由 `spawn_tab` 默认导航到缓存主地址后，如需改导航到
-/// `target="_blank"` 的目标 URL，用本函数做【第二次导航】。鉴权/新窗口/下载钩子已在首次
-/// `attach_webview_hooks` 时注册过，这里只导航、不重复挂事件（重复挂载会让同一事件被
-/// 处理两遍，例如一个下载请求触发两次下载）。
-pub(crate) fn navigate_webview(window: &tauri::WebviewWindow, url: &str) {
-    let url_owned = url.to_string();
-    let _ = window.with_webview(move |wv| {
-        // wry 的 with_webview 闭包返回 ()，这里手动处理 Result，不向调用方传播。
-        if let Ok(core) = unsafe { wv.controller().CoreWebView2() } {
-            unsafe {
-                let _ = core.Navigate(&HSTRING::from(url_owned.as_str()));
-            }
-        }
-    });
-}
-
 /// 在 Windows 上给主窗口注册 WebView2 原生事件（safe 接口）。
 ///
 /// - 新窗口请求（`target="_blank"` 链接 / JS `window.open()`）：用 `SetNewWindow` 把当前窗口

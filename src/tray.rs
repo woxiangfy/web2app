@@ -19,6 +19,21 @@ fn main_window_label() -> &'static str {
     "main"
 }
 
+/// 隐显宿主窗口后，同步多页签模式下各 tab 窗口的可见性。
+///
+/// 多页签模式里每个 tab 都是独立顶层窗口，宿主隐藏不会连带隐藏它们，
+/// 桌面上会残留“没有标签栏的内容窗口”。非 Windows / 非多页签模式为空操作。
+fn sync_tabs_visibility(app: &tauri::AppHandle, visible: bool) {
+    #[cfg(windows)]
+    {
+        if crate::tabs::tabs_enabled() {
+            crate::tabs::set_tabs_visible(app, visible);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (app, visible);
+}
+
 /// 切换主窗口：正常可见则隐藏；最小化或已隐藏则恢复并显示置顶（仅桌面端）。
 pub(crate) fn toggle_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(main_window_label()) {
@@ -26,10 +41,12 @@ pub(crate) fn toggle_window(app: &tauri::AppHandle) {
         let minimized = window.is_minimized().unwrap_or(false);
         if visible && !minimized {
             let _ = window.hide();
+            sync_tabs_visibility(app, false);
         } else {
             let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
+            sync_tabs_visibility(app, true);
         }
     }
 }
@@ -63,6 +80,7 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
+                sync_tabs_visibility(app, true);
             }
             // 托盘右键菜单新增的"设置"项：打开（或聚焦）设置窗口，
             // 与右键网页菜单的"设置"、全局快捷键 Shift+F1 走同一入口。
@@ -73,6 +91,7 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Some(w) = app.get_webview_window(main_window_label()) {
                     let _ = w.hide();
                 }
+                sync_tabs_visibility(app, false);
             }
             "quit" => {
                 app.exit(0);
