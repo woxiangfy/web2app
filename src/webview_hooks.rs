@@ -177,17 +177,37 @@ pub(crate) fn attach_webview_hooks(
     window: &tauri::WebviewWindow,
     auth_user: String,
     auth_pass: String,
-    target_url: String,
     use_local_proxy: bool,
 ) {
     let user = auth_user;
     let pass = auth_pass;
+    // 闭包是 FnOnce 且 capture 不进 window —— 把 label 拷出来用于错误日志。
+    let window_label = window.label().to_string();
 
     let _ = window.with_webview(move |wv| {
-        // CoreWebView2() 是 unsafe fn，其余（controller 已就绪）为 safe。
-        let core = match unsafe { wv.controller().CoreWebView2() } {
-            Ok(c) => c,
-            Err(_) => return,
+        // 5 s 内轮询等 CoreWebView2 就绪（wry 的 WebView2 controller 创建是异步的，
+        // 创建窗口 → attach 之间经常存在时序差）。
+        //
+        // 历史实现这里 `Err` 直接 return——结果「弹窗新 tab 永远停在 app_url + 鉴权/
+        // 新窗口/下载钩子全失效」。多页签模式下 Rust 同步建窗再 attach，wry 的
+        // WebView2 controller 异步创建（CreateCoreWebView2EnvironmentWithOptions 是 async）
+        // 经常没就绪就调到这里 → `CoreWebView2()` 返 Err → 函数 return。
+        let core = {
+            let started = std::time::Instant::now();
+            loop {
+                match unsafe { wv.controller().CoreWebView2() } {
+                    Ok(c) => break c,
+                    Err(_) => {
+                        if started.elapsed() > std::time::Duration::from_secs(5) {
+                            eprintln!(
+                                "[webview_hooks] CoreWebView2 在 5s 内未就绪，跳过窗口 {window_label} 的钩子注册"
+                            );
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
         };
 
         // --- 0) 开发者工具（F12）---
@@ -432,12 +452,16 @@ pub(crate) fn attach_webview_hooks(
             }
         }
 
-        // --- 3) 所有钩子注册完成后，发起首次导航（本地反向代理 URL）---
-        if !target_url.is_empty() {
-            unsafe {
-                let _ = core.Navigate(&HSTRING::from(target_url.as_str()));
-            }
-        }
+        // --- 3) 所有钩子已注册完毕；首次导航由调用方通过 `WebviewWindow::navigate`
+        // 触发（wry 内部会等 controller 就绪再调 WebView2 的 Navigation，比这里直接
+        // `core.Navigate` 更可靠）。
+        //
+        // ⚠️ 历史实现就在此处调 `core.Navigate(target_url)`——但 `with_webview` 闭包在
+        // controller 尚未就绪时直接 return，导致：
+        //   · 钩子未注册 → 鉴权 / 新窗口 / 下载等全部失效；
+        //   · Navigate 未触发 → tab 停在 builder 默认入口 `index.html`（即用户看到的
+        //     『弹窗永远停在 app_url』）。
+        // 故移除此处的 Navigate，由 [`crate::bootstrap::navigate_window`] 在外部统一触发。
     });
 }
 

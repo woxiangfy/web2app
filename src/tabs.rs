@@ -582,7 +582,14 @@ pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow
     let host = WebviewWindowBuilder::new(app, HOST_LABEL, shell_url())
         .title(WINDOW_TITLE)
         .decorations(false)
-        .resizable(true)
+        // ⚠️ resizable(false) 必须：宿主 + tab 都是 `decorations(false) + resizable(true)` 时，
+        // Windows 会保留不可见的 WS_THICKFRAME（拖动可触屏模拟），导致宿主 outer 包含 thick
+        // frame 而 tab 没有（或反之），双方 outer/inner 几何不一致 → tab 内容凸出宿主
+        // 右/下边缘（“两个窗体不一致”）。统一 `.resizable(false)` 后双方都无 thick frame，
+        // outer = inner = 用户期望值，relayout 用的 `set_position/set_size` 可让 tab 严格对齐。
+        // 副作用：用户**无法**用鼠标拖窗边框 resize——但宿主是 `decorations(false)` 没边框可拖，
+        // 调整大小由应用层通过 Rust 命令触发（启动时从 `window_state` 恢复）即可。
+        .resizable(false)
         .inner_size(1100.0, 650.0)
         .min_inner_size(400.0, 300.0)
         .background_color(crate::bootstrap::SPLASH_BG)

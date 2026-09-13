@@ -194,17 +194,23 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
     };
 
     // Windows：必须先注册 WebView2 钩子（新窗口拦截 + Basic 鉴权）再导航，否则窗口首批
-    // 请求会漏掉 Authorization 注入；attach_webview_hooks 内部在钩子注册完成后才发起导航。
-    // 导航产生的新文档由加载层（overlay 模式）接力覆盖空白期，内容就绪后淡出。
+    // 请求会漏掉 Authorization 注入；钩子注册由 attach_webview_hooks 完成（不负责 Navigate），
+    // 真正的导航在下面用 `window.navigate(url)` 触发（wry 内部会等 CoreWebView2 controller
+    // 就绪再触发 WebView2 的 Navigation，避免 with_webview 回调时机太早导致整个钩子+导航被
+    // 跳过、tab 停在 builder 默认入口的「app_url」问题）。
     #[cfg(windows)]
-    crate::webview_hooks::attach_webview_hooks(
-        app.clone(),
-        &window,
-        nav.user,
-        nav.pass,
-        nav.url,
-        nav.use_local_proxy,
-    );
+    {
+        crate::webview_hooks::attach_webview_hooks(
+            app.clone(),
+            &window,
+            nav.user,
+            nav.pass,
+            nav.use_local_proxy,
+        );
+        if let Ok(url) = Url::parse(&nav.url) {
+            let _ = window.navigate(url);
+        }
+    }
 
     // 其它平台（Android 等）：没有 WebView2，直接导航；鉴权统一由本地反向代理注入。
     #[cfg(not(windows))]
@@ -236,14 +242,23 @@ pub(crate) fn navigate_window(
     window: &tauri::WebviewWindow,
     nav: Navigation,
 ) {
+    // 1) 注册 WebView2 事件钩子（不含 Navigate）。
     crate::webview_hooks::attach_webview_hooks(
         app.clone(),
         window,
         nav.user,
         nav.pass,
-        nav.url,
         nav.use_local_proxy,
     );
+    // 2) 用 Tauri 的 `WebviewWindow::navigate` 真正导航——wry 内部会等 CoreWebView2
+    // controller 就绪再触发 WebView2 的 Navigation。
+    // 历史实现直接在 `attach_webview_hooks` 末尾调 `core.Navigate`，但此时 controller
+    // 可能未就绪（多页签模式新建 tab 时由 Rust 同步发起，与 wry 的就绪回调有时序差），
+    // `with_webview` 直接 return → 钩子没注册、Navigate 没触发，tab 停在 builder 默认入口
+    // —— 也就是用户看到的『弹窗新 tab 永远停在 app_url』。
+    if let Ok(parsed) = url::Url::parse(&nav.url) {
+        let _ = window.navigate(parsed);
+    }
 }
 
 #[cfg(test)]
