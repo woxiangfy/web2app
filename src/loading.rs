@@ -30,6 +30,8 @@ const RETRY_PATH: &str = "/retry";
 
 const SPLASH_TEMPLATE: &str = include_str!("splash.html");
 const LOADING_JS: &str = include_str!("loading.js");
+/// 自绘标题栏脚本（仅单窗口模式有意义）。启动页需要内联它，原因见 `splash_html`。
+const TITLEBAR_JS: &str = include_str!("titlebar.js");
 
 /// 注入到每一次导航目标文档的加载层脚本。
 ///
@@ -42,12 +44,18 @@ pub fn splash_url() -> Url {
     Url::parse("splash://localhost/").expect("构造 splash 协议 URL 失败")
 }
 
-/// 渲染启动页 HTML：把窗口标题与加载层脚本填进模板占位符。
+/// 渲染启动页 HTML：把窗口标题、加载层脚本、自绘标题栏脚本填进模板占位符。
 ///
 /// 先替换标题再插入脚本，避免脚本内容被后续替换误伤。
+///
+/// ⚠️ 标题栏脚本必须内联进启动页：`initialization_script` 是在 WebView 建好**之后**才注册的
+/// （wry 走 `AddScriptToExecuteOnDocumentCreated`，只对「之后创建的文档」生效），所以启动页
+/// 这个**首个文档**拿不到它 —— 旧版单窗口模式下「首次打开」这段时间窗口顶部什么都没有，
+/// 正是用户反馈的「无多标签时没有顶部的菜单栏」。
 pub fn splash_html(title: &str) -> String {
     SPLASH_TEMPLATE
         .replace("__WEB2APP_TITLE__", &html_escape(title))
+        .replace("/*__WEB2APP_TITLEBAR_JS__*/", TITLEBAR_JS)
         .replace("/*__WEB2APP_LOADING_JS__*/", LOADING_JS)
 }
 
@@ -152,9 +160,31 @@ mod tests {
             !html.contains("/*__WEB2APP_LOADING_JS__*/"),
             "脚本占位符应被替换"
         );
+        assert!(
+            !html.contains("/*__WEB2APP_TITLEBAR_JS__*/"),
+            "标题栏占位符也应被替换"
+        );
         assert!(html.contains("Tom&#39;s &lt;App&gt; &amp; \\Co"));
         assert!(html.contains("__web2appLoadingMode = 'splash'"));
         assert!(html.contains("w2l-ring"), "应内联加载层脚本");
+        assert!(
+            html.contains("__web2app_titlebar__"),
+            "启动页应内联自绘标题栏（首个文档拿不到 initialization_script）"
+        );
+    }
+
+    /// 注入脚本运行在「文档尚未解析」的时刻，此时 `document.documentElement` / `head` /
+    /// `body` 都可能为 null。历史上两个脚本直接 appendChild → 静默抛错 → 顶部栏与加载层
+    /// 双双不出现。这里锁死「必须等 DOM 宿主就绪」这条约束，避免以后被改回去。
+    #[test]
+    fn injected_scripts_wait_for_dom_host() {
+        for (name, js) in [("loading.js", OVERLAY_SCRIPT), ("titlebar.js", TITLEBAR_JS)] {
+            assert!(js.contains("whenHostReady"), "{name} 必须等 DOM 宿主就绪");
+            assert!(
+                js.contains("MutationObserver"),
+                "{name} 应使用 MutationObserver 尽早挂载（隐藏窗口下定时器会被节流）"
+            );
+        }
     }
 
     #[test]

@@ -72,6 +72,56 @@
     '<button type="button" class="w2t-btn w2t-close" title="关闭">✕</button>'
   ].join('');
 
+  // ---------------------------------------------------------------------
+  // DOM 宿主等待（关键，别删）
+  // ---------------------------------------------------------------------
+  // ⚠️ 本脚本（单窗口模式）由 WebView2 的 `AddScriptToExecuteOnDocumentCreated` 注入，
+  // 执行时机是「全局对象已创建、**HTML 文档尚未解析**」——MSDN 原文 "runs after the global
+  // object has been created, but before the HTML document has been parsed"。此刻
+  // `document.documentElement` / `document.head` / `document.body` **都可能为 null**。
+  //
+  // 历史实现直接 `(document.body || document.documentElement).appendChild(...)` → 真实页面上
+  // 必然抛 TypeError、被最外层 try/catch 静默吞掉 → **顶部栏从不出现**（用户反馈的
+  // 「无多标签时没有顶部的菜单栏」）。对照 splash 页是把它内联进完整 HTML，DOM 已就绪，
+  // 所以只在真实页面上暴露。
+  //
+  // 做法：宿主节点一出现就挂载。MutationObserver 最先（`<html>` 插入 document 时立即触发，
+  // 且不受隐藏窗口的定时器节流影响），interval 与 readystatechange 兜底。
+  function hostNode() {
+    return document.body || document.head || document.documentElement;
+  }
+
+  function whenHostReady(fn) {
+    if (hostNode()) {
+      fn();
+      return;
+    }
+    var done = false;
+    var obs = null;
+    var iv = 0;
+    function attempt() {
+      if (done || !hostNode()) return;
+      done = true;
+      try {
+        if (obs) obs.disconnect();
+      } catch (e) { /* noop */ }
+      try {
+        document.removeEventListener('readystatechange', attempt);
+      } catch (e) { /* noop */ }
+      if (iv) clearInterval(iv);
+      fn();
+    }
+    try {
+      obs = new MutationObserver(attempt);
+      obs.observe(document, { childList: true });
+    } catch (e) { /* 老引擎不支持时靠下面的兜底 */ }
+    try {
+      document.addEventListener('readystatechange', attempt);
+    } catch (e) { /* noop */ }
+    iv = setInterval(attempt, 16);
+    setTimeout(attempt, 3000); // 硬兜底：极端文档形态下 3s 后再强制试一次
+  }
+
   function mount() {
     var styleEl = document.createElement('style');
     styleEl.setAttribute('data-web2app', 'titlebar');
@@ -82,13 +132,20 @@
     bar.id = '__web2app_titlebar__';
     bar.innerHTML = HTML;
 
-    // document-created 阶段 body 可能尚未出现，先挂到 <html>，body 就绪后挪进去。
+    // document-created 阶段 DOM 尚未解析，`<body>` 往往还不存在，先挂到 `<html>`，
+    // 等 body 就绪后再挪进去（见 ensureHost）。
     (document.body || document.documentElement).appendChild(bar);
-    if (document.body && bar.parentNode !== document.body) {
-      document.body.appendChild(bar);
-    }
 
     return { styleEl: styleEl, bar: bar };
+  }
+
+  /// body 就绪后把标题栏挪进 body，避免它作为 <html> 直接子节点时被部分页面样式影响。
+  function ensureHost(bar) {
+    try {
+      if (document.body && bar.parentNode !== document.body) {
+        document.body.appendChild(bar);
+      }
+    } catch (e) { /* 忽略：挪动失败不影响 fixed 定位的显示效果 */ }
   }
 
   function wire(bar) {
@@ -133,13 +190,33 @@
     } catch (e) { /* 忽略：标题跟不跟随不影响按钮 */ }
   }
 
-  try {
-    var m = mount();
-    wire(m.bar);
-  } catch (e) {
-    // 极端文档挂载失败：绝不破坏宿主页面。
-    window.__web2appTitlebar = true;
-    return;
-  }
+  // 立刻置位防重入：挂载是异步的（要等 DOM 宿主节点），期间可能被再次注入。
   window.__web2appTitlebar = true;
+
+  whenHostReady(function () {
+    var bar;
+    try {
+      bar = mount().bar;
+      wire(bar);
+    } catch (e) {
+      // 极端文档挂载失败：绝不破坏宿主页面。
+      return;
+    }
+
+    // body 出现后把标题栏挪进 body（首次挂载时 body 常常还不存在，先挂在 <html> 上）。
+    try {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () { ensureHost(bar); }, { once: true });
+      } else {
+        ensureHost(bar);
+      }
+    } catch (e) { /* noop */ }
+
+    // 通告加载层（loading.js）：顶部已被占用 38px，请它让出该区域，避免把标题栏盖住。
+    // 两脚本的注入顺序不固定，故「全局标记 + 事件」双保险，谁先谁后都能同步上。
+    window.__web2appChromeH = TITLEBAR_H;
+    try {
+      window.dispatchEvent(new Event('web2app:chrome-ready'));
+    } catch (e) { /* noop */ }
+  });
 })();

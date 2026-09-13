@@ -111,6 +111,68 @@
   ].join('');
 
   // ---------------------------------------------------------------------
+  // DOM 宿主等待（关键，别删）
+  // ---------------------------------------------------------------------
+  // ⚠️ 本脚本由 WebView2 的 `AddScriptToExecuteOnDocumentCreated` 注入，执行时机是
+  // 「全局对象已创建、**HTML 文档尚未解析**」——MSDN 原文 "runs after the global object
+  // has been created, but before the HTML document has been parsed"。也就是说此刻
+  // `document.documentElement` / `document.head` / `document.body` **都可能为 null**，
+  // 而 `document` 对象本身已存在。
+  //
+  // 历史实现直接 `(document.head || document.documentElement).appendChild(...)`，在真实
+  // 页面上必然抛 TypeError、被最外层 try/catch 静默吞掉 → 加载层从不出现。这正是用户
+  // 反馈「首次打开没有加载动画」的根因。（对照组：dnd_polyfill.js 只用
+  // `document.addEventListener`，不碰 DOM 节点，所以一直正常工作。）
+  //
+  // 这里的做法：宿主节点一出现就挂载。MutationObserver 最先（`<html>` 被插入 document
+  // 时立即触发，且不受隐藏窗口的定时器节流影响——tab 窗口建窗时是 hidden 的），
+  // interval 与 readystatechange 兜底。
+  function hostNode() {
+    return document.body || document.head || document.documentElement;
+  }
+
+  function whenHostReady(fn) {
+    if (hostNode()) {
+      fn();
+      return;
+    }
+    var done = false;
+    var obs = null;
+    var iv = 0;
+    function attempt() {
+      if (done || !hostNode()) return;
+      done = true;
+      try {
+        if (obs) obs.disconnect();
+      } catch (e) { /* noop */ }
+      try {
+        document.removeEventListener('readystatechange', attempt);
+      } catch (e) { /* noop */ }
+      if (iv) clearInterval(iv);
+      fn();
+    }
+    try {
+      obs = new MutationObserver(attempt);
+      obs.observe(document, { childList: true });
+    } catch (e) { /* 老引擎不支持时靠下面的兜底 */ }
+    try {
+      document.addEventListener('readystatechange', attempt);
+    } catch (e) { /* noop */ }
+    iv = setInterval(attempt, 16);
+    setTimeout(attempt, 3000); // 硬兜底：极端文档形态下 3s 后再强制试一次
+  }
+
+  /// 自绘标题栏（titlebar.js）占据顶部 38px：加载层让出该区域，避免把它盖住。
+  /// 两脚本的注入顺序不固定，故用「全局标记 + 事件」双向同步。
+  function applyChromeOffset() {
+    if (!root || !root.style) return;
+    var h = window.__web2appChromeH || 0;
+    try {
+      root.style.setProperty('top', h ? h + 'px' : '0px', 'important');
+    } catch (e) { /* noop */ }
+  }
+
+  // ---------------------------------------------------------------------
   // 挂载
   // ---------------------------------------------------------------------
   function mount() {
@@ -159,6 +221,9 @@
     for (var i = 0; i < kids.length; i++) {
       var e = kids[i];
       if (e === root) continue;
+      // 自绘标题栏也是我们注入的，不能算「页面内容已就绪」——否则单窗口模式下
+      // 加载层会在页面还空着时就误判为完成、立刻淡出（等于没有加载动画）。
+      if (e.id === '__web2app_titlebar__') continue;
       var t = e.tagName;
       if (t === 'SCRIPT' || t === 'STYLE' || t === 'TEMPLATE' || t === 'LINK' ||
         t === 'META' || t === 'NOSCRIPT' || t === 'BASE') continue;
@@ -242,32 +307,47 @@
   // ---------------------------------------------------------------------
   // 安装
   // ---------------------------------------------------------------------
-  try {
-    mount();
-  } catch (e) {
-    // 挂载失败（极端文档形态）时绝不影响宿主页面，也绝不让用户卡在无反馈的空白里：
-    // 目标页加载完成会触发新的 load 事件，Rust 侧另有超时兜底。
-    window.__web2appLoading = { hide: function () {}, fail: function () {}, slow: function () {}, state: function () { return 'error'; } };
-    return;
-  }
-
-  // 对外 API：Rust 通过 window.eval 驱动异常态展示。
+  // 先挂一份 no-op API：Rust 侧可能在任何时刻 eval
+  // `window.__web2appLoading.fail/hide`（解析失败、代理启动失败等），挂载完成前调用必须无害。
   window.__web2appLoading = {
     state: function () { return state; },
-    hide: function () { done(); },
-    slow: function (t) { toSlow(t || '网络较慢，仍在努力加载…'); },
-    fail: function (t, d) { toFail(t, d); }
+    hide: function () {},
+    slow: function () {},
+    fail: function () {}
   };
 
-  setTimeout(function () {
-    toSlow(IS_SPLASH ? '正在准备应用环境…' : '网络较慢，仍在努力加载…');
-  }, SLOW_MS);
-  setTimeout(function () {
-    toFail(
-      IS_SPLASH ? '启动超时' : '加载超时',
-      IS_SPLASH ? '应用初始化耗时过长，请检查网络后重试。' : '页面响应超时，请检查网络连接后重试。'
-    );
-  }, FAIL_MS);
+  whenHostReady(function () {
+    try {
+      mount();
+    } catch (e) {
+      // 挂载失败（极端文档形态）时绝不影响宿主页面，也绝不让用户卡在无反馈的空白里：
+      // 目标页加载完成会触发新的 load 事件，Rust 侧另有超时兜底。
+      return;
+    }
 
-  if (!IS_SPLASH) startReadyWatch();
+    applyChromeOffset();
+    try {
+      window.addEventListener('web2app:chrome-ready', applyChromeOffset);
+    } catch (e) { /* noop */ }
+
+    // 对外 API：Rust 通过 window.eval 驱动异常态展示。
+    window.__web2appLoading = {
+      state: function () { return state; },
+      hide: function () { done(); },
+      slow: function (t) { toSlow(t || '网络较慢，仍在努力加载…'); },
+      fail: function (t, d) { toFail(t, d); }
+    };
+
+    setTimeout(function () {
+      toSlow(IS_SPLASH ? '正在准备应用环境…' : '网络较慢，仍在努力加载…');
+    }, SLOW_MS);
+    setTimeout(function () {
+      toFail(
+        IS_SPLASH ? '启动超时' : '加载超时',
+        IS_SPLASH ? '应用初始化耗时过长，请检查网络后重试。' : '页面响应超时，请检查网络连接后重试。'
+      );
+    }, FAIL_MS);
+
+    if (!IS_SPLASH) startReadyWatch();
+  });
 })();

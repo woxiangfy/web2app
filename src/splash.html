@@ -6,8 +6,9 @@
     （域名解析、本地反向代理启动、WebView 初始化等都发生在这段时间里）。
   · 真实地址准备好后，Rust 侧会导航到目标地址；新文档由 initialization_script 注入的
     同一套加载层（overlay 模式）接续显示，因此观感上是一条连续的「加载中」，不会闪白。
-  · 两个占位符由 src/loading.rs 在运行时替换：
+  · 三个占位符由 src/loading.rs 在运行时替换：
       __WEB2APP_TITLE__      窗口标题（已做 HTML 转义）
+      __WEB2APP_TITLEBAR_JS__ src/titlebar.js 全文
       __WEB2APP_LOADING_JS__ src/loading.js 全文
 -->
 <html lang="zh-CN">
@@ -37,6 +38,15 @@
   <body>
     <script>
       window.__web2appLoadingMode = 'splash';
+    </script>
+    <!--
+      自绘标题栏（单窗口模式）内联在启动页里。
+      ⚠️ 首个文档拿不到 initialization_script（脚本是在 WebView 建好之后才注册的，只对
+      「之后的文档」生效），所以启动页必须自己内联，否则「首次打开」这段时间窗口顶部
+      是空的——用户反馈的「没有顶部的菜单栏」。
+    -->
+    <script>
+      /*__WEB2APP_TITLEBAR_JS__*/
     </script>
     <script>
       /*__WEB2APP_LOADING_JS__*/

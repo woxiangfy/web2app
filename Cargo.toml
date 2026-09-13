@@ -70,6 +70,13 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 
+# 仅 Windows 的验证工具（examples/probe_dom_ready.rs）：直接命中 tauri 内部同版本的
+# wry / tao，用来实测「WebView2 注入脚本执行时 DOM 是否已存在」。仅测试目标使用，
+# 不进发布产物。
+[target.'cfg(windows)'.dev-dependencies]
+wry = "0.55"
+tao = "0.35"
+
 [profile.release]
 # 性能优先：CPU 密集路径（本地代理转发、Ed25519 验签 / AES-256-GCM 解密）按
 # opt-level=3 优化。代价是 exe 体积比 opt-level="z"（体积优先）增大（约 5-10MB → 10-15MB），

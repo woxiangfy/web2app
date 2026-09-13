@@ -5457,6 +5457,7 @@ dependencies = [
  "resolve-core",
  "serde",
  "serde_json",
+ "tao",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
@@ -5466,6 +5467,7 @@ dependencies = [
  "url",
  "webview2-com",
  "windows",
+ "wry",
 ]
 
 [[package]]
