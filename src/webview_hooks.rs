@@ -34,9 +34,29 @@ use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::System::Com::{CoTaskMemFree, IStream};
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::DEVTOOLS_ENABLED;
+
+/// 「钩子已注册」的窗口 label 集合 —— **去重闸门**，保证一个窗口的 WebView2 事件处理器
+/// 只挂一次。
+///
+/// 为什么必须有它（2026-09-13 用户反馈「点一次不停的打开新窗口，电脑都被干死机」的根因）：
+/// `window.with_webview(closure)` 从**非主线程**调用时走的是 `EventLoopProxy::send_event`
+/// （见 `tauri_runtime_wry::send_user_message`），是**异步投递**——调用方发完消息立刻返回，
+/// 闭包要等主线程下一次消息循环才执行。所以 [`attach_webview_hooks`] 的 5s 重试循环完全
+/// 可能同时有多个闭包在途，它们随后**逐个**执行、**每个都**会调用 [`register_webview_hooks`]
+/// → 同一个窗口挂上多个 `NewWindowRequested` 处理器 → WebView2 把**一次**点击分发给
+/// **每一个**处理器 → 一次点击打开 N 个新窗口（N = 已挂载的处理器数）。
+///
+/// 更糟的是 N 会随主线程繁忙程度增长：窗口越多 → 建窗越慢 → 在途排队的闭包越多 → N 越大，
+/// 形成正反馈，几十个 WebView2 实例一起启动就把整机拖死。
+///
+/// 闸门在**主线程**（`with_webview` 闭包内）执行，用 label 做一次性 check-and-insert，
+/// 天然串行且原子：第一个跑到的闭包注册，其余闭包直接返回。
+///
+/// 保留策略：label 在一个进程内唯一且永不复用（`tab-N` 由单调计数器生成），故无需清理。
+static HOOKS_REGISTERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// 读取右键菜单项集合的项数（COM 老式 out 参数封装）。
 fn read_menu_count(col: &ICoreWebView2ContextMenuItemCollection) -> Option<u32> {
@@ -177,6 +197,13 @@ fn default_download_path(
 /// 调度方式（踩过的坑，务必保持）：在**后台线程**里循环调用 `window.with_webview`，
 /// 每次只尝试一次，拿到 `CoreWebView2` 就注册并结束；拿不到就隔 50ms 再试，最多 5s。
 ///
+/// ⚠️ 重试意味着**多个闭包可能同时在途**（`with_webview` 从非主线程调用是异步投递，
+/// 发完就返回，闭包要等主线程消息循环才执行），它们会**逐个**跑到注册那一步。
+/// 这本身不是问题——真正的去重由 [`register_webview_hooks`] 开头的 [`HOOKS_REGISTERED`]
+/// 闸门保证「一个窗口只挂一套处理器」。**不要**把这里的重试改成以 `done` 提前收尾来
+/// 「避免重复」：`done` 只能说明「已有闭包跑到过注册那一步」，凭它无法在投递时判断
+/// 后续闭包是否会重复注册，闸门才是唯一可靠的位置。
+///
 /// ⚠️ 绝不能改成在主线程里同步 sleep 轮询等 controller：`tauri_runtime_wry` 的
 /// `send_user_message` 在**主线程**调用时是**内联同步执行**闭包的（源码即
 /// `if current_thread().id() == context.main_thread_id { handle_user_message(..) }`），
@@ -249,9 +276,10 @@ pub(crate) fn attach_webview_hooks(
 /// COM 事件处理器由 webview2_com 的 `create` 构造，`add_*` 会正确 AddRef；
 /// 闭包捕获的 core / 凭据在 handler 存活期间有效。
 ///
-/// ⚠️ 本函数一旦被调用就**绝不允许提前 return**：调用方用它是否执行完来判断「注册完成」，
-/// 提前 return 会被误判为「没注册」并触发重试 → 事件处理器被重复挂载。运行时接口版本
-/// 太老（cast 失败）属于环境不支持，跳过即可，不是错误。
+/// ⚠️ 调用契约：调用方靠「本函数是否返回」判断这次尝试是否落地，因此本函数**必须**走到底
+/// ——运行时接口版本太老（cast 失败）只跳过对应那一段，不能在中途 return。
+/// 唯一的例外是开头的 [`HOOKS_REGISTERED`] 闸门：命中说明该窗口的钩子已经挂过（或正由
+/// 另一个在途闭包挂上），直接返回即代表「注册已完成」，符合调用方预期。
 fn register_webview_hooks(
     app: &tauri::AppHandle,
     core: ICoreWebView2,
@@ -260,6 +288,17 @@ fn register_webview_hooks(
     use_local_proxy: bool,
     window_label: &str,
 ) {
+    // --- 去重闸门：同一窗口只允许注册一次 ---
+    // ⚠️ 别删。没有它，`attach_webview_hooks` 的异步重试会让同一个窗口挂上多个
+    // NewWindowRequested 处理器 → 一次点击打开多个新窗口（详见 HOOKS_REGISTERED 的文档）。
+    {
+        let mut done = HOOKS_REGISTERED.lock().unwrap_or_else(|p| p.into_inner());
+        if done.iter().any(|l| l == window_label) {
+            return;
+        }
+        done.push(window_label.to_string());
+    }
+
     // COM 事件处理器的闭包必须 'static：把借用的凭据拷成 owned String。
     // （下面所有逻辑与拿到 owned String 时完全一致，`user.as_str()` 仍然可用。）
     let user = user.to_string();

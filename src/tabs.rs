@@ -46,6 +46,14 @@ pub(crate) const SHELL_SCHEME: &str = "shell";
 /// 否则 tab 内容会与标签栏重叠或留缝。relayout 计算物理像素时再乘 DPI 缩放系数。
 pub(crate) const TAB_BAR_HEIGHT: i32 = 38;
 
+/// 同时存活的 tab 上限 —— **熔断保护**，不是产品约束。
+///
+/// 为什么需要：任何「一次输入触发多个建窗」的异常路径都会形成正反馈——窗口越多 → 主线程
+/// 建窗越慢 → 更多建窗被排队放大 → 直到把整机拖死。历史真凶是 WebView2 钩子被重复注册
+/// （见 `webview_hooks::HOOKS_REGISTERED`，一次点击打开 N 个窗口）。该 bug 已修，但这类
+/// 故障的代价是「用户电脑卡死」，值得兜一个硬上限：最坏情况下机器还活着、还能关掉多余页签。
+const MAX_TABS: usize = 32;
+
 /// 一个 tab 的运行时信息。
 #[derive(Clone)]
 pub(crate) struct TabInfo {
@@ -268,6 +276,20 @@ pub(crate) fn spawn_tab_with_target(
     app: &tauri::AppHandle,
     start: Option<String>,
 ) -> Result<String, String> {
+    // 熔断：已达上限直接拒绝建窗（详见 MAX_TABS）。必须在 next_tab_label 之前返回，
+    // 否则会白白消耗一个 label（label 只用于日志/前端展示，但保持单调更干净）。
+    {
+        let state = app.state::<TabManager>();
+        let live = state.tabs.lock().unwrap_or_else(|p| p.into_inner()).len();
+        if live >= MAX_TABS {
+            eprintln!(
+                "[tabs] 已达 tab 上限 {MAX_TABS}，拒绝新建；若这是单次点击触发的，说明存在\
+                 「异常建窗风暴」——请把 stderr 里连续的「拦截到新窗口请求」日志发出来定位"
+            );
+            return Err(format!("tab 数量已达上限 {MAX_TABS}"));
+        }
+    }
+
     let label = next_tab_label(app);
 
     // ⚠️ 先登记（占位）再建窗：`purge_orphan_tabs` 会销毁“label 不在册”的 tab 窗口，若先建窗，
