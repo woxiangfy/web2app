@@ -11,10 +11,10 @@
       __WEB2APP_TITLEBAR_JS__ src/titlebar.js 全文
       __WEB2APP_LOADING_JS__ src/loading.js 全文
 -->
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<html lang="zh-CN" data-page-node-id="mH30ix6vHW0TC6iOjLKgMU">
+  <head data-page-node-id="Efy0MZz1NpaTR2Hj9atACk">
+    <meta charset="utf-8" data-page-node-id="8RAq8HvRTVdKWyJxaHyvem" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" data-page-node-id="64sV2Uyd9NIzK8wUM61npv" />
     <title>__WEB2APP_TITLE__</title>
     <style>
       html,
@@ -35,15 +35,18 @@
       }
     </style>
   </head>
-  <body>
+  <body data-page-node-id="YRdCUTBep2FGnEwfy8QG4Z">
     <script>
       window.__web2appLoadingMode = 'splash';
     </script>
     <!--
       自绘标题栏（单窗口模式）内联在启动页里。
-      ⚠️ 首个文档拿不到 initialization_script（脚本是在 WebView 建好之后才注册的，只对
-      「之后的文档」生效），所以启动页必须自己内联，否则「首次打开」这段时间窗口顶部
-      是空的——用户反馈的「没有顶部的菜单栏」。
+      ⚠️ 为什么内联：titlebar.js 的挂载是「等 DOM 宿主节点出现」的异步过程，内联进首屏 HTML
+      能让它与页面同时就绪，不必依赖注入时机——观感上「窗口一出现就有顶部栏」。
+      注：早先这里写「首个文档拿不到 initialization_script」——该说法**已被实测推翻**
+      （wry 先完成 AddScriptToExecuteOnDocumentCreated 再 Navigate，首个文档同样有脚本，
+      见 examples/probe_new_window.rs）。两条路都会尝试，靠 `__web2appTitlebar` 防重，
+      保持内联只是更稳，不要据此推断其它问题。
     -->
     <script>
       /*__WEB2APP_TITLEBAR_JS__*/

@@ -25,13 +25,40 @@
  *   1. 零依赖、零网络，全部 try/catch：注入到第三方页面，任何异常都不能破坏宿主页面。
  *   2. 同一文档只安装一次（window.__web2appTitlebar 防重）。
  *   3. 关键样式带 !important 并走 ID 选择器，z-index 取极高位，避免被宿主页面样式覆盖。
- *   4. 标题栏落位在 <body>，并用 CSS 给 html/body 预留 38px 顶部空间，正文不被盖住。
+ *   4. 顶部空间只留【一次】38px（给 <html> 加 padding-top，body 不再重复加），
+ *      并且要把页面自己的「贴顶固定条」一起下移 —— 详见下面「顶部空间契约」。
+ *
+ * ---------------------------------------------------------------------------
+ * 顶部空间契约（2026-09-14 重写，别改回 html+body 双 padding）
+ * ---------------------------------------------------------------------------
+ * 症状（用户截图）：① 顶部出现一整条空白；② 页面自己的头部被切掉半截「显示不全」。
+ * 根因两条，都在旧实现 `html,body{padding-top:38px}` 上：
+ *   · `html` 与 `body` **各加一次** padding，而 body 位于 html 的内容框内 ⇒ 实际留白
+ *     **76px**（不是 38），页面正文被整体推低一条，顶部就露出空白；
+ *   · padding 只能移动**正常流**内容，对 `position:fixed` / `sticky` 的页面头部毫无作用：
+ *     它仍锚在视口顶（top:0），于是被我们 38px 的标题栏压住 ⇒ 「显示不全」。
+ *     （实测：fixed 页头 rect.top 恒为 0，标题栏 rect 0..38，恰好盖住它 38px。）
+ *
+ * 现在的做法：
+ *   · 只在 `html` 上加 padding-top（配 `box-sizing:border-box`，让页面 `height:100%`
+ *     的高度链仍然等于「视口 - 38」，不会多出 38px 溢出）；
+ *   · 再用「标记 + 下移」处理页面自己的贴顶固定条（见 shiftPageTopBars）：
+ *     给符合特征的元素加属性并 inline `top:38px!important`，让它们从标题栏下沿开始。
+ *     只改 `top`，不动页面结构、不动其它样式，随时可撤。
+ *
+ * 已知边界：整屏式布局（`position:fixed;inset:0` 那种）不在此列 —— 它高过半个视口，
+ * 被刻意排除在识别之外（否则整个应用会被推下去），其顶部 38px 仍会被标题栏遮住。
+ * 要做到彻底不遮，只能把 WebView2 的 bounds 本身下移 38px（原生内缩），那是另一套架构，
+ * 单窗口模式暂不采用。
  */
 (function () {
   'use strict';
   if (window.__web2appTitlebar) return; // 同一文档只安装一次
 
   var TITLEBAR_H = 38;
+  // 页面自己的「贴顶固定条」被识别后打上的标记属性（见 shiftPageTopBars）。
+  // 只加属性 + 一条 top 样式，不改结构，出问题时可整批撤销。
+  var SHIFT_ATTR = 'data-web2app-chrome-shift';
 
   var CSS = [
     '#__web2app_titlebar__{',
@@ -69,9 +96,16 @@
     '}',
     /* 关闭按钮 hover 用红底，符合系统惯例 */
     '#__web2app_titlebar__ .w2t-close:hover{background:#e81123!important;color:#fff!important;}',
-    /* 给远程页预留顶部空间，正文不被盖住 */
-    'html{min-height:100%!important;}',
-    'html,body{padding-top:' + TITLEBAR_H + 'px!important;}'
+    /* 给远程页预留顶部空间，正文不被盖住。
+     * ⚠️ 只给 html 加（旧实现 html,body 都加 → 实际留白 76px，页面顶部多出一条空白）。
+     * 配 box-sizing:border-box：页面若用 height:100% 的高度链，内容高度 = 视口 - 38px，
+     * 不会多出 38px 溢出；min-height:100% 保证 html 仍然是满高。 */
+    'html{box-sizing:border-box!important;padding-top:' + TITLEBAR_H + 'px!important;',
+    'min-height:100%!important;}',
+    /* 页面自己的贴顶固定条（fixed / sticky 且压在视口顶）由 shiftPageTopBars 标记后下移。
+     * 属性选择器特异性低，页面自己写 `#id{top:0!important}` 就能压过它 —— 所以 JS 里
+     * 同时写 inline `top:...!important`（内联 important 优先级最高），这条只作兜底。 */
+    '[' + SHIFT_ATTR + ']{top:' + TITLEBAR_H + 'px!important;}'
   ].join('\n');
 
   // `data-tauri-drag-region`：Tauri 的 drag.js 只认这个属性（Windows WebView2 上
@@ -105,6 +139,107 @@
   // ⚠️ 兜底**不要**写成「setTimeout 3s 后只试一次」：那一次尝试若仍拿不到宿主节点就直接返回，
   // 而 `__web2appTitlebar` 已经是 true → 本脚本从此再也不会挂载（标题栏永久消失）。
   // 现在的写法是「持续重试到 20s，期间任何一个宿主节点出现就立刻挂载」。
+  // ---------------------------------------------------------------------
+  // 把页面自己的「贴顶固定条」下移一个标题栏高度
+  // ---------------------------------------------------------------------
+  // 为什么必须做：我们只是往页面里插了一个 fixed 的标题栏（占 0..38px），
+  // 而页面自己的头部若是 `position:fixed;top:0` / `sticky;top:0`，**padding 推不动它** ——
+  // 它依旧锚在视口顶，被标题栏压住上半截（用户截图里的「显示不全」）。
+  //
+  // 识别条件刻意保守，只认「宽、扁、正贴着视口顶」的 fixed/sticky 元素：
+  //   · 宽度 ≥ 视口一半（顶部条的基本特征）
+  //   · 高度 >0 且 ≤ 视口一半（排除整屏浮层/遮罩，它们被推下去才是灾难）
+  //   · rect.top 在 [-1, 38+8] 内（此刻确实在顶部；sticky 未贴顶时它会被我们的
+  //     padding 推到 ~38，仍在窗口内，所以同样能识别到）
+  //   · 声明式 top 小于标题栏高度（页面自己已经躲开的，别去动）
+  // 命中后写 inline `top:38px!important`（内联 important 优先级最高，能压过页面
+  // 自己带 !important 的规则），并打上 SHIFT_ATTR 便于排查/撤销。
+  //
+  // ⚠️ 两阶段：先只读（收集命中项），再统一写。边读边写会让每次 getBoundingClientRect
+  // 都触发重排，大页面上能把首屏拖慢几十毫秒。
+  function shiftPageTopBars() {
+    try {
+      var root = document.body || document.documentElement;
+      if (!root) return;
+      var de = document.documentElement;
+      var vw = de.clientWidth || window.innerWidth || 0;
+      var vh = de.clientHeight || window.innerHeight || 0;
+      if (!vw || !vh) return;
+
+      var all = root.getElementsByTagName('*');
+      var hits = [];
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.hasAttribute(SHIFT_ATTR)) continue;          // 已经处理过
+        var id = el.id;
+        if (id === '__web2app_titlebar__' || id === '__web2app_loading__') continue; // 我们自己的
+        // 先用几何特征筛掉绝大多数元素（getBoundingClientRect 便宜），
+        // 只有少数候选才去读 computed style（那才是开销大头）。
+        var r = el.getBoundingClientRect();
+        if (r.width < vw * 0.5) continue;
+        if (r.height <= 0 || r.height > vh * 0.5) continue;
+        if (r.top < -1 || r.top > TITLEBAR_H + 8) continue;
+        // 到这里候选已经很少，再读 computed style
+        var cs = window.getComputedStyle(el);
+        var p = cs.position;
+        if (p !== 'fixed' && p !== 'sticky') continue;
+        var t = cs.top;
+        if (t === 'auto') {
+          // 没声明 top：只有确实贴在视口顶才认（否则是按静态位置摆放的普通 fixed 元素）
+          if (r.top > 2) continue;
+        } else if (parseFloat(t) >= TITLEBAR_H) {
+          continue;                                        // 页面自己已经把 top 让开了
+        }
+        hits.push(el);
+      }
+
+      for (var j = 0; j < hits.length; j++) {
+        try {
+          hits[j].setAttribute(SHIFT_ATTR, '');
+          hits[j].style.setProperty('top', TITLEBAR_H + 'px', 'important');
+        } catch (e) { /* 单个元素失败不影响其余 */ }
+      }
+    } catch (e) { /* 绝不把异常抛给宿主页面 */ }
+  }
+
+  // 调度：定时器在「被遮挡窗口」里会被 Chromium 节流到几乎不跑，所以主力是
+  // 「DOM 事件 + MutationObserver」（观察者回调不依赖定时器），定时器只作兜底补扫。
+  // 总次数封顶，避免与频繁改 DOM 的页面互相拉扯。
+  function scheduleShiftPasses() {
+    // 上限的取舍：SPA 换页/框架重建头部都发生在「结构性 DOM 变化」之后，观察者回调不受
+    // 定时器节流影响，所以次数给够（40 次 × 最小间隔 300ms ≈ 覆盖最后 12s 内的变化）；
+    // 又不能无限跑，否则与持续改 DOM 的页面互相拉扯。超过上限就不再补扫（已知边界）。
+    var MAX_RUNS = 40;
+    var MIN_GAP = 300;      // 两次扫描的最小间隔（ms），防抖动
+    var runs = 0;
+    var last = 0;
+    var mo = null;
+
+    function run() {
+      if (runs >= MAX_RUNS) {
+        try { if (mo) mo.disconnect(); } catch (e) { /* noop */ }
+        return;
+      }
+      var now = Date.now();
+      if (now - last < MIN_GAP) return;
+      last = now;
+      runs++;
+      shiftPageTopBars();
+    }
+
+    run();
+    try { document.addEventListener('DOMContentLoaded', run); } catch (e) { /* noop */ }
+    try { window.addEventListener('load', function () { run(); }); } catch (e) { /* noop */ }
+    try {
+      mo = new MutationObserver(run);
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) { /* 老引擎：靠上面的时机 + 定时器兜底 */ }
+    try {
+      setTimeout(run, 1000);
+      setTimeout(run, 3000);
+    } catch (e) { /* noop */ }
+  }
+
   function hostNode() {
     return document.body || document.head || document.documentElement;
   }
@@ -238,6 +373,10 @@
   window.__web2appTitlebar = true;
 
   whenHostReady(function () {
+    // 页面自己的贴顶固定条（fixed / sticky）必须一起下移，否则会被标题栏压住。
+    // 这一步不依赖标题栏挂载成功与否，所以先启动它（内部自带 try/catch 与次数上限）。
+    scheduleShiftPasses();
+
     var mounted;
     try {
       mounted = mount();
