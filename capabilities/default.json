@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window-chrome",
+  "description": "单窗口模式：主窗加载的是【远程页面】（直连上游域名，或本地反向代理的 http://127.0.0.1:<port>），自绘标题栏 titlebar.js 依赖 IPC 调用窗口控制命令。Tauri 2 规定远程 origin 的 IPC 必须先命中 ACL 才会放行（见 tauri::Webview::on_message：`plugin_command.is_some() || has_app_acl_manifest || !is_local` 时强制校验），因此这里显式声明所需权限；没有它，标题栏的最小化/最大化/关闭/拖动会被静默拒绝（前端 catch 掉，表现为“按钮点了没反应”）。",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://*", "https://*"]
+  },
+  "permissions": [
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

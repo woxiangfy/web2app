@@ -347,7 +347,18 @@ fn register_webview_hooks(
                     });
                     let _ = args.SetHandled(true);
                 } else {
-                    // 单窗口模式：保持历史行为——强制在当前窗口打开。
+                    // 单窗口模式：强制「在当前窗口打开」——
+                    // 把本次请求的「新窗口」指向当前 webview，新文档就落在同一个 webview 上。
+                    //
+                    // 实测确认（examples/probe_new_window.rs，2026-09-14）：
+                    //   ① wry 在创建 webview 时先注册了它自己的 NewWindowRequested 处理器
+                    //      （tauri 未配 `on_new_window` 时走 `args.SetHandled(true)` 分支），
+                    //      但**不影响**我们后注册的处理器被调用 —— 日志里能看到
+                    //      「[new-window] 我们的处理器被调用」；
+                    //   ② `SetNewWindow(当前 core)` 真实生效：新文档在同一 webview 创建，
+                    //      且初始化脚本在新文档里照常执行（日志出现新的 `[INJ]` 打点）。
+                    // 所以**不要**改成「Rust 侧显式 navigate」：那样会丢掉 `window.open()` 的
+                    // 返回值语义（页面拿不到可用窗口对象），而当前写法两者兼得。
                     let _ = args.SetNewWindow(&core_for_nw);
                     let _ = args.SetHandled(true);
                 }

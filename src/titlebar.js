@@ -6,9 +6,20 @@
  *
  * 提供的标题栏（高 38px，与多页签宿主 shell.html 的标签栏一致）：
  *      [← 后退] [→ 前进]          标题                [— 最小化] [▢ 最大化] [✕ 关闭]
- *   - 整条 `-webkit-app-region: drag` 空白处可拖动窗口；按钮为 no-drag 可点击；双击最大化。
- *   - 前进/后退调用 Rust 命令 history_nav(direction)，由 Rust 控制当前窗体对应 webview 的历史。
+ *   - 拖动/双击最大化交给 Tauri 的 drag region（`data-tauri-drag-region` 属性，
+ *     由 tauri 注入的 drag.js 处理）；Windows WebView2 上 `-webkit-app-region` 不可靠，
+ *     故以属性为准，CSS 里的 app-region 仅作兼容保留。
+ *   - 前进/后退直接驱动当前文档的 window.history（单窗口模式下与 Rust 的 history_nav 等价）。
  *   - 最小化/最大化/关闭经 window.__TAURI__.window.getCurrentWindow() 原生执行。
+ *
+ * ⚠️⚠️ 权限（capabilities）：主窗加载的是【远程页面】（直连上游域名，或本地反向代理的
+ * http://127.0.0.1:<port>），Tauri 2 对非本地 origin 的 IPC 强制走 ACL ——
+ * 未命中 capability 的调用会被一律拒绝，前端 catch 后静默，表现为「按钮点了没反应」。
+ * 因此 capabilities/default.json 必须声明：
+ *   core:window:allow-minimize / allow-toggle-maximize / allow-close /
+ *   allow-start-dragging / allow-internal-toggle-maximize，并把 remote.urls 放开到实际站点。
+ * 同理，本脚本【不要】去 invoke 应用自定义命令（history_nav / *_host 等）：
+ * 那类命令无法在 capability 里授权给远程 origin（需要 build.rs 的 app_manifest），必被拒。
  *
  * 设计约束（沿用 loading.js 的约定，务必保持）：
  *   1. 零依赖、零网络，全部 try/catch：注入到第三方页面，任何异常都不能破坏宿主页面。
@@ -63,10 +74,13 @@
     'html,body{padding-top:' + TITLEBAR_H + 'px!important;}'
   ].join('\n');
 
+  // `data-tauri-drag-region`：Tauri 的 drag.js 只认这个属性（Windows WebView2 上
+  // `-webkit-app-region` 不可靠）。空值语义是「只有直接点在本元素上才拖动」，
+  // 所以按钮不加（避免点不动），标题与整条空白区各自带上。
   var HTML = [
     '<button type="button" class="w2t-btn w2t-back" title="后退">←</button>',
     '<button type="button" class="w2t-btn w2t-fwd" title="前进">→</button>',
-    '<div class="w2t-title"> </div>',
+    '<div class="w2t-title" data-tauri-drag-region> </div>',
     '<button type="button" class="w2t-btn w2t-min" title="最小化">—</button>',
     '<button type="button" class="w2t-btn w2t-max" title="最大化/还原">▢</button>',
     '<button type="button" class="w2t-btn w2t-close" title="关闭">✕</button>'
@@ -132,6 +146,9 @@
 
     var bar = document.createElement('div');
     bar.id = '__web2app_titlebar__';
+    // 整条空白区可拖动：drag.js 的 isDragRegion 对「空属性」要求点击目标就是本元素，
+    // 按钮因不属于 drag region（且属 clickable）仍可正常点击。
+    bar.setAttribute('data-tauri-drag-region', '');
     bar.innerHTML = HTML;
 
     // document-created 阶段 DOM 尚未解析，`<body>` 往往还不存在，先挂到 `<html>`，
@@ -151,30 +168,36 @@
   }
 
   function wire(bar) {
-    var invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
     var win = null;
     try {
       win = window.__TAURI__ && window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow();
-    } catch (e) { /* 个别环境拿不到窗口句柄时，仅前进/后退仍可工作 */ }
+    } catch (e) { /* 个别环境拿不到窗口句柄时，前进/后退仍可工作 */ }
 
+    // ⚠️ 前进/后退【直接】驱动当前文档的历史，不要改回 invoke 自定义命令：
+    // 主窗加载的是远程页面（非 local origin），Tauri 2 会强制走 ACL 校验，而应用自定义命令
+    // 无法授权给远程 origin → 调用必被拒；前端又不能把异常抛给宿主页面，只能 catch 掉，
+    // 结果就是「点了没反应」。单窗口模式下用 window.history 与 Rust 的 history_nav 完全等价
+    //（后者也只是在目标 webview 里执行同样的调用，多页签模式才需要它来定位目标 tab）。
     function onNav(direction) {
-      if (invoke) {
-        invoke('history_nav', { direction: direction }).catch(function () {});
-      } else if (direction === 'back') {
-        try { window.history.back(); } catch (e) {}
-      } else {
-        try { window.history.forward(); } catch (e) {}
-      }
+      try {
+        if (direction === 'back') {
+          window.history.back();
+        } else {
+          window.history.forward();
+        }
+      } catch (e) { /* noop */ }
     }
 
     bar.querySelector('.w2t-back').addEventListener('click', function () { onNav('back'); });
     bar.querySelector('.w2t-fwd').addEventListener('click', function () { onNav('forward'); });
+
     if (win) {
       bar.querySelector('.w2t-min').addEventListener('click', function () { win.minimize().catch(function () {}); });
       bar.querySelector('.w2t-max').addEventListener('click', function () { win.toggleMaximize().catch(function () {}); });
       bar.querySelector('.w2t-close').addEventListener('click', function () { win.close().catch(function () {}); });
-      // 双击标题栏空白区最大化/还原
-      bar.addEventListener('dblclick', function () { win.toggleMaximize().catch(function () {}); });
+      // 双击标题栏空白区最大化/还原由 Tauri 的 drag region 负责（drag.js 在 mousedown
+      // detail===2 时调用 plugin:window|internal_toggle_maximize）。这里【不要】再自绑 dblclick：
+      // 一次双击会触发两次切换 = 看起来没反应。
     }
 
     // 标题：跟随 document.title（SPA 路由会动态改 title）。
@@ -196,14 +219,16 @@
   window.__web2appTitlebar = true;
 
   whenHostReady(function () {
-    var bar;
+    var mounted;
     try {
-      bar = mount().bar;
-      wire(bar);
+      mounted = mount();
+      wire(mounted.bar);
     } catch (e) {
       // 极端文档挂载失败：绝不破坏宿主页面。
       return;
     }
+    var bar = mounted.bar;
+    var styleEl = mounted.styleEl;
 
     // body 出现后把标题栏挪进 body（首次挂载时 body 常常还不存在，先挂在 <html> 上）。
     try {
@@ -220,5 +245,39 @@
     try {
       window.dispatchEvent(new Event('web2app:chrome-ready'));
     } catch (e) { /* noop */ }
+
+    // ---------------------------------------------------------------------
+    // 自愈守护（用户反馈「点开其他页面后顶部菜单栏整条消失」的兜底）
+    // ---------------------------------------------------------------------
+    // 有几类页面会把我们挂进去的节点整片抹掉：
+    //   · `document.write()` 重写文档（老式页面 / 某些 SPA 的兜底分支）；
+    //   · 前端框架清空并重建 <body>（挂载根节点替换整棵子树）。
+    // 这类「同文档」的 DOM 重建**不会**换掉 JS 环境，所以本脚本仍在运行、定时器仍在 ——
+    // 正好可以在这里低频自检：节点一旦脱离文档就挂回去。（整页导航会换掉 JS 环境，
+    // 新文档由初始化脚本重新注入，不归这里管。）
+    // 上限 20 次：避免与持续删除节点的页面互相拉扯；超过即放弃，绝不打扰宿主页面。
+    (function guard() {
+      var tries = 0;
+      var iv = setInterval(function () {
+        try {
+          if (!document.documentElement) return;
+          var root = document.body || document.head || document.documentElement;
+          if (!root) return;
+          var lostBar = !document.documentElement.contains(bar);
+          var lostStyle = !styleEl.parentNode;
+          if (!lostBar && !lostStyle) return;
+          if (++tries > 20) {
+            clearInterval(iv);
+            return;
+          }
+          if (lostStyle) {
+            (document.head || document.documentElement).appendChild(styleEl);
+          }
+          if (lostBar) {
+            root.appendChild(bar);
+          }
+        } catch (e) { /* noop */ }
+      }, 800);
+    })();
   });
 })();

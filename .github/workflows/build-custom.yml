@@ -72,7 +72,7 @@ on:
       windows_installer:
         description: '打 Windows 安装版(MSI) —— 双击安装、写注册表的正式安装包'
         required: false
-        default: true
+        default: false
         type: boolean
       windows_portable:
         description: '打 Windows 单文件版 —— 免安装绿色版（zip）'
@@ -82,7 +82,7 @@ on:
       android:
         description: '打 Android APK —— 已签名、可直接安装'
         required: false
-        default: true
+        default: false
         type: boolean
 
 jobs:
