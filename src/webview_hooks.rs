@@ -55,6 +55,10 @@ use crate::config::DEVTOOLS_ENABLED;
 /// 闸门在**主线程**（`with_webview` 闭包内）执行，用 label 做一次性 check-and-insert，
 /// 天然串行且原子：第一个跑到的闭包注册，其余闭包直接返回。
 ///
+/// 注：2026-09-14 修掉 [`attach_webview_hooks`] 的 `done` 标志竞态后，重试循环「有一次落地
+/// 就收工」，在途闭包通常只剩 1~2 个（此前是每 50ms 一个、最多约 100 个）。但闸门**仍然必需**：
+/// 控制器就绪较慢时依然会有多个闭包先后跑到这一步，去重不能指望调度侧的时序。
+///
 /// 保留策略：label 在一个进程内唯一且永不复用（`tab-N` 由单调计数器生成），故无需清理。
 static HOOKS_REGISTERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -179,8 +183,8 @@ fn default_download_path(
 /// 在 Windows 上给目标窗口注册 WebView2 原生事件（safe 接口）。
 ///
 /// - 新窗口请求（`target="_blank"` 链接 / JS `window.open()`）：多页签模式下新开一个 tab
-///   （落点见 [`crate::tabs::open_new_tab_from_request`]）；单窗口模式下用 `SetNewWindow`
-///   把当前窗口设为新窗口目标，强制在当前窗口打开且 `window.open()` 返回值有效。
+///   （落点见 [`crate::tabs::open_new_tab_from_request`]）；单窗口模式下由 Rust 侧把当前窗口
+///   **导航**到目标地址（**不能**用 `SetNewWindow(当前 core)`，原因见注册逻辑里的长注释）。
 /// - Basic 鉴权（URL 带 userinfo 时）：
 ///   1) `WebResourceRequested` 拦截【每一个子资源请求】（css/js/xhr/fetch），主动注入 `Authorization`
 ///      头，这是“始终鉴权”的可靠做法，子资源不会丢凭据；
@@ -193,12 +197,18 @@ fn default_download_path(
 /// 调度方式（踩过的坑，务必保持）：在**后台线程**里循环调用 `window.with_webview`，
 /// 每次只尝试一次，拿到 `CoreWebView2` 就注册并结束；拿不到就隔 50ms 再试，最多 5s。
 ///
-/// ⚠️ 重试意味着**多个闭包可能同时在途**（`with_webview` 从非主线程调用是异步投递，
-/// 发完就返回，闭包要等主线程消息循环才执行），它们会**逐个**跑到注册那一步。
-/// 这本身不是问题——真正的去重由 [`register_webview_hooks`] 开头的 [`HOOKS_REGISTERED`]
-/// 闸门保证「一个窗口只挂一套处理器」。**不要**把这里的重试改成以 `done` 提前收尾来
-/// 「避免重复」：`done` 只能说明「已有闭包跑到过注册那一步」，凭它无法在投递时判断
-/// 后续闭包是否会重复注册，闸门才是唯一可靠的位置。
+/// ⚠️⚠️ 判成功的 `done` 标志**必须全函数共用一个，且在【轮次开头】检查**。
+/// 曾经是「每轮新建一个 `done`，`with_webview` 返回后立刻检查」，结果是 **100% 误报**：
+/// `with_webview` 从非主线程调用是**异步投递**（`proxy.send_event`），返回时闭包还没执行，
+/// 立刻检查必然读到 `false`；而闭包真正执行、置位的又是「上一轮」那个已被丢弃的标志。
+/// 于是**哪怕第一次尝试就注册成功，循环也一定空转到 5s 超时**，打出
+/// 「CoreWebView2 在 5s 内未就绪，窗口 X 的钩子未注册」的假告警（每次启动 / 每个窗口一条），
+/// 同时白白排入约 100 个闭包去占主线程。
+///
+/// 去重职责**不在**这里，而在 [`register_webview_hooks`] 开头的 [`HOOKS_REGISTERED`] 闸门
+/// （它保证「一个窗口只挂一套处理器」）。所以「看到 `done` 就提前收工」不破坏去重——
+/// 前提是 `done` 的语义正确：**它表示「本窗口的注册已经跑到底」**（`register_webview_hooks`
+/// 已返回，含闸门命中直接返回的情形），此时继续重试纯属浪费。
 ///
 /// ⚠️ 绝不能改成在主线程里同步 sleep 轮询等 controller：`tauri_runtime_wry` 的
 /// `send_user_message` 在**主线程**调用时是**内联同步执行**闭包的（源码即
@@ -220,11 +230,41 @@ pub(crate) fn attach_webview_hooks(
     let window = window.clone();
 
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(5);
+        // ⚠️ 全函数**共用**这一个标志（不要每轮新建）：任一次投递的闭包把注册跑到
+        // 底就置位，外层据此收工。语义与检查位置的关系见函数文档的 ⚠️⚠️ 段。
+        let done = Arc::new(AtomicBool::new(false));
+        let mut attempts: u32 = 0;
+        // 超时后的宽限只给一次，避免在真正注册不上时无限等待。
+        let mut grace_used = false;
+
         loop {
-            // 每次尝试用一个独立的 done 标志：`with_webview` 是异步投递的，
-            // 只能靠它判断「闭包是否真的执行到了注册那一步」。
-            let done = Arc::new(AtomicBool::new(false));
+            // ⚠️⚠️ 必须在【轮次开头】检查，不能像旧实现那样在 `with_webview` 返回后立刻检查：
+            // 非主线程调用是异步投递，返回时闭包尚未执行，立刻检查必然是 false（→ 必然空转
+            // 到 5s 并打出假告警）。放在这里则已经过了一整轮 50ms，标志有充分时间被置位。
+            if done.load(Ordering::SeqCst) {
+                eprintln!(
+                    "[webview_hooks] 窗口 {window_label} 的钩子已注册（尝试 {attempts} 次，耗时 {}ms）",
+                    started.elapsed().as_millis()
+                );
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                // 宽限一次：在途闭包可能刚好在超时判定前后才跑到（控制器就绪回调与主线程
+                // 消息泵都很忙时）。这里只 sleep 再 `continue`，让成功判定统一走上面那一处
+                // ——否则会出现「其实注册上了却没有成功日志」的静默路径。
+                if !grace_used {
+                    grace_used = true;
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+                eprintln!(
+                    "[webview_hooks] CoreWebView2 在 5s 内未就绪，窗口 {window_label} 的钩子未注册（已尝试 {attempts} 次）"
+                );
+                return;
+            }
+
             let done_in = done.clone();
             let app_in = app.clone();
             let user_in = auth_user.clone();
@@ -252,15 +292,7 @@ pub(crate) fn attach_webview_hooks(
                 // 窗口已销毁 / 事件循环已退出：再试也没意义。
                 return;
             }
-            if done.load(Ordering::SeqCst) {
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                eprintln!(
-                    "[webview_hooks] CoreWebView2 在 5s 内未就绪，窗口 {window_label} 的钩子未注册"
-                );
-                return;
-            }
+            attempts += 1;
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     });
