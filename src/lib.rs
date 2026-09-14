@@ -226,7 +226,17 @@ pub fn run() {
                 // “后退/前进 + 最小化/最大化/关闭”按钮（仅单窗口模式生效；多页签模式见
                 // tabs.rs 的宿主窗口 + shell.html 标签栏）。依赖 withGlobalTauri 暴露的 __TAURI__。
                 .decorations(false)
-                .initialization_script(include_str!("titlebar.js"));
+                .initialization_script(include_str!("titlebar.js"))
+                // 兜底重注入：正常路径下每次导航都会执行上面的 initialization_script，但 WebView2
+                // 存在「某些新文档拿不到 AddScriptToExecuteOnDocumentCreated 脚本」的路径（例如
+                // 新窗口请求被 SetNewWindow 处理后创建的目标文档、页面自己 document.write 重写）。
+                // 这里在每次页面加载完成后再 eval 一次 —— titlebar.js 自带 `__web2appTitlebar`
+                // 防重标记，正常情况下是纯 no-op，只在标题栏真的没挂上时才补挂。
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        let _ = window.eval(include_str!("titlebar.js"));
+                    }
+                });
 
             #[cfg(windows)]
             let wb = match &browser_args {

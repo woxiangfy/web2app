@@ -126,7 +126,10 @@
   //
   // 这里的做法：宿主节点一出现就挂载。MutationObserver 最先（`<html>` 被插入 document
   // 时立即触发，且不受隐藏窗口的定时器节流影响——tab 窗口建窗时是 hidden 的），
-  // interval 与 readystatechange 兜底。
+  // readystatechange / DOMContentLoaded / load 与 interval 兜底。
+  //
+  // ⚠️ 兜底**不要**写成「setTimeout 3s 后只试一次」：那一次尝试若仍拿不到宿主节点就直接返回，
+  // 加载层从此不会出现（用户反馈的「首次打开没有加载动画」）。现在持续重试到 20s。
   function hostNode() {
     return document.body || document.head || document.documentElement;
   }
@@ -139,29 +142,44 @@
     var done = false;
     var obs = null;
     var iv = 0;
-    var to = 0;
-    function attempt() {
-      if (done || !hostNode()) return;
-      done = true;
+    var stopAt = Date.now() + 20000;
+
+    function stop() {
       try {
         if (obs) obs.disconnect();
       } catch (e) { /* noop */ }
       try {
         document.removeEventListener('readystatechange', attempt);
+        document.removeEventListener('DOMContentLoaded', attempt);
+        window.removeEventListener('load', attempt);
       } catch (e) { /* noop */ }
       if (iv) clearInterval(iv);
-      if (to) clearTimeout(to);
+    }
+
+    function attempt() {
+      if (done) return;
+      if (!hostNode()) {
+        if (Date.now() > stopAt) {
+          done = true;
+          stop();
+        }
+        return;
+      }
+      done = true;
+      stop();
       fn();
     }
+
     try {
       obs = new MutationObserver(attempt);
       obs.observe(document, { childList: true });
     } catch (e) { /* 老引擎不支持时靠下面的兜底 */ }
     try {
       document.addEventListener('readystatechange', attempt);
+      document.addEventListener('DOMContentLoaded', attempt);
+      window.addEventListener('load', attempt);
     } catch (e) { /* noop */ }
     iv = setInterval(attempt, 16);
-    to = setTimeout(attempt, 3000); // 硬兜底：极端文档形态下 3s 后再强制试一次
   }
 
   /// 自绘标题栏（titlebar.js）占据顶部 38px：加载层让出该区域，避免把它盖住。

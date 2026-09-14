@@ -20,30 +20,43 @@
 //!
 //! ## 2026-09-14 实测记录（踩过的坑，别再重踩）
 //!
-//! **首个文档也会执行 `initialization_script`**：wry 是「先把脚本
-//! `AddScriptToExecuteOnDocumentCreated` 完成，再 Navigate」，所以 `[INJ] page A` 必然出现。
-//! 即 titlebar.js / splash.html 注释里「首个文档拿不到初始化脚本」的说法不成立
-//! （splash 内联无害，可保留，但别再据此推断其它问题）。
+//! 1. **隐藏窗口会毁掉结论**：`with_visible(false)` 时 WebView2 暂停文档解析与页面脚本，
+//!    title 会一直停在主机名（如 `127.0.0.1`），看起来像「页面没加载」。
+//! 2. **Chromium 会节流被遮挡窗口的定时器**：`setTimeout` 可能从不执行，改用
+//!    `meta refresh` 或「文档加载时同步 `window.open`」（本探针即如此）才稳。
+//! 3. **页面必须是 http://**：wry 的 IPC 处理器把 WebMessage 的 source 当 `http::Uri` 解析，
+//!    `file://` 页面一旦 `postMessage` 就 panic（`Result::unwrap()` on InvalidUri）。
+//! 4. **上报通道**：`evaluate_script` / `evaluate_script_with_callback` 的回调在本环境收不到；
+//!    `with_document_title_changed_handler` 是唯一稳定的通道。
+//! 5. ⚠️⚠️ **用 title 判定「新文档是否执行了初始化脚本」会骗人**：初始化脚本在
+//!    document-created 阶段执行，此时 `<title>` 还没被解析，于是
+//!    `document.title = '[INJ] ' + document.title` 得到 `[INJ] `（空标题）；随后 HTML 解析到
+//!    `<title>page B</title>` 又把标题改成 `page B`。日志里看到
+//!    `[title] [INJ]` → `[title] page B` 极易误判成「page B 这个新文档里有 [INJ] 打点」，
+//!    实际这两行来自**同一个**文档、只反映 title 变化。本探针早期就是被这一点误导，
+//!    得出了「SetNewWindow 有效、新文档照常执行初始化脚本」的错误结论。
+//! 6. **正确结论**：`SetNewWindow(&当前 core)` 产生的目标文档**不执行**
+//!    `AddScriptToExecuteOnDocumentCreated` 注册的脚本（现场实测：新文档里
+//!    `#__web2app_titlebar__` 不存在、`document.body.children.length` 等于页面自身节点数），
+//!    即注入的标题栏 / 加载层全部消失 —— 这正是「点击打开其他页面后顶部菜单栏全部消失」。
+//!    单窗口模式已改为「`SetHandled(true)` + Rust 侧 `navigate` 到目标地址」。
 //!
-//! **隐藏窗口会毁掉结论**：`with_visible(false)` 时 WebView2 暂停文档解析与页面脚本，
-//! title 会一直停在主机名（如 `127.0.0.1`），看起来像「页面没加载」。
+//! ## 更可靠的定位方法（本轮用它锁定了根因，wry 探针做不到的事）
 //!
-//! **Chromium 会节流被遮挡窗口的定时器**：探针里页面的 `setTimeout` 从不执行，
-//! 改用 `meta refresh` / `window.open` 后仍受本机环境影响，所以「导航是否发生」这类结论
-//! **不要**只靠本探针，最终以真机（真实 Tauri 应用）为准。
+//! 本探针缺 Tauri 的初始化脚本集合、缺 WebView2 钩子、上报通道受限，
+//! **不适用**于判定「标题栏为什么不见了」。改用「真实 app + 自建本地站点」：
 //!
-//! **页面必须是 http://**：wry 的 IPC 处理器把 WebMessage 的 source 当 `http::Uri` 解析，
-//! `file://` 页面一旦 `postMessage` 就 panic（`Result::unwrap()` on InvalidUri）。
+//! 1. 自建 HTTP 站点，页面自己回传状态：每 400ms 用 `<img src="/beacon?d=<json>">`
+//!    把 `!!document.getElementById('__web2app_titlebar__')`、`getBoundingClientRect()`、
+//!    `getComputedStyle()`、**`document.elementFromPoint(60,20)`**（看是否被别的元素盖住）、
+//!    `document.body.children.length`、`performance.timeOrigin`（区分文档）发给本地服务器落盘；
+//! 2. `cargo build` 时指到本地站点：`APP_URL=http://127.0.0.1:<port>/start.html
+//!    PROXY_ENABLED=false APP_NAME=<探针名>`（`parse_domains` 只认 JSON 数组，普通 URL 会直连）；
+//! 3. 站点按场景返回不同页面：`target="_blank"` / `window.open(url)` /
+//!    `window.open('')+document.write` / 重建 body / 普通 `location.href` 导航；
+//!    每轮只改场景文件（服务端按请求读文件），跑完直接看落盘 JSON。
 //!
-//! **上报通道**：`evaluate_script` / `evaluate_script_with_callback` 的回调在本环境收不到；
-//! `with_document_title_changed_handler` 是唯一稳定的通道。
-//!
-//! **`blank` 组跑出了完整链路**（页面自己同步调用 `window.open` 时成功）：
-//! `[title] page A` → `[title] [INJ] page A`（首文档注入生效）→
-//! `[new-window] 我们的处理器被调用：uri=...page_b.html`（webview_hooks 的钩子确实被调用，
-//! 即 wry 默认处理器的 `SetHandled(true)` 不会阻止后注册的处理器）→
-//! `[title] [INJ]`（新文档创建，且初始化脚本在新文档里同样执行）→ `[title] page B`。
-//! 结论：单窗口模式「`target="_blank"` 在当前窗口打开」的实现是有效的，别再当死代码删掉。
+//! 判据：`bar:false` 且 `body.children.length` == 页面自身节点数 ⇒ 该文档**根本没执行注入脚本**。
 //!
 //! 判断完即删，不进发布产物。
 

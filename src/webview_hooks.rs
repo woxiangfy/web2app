@@ -309,8 +309,7 @@ fn register_webview_hooks(
         }
     }
 
-    // --- 1) 新窗口请求：多页签模式新开 tab；单窗口模式强制在当前窗口打开 ---
-    let core_for_nw = core.clone();
+    // --- 1) 新窗口请求：多页签模式新开 tab；单窗口模式改为「当前窗口导航到该地址」---
     let app_for_nw = app.clone();
     let label_for_nw = window_label.to_string();
     let nw_handler = NewWindowRequestedEventHandler::create(Box::new(move |_sender, args| {
@@ -347,20 +346,65 @@ fn register_webview_hooks(
                     });
                     let _ = args.SetHandled(true);
                 } else {
-                    // 单窗口模式：强制「在当前窗口打开」——
-                    // 把本次请求的「新窗口」指向当前 webview，新文档就落在同一个 webview 上。
+                    // ---- 单窗口模式：把「新窗口请求」变成【当前窗口的一次导航】----
                     //
-                    // 实测确认（examples/probe_new_window.rs，2026-09-14）：
-                    //   ① wry 在创建 webview 时先注册了它自己的 NewWindowRequested 处理器
-                    //      （tauri 未配 `on_new_window` 时走 `args.SetHandled(true)` 分支），
-                    //      但**不影响**我们后注册的处理器被调用 —— 日志里能看到
-                    //      「[new-window] 我们的处理器被调用」；
-                    //   ② `SetNewWindow(当前 core)` 真实生效：新文档在同一 webview 创建，
-                    //      且初始化脚本在新文档里照常执行（日志出现新的 `[INJ]` 打点）。
-                    // 所以**不要**改成「Rust 侧显式 navigate」：那样会丢掉 `window.open()` 的
-                    // 返回值语义（页面拿不到可用窗口对象），而当前写法两者兼得。
-                    let _ = args.SetNewWindow(&core_for_nw);
+                    // ⚠️⚠️ 不要改回 `args.SetNewWindow(&当前 core)`。
+                    //
+                    // 现场对照实验（真实 app + 本地站点，页面回传 DOM 状态，2026-09-14）：
+                    //   · 普通整页导航（`location.href`）：新文档里 `#__web2app_titlebar__` 存在、
+                    //     rect [0,38,宽]、z-index 最高 → 初始化脚本正常执行；
+                    //   · `target="_blank"` 走 `SetNewWindow(当前 core)`：新文档里标题栏**完全不存在**，
+                    //     `document.body.children.length` 等于页面自身节点数，连加载层也没有
+                    //     → **该文档不执行 `AddScriptToExecuteOnDocumentCreated` 注册的初始化脚本**。
+                    //     这正是用户反馈的「点击打开其他页面后顶部菜单栏全部消失」。
+                    //
+                    // 语义上也不该这样用：MSDN 对 `NewWindow` 的定义是「另建一个 webview 承载新窗口，
+                    // 该 webview 必须与 opener 同 environment 且**未被导航过**」。把自己的 core 传进去
+                    // 属于滥用：WebView2 会复用当前 webview 承载新内容，同时丢掉脚本注册；页面里的
+                    // `w.document.write(...)` 还会直接把主页面改写掉。
+                    //
+                    // 正确做法：`SetHandled(true)` 关掉默认行为，再由 Rust 侧把当前窗口**导航**到
+                    // 目标地址。新页面因此走普通导航路径，初始化脚本（自绘标题栏 / 加载层）与
+                    // WebView2 钩子（鉴权 / 下载 / 右键菜单）全部照常生效。
+                    // 代价：`window.open()` 的返回值不再是可用的窗口对象——单窗口模式本就没有独立窗口，
+                    // 属预期取舍；另见 examples/probe_new_window.rs 里踩过的坑。
+                    eprintln!(
+                        "[webview_hooks] 单窗口模式拦截到新窗口请求：{}",
+                        uri.as_deref().unwrap_or("<无法读取>")
+                    );
                     let _ = args.SetHandled(true);
+                    match uri.as_deref() {
+                        Some(t) if !t.is_empty() && t != "about:blank" => {
+                            let target = t.to_string();
+                            let app_spawn = app_for_nw.clone();
+                            let label_spawn = label_for_nw.clone();
+                            let _ = std::thread::spawn(move || {
+                                // ⚠️ 与右键菜单「设置」同理：本回调运行在主线程，直接
+                                // `run_on_main_thread` 会被同步内联执行（嵌套事件循环 → 卡死）。
+                                // 先切到后台线程再排队，等 COM 分发退栈后的下一个事件循环轮次
+                                // 才在主线程导航。
+                                let app_main = app_spawn.clone();
+                                let _ = app_spawn.run_on_main_thread(move || {
+                                    let Some(window) = app_main.get_webview_window(&label_spawn) else {
+                                        return;
+                                    };
+                                    match url::Url::parse(&target) {
+                                        Ok(u) => {
+                                            let _ = window.navigate(u);
+                                        }
+                                        Err(e) => eprintln!(
+                                            "[webview_hooks] 新窗口目标地址不合法，已忽略：{e}（{target}）"
+                                        ),
+                                    }
+                                });
+                            });
+                        }
+                        // about:blank：典型用法是「先开空窗口再往里 document.write」。
+                        // 单窗口模式无法提供独立窗口，硬套会把用户当前页面变成白板，故忽略。
+                        _ => eprintln!(
+                            "[webview_hooks] 忽略无地址的 window.open()（单窗口模式无法提供独立窗口）"
+                        ),
+                    }
                 }
             }
         }
