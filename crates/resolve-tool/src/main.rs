@@ -53,38 +53,78 @@ resolve-tool —— 动态解析服务端工具（Ed25519 签名 + AES-256-GCM�
     );
 }
 
-fn parse_ttl(args: &[String]) -> Result<u64, String> {
-    // 找 --ttl，返回其后的整数值；不存在则默认 48h。
-    for (i, a) in args.iter().enumerate() {
-        if a == "--ttl" {
-            let v = args
-                .get(i + 1)
-                .ok_or_else(|| "--ttl 需要一个秒数（整数）".to_string())?;
-            return v
-                .parse::<u64>()
-                .map_err(|_| format!("--ttl 必须是整数秒数，收到：{v}"));
-        }
-    }
-    Ok(48 * 3600)
+/// 一次解析出的命令行参数：所有可选 flag 的取值 + 剩余位置参数。
+struct ParsedArgs {
+    ttl: u64,
+    count: u64,
+    out: String,
+    batch: bool,
+    positional: Vec<String>,
 }
 
-fn parse_count(args: &[String]) -> Result<u64, String> {
-    // 找 --count，返回其后的正整数；不存在则默认 1。
-    for (i, a) in args.iter().enumerate() {
-        if a == "--count" {
-            let v = args
-                .get(i + 1)
-                .ok_or_else(|| "--count 需要一个正整数".to_string())?;
-            let n = v
-                .parse::<u64>()
-                .map_err(|_| format!("--count 必须是正整数，收到：{v}"))?;
-            if n == 0 {
-                return Err("--count 必须 >= 1".to_string());
+/// 统一解析 `--ttl / --count / --out / --batch` 及剩余位置参数（不引 clap，保持零重依赖）。
+///
+/// 之前 `cmd_encrypt` / `cmd_all` / `genkey` 各自手写一份 while 循环解析，重复且易漏新 flag；
+/// 这里归并为一处，三个子命令共用同一套解析规则，便于后续扩展新 flag。
+fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
+    let mut ttl: Option<u64> = None;
+    let mut count: Option<u64> = None;
+    let mut out: Option<String> = None;
+    let mut batch = false;
+    let mut positional: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--ttl" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--ttl 需要一个秒数（整数）".to_string())?;
+                ttl = Some(
+                    v.parse::<u64>()
+                        .map_err(|_| format!("--ttl 必须是整数秒数，收到：{v}"))?,
+                );
+                i += 2;
             }
-            return Ok(n);
+            "--count" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--count 需要一个正整数".to_string())?;
+                let n = v
+                    .parse::<u64>()
+                    .map_err(|_| format!("--count 必须是正整数，收到：{v}"))?;
+                if n == 0 {
+                    return Err("--count 必须 >= 1".to_string());
+                }
+                count = Some(n);
+                i += 2;
+            }
+            "--out" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--out 需要一个目录路径".to_string())?;
+                out = Some(v.clone());
+                i += 2;
+            }
+            "--batch" => {
+                batch = true;
+                i += 1;
+            }
+            _ => {
+                positional.push(a.to_string());
+                i += 1;
+            }
         }
     }
-    Ok(1)
+
+    Ok(ParsedArgs {
+        ttl: ttl.unwrap_or(48 * 3600),
+        count: count.unwrap_or(1),
+        out: out.unwrap_or_else(|| ".".to_string()),
+        batch,
+        positional,
+    })
 }
 
 /// 从 PEM（PKCS#8 纯私钥格式）解析 Ed25519 私钥。
@@ -93,51 +133,11 @@ fn parse_count(args: &[String]) -> Result<u64, String> {
 /// `cryptography` 导出的 `Ed25519PrivateKey`（同样 48 字节纯私钥 DER）。
 /// 也兼容 ed25519-dalek 的 `to_pkcs8_pem` 输出的 RFC 8410 格式（83 字节，带内嵌公钥）。
 ///
-/// 解析对空白【完全健壮】：不假设 PEM 的 base64 正文单独成行。做法是去掉 `-----BEGIN/END`
-/// 头尾标记后，把剩余内容里的所有空白（换行、回车、空格、Tab）全部剔除，剩下的即为
-/// base64 正文。这样即使私钥在多行传递时被折叠成一行（如 `-----BEGIN ... base64 ... -----END`），
-/// 也能正确提取。
+/// PEM → SigningKey 的解析已下沉到 `resolve-core::parse_signing_key_pem`，与客户端测试
+/// 共用同一套健壮实现（对空白完全健壮，即使私钥被折叠成单行也能正确提取）。
 fn load_signing_key(path: &str) -> Result<ed25519_dalek::SigningKey, String> {
     let pem = std::fs::read_to_string(path).map_err(|e| format!("读取私钥失败：{e}"))?;
-
-    // 去掉 PEM 头尾标记（可能被折叠在一行里，用字符串替换而非按行过滤）。
-    let mut body = pem.replace("-----BEGIN PRIVATE KEY-----", "");
-    body = body.replace("-----END PRIVATE KEY-----", "");
-    // 兼容 ed25519-dalek 的 RFC 8410 标签（`to_pkcs8_pem` 用 "PRIVATE KEY"，但个别工具
-    // 可能输出 "PRIVATE KEY" 变体；这里再兜底去掉常见的 "BEGIN/END" 标记）。
-    body = body.replace("-----BEGIN", "").replace("-----END", "");
-    body = body.replace("PRIVATE KEY", "");
-
-    // 去掉所有空白字符，剩下的就是 base64 正文。
-    let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64)
-        .map_err(|e| format!("私钥 PEM base64 解码失败：{e}"))?;
-
-    // Ed25519 私钥 seed（32 字节）位于 DER 末尾：
-    //   - 纯私钥格式（48 字节）：`... 04 20 <seed>`，seed 是最后 32 字节。
-    //   - RFC 8410 格式（83 字节）：`... 04 20 <seed> a1 23 03 21 00 <pub>`，seed 也是
-    //     从内层 OCTET STRING 开始，但公钥跟在后面。统一做法：定位 `04 20`（内层
-    //     OCTET STRING 长度 32）后紧跟的 32 字节即 seed。
-    if der.len() < 34 {
-        return Err(format!(
-            "私钥 DER 长度异常（解码后 {} 字节，应为 48 字节纯私钥）。请确认粘贴的是完整的 \
-             Ed25519 私钥 PEM（含 BEGIN/END 行）",
-            der.len()
-        ));
-    }
-    let mut seed_pos = None;
-    for i in 0..der.len().saturating_sub(1) {
-        if der[i] == 0x04 && der[i + 1] == 0x20 {
-            seed_pos = Some(i + 2);
-            break;
-        }
-    }
-    let seed_pos = seed_pos.ok_or_else(|| "私钥 DER 中未找到 Ed25519 seed".to_string())?;
-    let seed = der
-        .get(seed_pos..seed_pos + 32)
-        .ok_or_else(|| "私钥 seed 长度不足 32 字节".to_string())?;
-    let bytes: [u8; 32] = seed.try_into().map_err(|_| "seed 长度异常".to_string())?;
-    Ok(ed25519_dalek::SigningKey::from_bytes(&bytes))
+    resolve_core::parse_signing_key_pem(&pem)
 }
 
 /// 生成密钥对并写入 out_dir，返回（私钥路径，公钥路径，公钥 base64）。
@@ -170,47 +170,23 @@ fn cmd_genkey(out_dir: &str) -> Result<(), String> {
 /// 一键：生成密钥对 + 立即用新私钥加密一个 URL（N 份密文）。
 /// args 形如：[all, <url>, (--out DIR), (--ttl N), (--count N)]
 fn cmd_all(args: &[String]) -> Result<(), String> {
-    let ttl = parse_ttl(args)?;
-    let count = parse_count(args)?;
+    let a = parse_args(args)?;
 
-    // 解析 --out 与位置参数（URL 列表）。
-    let mut out = String::from(".");
-    let mut urls: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--ttl" || a == "--count" {
-            i += 2;
-            continue;
-        } else if a == "--out" {
-            match args.get(i + 1) {
-                Some(v) => {
-                    out = v.clone();
-                    i += 2;
-                }
-                None => return Err("--out 需要一个目录路径".to_string()),
-            }
-        } else {
-            urls.push(a.clone());
-            i += 1;
-        }
-    }
-
-    if urls.is_empty() {
+    if a.positional.is_empty() {
         return Err("未提供要加密的 URL".to_string());
     }
 
     // 生成密钥对并写文件。
-    let (priv_path, pub_path, pub_b64) = generate_and_write_keypair(&out)?;
+    let (priv_path, pub_path, pub_b64) = generate_and_write_keypair(&a.out)?;
 
     // 从刚写的私钥文件重新加载 SigningKey（复用同一套解析逻辑）。
     let signing_key = load_signing_key(&priv_path)?;
 
     // 逐个 URL、每个 URL 生成 count 份密文。
     let mut ciphers: Vec<String> = Vec::new();
-    for url in &urls {
-        for _ in 0..count {
-            let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
+    for url in &a.positional {
+        for _ in 0..a.count {
+            let cipher = resolve_core::sign_and_encrypt(&signing_key, url, a.ttl, None)?;
             ciphers.push(cipher);
         }
     }
@@ -227,10 +203,14 @@ fn cmd_all(args: &[String]) -> Result<(), String> {
         ciphers.len()
     );
     let mut idx = 0;
-    for url in &urls {
-        for _ in 0..count {
+    for url in &a.positional {
+        for _ in 0..a.count {
             let cipher = &ciphers[idx];
-            println!("# {url}  (ttl={ttl}s, 第 {} 份)", idx % count as usize + 1);
+            println!(
+                "# {url}  (ttl={}s, 第 {} 份)",
+                a.ttl,
+                idx % a.count as usize + 1
+            );
             println!("{cipher}");
             println!();
             idx += 1;
@@ -242,34 +222,15 @@ fn cmd_all(args: &[String]) -> Result<(), String> {
 fn cmd_encrypt(args: &[String]) -> Result<(), String> {
     // args 形如：[encrypt, <private_key.pem>, <url>, (--ttl N), (--count N)]
     //          或 [encrypt, --batch, <private_key.pem>, (--ttl N), (--count N)]
-    let ttl = parse_ttl(args)?;
-    let count = parse_count(args)?;
+    let a = parse_args(args)?;
 
-    let mut positional: Vec<&String> = Vec::new();
-    let mut batch = false;
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--ttl" || a == "--count" {
-            i += 2; // 跳过选项及其值
-            continue;
-        } else if a == "--batch" {
-            batch = true;
-            i += 1;
-            continue;
-        } else {
-            positional.push(a);
-            i += 1;
-        }
-    }
-
-    let key_path = positional
+    let key_path = a
+        .positional
         .first()
-        .ok_or_else(|| "缺少私钥路径参数".to_string())?
-        .as_str();
+        .ok_or_else(|| "缺少私钥路径参数".to_string())?;
     let signing_key = load_signing_key(key_path)?;
 
-    let urls: Vec<String> = if batch {
+    let urls: Vec<String> = if a.batch {
         // 从 stdin 逐行读 URL。
         let mut input = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
@@ -280,7 +241,7 @@ fn cmd_encrypt(args: &[String]) -> Result<(), String> {
             .filter(|l| !l.is_empty())
             .collect()
     } else {
-        positional
+        a.positional
             .iter()
             .skip(1)
             .map(|s| s.as_str().to_string())
@@ -292,12 +253,12 @@ fn cmd_encrypt(args: &[String]) -> Result<(), String> {
     }
 
     for url in &urls {
-        for n in 0..count {
-            let cipher = resolve_core::sign_and_encrypt(&signing_key, url, ttl, None)?;
-            if count > 1 {
-                println!("# {url}  (ttl={ttl}s, 第 {} 份)", n + 1);
+        for n in 0..a.count {
+            let cipher = resolve_core::sign_and_encrypt(&signing_key, url, a.ttl, None)?;
+            if a.count > 1 {
+                println!("# {url}  (ttl={}s, 第 {} 份)", a.ttl, n + 1);
             } else {
-                println!("# {url}  (ttl={ttl}s)");
+                println!("# {url}  (ttl={}s)", a.ttl);
             }
             println!("{cipher}");
             println!();
@@ -314,29 +275,11 @@ fn main() -> ExitCode {
     }
 
     let result = match args[0].as_str() {
-        "genkey" => {
-            // 解析 --out
-            let mut out = String::from(".");
-            let mut i = 1;
-            while i < args.len() {
-                if args[i] == "--out" {
-                    match args.get(i + 1) {
-                        Some(v) => {
-                            out = v.clone();
-                            i += 2;
-                        }
-                        None => {
-                            print_usage();
-                            return ExitCode::from(2);
-                        }
-                    }
-                } else {
-                    out = args[i].clone();
-                    i += 1;
-                }
-            }
+        "genkey" => parse_args(&args[1..]).and_then(|a| {
+            // 兼容历史用法：genkey 既支持 `--out DIR`，也支持 `genkey DIR`（裸位置参数当作目录）。
+            let out = a.positional.last().cloned().unwrap_or(a.out);
             cmd_genkey(&out)
-        }
+        }),
         "encrypt" => cmd_encrypt(&args[1..]),
         "all" => cmd_all(&args[1..]),
         _ => {
@@ -422,33 +365,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_ttl_default_and_custom() {
-        assert_eq!(parse_ttl(&[]).unwrap(), 48 * 3600, "默认 48h");
-        assert_eq!(
-            parse_ttl(&["--ttl".to_string(), "60".to_string()]).unwrap(),
-            60
-        );
-        assert!(
-            parse_ttl(&["--ttl".to_string(), "abc".to_string()]).is_err(),
-            "非整数应报错"
-        );
-        assert!(parse_ttl(&["--ttl".to_string()]).is_err(), "缺少数值应报错");
+    fn parse_args_defaults() {
+        let a = parse_args(&[]).unwrap();
+        assert_eq!(a.ttl, 48 * 3600, "默认 48h");
+        assert_eq!(a.count, 1, "默认 1 份");
+        assert_eq!(a.out, ".", "默认输出目录 .");
+        assert!(!a.batch);
+        assert!(a.positional.is_empty());
     }
 
     #[test]
-    fn parse_count_default_and_custom() {
-        assert_eq!(parse_count(&[]).unwrap(), 1, "默认 1 份");
-        assert_eq!(
-            parse_count(&["--count".to_string(), "3".to_string()]).unwrap(),
-            3
+    fn parse_args_all_flags_and_positional() {
+        let args: Vec<String> = [
+            "--ttl", "60", "--count", "3", "--out", "/tmp", "--batch", "key.pem", "url1", "url2",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let a = parse_args(&args).unwrap();
+        assert_eq!(a.ttl, 60);
+        assert_eq!(a.count, 3);
+        assert_eq!(a.out, "/tmp");
+        assert!(a.batch);
+        assert_eq!(a.positional, vec!["key.pem", "url1", "url2"]);
+    }
+
+    #[test]
+    fn parse_args_errors() {
+        assert!(
+            parse_args(&["--ttl".to_string()]).is_err(),
+            "--ttl 缺少数值应报错"
         );
         assert!(
-            parse_count(&["--count".to_string(), "0".to_string()]).is_err(),
-            "0 不允许"
+            parse_args(&["--ttl".to_string(), "abc".to_string()]).is_err(),
+            "--ttl 非整数应报错"
         );
         assert!(
-            parse_count(&["--count".to_string(), "x".to_string()]).is_err(),
-            "非整数应报错"
+            parse_args(&["--count".to_string(), "0".to_string()]).is_err(),
+            "--count 0 不允许"
+        );
+        assert!(
+            parse_args(&["--count".to_string(), "x".to_string()]).is_err(),
+            "--count 非整数应报错"
+        );
+        assert!(
+            parse_args(&["--out".to_string()]).is_err(),
+            "--out 缺少数值应报错"
         );
     }
 }

@@ -203,6 +203,11 @@ jobs:
           merged["icon_url"] = merged["icon_url"].strip()
           # resolve_secret：去首尾空白（空串 = 用代码内置默认值，向后兼容旧密文）。
           merged["resolve_secret"] = merged["resolve_secret"].strip()
+          # 安全门槛：resolve_secret 留空 = 回落到代码内置的公开默认 Secret（所有产物共享同一固定
+          # 密钥串，反编译门槛较低）。打包时醒目告警，提醒为本次产物配置独立 Secret。
+          if not merged["resolve_secret"]:
+              print("::warning::resolve_secret 未配置：将使用代码内置默认 Secret（所有产物共享同一固定密钥串，"
+                    "安全门槛较低）。建议配置独立的 resolve_secret，并同步服务端 encrypt_url.py / resolve-tool。")
           # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
           # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
           if merged["public_key"]:
@@ -485,6 +490,11 @@ jobs:
           merged["icon_url"] = merged["icon_url"].strip()
           # resolve_secret：去首尾空白（空串 = 用代码内置默认值，向后兼容旧密文）。
           merged["resolve_secret"] = merged["resolve_secret"].strip()
+          # 安全门槛：resolve_secret 留空 = 回落到代码内置的公开默认 Secret（所有产物共享同一固定
+          # 密钥串，反编译门槛较低）。打包时醒目告警，提醒为本次产物配置独立 Secret。
+          if not merged["resolve_secret"]:
+              print("::warning::resolve_secret 未配置：将使用代码内置默认 Secret（所有产物共享同一固定密钥串，"
+                    "安全门槛较低）。建议配置独立的 resolve_secret，并同步服务端 encrypt_url.py / resolve-tool。")
           # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
           # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
           if merged["public_key"]:

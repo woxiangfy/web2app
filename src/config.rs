@@ -79,13 +79,13 @@ macro_rules! env_bool {
     }};
 }
 
-// 把应用名清洗为合法的目录名（Windows/Linux/macOS 通用）：
-//   - 替换路径非法字符 < > : " / \ | ? * 与控制字符为下划线
-//   - 压缩连续空白为单个空格、去首尾空白与首尾句点
-//   - 清洗后为空则回落 "Web2App"
-// 用于让 Windows 的 WebView2 数据目录 / 设置目录以自定义 app_name 命名，
-// 而非固定的 tauri.conf.json identifier（com.example.web2app）。
-pub(crate) fn sanitize_dir_name(name: &str) -> String {
+// 把名字清洗为 Windows 合法的文件/目录名：替换路径非法字符 < > : " / \ | ? * 与控制字符
+// （0x00–0x1F）为下划线；`collapse_ws` 为 true 时额外把连续空白压缩为单个空格。
+//
+// 这里【只做】字符替换与空白压缩，不做首尾 trim 与默认值回落——那部分两个调用方语义不同
+// （目录名 vs 下载文件名），由各自保留。与 `webview_hooks::sanitize_filename` 共用，消除两处
+// 「Windows 非法字符→下划线」的重复实现。
+pub(crate) fn sanitize_windows_name(name: &str, collapse_ws: bool) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_ws = false;
     for c in name.chars() {
@@ -94,7 +94,7 @@ pub(crate) fn sanitize_dir_name(name: &str) -> String {
             c if (c as u32) < 32 => '_',
             c => c,
         };
-        if mapped.is_whitespace() {
+        if collapse_ws && mapped.is_whitespace() {
             // 压缩连续空白；首个字符前的空白不输出
             if !prev_ws && !out.is_empty() {
                 out.push(' ');
@@ -105,7 +105,18 @@ pub(crate) fn sanitize_dir_name(name: &str) -> String {
             prev_ws = false;
         }
     }
-    let trimmed = out.trim().trim_matches('.').to_string();
+    out
+}
+
+// 把应用名清洗为合法的目录名（Windows/Linux/macOS 通用）：
+//   - 替换路径非法字符 < > : " / \ | ? * 与控制字符为下划线
+//   - 压缩连续空白为单个空格、去首尾空白与首尾句点
+//   - 清洗后为空则回落 "Web2App"
+// 用于让 Windows 的 WebView2 数据目录 / 设置目录以自定义 app_name 命名，
+// 而非固定的 tauri.conf.json identifier（com.example.web2app）。
+pub(crate) fn sanitize_dir_name(name: &str) -> String {
+    let cleaned = sanitize_windows_name(name, true);
+    let trimmed = cleaned.trim().trim_matches('.').to_string();
     if trimmed.is_empty() {
         "Web2App".to_string()
     } else {
@@ -134,6 +145,20 @@ pub(crate) const WINDOW_TITLE: &str = env_str!("WINDOW_TITLE", APP_NAME);
 // 会以 `window.web2appExtra = {...}` 注入到被包裹网页，前端 JS 可直接读取。
 // 必须是合法 JSON（对象/数组/标量皆可），注入时原样内联为 JS 表达式。
 pub(crate) const EXTRA: &str = env_str!("EXTRA", "{}");
+
+/// 返回注入到页面的 EXTRA JSON 文本；若 EXTRA 不是合法 JSON（打包时手误配置），回退为 "{}"，
+/// 避免 `window.web2appExtra = <非法 JSON>;` 因语法错误破坏宿主页面脚本。
+///
+/// EXTRA 是编译期常量，本函数在每次建窗 / 建 tab 时各调用一次（serde_json 解析开销可忽略），
+/// 起到「注入前校验」的兜底作用。
+pub(crate) fn extra_json() -> &'static str {
+    if serde_json::from_str::<serde_json::Value>(EXTRA).is_ok() {
+        EXTRA
+    } else {
+        eprintln!("[config] EXTRA 不是合法 JSON，已回退为 {{}} 注入");
+        "{}"
+    }
+}
 
 // ---------- 开发者工具（F12 调试，仅 Windows WebView2 生效）----------
 // true  = 启用 WebView2 DevTools，运行后按 F12 即可打开开发者工具，查看 Network / Console 排查问题。
@@ -268,6 +293,17 @@ mod tests {
     fn sanitize_dir_name_keeps_unicode() {
         assert_eq!(sanitize_dir_name("我的应用"), "我的应用");
         assert_eq!(sanitize_dir_name("我的/应用"), "我的_应用");
+    }
+
+    #[test]
+    fn extra_is_valid_json() {
+        // EXTRA 会原样内联为 `window.web2appExtra = <EXTRA>;`，必须是合法 JSON，否则宿主页面脚本报错。
+        assert!(
+            serde_json::from_str::<serde_json::Value>(EXTRA).is_ok(),
+            "EXTRA 必须是合法 JSON"
+        );
+        // 合法默认值下 extra_json() 应原样返回，不回退。
+        assert_eq!(extra_json(), EXTRA);
     }
 
     // build_proxy_args 依赖编译期常量 PROXY_ENABLED（默认 false），

@@ -206,30 +206,35 @@ async fn proxy_handler(
     // 诊断日志：只打印"关心"的响应——非 200 / 重定向 / PDF / 二进制文件。正常页面的大量
     // JS/CSS 静默跳过，噪音可控。用于排查 PDF 预览（能否拿到 200 + 正确 MIME/Content-Disposition）
     // 与拖动改序（moveBranchTo 走 WS，见 handle_websocket 日志）。
-    let dbg_path = parts
-        .uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
-        .to_string();
+    //
+    // 微优化：content-type 的小写拷贝只做一次（原来 pdf 与 octet-stream 各 lower 一次）；
+    // path 与 content-disposition 延迟到「确定要打印」时才构造，热路径（海量 JS/CSS）上
+    // 少几次字符串分配。
+    let dbg_status = proxied_resp.status();
     let dbg_ct = proxied_resp
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let dbg_cd = proxied_resp
-        .headers()
-        .get(header::CONTENT_DISPOSITION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let dbg_status = proxied_resp.status();
+    let ct_lower = dbg_ct.to_ascii_lowercase();
     let is_interesting = dbg_status != StatusCode::OK
         || dbg_status.is_redirection()
-        || dbg_ct.to_ascii_lowercase().contains("pdf")
-        || dbg_ct.to_ascii_lowercase().contains("octet-stream");
+        || ct_lower.contains("pdf")
+        || ct_lower.contains("octet-stream");
     if is_interesting {
+        let dbg_path = parts
+            .uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let dbg_cd = proxied_resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         eprintln!(
             "[proxy] {method} {dbg_path} -> {dbg_status} [content-type: {dbg_ct}] [content-disposition: {dbg_cd}]"
         );
@@ -405,9 +410,11 @@ fn tungstenite_msg_to_axum(
     use tokio_tungstenite::tungstenite::Message as T;
     match msg {
         T::Text(t) => Some(A::Text(t.as_str().into())),
-        T::Binary(b) => Some(A::Binary(bytes::Bytes::from(b.to_vec()))),
-        T::Ping(b) => Some(A::Ping(bytes::Bytes::from(b.to_vec()))),
-        T::Pong(b) => Some(A::Pong(bytes::Bytes::from(b.to_vec()))),
+        // `b` 已是 `bytes::Bytes`，axum 的 Message::Binary/Ping/Pong 同样携带 `Bytes`，
+        // 直接复用即可，`to_vec()` 只是多做一次堆拷贝（每个 WS 帧省一次分配）。
+        T::Binary(b) => Some(A::Binary(b)),
+        T::Ping(b) => Some(A::Ping(b)),
+        T::Pong(b) => Some(A::Pong(b)),
         T::Close(Some(cf)) => Some(A::Close(Some(axum::extract::ws::CloseFrame {
             code: cf.code.into(),
             reason: cf.reason.as_str().into(),

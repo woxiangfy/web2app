@@ -39,6 +39,7 @@ jobs:
       WINDOW_TITLE: ${{ vars.APP_TITLE || vars.WINDOW_TITLE }}
       DATA_DIR_DEFAULT: ${{ vars.DATA_DIR_DEFAULT }}
       PUBLIC_KEY: ${{ secrets.PUBLIC_KEY || vars.PUBLIC_KEY }}
+      RESOLVE_SECRET: ${{ secrets.RESOLVE_SECRET || vars.RESOLVE_SECRET }}
       PROXY_ENABLED: ${{ vars.PROXY_ENABLED }}
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
@@ -125,6 +126,7 @@ jobs:
       WINDOW_TITLE: ${{ vars.APP_TITLE || vars.WINDOW_TITLE }}
       DATA_DIR_DEFAULT: ${{ vars.DATA_DIR_DEFAULT }}
       PUBLIC_KEY: ${{ secrets.PUBLIC_KEY || vars.PUBLIC_KEY }}
+      RESOLVE_SECRET: ${{ secrets.RESOLVE_SECRET || vars.RESOLVE_SECRET }}
       PROXY_ENABLED: ${{ vars.PROXY_ENABLED }}
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}

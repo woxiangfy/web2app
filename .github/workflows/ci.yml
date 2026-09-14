@@ -41,9 +41,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting (non-blocking)
-        # 仅作提示；若与本地 rustfmt 版本略有差异不会阻断流水线。
-        continue-on-error: true
+      - name: Check formatting
+        # 工具链已通过 dtolnay/rust-toolchain@stable 固定到同一 stable 版本（含 rustfmt 组件），
+        # CI 内格式检查结果稳定，故改为阻断：格式不一致直接失败，不再静默放过。
         run: cargo fmt --all -- --check
 
       - name: Clippy
@@ -110,6 +110,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+          components: clippy
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
@@ -131,3 +132,10 @@ jobs:
 
       - name: Cargo check (Android target)
         run: cargo ndk -t arm64-v8a build
+
+      - name: Clippy (Android)
+        # 与 Windows 同理：Android 目标下 `#[cfg(target_os="android")]` / 移动端专属分支在
+        # Linux 作业的 clippy 里不参与编译，其 lint 问题会漏到打包才暴露。补一次 Android 目标
+        # 的 clippy（-D warnings，与其它作业一致）。不带 --all-targets：桌面端示例/测试在
+        # Android 交叉编译下无法构建。
+        run: cargo ndk -t arm64-v8a clippy -- -D warnings

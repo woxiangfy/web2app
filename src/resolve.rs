@@ -112,7 +112,7 @@ pub fn resolve_url_from_domains(
         }
         let txts = match query_txt_all(&resolver, domain) {
             Ok(t) => t,
-            Err(_e) => {
+            Err(_) => {
                 // 单个域名查询失败：记录后尝试下一个域名。
                 eprintln!("[resolve] 域名 {domain} 解析失败，尝试下一个");
                 continue;
@@ -120,7 +120,7 @@ pub fn resolve_url_from_domains(
         };
         match decrypt_first_valid_txt(&public_key, &txts) {
             Ok(url) => return Ok(url),
-            Err(_e) => {
+            Err(_) => {
                 eprintln!("[resolve] 域名 {domain} 的所有 TXT 均无法解出有效 URL，尝试下一个");
             }
         }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn decrypt_first_valid_txt_skips_bad_and_hits_valid() {
         let (priv_pem, pub_b64) = resolve_core::generate_keypair().unwrap();
-        let signing_key = load_signing_key_str(&priv_pem);
+        let signing_key = resolve_core::parse_signing_key_pem(&priv_pem).unwrap();
         let public_key = parse_public_key(&pub_b64).unwrap();
 
         // 同一 URL 生成 3 份密文。
@@ -182,7 +182,7 @@ mod tests {
 
         // 用另一把公钥签一条密文，模拟「别的公钥签的 / 被篡改」。
         let (other_priv, _) = resolve_core::generate_keypair().unwrap();
-        let other_key = load_signing_key_str(&other_priv);
+        let other_key = resolve_core::parse_signing_key_pem(&other_priv).unwrap();
         let other_signed =
             resolve_core::sign_and_encrypt(&other_key, "https://evil.example.com/", 0, None)
                 .unwrap();
@@ -204,28 +204,5 @@ mod tests {
         let public_key = parse_public_key(&pub_b64).unwrap();
         let txts = vec!["垃圾1".to_string(), "垃圾2".to_string()];
         assert!(decrypt_first_valid_txt(&public_key, &txts).is_err());
-    }
-
-    /// 从 PEM 文本解析 SigningKey（测试用，复用 resolve-tool 的健壮解析思路）。
-    fn load_signing_key_str(pem: &str) -> resolve_core::SigningKey {
-        let body: String = pem
-            .replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "")
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        let der =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body).unwrap();
-        let mut seed_pos = None;
-        for i in 0..der.len().saturating_sub(1) {
-            if der[i] == 0x04 && der[i + 1] == 0x20 {
-                seed_pos = Some(i + 2);
-                break;
-            }
-        }
-        let seed: [u8; 32] = der[seed_pos.unwrap()..seed_pos.unwrap() + 32]
-            .try_into()
-            .unwrap();
-        resolve_core::SigningKey::from_bytes(&seed)
     }
 }

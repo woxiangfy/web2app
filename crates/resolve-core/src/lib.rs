@@ -216,6 +216,60 @@ pub fn generate_keypair() -> Result<(String, String), String> {
     Ok((priv_pem, pub_b64))
 }
 
+/// 从 PEM 文本（Ed25519 私钥）解析出 `SigningKey`。
+///
+/// 兼容三种来源：
+///   - 本 crate [`generate_keypair`] 生成的纯私钥（48 字节 DER）；
+///   - Python `cryptography` 导出的 `Ed25519PrivateKey`（同样 48 字节纯私钥 DER）；
+///   - ed25519-dalek `to_pkcs8_pem` 输出的 RFC 8410 格式（83 字节，带内嵌公钥）。
+///
+/// 对空白【完全健壮】：去掉 `-----BEGIN/END PRIVATE KEY-----` 头尾标记后，把剩余内容里的
+/// 所有空白（换行、回车、空格、Tab）全部剔除，剩下即 base64 正文。这样即使私钥在多行传递时
+/// 被折叠成一行（如 `-----BEGIN ... base64 ... -----END`），也能正确提取。
+///
+/// 复用点：`resolve-tool` 服务端加载私钥、各处测试里的 PEM → SigningKey 解析，统一走本函数，
+/// 避免多处复制同一套「找 seed → 切 32 字节」的脆弱逻辑。
+pub fn parse_signing_key_pem(pem: &str) -> Result<SigningKey, String> {
+    // 去掉 PEM 头尾标记（可能被折叠在一行里，用字符串替换而非按行过滤）。
+    let mut body = pem.replace("-----BEGIN PRIVATE KEY-----", "");
+    body = body.replace("-----END PRIVATE KEY-----", "");
+    // 兼容个别工具输出的 "BEGIN/END" 变体标记。
+    body = body.replace("-----BEGIN", "").replace("-----END", "");
+    body = body.replace("PRIVATE KEY", "");
+
+    // 去掉所有空白字符，剩下的就是 base64 正文。
+    let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(&b64)
+        .map_err(|e| format!("私钥 PEM base64 解码失败：{e}"))?;
+
+    // Ed25519 私钥 seed（32 字节）位于 DER 末尾：
+    //   - 纯私钥格式（48 字节）：`... 04 20 <seed>`，seed 是最后 32 字节。
+    //   - RFC 8410 格式（83 字节）：`... 04 20 <seed> a1 23 03 21 00 <pub>`，seed 也是
+    //     从内层 OCTET STRING 开始。统一做法：定位 `04 20`（内层 OCTET STRING 长度 32）
+    //     后紧跟的 32 字节即 seed。
+    if der.len() < 34 {
+        return Err(format!(
+            "私钥 DER 长度异常（解码后 {} 字节，应为 48 字节纯私钥）。请确认粘贴的是完整的 \
+             Ed25519 私钥 PEM（含 BEGIN/END 行）",
+            der.len()
+        ));
+    }
+    let mut seed_pos = None;
+    for i in 0..der.len().saturating_sub(1) {
+        if der[i] == 0x04 && der[i + 1] == 0x20 {
+            seed_pos = Some(i + 2);
+            break;
+        }
+    }
+    let seed_pos = seed_pos.ok_or_else(|| "私钥 DER 中未找到 Ed25519 seed".to_string())?;
+    let seed = der
+        .get(seed_pos..seed_pos + 32)
+        .ok_or_else(|| "私钥 seed 长度不足 32 字节".to_string())?;
+    let bytes: [u8; 32] = seed.try_into().map_err(|_| "seed 长度异常".to_string())?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
 /// 把 DER 字节编码成 PEM 文本（LF 换行，64 字符一行）。
 fn pem_encode(label: &str, der: &[u8]) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(der);
@@ -366,18 +420,8 @@ mod tests {
     #[test]
     fn e2e_sign_encrypt_roundtrip() {
         let (priv_pem, pub_b64) = generate_keypair().unwrap();
-        let signing_key = {
-            // 从 PEM 解析回 SigningKey（复刻 bin 工具的 load_signing_key 逻辑）。
-            let b64: String = priv_pem
-                .lines()
-                .filter(|l| !l.starts_with("-----"))
-                .collect();
-            let der = base64::engine::general_purpose::STANDARD
-                .decode(b64.trim())
-                .unwrap();
-            let seed_pos = der.windows(2).position(|w| w == [0x04, 0x20]).unwrap() + 2;
-            ed25519_dalek::SigningKey::from_bytes(der[seed_pos..seed_pos + 32].try_into().unwrap())
-        };
+        let signing_key = parse_signing_key_pem(&priv_pem)
+            .expect("generate_keypair 产出的 PEM 应能被 parse_signing_key_pem 解析");
         let key = parse_public_key(&pub_b64).unwrap();
 
         // ttl = 0（永不失效）

@@ -146,15 +146,11 @@ fn url_path_filename(uri: &str) -> Option<String> {
 
 /// 清洗文件名：把 Windows 路径非法字符与控制在 0x20 以下的字符替换为下划线，
 /// 去掉首尾空白与末尾句点；结果为空时回落默认名 "download"。
+///
+/// 字符替换复用 [`crate::config::sanitize_windows_name`]（与目录名清洗同一套规则），
+/// 仅「是否压缩空白 / 默认回落名」两处语义不同，故在此各自保留。
 fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            c if (c as u32) < 32 => '_',
-            c => c,
-        })
-        .collect();
+    let cleaned = crate::config::sanitize_windows_name(name, false);
     let trimmed = cleaned.trim().trim_matches('.').trim();
     if trimmed.is_empty() {
         "download".to_string()

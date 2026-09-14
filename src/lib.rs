@@ -209,7 +209,8 @@ pub fn run() {
             // 加载层：在每个新文档的 document-created 阶段铺满视口，页面渲染出内容后淡出。
             .initialization_script(loading::OVERLAY_SCRIPT)
             // 注入打包配置 JSON 里的 `extra`：以 `window.web2appExtra = <JSON>;` 定义在页面全局。
-            .initialization_script(format!("window.web2appExtra = {};", config::EXTRA));
+            // 经 extra_json() 校验：EXTRA 不是合法 JSON 时回退 "{}"，避免注入非法 JSON 破坏页面脚本。
+            .initialization_script(format!("window.web2appExtra = {};", config::extra_json()));
 
             // Windows 专属链：禁用拖放 handler + 注入拖拽 polyfill。
             #[cfg(windows)]

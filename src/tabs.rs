@@ -319,7 +319,10 @@ pub(crate) fn spawn_tab_with_target(
         .visible(false)
         .background_color(crate::bootstrap::SPLASH_BG)
         .initialization_script(crate::loading::OVERLAY_SCRIPT)
-        .initialization_script(format!("window.web2appExtra = {};", crate::config::EXTRA))
+        .initialization_script(format!(
+            "window.web2appExtra = {};",
+            crate::config::extra_json()
+        ))
         // 注入当前 tab 的 label，供标题回传脚本（tab_title.js）读取后回传真实网页标题。
         .initialization_script(format!(
             "window.__web2appTabLabel = {};",

@@ -139,6 +139,7 @@
     var done = false;
     var obs = null;
     var iv = 0;
+    var to = 0;
     function attempt() {
       if (done || !hostNode()) return;
       done = true;
@@ -149,6 +150,7 @@
         document.removeEventListener('readystatechange', attempt);
       } catch (e) { /* noop */ }
       if (iv) clearInterval(iv);
+      if (to) clearTimeout(to);
       fn();
     }
     try {
@@ -159,7 +161,7 @@
       document.addEventListener('readystatechange', attempt);
     } catch (e) { /* noop */ }
     iv = setInterval(attempt, 16);
-    setTimeout(attempt, 3000); // 硬兜底：极端文档形态下 3s 后再强制试一次
+    to = setTimeout(attempt, 3000); // 硬兜底：极端文档形态下 3s 后再强制试一次
   }
 
   /// 自绘标题栏（titlebar.js）占据顶部 38px：加载层让出该区域，避免把它盖住。
