@@ -49,7 +49,15 @@ hickory-resolver = "0.26"
 # 否则 ICoreWebView2 等 COM 类型会因版本不同而编译失败。
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT"] }
+# Win32_UI_Shell / Win32_UI_Shell_Common：下载时弹系统「另存为」对话框（IFileSaveDialog），
+# 见 `src/save_dialog.rs`。两者都不引入新的 crate，只是给同一个 windows crate 多开两个模块。
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
 # Windows 沿用系统证书库（native-tls/schannel），与你当前可用的构建保持一致。
 # `stream` feature：提供 Response::bytes_stream / Body::wrap_stream / Body::from_stream，
 # 本地反向代理做流式转发（大文件不整块缓冲到内存）依赖它们。

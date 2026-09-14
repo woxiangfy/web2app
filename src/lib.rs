@@ -10,7 +10,8 @@
 //! - [`proxy`]         本地反向代理（HTTP + WebSocket 统一注入 Basic 鉴权）
 //! - [`resolve`]       DNS TXT 查询 + 验签解密的解析层
 //! - [`bootstrap`]     后台准备真实地址 → 就绪后导航
-//! - [`webview_hooks`] Windows WebView2 原生事件钩子（鉴权/新窗口/右键菜单）
+//! - [`webview_hooks`] Windows WebView2 原生事件钩子（鉴权/新窗口/下载/右键菜单）
+//! - [`save_dialog`]   Windows 原生「另存为」对话框（下载落盘位置由用户决定）
 //! - [`tray`]          系统托盘 + 设置命令 + 窗口切换
 //! - [`window_state`]  窗口几何持久化（仅桌面端）
 
@@ -39,6 +40,10 @@ use bootstrap::ProxyTask;
 // Windows 专属：WebView2 原生事件钩子。
 #[cfg(windows)]
 mod webview_hooks;
+
+// Windows 专属：系统「另存为」对话框（下载时由用户决定落盘位置）。
+#[cfg(windows)]
+mod save_dialog;
 
 // 多页签（tab）模式（仅 Windows）。
 #[cfg(windows)]

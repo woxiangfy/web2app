@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::config::DEVTOOLS_ENABLED;
+use crate::save_dialog::SaveChoice;
 
 /// 「钩子已注册」的窗口 label 集合 —— **去重闸门**，保证一个窗口的 WebView2 事件处理器
 /// 只挂一次。
@@ -163,21 +164,13 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// 计算下载的默认落盘路径：系统下载目录 + 文件名（Content-Disposition → URL 末段 → "download"）。
-/// 拿不到系统下载目录时返回 None，调用方维持 WebView2 默认行为。
-fn default_download_path(
-    app: &tauri::AppHandle,
-    uri: &Option<String>,
-    cd: &Option<String>,
-) -> Option<std::path::PathBuf> {
-    let dir = app.path().download_dir().ok()?;
-    let name = cd
-        .as_deref()
-        .and_then(content_disposition_filename)
-        .or_else(|| uri.as_deref().and_then(url_path_filename))
+/// 计算下载的建议文件名：`Content-Disposition`（RFC 6266/5987）→ URL 路径末段 → `"download"`，
+/// 并做 Windows 非法字符清洗。用作「另存为」对话框里的默认文件名。
+fn suggested_filename(uri: Option<&str>, cd: Option<&str>) -> String {
+    cd.and_then(content_disposition_filename)
+        .or_else(|| uri.and_then(url_path_filename))
         .map(|n| sanitize_filename(&n))
-        .unwrap_or_else(|| "download".to_string());
-    Some(dir.join(name))
+        .unwrap_or_else(|| "download".to_string())
 }
 
 /// 在 Windows 上给目标窗口注册 WebView2 原生事件（safe 接口）。
@@ -191,6 +184,8 @@ fn default_download_path(
 ///   2) `BasicAuthenticationRequested` 兜底，主框架文档（不触发 WebResourceRequested 的硬限制）及
 ///      任何漏网请求收到 401 时自动应答账号密码。
 /// - 右键菜单：隐藏「更多工具」「另存为」「打印」，新增「设置」项。
+/// - 下载（`DownloadStarting`）：弹系统原生「另存为」对话框，由用户决定落盘位置
+///   （见 [`crate::save_dialog`]）；用户取消则取消这次下载。
 ///
 /// 本函数只负责**调度**，真正的注册逻辑在 [`register_webview_hooks`]。
 ///
@@ -524,12 +519,24 @@ fn register_webview_hooks(
         }
     }
 
-    // --- 1c) 下载支持：把下载拦截到系统下载目录，不弹 WebView2 默认下载栏 ---
+    // --- 1c) 下载支持：弹系统「另存为」对话框，由用户决定落盘位置 ---
     // 需要 ICoreWebView2_4（较新运行时才暴露 DownloadStarting）；cast 失败（极老运行时）
     // 则跳过，保持 WebView2 默认下载行为，不影响其它钩子。
-    // 文件名优先取 Content-Disposition（filename*/filename），否则取 URL 路径末段，
-    // 均做 Windows 非法字符清洗；拿不到系统下载目录时放弃设置路径（走默认行为）。
+    //
+    // ⚠️ 旧实现只调 `SetResultFilePath(下载目录 + 站点给的文件名)`：既不给任何交互，同名文件
+    // 还会被 WebView2 直接覆盖（MSDN：ResultFilePath 指向已存在文件时「will be overwritten」），
+    // 用户看到的现象就是「点下载没反应」。现在改为弹【系统原生另存为】（见 [`crate::save_dialog`]）：
+    //   · 确认 → `SetResultFilePath(用户选的路径)` + `SetHandled(true)`
+    //     （`Handled` 的语义按 MSDN 是「隐藏 WebView2 自带的下载对话框」，下载照常进行；
+    //      不设它就会出现「系统另存为 + WebView2 下载气泡」两个 UI 抢注意力的怪现象）
+    //   · 取消 → `SetCancel(true)`（MSDN：Cancel 为真时无论如何都不显示默认保存 UI）
+    //   · 对话框建不出来 → 什么都不设，保持 WebView2 原生行为，绝不静默改动用户的数据
     let app_for_dl = app.clone();
+    // owner 窗口句柄在主线程这里取一次：对话框要按「真模态」禁用宿主窗口，而在 COM 回调里
+    // 再取窗口需要过 Tauri 的 WindowManager 锁 —— 不在回调执行期间持任何锁更安全。
+    let owner_hwnd = app
+        .get_webview_window(window_label)
+        .and_then(|w| w.hwnd().ok());
     let dl_handler = DownloadStartingEventHandler::create(Box::new(move |_sender, args| {
         if let Some(args) = args {
             unsafe {
@@ -551,9 +558,33 @@ fn register_webview_hooks(
                     if !cd_pw.is_null() {
                         CoTaskMemFree(Some(cd_pw.0 as *const core::ffi::c_void));
                     }
-                    if let Some(path) = default_download_path(&app_for_dl, &uri, &cd) {
-                        let _ =
-                            args.SetResultFilePath(&HSTRING::from(path.to_string_lossy().as_ref()));
+                    let name = suggested_filename(uri.as_deref(), cd.as_deref());
+                    let dir = app_for_dl.path().download_dir().ok();
+                    // 这行日志是「下载到底有没有走到钩子」的唯一判据：先打日志再弹框，
+                    // 用户报「点了没反应」时据此区分「钩子没触发」与「对话框没弹出来」。
+                    eprintln!("[webview_hooks] 下载：正在询问保存位置（建议文件名 {name}）");
+                    // ⚠️ 这里**同步**跑模态对话框（含它自己的消息循环），全程在主线程。
+                    // 理由见 `crate::save_dialog` 顶部注释：换线程会同时丢掉模态语义与 Send 保证。
+                    match crate::save_dialog::ask_save_path(owner_hwnd, &name, dir.as_deref()) {
+                        SaveChoice::Save(path) => {
+                            eprintln!(
+                                "[webview_hooks] 下载：{name} → 用户选择保存到 {}",
+                                path.display()
+                            );
+                            let _ = args
+                                .SetResultFilePath(&HSTRING::from(path.to_string_lossy().as_ref()));
+                            let _ = args.SetHandled(true);
+                        }
+                        SaveChoice::Cancelled => {
+                            eprintln!("[webview_hooks] 下载：用户取消了保存（{name}）");
+                            let _ = args.SetCancel(true);
+                        }
+                        SaveChoice::Unavailable => {
+                            eprintln!(
+                                "[webview_hooks] 下载：系统「另存为」对话框不可用，本次维持 \
+                                 WebView2 默认下载行为（{name}）"
+                            );
+                        }
                     }
                 }
             }
@@ -695,5 +726,32 @@ mod tests {
         // 全部非法 → 空 → 回落默认名
         assert_eq!(sanitize_filename("..."), "download");
         assert_eq!(sanitize_filename(""), "download");
+    }
+
+    #[test]
+    fn suggested_filename_prefers_content_disposition() {
+        // Content-Disposition 优先于 URL（站点给的名字更准）
+        assert_eq!(
+            suggested_filename(
+                Some("https://host/download?id=9"),
+                Some("attachment; filename=\"报表.xlsx\"")
+            ),
+            "报表.xlsx"
+        );
+        // 没有 Content-Disposition 时取 URL 路径末段（percent-decode + 清洗）
+        assert_eq!(
+            suggested_filename(Some("https://host/a/报告%20v2.pdf?t=1"), None),
+            "报告 v2.pdf"
+        );
+    }
+
+    #[test]
+    fn suggested_filename_falls_back_to_download() {
+        // 两者都拿不到（如 blob: 下载且无 Content-Disposition）→ 非空默认名
+        assert_eq!(suggested_filename(None, None), "download");
+        assert_eq!(
+            suggested_filename(Some("https://host/"), Some("attachment")),
+            "download"
+        );
     }
 }
