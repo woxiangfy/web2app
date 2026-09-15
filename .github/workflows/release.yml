@@ -148,6 +148,14 @@ jobs:
 
       - name: Set up Android SDK/NDK
         uses: android-actions/setup-android@v4
+        with:
+          # ⚠️ 必须显式给 `packages`。本 action 的默认值是 `tools platform-tools`，而 Google
+          # 早已下架独立的 `tools` 包（由 cmdline-tools 取代），新版 sdkmanager 对「找不到的包」
+          # 直接以 exit code 1 结束（旧版只打警告），整个步骤随之失败：
+          #   Warning: Failed to find package 'tools'
+          #   Error: The process '.../cmdline-tools/20.0/bin/sdkmanager' failed with exit code 1
+          # 这里只保留确实存在的 platform-tools；NDK 由下一步显式安装。
+          packages: 'platform-tools'
 
       - name: Install NDK
         # 平台/构建工具的版本跟随 Tauri 模板（见下方 "Initialize Android project" 步骤，
