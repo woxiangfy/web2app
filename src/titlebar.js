@@ -39,26 +39,49 @@
  *     它仍锚在视口顶（top:0），于是被我们 38px 的标题栏压住 ⇒ 「显示不全」。
  *     （实测：fixed 页头 rect.top 恒为 0，标题栏 rect 0..38，恰好盖住它 38px。）
  *
- * 现在的做法：
+ * 现在的做法（见 applyChromeFit）：
  *   · 只在 `html` 上加 padding-top（配 `box-sizing:border-box`，让页面 `height:100%`
  *     的高度链仍然等于「视口 - 38」，不会多出 38px 溢出）；
- *   · 再用「标记 + 下移」处理页面自己的贴顶固定条（见 shiftPageTopBars）：
- *     给符合特征的元素加属性并 inline `top:38px!important`，让它们从标题栏下沿开始。
- *     只改 `top`，不动页面结构、不动其它样式，随时可撤。
+ *   · 页面自己的「贴顶固定条」→ 标记 + inline `top:38px!important`（下移，别被标题栏压住）；
+ *   · 页面自己的「按视口高度定尺寸的容器」→ 标记 + inline 高度减 38px（缩高，别被挤出视口底部）。
+ *     只改这几条声明，不动页面结构、不动其它样式，随时可撤。
  *
- * 已知边界：整屏式布局（`position:fixed;inset:0` 那种）不在此列 —— 它高过半个视口，
- * 被刻意排除在识别之外（否则整个应用会被推下去），其顶部 38px 仍会被标题栏遮住。
- * 要做到彻底不遮，只能把 WebView2 的 bounds 本身下移 38px（原生内缩），那是另一套架构，
- * 单窗口模式暂不采用。
+ * ---------------------------------------------------------------------------
+ * 底部空间契约（2026-09-16 追加，别再退回「只补顶部」）
+ * ---------------------------------------------------------------------------
+ * 症状（用户反馈）：顶部修好之后，页面【底部】有一截被窗口下沿吞掉 —— 页面自己的页脚 /
+ * 底栏显示不全（「页面底部存在部分被下面覆盖」）。
+ * 根因：我们拿掉的是 38px 的【布局高度】，而 CSS 里的 `100vh` / `min-height:100vh` 量的
+ * 是【视口高度】—— 视口并没有变小（仍是整窗高），于是：
+ *   · 正常流里的 `min-height:100vh` 容器：起点被 padding 推到 38，高度仍是整个视口
+ *     ⇒ 底边落到视口下方 38px（实测 #root: top=38 / bottom=688 / viewH=650），页脚被推出可视区；
+ *   · `position:fixed;inset:0` 的整屏外壳：padding 对它无效，仍锚在 0..视口底
+ *     ⇒ 顶部 38px 被标题栏压住（下面「已知边界」提到的那个）。
+ * 做法：对这两类元素各补一条 inline 声明（内联 + !important，能压过页面自己带 !important 的规则）：
+ *   · 底部锚定（computed `bottom` 不是 auto）→ 只把 `top` 改成 38px：元素被【缩短】而不是
+ *     下移，底边仍钉在视口底 ⇒ 整屏外壳既不压头也不切尾；
+ *   · 只给了高度（`height:100vh` / `min-height:100vh`）→ 改 `top` 的同时把高度也减 38px。
+ * 只动 `top` / `height` / `min-height` 三个属性；识别条件保守（见 applyChromeFit），
+ * 认不出来就什么都不做，页面最多维持原样。
+ *
+ * 仍存在的边界：真正的「原生内缩」（把 WebView2 的 bounds 本身下移 38px）能让 `100vh`
+ * 天然等于「视口 - 38」，但那要求标题栏改由原生绘制（画在 webview 之外），是另一套架构；
+ * 单窗口模式继续走「注入 + 逐元素补偿」这条路。
  */
 (function () {
   'use strict';
   if (window.__web2appTitlebar) return; // 同一文档只安装一次
 
   var TITLEBAR_H = 38;
-  // 页面自己的「贴顶固定条」被识别后打上的标记属性（见 shiftPageTopBars）。
-  // 只加属性 + 一条 top 样式，不改结构，出问题时可整批撤销。
+  // 页面自己的「贴顶固定条」被识别后打上的标记属性（见 applyChromeFit）：只加属性 + 一条
+  // top 样式，不改结构，出问题时可整批撤销。
   var SHIFT_ATTR = 'data-web2app-chrome-shift';
+  // 页面自己的「按视口高度定尺寸的容器」被识别后打上的标记属性：加属性 + 高度声明。
+  var SHRINK_ATTR = 'data-web2app-chrome-shrink';
+  // 给这类容器用的高度：视口高度减去标题栏（保持它们原本的「按视口定尺寸」语义）。
+  var FIXED_H = 'calc(100vh - ' + TITLEBAR_H + 'px)';
+  // 判定「高度≈视口高度」的容差：布局取整 + 滚动条换算，1px 足够。
+  var VH_TOL = 1;
 
   var CSS = [
     '#__web2app_titlebar__{',
@@ -102,10 +125,13 @@
      * 不会多出 38px 溢出；min-height:100% 保证 html 仍然是满高。 */
     'html{box-sizing:border-box!important;padding-top:' + TITLEBAR_H + 'px!important;',
     'min-height:100%!important;}',
-    /* 页面自己的贴顶固定条（fixed / sticky 且压在视口顶）由 shiftPageTopBars 标记后下移。
-     * 属性选择器特异性低，页面自己写 `#id{top:0!important}` 就能压过它 —— 所以 JS 里
-     * 同时写 inline `top:...!important`（内联 important 优先级最高），这条只作兜底。 */
-    '[' + SHIFT_ATTR + ']{top:' + TITLEBAR_H + 'px!important;}'
+    /* 页面自己的贴顶固定条（fixed / sticky / 整屏外壳，且压在视口顶）由 applyChromeFit 标记后
+     * 下移。属性选择器特异性低，页面自己写 `#id{top:0!important}` 就能压过它 —— 所以 JS 里
+     * 同时写 inline `top:...!important`（内联 important 优先级最高），这两条只作兜底。 */
+    '[' + SHIFT_ATTR + ']{top:' + TITLEBAR_H + 'px!important;}',
+    /* 页面自己的「按视口高度定尺寸的容器」由 applyChromeFit 标记后缩高一个标题栏：
+     * 否则它们（100vh / min-height:100vh）的底边会落到视口下方 38px，页脚被窗口下沿吞掉。 */
+    '[' + SHRINK_ATTR + ']{height:' + FIXED_H + '!important;min-height:' + FIXED_H + '!important;}'
   ].join('\n');
 
   // `data-tauri-drag-region`：Tauri 的 drag.js 只认这个属性（Windows WebView2 上
@@ -140,24 +166,31 @@
   // 而 `__web2appTitlebar` 已经是 true → 本脚本从此再也不会挂载（标题栏永久消失）。
   // 现在的写法是「持续重试到 20s，期间任何一个宿主节点出现就立刻挂载」。
   // ---------------------------------------------------------------------
-  // 把页面自己的「贴顶固定条」下移一个标题栏高度
+  // 让页面自己的「顶部条 / 整屏外壳 / 按视口高度定尺寸的容器」适配这 38px
   // ---------------------------------------------------------------------
-  // 为什么必须做：我们只是往页面里插了一个 fixed 的标题栏（占 0..38px），
-  // 而页面自己的头部若是 `position:fixed;top:0` / `sticky;top:0`，**padding 推不动它** ——
-  // 它依旧锚在视口顶，被标题栏压住上半截（用户截图里的「显示不全」）。
+  // 一个扫描里做三件事（识别条件都保守，认不出来就什么都不做，页面维持原样）：
+  //   ① 贴顶固定条（fixed / sticky，声明 top < 38）→ inline `top:38px!important`，
+  //      否则被标题栏压住上半截（「页面头部显示不全」）。
+  //   ② 底部锚定的整屏外壳（fixed / absolute 且 computed `bottom` ≠ auto）→ 同样只改 top：
+  //      因为 bottom 还钉在视口底，元素是被【缩短】而不是整体下移 —— 既不压头也不切尾。
+  //      （旧版把这整类元素排除在外，它们的顶部 38px 就一直被标题栏压着。）
+  //   ③ 高度≈视口高度的容器（`height:100vh` / `min-height:100vh`，且底边已经贴到/越过
+  //      视口底）→ inline `height/min-height: calc(100vh - 38px)!important`：
+  //      它们本来底边会落到视口下方 38px，把页面自己的页脚 / 底栏顶出窗口
+  //      （用户反馈的「页面底部存在部分被下面覆盖」）。
   //
-  // 识别条件刻意保守，只认「宽、扁、正贴着视口顶」的 fixed/sticky 元素：
-  //   · 宽度 ≥ 视口一半（顶部条的基本特征）
-  //   · 高度 >0 且 ≤ 视口一半（排除整屏浮层/遮罩，它们被推下去才是灾难）
-  //   · rect.top 在 [-1, 38+8] 内（此刻确实在顶部；sticky 未贴顶时它会被我们的
-  //     padding 推到 ~38，仍在窗口内，所以同样能识别到）
-  //   · 声明式 top 小于标题栏高度（页面自己已经躲开的，别去动）
-  // 命中后写 inline `top:38px!important`（内联 important 优先级最高，能压过页面
-  // 自己带 !important 的规则），并打上 SHIFT_ATTR 便于排查/撤销。
+  // 判定依据全部来自实测几何，不猜页面结构：
+  //   · 宽 ≥ 视口一半（顶部条、整屏容器、整页容器必然宽；顺带筛掉绝大多数小元素）
+  //   · 顶部类：rect.top ∈ [-1, 38+8]（此刻确实贴着视口顶）
+  //   · 缩高类：rect.height ≈ 视口高度（±1px，网格/取整余量）且 rect.bottom ≥ 视口底
+  //   · 声明式 top 小于标题栏高度（页面自己已经让开的，别去动）
+  //   · absolute 只认 rect.top ≤ 1 的：只有「包含块就是初始包含块」的绝对定位元素才会如此；
+  //     有定位祖先时它会被 html 的 padding 推到 ~38，那时改 top 是错的。
+  //   · 已经标记过的元素不再进入候选（属性检查），避免反复扫描反复写。
   //
   // ⚠️ 两阶段：先只读（收集命中项），再统一写。边读边写会让每次 getBoundingClientRect
   // 都触发重排，大页面上能把首屏拖慢几十毫秒。
-  function shiftPageTopBars() {
+  function applyChromeFit() {
     try {
       var root = document.body || document.documentElement;
       if (!root) return;
@@ -165,38 +198,74 @@
       var vw = de.clientWidth || window.innerWidth || 0;
       var vh = de.clientHeight || window.innerHeight || 0;
       if (!vw || !vh) return;
+      var scrollY = window.scrollY || window.pageYOffset || 0;
 
       var all = root.getElementsByTagName('*');
-      var hits = [];
+      var shifts = [];                 // 需要把 top 改成 38px 的元素
+      var shrinks = [];                // 需要把高度减掉一个标题栏的元素
+      var shrinkH = [];                // 与 shrinks 一一对应的高度值
+
       for (var i = 0; i < all.length; i++) {
         var el = all[i];
-        if (el.hasAttribute(SHIFT_ATTR)) continue;          // 已经处理过
         var id = el.id;
         if (id === '__web2app_titlebar__' || id === '__web2app_loading__') continue; // 我们自己的
+        if (el === de) continue;       // 不碰 <html>：它的高度由文件头「顶部空间契约」负责
+
+        var needShift = !el.hasAttribute(SHIFT_ATTR);
+        var needShrink = !el.hasAttribute(SHRINK_ATTR);
+        if (!needShift && !needShrink) continue;
+
         // 先用几何特征筛掉绝大多数元素（getBoundingClientRect 便宜），
         // 只有少数候选才去读 computed style（那才是开销大头）。
         var r = el.getBoundingClientRect();
         if (r.width < vw * 0.5) continue;
-        if (r.height <= 0 || r.height > vh * 0.5) continue;
-        if (r.top < -1 || r.top > TITLEBAR_H + 8) continue;
-        // 到这里候选已经很少，再读 computed style
+        if (r.height <= 0) continue;
+
+        var atTop = needShift && r.top >= -1 && r.top <= TITLEBAR_H + 8;
+        var viewportTall = needShrink &&
+          r.height >= vh - VH_TOL && r.height <= vh + VH_TOL && r.bottom >= vh - VH_TOL;
+        if (!atTop && !viewportTall) continue;
+
         var cs = window.getComputedStyle(el);
-        var p = cs.position;
-        if (p !== 'fixed' && p !== 'sticky') continue;
-        var t = cs.top;
-        if (t === 'auto') {
-          // 没声明 top：只有确实贴在视口顶才认（否则是按静态位置摆放的普通 fixed 元素）
-          if (r.top > 2) continue;
-        } else if (parseFloat(t) >= TITLEBAR_H) {
-          continue;                                        // 页面自己已经把 top 让开了
+        var pos = cs.position;
+        var bottomAnchored = cs.bottom !== 'auto';   // 底边钉在包含块/视口底部
+
+        var moved = false;   // 本次是否会把它的 top 改成 38px
+        // ① 贴顶的 fixed / sticky（以及「包含块就是初始包含块」的 absolute）→ 下移
+        if (atTop && (pos === 'fixed' || pos === 'sticky' || (pos === 'absolute' && r.top <= 1))) {
+          var t = cs.top;
+          if (t === 'auto' ? r.top <= 2 : parseFloat(t) < TITLEBAR_H) {
+            shifts.push(el);
+            moved = true;
+          }
         }
-        hits.push(el);
+        if (!needShrink) continue;
+        // 底部锚定的元素靠 bottom 定位，改 top 就够了，本身会被缩短，不需要动高度
+        if (bottomAnchored) continue;
+        // ② 正常流里按视口高度定尺寸的容器 → 高度减一个标题栏
+        if (!viewportTall) continue;
+        // 高度该减多少：元素被下移到 38 时减 38；本身就在 38 往下的（body 默认 8px 边距等）
+        // 就按它离文档顶的实际距离减，但夹在 [38, 54] 内 —— 只补偿标题栏这一档，不做大改写。
+        var c = TITLEBAR_H;
+        if (!moved) {
+          var off = Math.round(r.top + scrollY);
+          if (off >= 0) c = Math.max(TITLEBAR_H, Math.min(off, TITLEBAR_H + 16));
+        }
+        shrinks.push(el);
+        shrinkH.push('calc(100vh - ' + c + 'px)');
       }
 
-      for (var j = 0; j < hits.length; j++) {
+      for (var j = 0; j < shrinks.length; j++) {
         try {
-          hits[j].setAttribute(SHIFT_ATTR, '');
-          hits[j].style.setProperty('top', TITLEBAR_H + 'px', 'important');
+          shrinks[j].setAttribute(SHRINK_ATTR, '');
+          shrinks[j].style.setProperty('height', shrinkH[j], 'important');
+          shrinks[j].style.setProperty('min-height', shrinkH[j], 'important');
+        } catch (e) { /* 单个元素失败不影响其余 */ }
+      }
+      for (var k = 0; k < shifts.length; k++) {
+        try {
+          shifts[k].setAttribute(SHIFT_ATTR, '');
+          shifts[k].style.setProperty('top', TITLEBAR_H + 'px', 'important');
         } catch (e) { /* 单个元素失败不影响其余 */ }
       }
     } catch (e) { /* 绝不把异常抛给宿主页面 */ }
@@ -205,7 +274,10 @@
   // 调度：定时器在「被遮挡窗口」里会被 Chromium 节流到几乎不跑，所以主力是
   // 「DOM 事件 + MutationObserver」（观察者回调不依赖定时器），定时器只作兜底补扫。
   // 总次数封顶，避免与频繁改 DOM 的页面互相拉扯。
-  function scheduleShiftPasses() {
+  //
+  // ⚠️ 多轮扫描是有用的：嵌套的整页容器（外层被缩高后，内层才暴露出「底边越过视口底」）
+  // 要靠下一轮才命中 —— 单轮只处理「当轮量得到」的那一层。
+  function scheduleChromeFit() {
     // 上限的取舍：SPA 换页/框架重建头部都发生在「结构性 DOM 变化」之后，观察者回调不受
     // 定时器节流影响，所以次数给够（40 次 × 最小间隔 300ms ≈ 覆盖最后 12s 内的变化）；
     // 又不能无限跑，否则与持续改 DOM 的页面互相拉扯。超过上限就不再补扫（已知边界）。
@@ -224,7 +296,7 @@
       if (now - last < MIN_GAP) return;
       last = now;
       runs++;
-      shiftPageTopBars();
+      applyChromeFit();
     }
 
     run();
@@ -321,17 +393,57 @@
     } catch (e) { /* 忽略：挪动失败不影响 fixed 定位的显示效果 */ }
   }
 
-  function wire(bar) {
-    var win = null;
+  /// 取当前窗口句柄：**每次要用时现取**，绝不在挂载时缓存。
+  /// 挂载发生在 document-created 之后不久，个别环境下 `window.__TAURI__` 还没注入完；
+  /// 旧实现把句柄缓存在闭包里、拿不到就整段不绑定 → 「按钮点了没反应」且无从察觉。
+  function currentWindow() {
     try {
-      win = window.__TAURI__ && window.__TAURI__.window && window.__TAURI__.window.getCurrentWindow();
-    } catch (e) { /* 个别环境拿不到窗口句柄时，前进/后退仍可工作 */ }
+      var T = window.__TAURI__;
+      if (!T) return null;
+      if (T.window && T.window.getCurrentWindow) return T.window.getCurrentWindow();
+      if (T.webviewWindow && T.webviewWindow.getCurrentWebviewWindow) {
+        return T.webviewWindow.getCurrentWebviewWindow();
+      }
+    } catch (e) { /* noop */ }
+    return null;
+  }
 
+  /// 执行窗口命令，并把失败原因打到控制台。
+  /// ⚠️ **不要**退回 `.catch(function(){})` 那种静默写法：ACL 拒绝时前端一片安静，
+  /// 用户只看到「点了没反应」，排查得从零开始（2026-09-16 就是这么被坑的）。
+  /// 控制台日志只是给人看的，仍然绝不向宿主页面抛异常。
+  function callWindow(method) {
+    var w = currentWindow();
+    if (!w || typeof w[method] !== 'function') {
+      try { console.error('[web2app] 窗口命令 ' + method + ' 不可用：__TAURI__ 未就绪或缺少 window 模块'); } catch (e) { /* noop */ }
+      return;
+    }
+    try {
+      var p = w[method]();
+      if (p && p.then) {
+        p.then(null, function (err) {
+          try { console.error('[web2app] 窗口命令 ' + method + ' 被拒绝：', err); } catch (e) { /* noop */ }
+        });
+      }
+    } catch (e) {
+      try { console.error('[web2app] 窗口命令 ' + method + ' 抛异常：', e); } catch (e2) { /* noop */ }
+    }
+  }
+
+  function wire(bar) {
     // ⚠️ 前进/后退【直接】驱动当前文档的历史，不要改回 invoke 自定义命令：
     // 主窗加载的是远程页面（非 local origin），Tauri 2 会强制走 ACL 校验，而应用自定义命令
     // 无法授权给远程 origin → 调用必被拒；前端又不能把异常抛给宿主页面，只能 catch 掉，
     // 结果就是「点了没反应」。单窗口模式下用 window.history 与 Rust 的 history_nav 完全等价
     //（后者也只是在目标 webview 里执行同样的调用，多页签模式才需要它来定位目标 tab）。
+    //
+    // 最小化/最大化/关闭走的是 `plugin:window|*`（Tauri 核心插件命令）—— 这类命令**即使本地
+    // origin 也要过 ACL**，所以 capabilities/default.json 必须同时满足两点：
+    //   1. 列出窗口 label（`windows: ["main"]`）；
+    //   2. `remote.urls` 覆盖真实页面 origin，**并且带上端口通配 `:*`**。
+    //      踩坑记录：URLPattern 里「不写端口」＝只匹配该 scheme 的默认端口，`http://*`
+    //      匹配不了 `http://127.0.0.1:51234/`（本地反向代理的端口是随机的）⇒ 只有直连
+    //      https://域名（443 默认端口）时按钮才是好的，代理模式下按钮全废。
     function onNav(direction) {
       try {
         if (direction === 'back') {
@@ -344,15 +456,12 @@
 
     bar.querySelector('.w2t-back').addEventListener('click', function () { onNav('back'); });
     bar.querySelector('.w2t-fwd').addEventListener('click', function () { onNav('forward'); });
-
-    if (win) {
-      bar.querySelector('.w2t-min').addEventListener('click', function () { win.minimize().catch(function () {}); });
-      bar.querySelector('.w2t-max').addEventListener('click', function () { win.toggleMaximize().catch(function () {}); });
-      bar.querySelector('.w2t-close').addEventListener('click', function () { win.close().catch(function () {}); });
-      // 双击标题栏空白区最大化/还原由 Tauri 的 drag region 负责（drag.js 在 mousedown
-      // detail===2 时调用 plugin:window|internal_toggle_maximize）。这里【不要】再自绑 dblclick：
-      // 一次双击会触发两次切换 = 看起来没反应。
-    }
+    bar.querySelector('.w2t-min').addEventListener('click', function () { callWindow('minimize'); });
+    bar.querySelector('.w2t-max').addEventListener('click', function () { callWindow('toggleMaximize'); });
+    bar.querySelector('.w2t-close').addEventListener('click', function () { callWindow('close'); });
+    // 双击标题栏空白区最大化/还原由 Tauri 的 drag region 负责（drag.js 在 mousedown
+    // detail===2 时调用 plugin:window|internal_toggle_maximize）。这里【不要】再自绑 dblclick：
+    // 一次双击会触发两次切换 = 看起来没反应。
 
     // 标题：跟随 document.title（SPA 路由会动态改 title）。
     var titleEl = bar.querySelector('.w2t-title');
@@ -373,9 +482,10 @@
   window.__web2appTitlebar = true;
 
   whenHostReady(function () {
-    // 页面自己的贴顶固定条（fixed / sticky）必须一起下移，否则会被标题栏压住。
+    // 页面自己的贴顶固定条 / 整屏外壳 / 按视口高度定尺寸的容器都要一起适配（见 applyChromeFit）：
+    // ① 下移，别被标题栏压住；② 缩高，别被挤出视口底部。
     // 这一步不依赖标题栏挂载成功与否，所以先启动它（内部自带 try/catch 与次数上限）。
-    scheduleShiftPasses();
+    scheduleChromeFit();
 
     var mounted;
     try {
