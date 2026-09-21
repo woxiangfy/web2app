@@ -13,7 +13,12 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
-use crate::config::{config_dir, APP_NAME};
+use crate::config::config_dir;
+// ⚠️ APP_NAME 只被下方 `#[cfg(desktop)]` 的 open_settings_window 使用（拼设置窗标题）。
+// 若与 config_dir 合并成一条无条件 use，Android 目标下该导入即「未使用」，
+// 在 `-D warnings`（CI 的 check-android → clippy）下直接编译失败。必须按 cfg 拆开。
+#[cfg(desktop)]
+use crate::config::APP_NAME;
 
 const SETTINGS_FILE: &str = "settings.json";
 

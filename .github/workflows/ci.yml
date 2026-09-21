@@ -163,4 +163,11 @@ jobs:
         # Linux 作业的 clippy 里不参与编译，其 lint 问题会漏到打包才暴露。补一次 Android 目标
         # 的 clippy（-D warnings，与其它作业一致）。不带 --all-targets：桌面端示例/测试在
         # Android 交叉编译下无法构建。
+        #
+        # ⚠️ 最常在此翻车的一类：**导入（use）被无条件写出，却只被 `#[cfg(desktop)]` 的代码使用**。
+        #    桌面/Linux 上 `desktop` 为真 ⇒ 恒不报错；Android 上 `desktop` 为假 ⇒ unused import，
+        #    在 -D warnings 下直接编译失败。2026-09-22 的 `settings.rs` 即为此例：APP_NAME 的唯一
+        #    使用点（open_settings_window 里拼设置窗标题）被 cfg(desktop) 包住后，导入未同步拆开。
+        #    ⇒ 给某个 item 加 cfg(desktop) 时，同步检查它的导入是否也要按 cfg 拆开。
+        #    （本 crate 有全量 `#![allow(dead_code)]`，所以这里唯一会拦的就是 unused import 这一类。）
         run: cargo ndk -t arm64-v8a clippy -- -D warnings
