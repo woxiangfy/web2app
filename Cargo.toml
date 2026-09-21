@@ -7,8 +7,12 @@ rust-version = "1.70"
 
 # 多 crate 工作区：把纯加密核心（resolve-core）与命令行工具（resolve-tool）拆出，
 # 使 resolve-tool 不必编译 Tauri 全量依赖（避免 Linux CI 上拉入 glib-sys 等系统库）。
+#
+# proxy-server 是 Electron 侧的 sidecar（bin 名 `w2a-proxy`），以 `#[path]` 复用本 crate 的
+# src/proxy.rs 与 src/resolve.rs，零重写。它同样是本 workspace 的默认成员 ——
+# `cargo build --release` 一次就把 GUI 与 sidecar 都编出来，手动打包时不必分开调用。
 [workspace]
-members = ["crates/resolve-core", "crates/resolve-tool"]
+members = ["crates/resolve-core", "crates/resolve-tool", "crates/proxy-server"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

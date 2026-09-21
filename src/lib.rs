@@ -15,14 +15,14 @@
 //! - [`tray`]          系统托盘 + 设置命令 + 窗口切换
 //! - [`window_state`]  窗口几何持久化（仅桌面端）
 
-// 允许各平台下未被使用的编译期常量（例如 Android 上不使用的 HOTKEY_* / DEVTOOLS_ENABLED 等），
+// 允许各平台下未被使用的编译期常量（例如 Android 上不使用的 DEVTOOLS_ENABLED 等），
 // 避免出现 dead_code 警告导致 `cargo clippy -D warnings` 在 CI 中失败。
 #![allow(dead_code)]
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
 // 全局快捷键插件（仅桌面端；Android 无该依赖，见 Cargo.toml 平台 gate）。
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 pub mod config;
@@ -50,11 +50,11 @@ mod save_dialog;
 mod tabs;
 
 // 系统托盘 / 设置命令 / 窗口切换（仅桌面端）。
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 mod tray;
 
 // 窗口几何持久化（仅桌面端）。
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 mod window_state;
 
 use settings::SettingsState;
@@ -106,9 +106,9 @@ pub fn run() {
         b
     };
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     let settings_open = settings::settings_open_shortcut();
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     let builder = builder.plugin(
         tauri_plugin_global_shortcut::Builder::new()
             .with_handler(move |app, shortcut, event| {
@@ -141,7 +141,7 @@ pub fn run() {
 
     // 单实例：第二个实例启动时不再新开窗口，而是把已存在的窗口带到前台。
     // （仅桌面端；Android 无此概念，故按 target_os 剔除。）
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // 多页签模式聚焦宿主窗口，单窗口模式聚焦 "main"。
         #[cfg(windows)]
@@ -250,16 +250,11 @@ pub fn run() {
             };
 
             // 数据目录：true = WebView2 系统默认；false = %LOCALAPPDATA%\{自定义 app_name}（推荐）。
-            // 用 if-let 而非 `?`：app_local_data_dir 在极少数环境可能返回 Err，拿不到就退回默认。
             #[cfg(windows)]
             let wb = if !config::DATA_DIR_DEFAULT {
-                match app.path().app_local_data_dir() {
-                    Ok(dir) => {
-                        let base = dir.parent().unwrap_or(&dir);
-                        let new_dir = base.join(config::sanitize_dir_name(config::APP_NAME));
-                        wb.data_directory(new_dir)
-                    }
-                    Err(_) => wb,
+                match config::user_data_dir(app) {
+                    Some(dir) => wb.data_directory(dir),
+                    None => wb,
                 }
             } else {
                 wb
@@ -298,7 +293,7 @@ pub fn run() {
         {
             let window = build_main_window(app.handle());
 
-            #[cfg(not(target_os = "android"))]
+            #[cfg(desktop)]
             if let Some(st) = window_state::load(app.handle()) {
                 window_state::apply(&window, &st);
             }
@@ -307,7 +302,7 @@ pub fn run() {
         }
 
         // ---------- 系统托盘与全局快捷键（仅桌面端；Android 无）----------
-        #[cfg(not(target_os = "android"))]
+        #[cfg(desktop)]
         {
             // 托盘图标：仅当设置中“启用托盘”时创建
             if initial_settings.tray_enabled {
@@ -372,7 +367,7 @@ pub fn run() {
                 // 应用即将退出：记录窗口几何（兜底，覆盖“托盘退出”等不经过关窗的路径），
                 // 优雅终止本地反向代理任务，释放 127.0.0.1 监听端口。
                 RunEvent::ExitRequested { .. } => {
-                    #[cfg(not(target_os = "android"))]
+                    #[cfg(desktop)]
                     {
                         // 多页签模式持久化宿主窗口几何，单窗口模式持久化 "main"。
                         #[cfg(windows)]
@@ -406,7 +401,7 @@ pub fn run() {
 /// `target_label` 由调用方决定：单窗口模式为 `"main"`，多页签模式为宿主窗口 label。
 /// 这样 `window_state::persist_label` 记录的也是正确窗口的几何。
 ///
-/// ⚠️ 本函数【不可】加 `cfg(not(target_os = "android"))`：Android 也会走到这里读
+/// ⚠️ 本函数【不可】加 `cfg(desktop)`：Android 也会走到这里读
 /// SettingsState 判断托盘语义（托盘未启用时等价于允许关闭）。只有「窗口几何持久化」
 /// 依赖的 `window_state` 模块才是桌面端专属，故 cfg 下沉到那一行。
 fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi) {
@@ -426,7 +421,7 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
     };
 
     // 记录主窗口当前大小/位置，供下次启动恢复（仅桌面端；Android 无窗口几何持久化）。
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     window_state::persist_label(app_handle, &target_label);
 
     let st = app_handle.state::<SettingsState>();

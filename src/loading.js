@@ -41,14 +41,16 @@
 
   var state = 'loading'; // loading | slow | failed | done
   var t0 = Date.now();
-  var root, styleEl, elRing, elBar, elTitle, elDetail, elActions, elBtn;
+  var root, styleHandle, elRing, elBar, elTitle, elDetail, elActions, elBtn;
 
   // ---------------------------------------------------------------------
   // 样式：ID 选择器 + !important，抵御宿主页面样式污染
   // ---------------------------------------------------------------------
   var CSS = [
     '#__web2app_loading__{',
-    'position:fixed!important;top:0!important;right:0!important;bottom:0!important;left:0!important;',
+    /* 整屏遮罩同理（见 titlebar.js 里的那段说明）：fixed 的 right/bottom:0 只到 clientWidth/clientHeight，
+     * 页面有滚动条时右侧/底部会漏出 15px 缝隙。改成 100vw/100vh 才能真盖满。 */
+    'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;',
     'z-index:2147483647!important;display:flex!important;flex-direction:column!important;',
     'align-items:center!important;justify-content:center!important;gap:15px!important;',
     'margin:0!important;padding:0!important;border:0!important;outline:0!important;',
@@ -195,11 +197,43 @@
   // ---------------------------------------------------------------------
   // 挂载
   // ---------------------------------------------------------------------
+  /// 装载样式表，返回句柄。优先「构造函数式样式表」（**不受页面 CSP 的 style-src 限制**），
+  /// 回退 `<style>` 元素 —— 缘由与细节见 titlebar.js 的 mountStyle，两侧必须保持一致，
+  /// 否则会出现「标题栏有样式、加载层没样式」这种半截状态。
+  function mountStyle() {
+    try {
+      if (typeof CSSStyleSheet === 'function' && document.adoptedStyleSheets) {
+        var sheet = new CSSStyleSheet();
+        sheet.replaceSync(CSS);
+        var next = [], cur = document.adoptedStyleSheets;
+        for (var i = 0; i < cur.length; i++) next.push(cur[i]);
+        next.push(sheet);
+        document.adoptedStyleSheets = next;
+        return { kind: 'adopted', sheet: sheet };
+      }
+    } catch (e) { /* 落到 <style> 回退 */ }
+    var el = document.createElement('style');
+    el.setAttribute('data-web2app', 'loading');
+    el.textContent = CSS;
+    (document.head || document.documentElement).appendChild(el);
+    return { kind: 'style', el: el };
+  }
+
+  function unmountStyle(h) {
+    try {
+      if (!h) return;
+      if (h.kind === 'style') {
+        if (h.el.parentNode) h.el.parentNode.removeChild(h.el);
+        return;
+      }
+      var cur = document.adoptedStyleSheets, next = [];
+      for (var i = 0; i < cur.length; i++) if (cur[i] !== h.sheet) next.push(cur[i]);
+      document.adoptedStyleSheets = next;
+    } catch (e) { /* noop */ }
+  }
+
   function mount() {
-    styleEl = document.createElement('style');
-    styleEl.setAttribute('data-web2app', 'loading');
-    styleEl.textContent = CSS;
-    (document.head || document.documentElement).appendChild(styleEl);
+    styleHandle = mountStyle();
 
     root = document.createElement('div');
     root.id = '__web2app_loading__';
@@ -270,8 +304,9 @@
       root.className = 'w2l-out';
       setTimeout(function () {
         if (root && root.parentNode) root.parentNode.removeChild(root);
-        if (styleEl && styleEl.parentNode) styleEl.parentNode.removeChild(styleEl);
-        root = styleEl = null;
+        unmountStyle(styleHandle);
+        root = null;
+        styleHandle = null;
       }, FADE_MS);
     }, wait);
   }
@@ -327,7 +362,23 @@
   // ---------------------------------------------------------------------
   // 安装
   // ---------------------------------------------------------------------
-  // 先挂一份 no-op API：Rust 侧可能在任何时刻 eval
+  /// 取走壳侧「烤进 HTML」的失败态（Electron 侧启动页走这条路）。
+  ///
+  /// 为什么需要：启动页把加载层内联在**主世界**，而 preload 的 IPC 通道在**隔离世界**
+  /// （读不到 window.__web2appLoading），所以启动页阶段的错误没法用 IPC 推 —— 壳侧改为在
+  /// 生成的 HTML 末尾直接写 `window.__web2appPendingFail = {…}`，这里在加载层真正挂好后
+  /// 取走。放在 API 安装【之后】调用是关键：挂载前 window.__web2appLoading 还是 no-op 桩，
+  /// 那时调用 fail() 会被丢掉。
+  function applyPendingFail() {
+    try {
+      var pf = window.__web2appPendingFail;
+      if (!pf || !pf.title) return;
+      window.__web2appPendingFail = null;
+      toFail(pf.title, pf.detail || '');
+    } catch (e) { /* noop */ }
+  }
+
+  // 先挂一份 no-op API：壳侧可能在任何时刻 eval
   // `window.__web2appLoading.fail/hide`（解析失败、代理启动失败等），挂载完成前调用必须无害。
   window.__web2appLoading = {
     state: function () { return state; },
@@ -350,13 +401,16 @@
       window.addEventListener('web2app:chrome-ready', applyChromeOffset);
     } catch (e) { /* noop */ }
 
-    // 对外 API：Rust 通过 window.eval 驱动异常态展示。
+    // 对外 API：壳通过 window.eval 驱动异常态展示（Tauri），
+    // 或经 IPC 转交（Electron 真实页面：加载层与 preload 同在隔离世界）。
     window.__web2appLoading = {
       state: function () { return state; },
       hide: function () { done(); },
       slow: function (t) { toSlow(t || '网络较慢，仍在努力加载…'); },
       fail: function (t, d) { toFail(t, d); }
     };
+
+    applyPendingFail();
 
     setTimeout(function () {
       toSlow(IS_SPLASH ? '正在准备应用环境…' : '网络较慢，仍在努力加载…');

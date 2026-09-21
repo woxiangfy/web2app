@@ -351,13 +351,9 @@ pub(crate) fn spawn_tab_with_target(
     // 数据目录：与主窗口共享同一 WebView2 数据目录（同账号、共享 cookie/localStorage）。
     #[cfg(windows)]
     let window = if !crate::config::DATA_DIR_DEFAULT {
-        match app.path().app_local_data_dir() {
-            Ok(dir) => {
-                let base = dir.parent().unwrap_or(&dir);
-                let new_dir = base.join(crate::config::sanitize_dir_name(crate::config::APP_NAME));
-                window.data_directory(new_dir)
-            }
-            Err(_) => window,
+        match crate::config::user_data_dir(app) {
+            Some(dir) => window.data_directory(dir),
+            None => window,
         }
     } else {
         window

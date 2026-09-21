@@ -1,35 +1,42 @@
 /*
  * web2app 自绘窗口标题栏（titlebar.js）
  * ---------------------------------------------------------------------------
- * 仅单窗口模式（TABS_ENABLED=false，Windows）注入到主窗【每一个】文档（document-created），
- * 因为主窗加载的是远程 Trilium 页，持久置顶的标题栏只能经 initialization_script 注入其页面。
+ * 两个壳共用这一份脚本：Tauri 版（webview-app，Windows/Android）与 Electron 绿色版
+ * （electron-app，Windows）。差异全部收在下面两处能力探测里，其余逻辑一字不分叉。
  *
  * 提供的标题栏（高 38px，与多页签宿主 shell.html 的标签栏一致）：
  *      [← 后退] [→ 前进]          标题                [— 最小化] [▢ 最大化] [✕ 关闭]
- *   - 拖动/双击最大化交给 Tauri 的 drag region（`data-tauri-drag-region` 属性，
- *     由 tauri 注入的 drag.js 处理）；Windows WebView2 上 `-webkit-app-region` 不可靠，
- *     故以属性为准，CSS 里的 app-region 仅作兼容保留。
+ *   - 拖动 / 双击最大化：
+ *       · Tauri（Windows）：交给 drag region（`data-tauri-drag-region` 属性，由 tauri 注入的
+ *         drag.js 处理）。WebView2 上 `-webkit-app-region` 不可靠，故以属性为准。
+ *       · Electron：靠 CSS 的 `-webkit-app-region: drag`（Chromium 原生支持无边框窗口的自绘
+ *         拖动区），双击最大化由 Chromium 把拖动区当作 caption 交给系统处理 —— 所以两个壳都
+ *         【不要】自绑 dblclick：一次双击会触发两次切换，看起来像「点了没反应」。
  *   - 前进/后退直接驱动当前文档的 window.history（单窗口模式下与 Rust 的 history_nav 等价）。
- *   - 最小化/最大化/关闭经 window.__TAURI__.window.getCurrentWindow() 原生执行。
+ *   - 最小化/最大化/关闭经能力探测拿到的窗口控制器原生执行：
+ *       · Electron：`window.web2app`（preload 白名单 API，minimize / toggleMaximize / close）
+ *       · Tauri   ：`window.__TAURI__.window.getCurrentWindow()`
  *
- * ⚠️⚠️ 权限（capabilities）：主窗加载的是【远程页面】（直连上游域名，或本地反向代理的
- * http://127.0.0.1:<port>），Tauri 2 对非本地 origin 的 IPC 强制走 ACL ——
+ * ⚠️⚠️ 权限（capabilities，**仅 Tauri 版**）：主窗加载的是【远程页面】（直连上游域名，或本地
+ * 反向代理的 http://127.0.0.1:<port>），Tauri 2 对非本地 origin 的 IPC 强制走 ACL ——
  * 未命中 capability 的调用会被一律拒绝，前端 catch 后静默，表现为「按钮点了没反应」。
  * 因此 capabilities/default.json 必须声明：
  *   core:window:allow-minimize / allow-toggle-maximize / allow-close /
  *   allow-start-dragging / allow-internal-toggle-maximize，并把 remote.urls 放开到实际站点。
  * 同理，本脚本【不要】去 invoke 应用自定义命令（history_nav / *_host 等）：
  * 那类命令无法在 capability 里授权给远程 origin（需要 build.rs 的 app_manifest），必被拒。
+ * （Electron 侧没有这套 ACL：`window.web2app` 由 preload 直接暴露给页面，远程 origin 同样可用。
+ *   也因此【不要】把这段 ACL 结论套到 Electron 上排查「按钮没反应」，那边要先看 preload 是否注入。）
  *
  * 设计约束（沿用 loading.js 的约定，务必保持）：
  *   1. 零依赖、零网络，全部 try/catch：注入到第三方页面，任何异常都不能破坏宿主页面。
  *   2. 同一文档只安装一次（window.__web2appTitlebar 防重）。
  *   3. 关键样式带 !important 并走 ID 选择器，z-index 取极高位，避免被宿主页面样式覆盖。
- *   4. 顶部空间只留【一次】38px（给 <html> 加 padding-top，body 不再重复加），
- *      并且要把页面自己的「贴顶固定条」一起下移 —— 详见下面「顶部空间契约」。
+ *   4. 顶部空间只留【一次】38px：把 `body` 的盒子整体推到 38px（`margin-top`）并让 body
+ *      当滚动容器（`html` 不滚）—— 详见下面「顶部空间契约」。页面自己的「贴顶固定条」要一起下移。
  *
  * ---------------------------------------------------------------------------
- * 顶部空间契约（2026-09-14 重写，别改回 html+body 双 padding）
+ * 顶部空间契约（2026-09-14 重写；2026-09-17 改成「html 不滚、body 滚」）
  * ---------------------------------------------------------------------------
  * 症状（用户截图）：① 顶部出现一整条空白；② 页面自己的头部被切掉半截「显示不全」。
  * 根因两条，都在旧实现 `html,body{padding-top:38px}` 上：
@@ -39,12 +46,19 @@
  *     它仍锚在视口顶（top:0），于是被我们 38px 的标题栏压住 ⇒ 「显示不全」。
  *     （实测：fixed 页头 rect.top 恒为 0，标题栏 rect 0..38，恰好盖住它 38px。）
  *
- * 现在的做法（见 applyChromeFit）：
- *   · 只在 `html` 上加 padding-top（配 `box-sizing:border-box`，让页面 `height:100%`
- *     的高度链仍然等于「视口 - 38」，不会多出 38px 溢出）；
- *   · 页面自己的「贴顶固定条」→ 标记 + inline `top:38px!important`（下移，别被标题栏压住）；
+ * 现在的做法（见 CSS 里那段「顶部空间契约」）：
+ *   · `html{height:100%;overflow:hidden}` + `body{margin-top:38px;height:calc(100vh - 38px);
+ *     overflow-y:auto}` —— **页面滚动的矩形从 38px 开始**，滚动条因此不可能越过标题栏。
+ *     2026-09-17 逐像素对照实验（`scripts/scrollbar-lab.cjs`）确认这是唯一可行解：
+ *     根滚动条永远绘制在视口最顶层、几何占满整个视口高，`border-top` / overlay 开关全都无效；
+ *     而「把滚动条隐藏掉」又不是使用者要的（他要的是「滚动条在，只是别超过菜单栏」）。
+ *   · 页面自己的「贴顶固定条」（fixed）→ 标记 + inline `top:38px!important`（下移，别被压住）。
+ *     `sticky` 不再动：body 已是滚动容器，`top:0` 的 sticky 天然停在 y=38，再加就成 76px。
  *   · 页面自己的「按视口高度定尺寸的容器」→ 标记 + inline 高度减 38px（缩高，别被挤出视口底部）。
  *     只改这几条声明，不动页面结构、不动其它样式，随时可撤。
+ *   · 换来这套契约的代价：`window` 级滚动 API 不再指向真正的滚动元素，由 shimWindowScroll()
+ *     转发到 body（懒加载 / 吸顶导航 / 回到顶部 / 阅读进度都靠它）。若页面把契约压掉，
+ *     ensureScrollRoot() 会探测并退回旧的 html 顶部留白模式。
  *
  * ---------------------------------------------------------------------------
  * 底部空间契约（2026-09-16 追加，别再退回「只补顶部」）
@@ -72,7 +86,36 @@
   'use strict';
   if (window.__web2appTitlebar) return; // 同一文档只安装一次
 
+  /// 壳能力探测（唯一一处壳分支）。
+  ///
+  /// Electron 绿色版：preload 用 contextBridge 暴露 `window.web2app`
+  /// （minimize / toggleMaximize / close / chromeH / isElectron）；
+  /// Tauri 版：`window.__TAURI__`（window.getCurrentWindow()）。
+  ///
+  /// ⚠️ 探测必须**每次要用时现做**，不要在挂载时把结果缓存进闭包：注入发生在
+  /// document-created 之后不久，个别环境下 preload/初始化脚本还没跑完；
+  /// 旧实现就是在挂载时缓存句柄、拿不到就整段不绑定 → 「按钮点了没反应」且毫无日志。
+  function electronApi() {
+    try {
+      var E = window.web2app;
+      if (E && typeof E.minimize === 'function' && typeof E.close === 'function') return E;
+    } catch (e) { /* noop */ }
+    return null;
+  }
+
+  function shellName() {
+    if (electronApi()) return 'electron';
+    try { if (window.__TAURI__) return 'tauri'; } catch (e) { /* noop */ }
+    return 'unknown';
+  }
+
   var TITLEBAR_H = 38;
+  // 标题栏高度以壳侧声明为准（单一真源在 preload / capabilities 里）。
+  // 拿不到就沿用 38 —— 两个壳的 CSS 与加载层让位逻辑都按这个值走，绝不各写一份。
+  try {
+    var apiH = electronApi() && electronApi().chromeH;
+    if (typeof apiH === 'number' && apiH > 0) TITLEBAR_H = apiH;
+  } catch (e) { /* noop */ }
   // 页面自己的「贴顶固定条」被识别后打上的标记属性（见 applyChromeFit）：只加属性 + 一条
   // top 样式，不改结构，出问题时可整批撤销。
   var SHIFT_ATTR = 'data-web2app-chrome-shift';
@@ -85,7 +128,20 @@
 
   var CSS = [
     '#__web2app_titlebar__{',
-    'position:fixed!important;top:0!important;left:0!important;right:0!important;',
+    /* ⚠️⚠️ 必须用 width:100vw，**不能**用 left:0;right:0。
+     * fixed 元素的 left/right:0 只到 clientWidth（**不含**滚动条），而垂直滚动条属于视口、
+     * 从 y=0 就开始画 ⇒ 标题栏右侧会空出一条滚动条宽度，滚动条的向上箭头与轨道顶段正好
+     * 裸露在那条缝里，看起来像「标题栏被切掉一角 + 滚动条穿过标题栏」。
+     * 实测（W2A-VWCHECK，400×340 窗口、经典 15px 滚动条）：
+     *   innerWidth=399  clientWidth=384  scrollbarW=15
+     *   固定定位 left+right:0 → 宽 384（差 15px）；width:100vw → 宽 399 ✓
+     *   固定定位 width:100%   → 宽 384（同样差 15px）
+     * 100vw 含滚动条宽度 ⇒ 标题栏铺满整窗宽（含滚动条本该占的那一条）。
+     * 无滚动条时 100vw == clientWidth == 窗口宽，无副作用；WebView2 的 overlay 滚动条
+     * 不占布局（clientWidth == innerWidth）时同样无副作用。
+     * 注：「滚动条不横穿标题栏」这件事**不由这个宽度保证**，而由下面的「顶部空间契约」
+     *（html 不滚、body 滚）保证 —— 见那里 2026-09-17 的实测记录。 */
+    'position:fixed!important;top:0!important;left:0!important;width:100vw!important;',
     'height:' + TITLEBAR_H + 'px!important;',
     'z-index:2147483647!important;',
     'display:flex!important;align-items:center!important;',
@@ -119,12 +175,42 @@
     '}',
     /* 关闭按钮 hover 用红底，符合系统惯例 */
     '#__web2app_titlebar__ .w2t-close:hover{background:#e81123!important;color:#fff!important;}',
-    /* 给远程页预留顶部空间，正文不被盖住。
-     * ⚠️ 只给 html 加（旧实现 html,body 都加 → 实际留白 76px，页面顶部多出一条空白）。
-     * 配 box-sizing:border-box：页面若用 height:100% 的高度链，内容高度 = 视口 - 38px，
-     * 不会多出 38px 溢出；min-height:100% 保证 html 仍然是满高。 */
-    'html{box-sizing:border-box!important;padding-top:' + TITLEBAR_H + 'px!important;',
-    'min-height:100%!important;}',
+    /* ================== 顶部空间契约：让 body 当滚动容器 ==================
+     *
+     * 目标（使用者原话）：「滚动条不应该强制隐藏，只是不要超过菜单栏而已」：
+     * 滚动条**保持可见**，但它的最高点不得越过标题栏下沿（y = 38）。
+     *
+     * ⚠️⚠️ 为什么不能让 html 继续当滚动容器：Chromium 把**视口（根）滚动条**绘制在所有 DOM
+     * 内容之上 —— 标题栏 `z-index:2147483647` 也压不住；而它的几何就是「视口右缘 × 整个视口高」，
+     * 任何 CSS 都缩不动。2026-09-17 用逐像素 + 对照实验（`scripts/scrollbar-lab.cjs`）逐一否掉：
+     *   · `::-webkit-scrollbar{border-top:38px}`        → thumb 仍从 y=0 起（border 不参与零件布局）
+     *   · `::-webkit-scrollbar-track{border-top:38px}`  → 同上，无效
+     *   · `--enable-features=OverlayScrollbar` / `FluentOverlayScrollbar` → Electron 44 上均已失效
+     *   · `scrollbar-width:none`                        → 缝没了，但滚动条也没了（使用者要的不是这个）
+     *   · html 不滚 + body 当滚动容器                   → y0..y32 纯标题栏色、y40 起才是滚动条 ✓
+     * 也就是说：只要滚动条存在，它就从 y=0 开始画、必然横穿标题栏，还顺带盖住最右侧的关闭按钮
+     *（`elementFromPoint(innerWidth-1, 20)` 返回 null 就是「此处被滚动条占住、点不到」）。
+     * 所以只能反过来 —— 让**滚动的那块矩形**自己从 38px 开始：html 不滚，body 滚。
+     *
+     * body 的滚动条只在 body 盒子内绘制 ⇒ 物理上不可能高于 y=38，不依赖任何引擎语义。
+     * 附带收益：关闭按钮右端重新可点；页面自己的 `position:sticky` 也天然停在 y=38
+     *（见 applyChromeFit 里 sticky 分支的说明）。
+     *
+     * ⚠️ 必须用 margin-top 而不是 padding-top：padding 在盒子内部，滚动条仍从盒子上沿开始画。
+     * ⚠️ box-sizing:border-box 让 body 自己的 padding/border 不把盒子撑出 38px 之外。
+     * ⚠️ body 的 min-height 必须归零：页面常写 `min-height:100vh`，它会把 body 撑高一个标题栏，
+     *    于是 body 的滚动口比可视区高 38px、最后 38px 内容滚不到。
+     * ⚠️ 页面若用 !important 把这两条压掉，会落到「html 不滚 + body 也不滚 = 页面钉死滚不动」的
+     *    死局（比原缺陷严重得多）⇒ JS 侧 `ensureScrollRoot()` 会探测并退回旧模式
+     *   （html 顶部留白 + 页面自己滚；滚动条会横穿标题栏，但页面至少能用）。 */
+    'html{box-sizing:border-box!important;height:100%!important;overflow:hidden!important;}',
+    'body{box-sizing:border-box!important;margin-top:' + TITLEBAR_H + 'px!important;',
+    'min-height:0!important;height:calc(100vh - ' + TITLEBAR_H + 'px)!important;',
+    'overflow-y:auto!important;',
+    /* 页面常写 `html{scroll-behavior:smooth}` 让锚点跳转平滑 —— 但 scroll-behavior 不继承，
+     * 不镜像过来就会让平滑滚动悄悄变成瞬移。用 inherit 把 html 的值搬给 body：
+     * html 没设时就是 auto，与改契约之前的行为完全一致。 */
+    'scroll-behavior:inherit!important;}',
     /* 页面自己的贴顶固定条（fixed / sticky / 整屏外壳，且压在视口顶）由 applyChromeFit 标记后
      * 下移。属性选择器特异性低，页面自己写 `#id{top:0!important}` 就能压过它 —— 所以 JS 里
      * 同时写 inline `top:...!important`（内联 important 优先级最高），这两条只作兜底。 */
@@ -190,6 +276,134 @@
   //
   // ⚠️ 两阶段：先只读（收集命中项），再统一写。边读边写会让每次 getBoundingClientRect
   // 都触发重排，大页面上能把首屏拖慢几十毫秒。
+  // ---------------------------------------------------------------------
+  // 滚动根：html 不滚、body 滚（CSS 里「顶部空间契约」的 JS 半边）
+  // ---------------------------------------------------------------------
+  // 这个标志决定 applyChromeFit 怎么对待页面自己的 `position:sticky`，所以必须是模块级的。
+  var bodyScrollOK = false;
+
+  /// 架好滚动根，并**探测它是否真的生效**；被页面压掉就退回旧的 html 顶部留白模式。
+  ///
+  /// 三条探测都是有意义的：
+  ///   ① `html` 的 overflow 必须已是 hidden（否则根滚动条还在，缺陷原样复现）；
+  ///   ② `body` 必须是滚动容器（overflow-y:auto/scroll）；
+  ///   ③ `body` 的实际高度必须 ≈ 视口 - 38（页面写 `body{height:auto!important}` 时前两条都成立，
+  ///      但 body 会随内容长高、html 又裁掉了溢出 ⇒ 页面滚不动。只查 computed overflow 抓不到这种）。
+  /// 任一不成立就退回旧模式，并且**不再装滚动 API 转发**（那时 body 不是滚动容器，
+  /// 把它们转发到 body 反而会把页面读到的滚动位置弄错）。
+  function ensureScrollRoot(h) {
+    try {
+      var de = document.documentElement;
+      var b = document.body;
+      if (!de || !b) return;
+      // 契约样式表还没挂上时什么都不做：此刻 computed style 必然是页面原样，
+      // 在这里判「失败」并把退路写进 inline style，会把新契约永久压住（见调用点说明）。
+      if (h && !styleAttached(h)) return;
+      var hcs = window.getComputedStyle(de);
+      var bcs = window.getComputedStyle(b);
+      var rootHidden = hcs.overflowY === 'hidden' || hcs.overflowY === 'clip';
+      var bodyScrolls = bcs.overflowY === 'auto' || bcs.overflowY === 'scroll';
+      var want = (window.innerHeight || 0) - TITLEBAR_H;
+      var h = b.getBoundingClientRect().height;
+      var heightOK = want > 0 && Math.abs(h - want) <= 2;
+      bodyScrollOK = rootHidden && bodyScrolls && heightOK;
+      if (bodyScrollOK) {
+        shimWindowScroll(b);
+        return;
+      }
+      // ---- 退路：把契约换回「html 顶部留白 + 页面自己滚」 ----
+      // 用 inline !important（优先级最高），确保反转一定生效；宁可滚动条横穿标题栏，
+      // 也不能让页面滚不动。
+      b.style.setProperty('margin-top', '0px', 'important');
+      b.style.setProperty('height', 'auto', 'important');
+      b.style.setProperty('min-height', '0px', 'important');
+      b.style.setProperty('overflow-y', 'visible', 'important');
+      de.style.setProperty('height', 'auto', 'important');
+      de.style.setProperty('overflow-y', 'auto', 'important');
+      de.style.setProperty('padding-top', TITLEBAR_H + 'px', 'important');
+      try {
+        console.error('[web2app] 滚动根契约未生效（html overflow=' + hcs.overflowY +
+          ' body overflowY=' + bcs.overflowY + ' bodyH=' + Math.round(h) + ' 期望≈' + Math.round(want) +
+          '）已退回 html 顶部留白模式：标题栏右端可能被滚动条盖住，但页面可以正常滚动。');
+      } catch (e) { /* noop */ }
+    } catch (e) { /* 探测本身失败：按现状继续，绝不打扰宿主页面 */ }
+  }
+
+  /// body 当滚动容器之后，页面代码常用的「window 级滚动 API」会指向一个不再滚动的
+  /// documentElement —— `scrollY` 恒 0、window 上的 `scroll` 事件不再触发、`scrollTo` 空转，
+  /// 而懒加载 / 吸顶导航 / 回到顶部 / 阅读进度全靠它们。这里做一层**转发**：
+  /// 读到的就是真实的 body 滚动位置，写下去也是真的滚 body。
+  ///
+  /// 只转发、不改语义；每一步都独立 try/catch —— 少转发一个 API 不影响页面运行。
+  function shimWindowScroll(b) {
+    try {
+      if (window.__web2appScrollShim) return;
+      window.__web2appScrollShim = true;
+    } catch (e) { return; }
+
+    // ① body 滚动 → 在 window / document 上补发 scroll 事件。
+    //    body 的 scroll 事件**不冒泡**，所以两个目标各派发一次（页面多半监听其中之一）。
+    try {
+      b.addEventListener('scroll', function () {
+        try { window.dispatchEvent(new Event('scroll')); } catch (e) { /* noop */ }
+        try { document.dispatchEvent(new Event('scroll')); } catch (e) { /* noop */ }
+      }, { passive: true });
+    } catch (e) { /* noop */ }
+
+    // ② 四个位置读法转发到 body（页面据此判断「滚到哪了 / 该不该回顶」）。
+    var readers = {
+      scrollY: 'scrollTop', pageYOffset: 'scrollTop',
+      scrollX: 'scrollLeft', pageXOffset: 'scrollLeft'
+    };
+    for (var name in readers) {
+      (function (prop, key) {
+        try {
+          Object.defineProperty(window, key, {
+            configurable: true,
+            get: function () { return b[prop] || 0; }
+          });
+        } catch (e) { /* noop */ }
+      })(readers[name], name);
+    }
+
+    // ③ 两个写方法转发到 body（`window.scrollTo(0,0)` 这类回顶调用）。
+    //    支持 `scrollTo({top:0,behavior:'smooth'})` 这种 options 形式（直接透传给 body）。
+    try {
+      var to = function (x, y) {
+        return (x && typeof x === 'object') ? b.scrollTo(x) : b.scrollTo(x, y);
+      };
+      var by = function (x, y) {
+        return (x && typeof x === 'object') ? b.scrollBy(x) : b.scrollBy(x, y);
+      };
+      window.scrollTo = to;
+      window.scroll = to;
+      window.scrollBy = by;
+    } catch (e) { /* noop */ }
+
+    // ④ `document.scrollingElement` 指向 body：现代页面写
+    //    `document.scrollingElement.scrollTop = 0` 很常见。它是 Document 上的只读访问器，
+    //    某些引擎标记为不可配置，改不动就跳过（那条路径本来也只是少数站点用）。
+    try {
+      Object.defineProperty(Document.prototype, 'scrollingElement', {
+        configurable: true,
+        get: function () { return this.body || null; }
+      });
+    } catch (e) { /* noop */ }
+
+    // ⑤ `<html>` 元素自己的 scrollTop / scrollLeft 转发到 body：还有一批「回到顶部」写的是
+    //    `document.documentElement.scrollTop = 0`。只给**这一个实例**挂自有访问器去遮蔽原型上的
+    //    那对（不碰 Element.prototype），影响面最小：其它任何元素的行为一模一样。
+    try {
+      ['scrollTop', 'scrollLeft'].forEach(function (prop) {
+        Object.defineProperty(document.documentElement, prop, {
+          configurable: true,
+          get: function () { return b[prop] || 0; },
+          set: function (v) { b[prop] = v; }
+        });
+      });
+    } catch (e) { /* noop */ }
+  }
+
   function applyChromeFit() {
     try {
       var root = document.body || document.documentElement;
@@ -232,7 +446,12 @@
 
         var moved = false;   // 本次是否会把它的 top 改成 38px
         // ① 贴顶的 fixed / sticky（以及「包含块就是初始包含块」的 absolute）→ 下移
-        if (atTop && (pos === 'fixed' || pos === 'sticky' || (pos === 'absolute' && r.top <= 1))) {
+        //
+        // ⚠️ sticky 只在**退路模式**（html 当滚动容器）下才需要下移：那时它贴的是视口顶 y=0。
+        // 正常模式下 body 就是滚动容器、盒子上沿已在 38px，`top:0` 的 sticky 天然停在 y=38 ——
+        // 再给它加 38 就成了 76px（页面自己的吸顶导航凭空多出一条空白）。所以正常模式不碰 sticky。
+        if (atTop && (pos === 'fixed' || (pos === 'sticky' && !bodyScrollOK) ||
+            (pos === 'absolute' && r.top <= 1))) {
           var t = cs.top;
           if (t === 'auto' ? r.top <= 2 : parseFloat(t) < TITLEBAR_H) {
             shifts.push(el);
@@ -364,11 +583,98 @@
     iv = setInterval(attempt, 16);
   }
 
+  /// 往 document 追加一张「构造函数式样式表」（adoptedStyleSheets 是 FrozenArray，
+  /// 只能整体替换，且它不保证有 concat —— 用最笨的复制方式，兼容性最好）。
+  function adoptSheet(sheet) {
+    var next = [];
+    var cur = document.adoptedStyleSheets || [];
+    for (var i = 0; i < cur.length; i++) next.push(cur[i]);
+    next.push(sheet);
+    document.adoptedStyleSheets = next;
+  }
+
+  /// 装载样式表，返回句柄供自愈守护检查 / 重挂。
+  ///
+  /// ⚠️⚠️ 优先走「构造函数式样式表」（CSSStyleSheet + document.adoptedStyleSheets）：
+  /// 它**不受页面 CSP 的 `style-src` 约束**。像声明 `style-src 'self'` 的站点会把我们
+  /// 插入的 `<style>` 元素直接拦掉，故障表象是「标题栏在、按钮在、几何也对，但完全没样式」
+  ///（透明背景、按钮挤成一团、38px 让位也丢了）—— 本项目里最难从表象反推原因的一类。
+  /// 回退路径保留 `<style>`：WebView2 / Chromium 100+ 都支持 adoptedStyleSheets，
+  /// 这条回退基本只在极老引擎上才走到。
+  function mountStyle() {
+    try {
+      if (typeof CSSStyleSheet === 'function' && document.adoptedStyleSheets) {
+        var sheet = new CSSStyleSheet();
+        sheet.replaceSync(CSS);
+        adoptSheet(sheet);
+        return { kind: 'adopted', sheet: sheet };
+      }
+    } catch (e) { /* 落到 <style> 回退 */ }
+    var el = document.createElement('style');
+    el.setAttribute('data-web2app', 'titlebar');
+    el.textContent = CSS;
+    (document.head || document.documentElement).appendChild(el);
+    return { kind: 'style', el: el };
+  }
+
+  /// 样式是否仍然生效（document.write / 框架重建 body 时可能被整片抹掉）。
+  function styleAttached(h) {
+    try {
+      if (!h) return true;
+      if (h.kind === 'style') return !!h.el.parentNode;
+      var list = document.adoptedStyleSheets || [];
+      for (var i = 0; i < list.length; i++) if (list[i] === h.sheet) return true;
+      return false;
+    } catch (e) { return true; }
+  }
+
+  function styleReattach(h) {
+    try {
+      if (!h) return;
+      if (h.kind === 'style') {
+        (document.head || document.documentElement).appendChild(h.el);
+      } else {
+        adoptSheet(h.sheet);
+      }
+    } catch (e) { /* noop */ }
+  }
+
+  /// 标题栏该有多宽（CSS px）：窗口宽度（**含**滚动条区域）再除以页面 zoom。
+  ///
+  /// 为什么 CSS 里已经有 `width:100vw!important` 还要在 JS 里再钉一次：
+  /// 实测在 WebView2 / Electron（Chromium）上 `100vw == innerWidth`（含滚动条宽）成立，
+  /// 所以平时这里写进去的值与 100vw 相同、什么也不改；但那条等式依赖「引擎把 vw 解析成
+  /// 布局视口宽」这个实现细节。一旦不成立（换了渲染引擎、页面在 html/body 上用了 `zoom`
+  /// 把整棵子树按倍数缩放），标题栏就会比窗口窄**正好一条滚动条**，滚动条从 y=0 裸露在
+  /// 标题栏右侧（2026-09-17 使用者截图反馈的现象）。显式写 px 之后，这件事从
+  /// 「寄希望于引擎语义」变成「我们能测、能断言的事实」。
+  ///
+  /// ⚠️ 除 zoom 之外不加别的修正：任何「凭感觉补偿几个像素」的写法都会在不同 DPI / 不同
+  /// 滚动条宽度下变成新的错位来源。
+  function barWidthPx() {
+    var w = 0;
+    try { w = window.innerWidth || 0; } catch (e) { w = 0; }
+    if (!(w > 0)) return 0;
+    var z = 1;
+    try {
+      var cz = parseFloat(window.getComputedStyle(document.documentElement).zoom);
+      if (isFinite(cz) && cz > 0 && cz !== 1) z = cz;
+    } catch (e) { /* 没有 zoom 的引擎：1 就是正解 */ }
+    return w / z;
+  }
+
+  /// 把宽度钉到窗口宽。任何异常都吞掉 —— 注入脚本绝不给宿主页面抛错。
+  function syncBarWidth(bar) {
+    try {
+      var b = bar && bar.style ? bar : document.getElementById('__web2app_titlebar__');
+      if (!b || !b.style) return;
+      var w = barWidthPx();
+      if (w > 0) b.style.setProperty('width', w + 'px', 'important');
+    } catch (e) { /* noop */ }
+  }
+
   function mount() {
-    var styleEl = document.createElement('style');
-    styleEl.setAttribute('data-web2app', 'titlebar');
-    styleEl.textContent = CSS;
-    (document.head || document.documentElement).appendChild(styleEl);
+    var style = mountStyle();
 
     var bar = document.createElement('div');
     bar.id = '__web2app_titlebar__';
@@ -381,7 +687,7 @@
     // 等 body 就绪后再挪进去（见 ensureHost）。
     (document.body || document.documentElement).appendChild(bar);
 
-    return { styleEl: styleEl, bar: bar };
+    return { style: style, bar: bar };
   }
 
   /// body 就绪后把标题栏挪进 body，避免它作为 <html> 直接子节点时被部分页面样式影响。
@@ -393,10 +699,33 @@
     } catch (e) { /* 忽略：挪动失败不影响 fixed 定位的显示效果 */ }
   }
 
-  /// 取当前窗口句柄：**每次要用时现取**，绝不在挂载时缓存。
-  /// 挂载发生在 document-created 之后不久，个别环境下 `window.__TAURI__` 还没注入完；
-  /// 旧实现把句柄缓存在闭包里、拿不到就整段不绑定 → 「按钮点了没反应」且无从察觉。
+  /// 宣告「顶部 38px 已被标题栏占用」（loading.js 靠它让出该区域；壳侧也用它判进度）。
+  ///
+  /// 两条通路都给：
+  ///   · 全局变量 + 事件 —— 给同世界的 loading.js（两个脚本总被一起注入，同一世界）；
+  ///   · `documentElement` 上的属性 —— 给**外部探针**断言用。Electron 侧探针在渲染进程的
+  ///     主世界里 `executeJavaScript` 读它；Tauri 侧探针走 beacon 回传。DOM 跨世界共享，
+  ///     属性比全局变量更「稳」，是外部唯一该依赖的接口。
+  ///     （注：这里曾写「属性是主世界唯一可观测的口子，因为注入脚本跑在隔离世界」——
+  ///      那个前提**已被推翻**：Electron 侧改用 webFrame.executeJavaScript 注入主世界，
+  ///      理由见 electron-app/src/renderer/preload.ts。属性保留只为对外观测。）
+  function markChromeReady() {
+    try { window.__web2appChromeH = TITLEBAR_H; } catch (e) { /* noop */ }
+    try {
+      var de = document.documentElement;
+      if (de) {
+        de.setAttribute('data-web2app-chrome-h', String(TITLEBAR_H));
+        de.setAttribute('data-web2app-shell', shellName());
+      }
+    } catch (e) { /* noop */ }
+    try { window.dispatchEvent(new Event('web2app:chrome-ready')); } catch (e) { /* noop */ }
+  }
+
+  /// 取当前窗口控制器：**每次要用时现取**，绝不在挂载时缓存（理由见 electronApi 注释）。
+  /// 两个壳暴露的控制器方法名一致：minimize / toggleMaximize / close。
   function currentWindow() {
+    var E = electronApi();
+    if (E) return E;
     try {
       var T = window.__TAURI__;
       if (!T) return null;
@@ -409,13 +738,18 @@
   }
 
   /// 执行窗口命令，并把失败原因打到控制台。
-  /// ⚠️ **不要**退回 `.catch(function(){})` 那种静默写法：ACL 拒绝时前端一片安静，
-  /// 用户只看到「点了没反应」，排查得从零开始（2026-09-16 就是这么被坑的）。
-  /// 控制台日志只是给人看的，仍然绝不向宿主页面抛异常。
+  /// ⚠️ **不要**退回 `.catch(function(){})` 那种静默写法：ACL 拒绝（Tauri）/ IPC 未注册
+  ///（Electron）时前端一片安静，用户只看到「点了没反应」，排查得从零开始
+  ///（2026-09-16 Tauri 侧就是这么被坑的）。控制台日志只是给人看的，仍然绝不向宿主页面抛异常。
   function callWindow(method) {
     var w = currentWindow();
     if (!w || typeof w[method] !== 'function') {
-      try { console.error('[web2app] 窗口命令 ' + method + ' 不可用：__TAURI__ 未就绪或缺少 window 模块'); } catch (e) { /* noop */ }
+      try {
+        console.error(
+          '[web2app] 窗口命令 ' + method + ' 不可用：壳控制器未就绪（shell=' + shellName() + '）。' +
+          'Electron 侧查 preload 是否注入 window.web2app；Tauri 侧查 __TAURI__ 与 capabilities 的 remote.urls。'
+        );
+      } catch (e) { /* noop */ }
       return;
     }
     try {
@@ -482,40 +816,56 @@
   window.__web2appTitlebar = true;
 
   whenHostReady(function () {
-    // 页面自己的贴顶固定条 / 整屏外壳 / 按视口高度定尺寸的容器都要一起适配（见 applyChromeFit）：
-    // ① 下移，别被标题栏压住；② 缩高，别被挤出视口底部。
-    // 这一步不依赖标题栏挂载成功与否，所以先启动它（内部自带 try/catch 与次数上限）。
-    scheduleChromeFit();
-
-    var mounted;
+    var mounted = null;
     try {
       mounted = mount();
       wire(mounted.bar);
     } catch (e) {
       // 极端文档挂载失败：绝不破坏宿主页面。同时撤销防重标记，让后续注入
-      //（页面重载、Rust 侧 `on_page_load` 的兜底重注入）仍有机会补挂，
-      // 而不是从此彻底放弃。
+      //（页面重载、Rust 侧 `on_page_load` 的兜底重注入）仍有机会补挂，而不是从此彻底放弃。
       window.__web2appTitlebar = false;
-      return;
     }
+
+    // ⚠️ 滚动根契约（html 不滚、body 滚）必须**在样式表挂上之后**探测。
+    // 早一步跑，computed style 还是页面原样（html auto / body visible），探测必然判失败、
+    // 并把退路写死在 inline style 上 —— 而 inline `!important` 会永久压住我们的样式表，
+    // 新契约再也起不来（2026-09-17 自己踩过一次：现象是 body 高度仍是内容高、根滚动条照旧）。
+    // 挂载真失败时它也顺手把「html 顶部留白」的旧契约兜上，页面至少能滚。
+    ensureScrollRoot(mounted ? mounted.style : null);
+
+    // 页面自己的贴顶固定条 / 整屏外壳 / 按视口高度定尺寸的容器都要一起适配（见 applyChromeFit）：
+    // ① 下移，别被标题栏压住；② 缩高，别被挤出视口底部。
+    // 这一步不依赖标题栏挂载成功与否，所以无论如何都启动（内部自带 try/catch 与次数上限）。
+    scheduleChromeFit();
+
+    if (!mounted) return;
     var bar = mounted.bar;
-    var styleEl = mounted.styleEl;
+    var style = mounted.style;
+
+    // 宽度钉一次（见 barWidthPx 的说明）：CSS 的 100vw 负责首帧，这里负责「确定性」。
+    syncBarWidth(bar);
+    // 窗口尺寸变化（拖动 / 最大化 / DPI 与系统缩放改动）后重新钉。
+    // 只监听 resize：这是唯一会改变窗口宽度的途径，页面自身滚动条出现/消失不影响 innerWidth。
+    try {
+      window.addEventListener('resize', function () { syncBarWidth(bar); }, { passive: true });
+    } catch (e) { /* noop */ }
 
     // body 出现后把标题栏挪进 body（首次挂载时 body 常常还不存在，先挂在 <html> 上）。
     try {
       if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { ensureHost(bar); }, { once: true });
+        document.addEventListener('DOMContentLoaded', function () {
+          ensureHost(bar);
+          syncBarWidth(bar);   // 换宿主后 zoom 上下文可能变，跟着重钉一次
+        }, { once: true });
       } else {
         ensureHost(bar);
+        syncBarWidth(bar);
       }
     } catch (e) { /* noop */ }
 
     // 通告加载层（loading.js）：顶部已被占用 38px，请它让出该区域，避免把标题栏盖住。
     // 两脚本的注入顺序不固定，故「全局标记 + 事件」双保险，谁先谁后都能同步上。
-    window.__web2appChromeH = TITLEBAR_H;
-    try {
-      window.dispatchEvent(new Event('web2app:chrome-ready'));
-    } catch (e) { /* noop */ }
+    markChromeReady();
 
     // ---------------------------------------------------------------------
     // 自愈守护（用户反馈「点开其他页面后顶部菜单栏整条消失」的兜底）
@@ -535,18 +885,25 @@
           var root = document.body || document.head || document.documentElement;
           if (!root) return;
           var lostBar = !document.documentElement.contains(bar);
-          var lostStyle = !styleEl.parentNode;
+          var lostStyle = !styleAttached(style);
           if (!lostBar && !lostStyle) return;
           if (++tries > 20) {
             clearInterval(iv);
             return;
           }
           if (lostStyle) {
-            (document.head || document.documentElement).appendChild(styleEl);
+            styleReattach(style);
+            // 文档被重写时 <html>/<body> 可能也是新的 ⇒ 滚动根契约与滚动 API 转发一起重放
+            //（bodyScrollOK 会重新探测；已被转发过的 window 属性靠 __web2appScrollShim 幂等跳过）。
+            ensureScrollRoot(style);
           }
           if (lostBar) {
             root.appendChild(bar);
+            syncBarWidth(bar);   // 文档被重写后宿主与 zoom 上下文都可能变了
           }
+          // 文档被重写时 documentElement 可能也是新的：契约标记（属性 / 全局 / 让位事件）
+          // 得跟着重放，否则 loading.js 会把加载层重新盖到标题栏上。
+          markChromeReady();
         } catch (e) { /* noop */ }
       }, 800);
     })();

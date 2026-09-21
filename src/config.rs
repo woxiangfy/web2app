@@ -16,6 +16,9 @@
 //!   TABS_ENABLED     true/false 是否启用多页签（tab）模式（仅 Windows）
 //! 例：APP_URL="https://u:p@example.com" APP_NAME="MyApp" cargo build --release
 
+use std::path::PathBuf;
+use tauri::{AppHandle, Manager};
+
 // const 上下文可用的字符串相等判断：`str` 的 `==` 与 `match` 在常量求值中不可用
 // （`PartialEq` 尚未稳定为 const trait，见 issue #143874），这里用字节逐个比较实现。
 const fn str_eq(a: &str, b: &str) -> bool {
@@ -124,6 +127,32 @@ pub(crate) fn sanitize_dir_name(name: &str) -> String {
     }
 }
 
+/// 配置根目录：桌面端取 `app_config_dir` 的父目录、Android 用自身 `dataDir`，再拼 `<app_name>`。
+///
+/// 桌面端的 `app_config_dir` 末段是 `tauri.conf.json` 的 identifier，必须取父目录后再拼自定义
+/// app_name，让不同应用的配置互相隔离；Android 的 `app_config_dir` 直接就是应用私有根目录
+/// （`/data/data/<package>`），**绝不能取 parent**（否则跳到 `/data/data`，既不可写又与其他包冲突）。
+/// `settings.json` 与 `window-state.json` 都落在这个目录下（调用方各自再拼文件名）。
+pub(crate) fn config_dir(app: &AppHandle) -> Option<PathBuf> {
+    let base = app.path().app_config_dir().ok()?;
+    #[cfg(desktop)]
+    let root = base.parent().unwrap_or(&base).to_path_buf();
+    #[cfg(target_os = "android")]
+    let root = base;
+    Some(root.join(sanitize_dir_name(APP_NAME)))
+}
+
+/// WebView2 用户数据目录：`%LOCALAPPDATA%\<app_name>`（仅 Windows）。
+///
+/// 否定了 `DATA_DIR_DEFAULT` 时，主窗口与每个 tab 共用这个目录（同账号、共享 cookie/localStorage）。
+/// `app_local_data_dir` 在极少数环境可能返回 Err，此时返回 None、由调用方退回系统默认目录。
+#[cfg(windows)]
+pub(crate) fn user_data_dir(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_local_data_dir().ok()?;
+    let base = dir.parent().unwrap_or(&dir);
+    Some(base.join(sanitize_dir_name(APP_NAME)))
+}
+
 // 默认打开的网址；支持带账号密码的形式：
 //   "https://用户名:密码@www.example.com"
 // 注意：现代 Chromium / WebView2 已废弃“URL 内嵌 userinfo 自动发 Basic 鉴权”的行为，
@@ -174,7 +203,7 @@ pub(crate) const DEVTOOLS_ENABLED: bool = false;
 // true  = 使用 WebView2 系统默认位置（{exe 名}.WebView2，紧挨 exe 文件）。
 //         注意：打包安装（msi/nsis）后 exe 通常在 Program Files，标准用户对该目录无写权限，
 //         此时 WebView2 初始化会失败、窗口直接打不开。故【安装版强烈建议设为 false】。
-// false = 固定到“用户本地数据目录 / 程序名”（%LOCALAPPDATA%\com.example.web2app），
+// false = 固定到“用户本地数据目录 / 程序名”（%LOCALAPPDATA%\<清洗后的 app_name>，
 //         始终可写，适合安装版与多用户场景（推荐）。
 pub(crate) const DATA_DIR_DEFAULT: bool = env_bool!("DATA_DIR_DEFAULT", false);
 
@@ -197,18 +226,6 @@ pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.
 // 该能力仅在 Windows 实现（依赖多 WebviewWindow 叠放 + WebView2 共享数据目录），
 // 移动端按 target_os 剔除，本常量在移动端也一并保留但由 cfg 门控引用，避免 dead_code 警告。
 pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
-
-// ---------- 全局快捷键（按下切换 显示/隐藏 窗口，仅桌面端）----------
-// 用下面三个开关组合修饰键，再指定一个主键。
-#[cfg(not(target_os = "android"))]
-pub(crate) const HOTKEY_CTRL: bool = false;
-#[cfg(not(target_os = "android"))]
-pub(crate) const HOTKEY_ALT: bool = true;
-#[cfg(not(target_os = "android"))]
-pub(crate) const HOTKEY_SHIFT: bool = false;
-#[cfg(not(target_os = "android"))]
-pub(crate) const HOTKEY_KEY: tauri_plugin_global_shortcut::Code =
-    tauri_plugin_global_shortcut::Code::Digit4; // 数字键 4，配合 Alt → Alt+4
 
 /// 根据编译时写死的常量生成 Chromium 代理启动参数；未启用则返回 None（仅 Windows WebView2 使用）。
 #[cfg(windows)]

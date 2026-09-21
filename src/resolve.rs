@@ -1,8 +1,17 @@
 //! 动态解析真实 URL 的【DNS 查询层】。
 //!
 //! 加解密 / 签名验签 / 密钥对生成等纯 Rust 逻辑已下沉到 `resolve-core` crate；
-//! 本模块只保留依赖 Tauri 异步运行时 + hickory-resolver 的 DNS TXT 查询与
-//! 域名遍历逻辑，并 re-export `resolve-core` 的 API 供 lib.rs / resolve-tool 使用。
+//! 本模块只保留依赖 hickory-resolver 的 DNS TXT 查询与域名遍历逻辑，
+//! 并 re-export `resolve-core` 的 API 供 lib.rs / resolve-tool 使用。
+//!
+//! ⚠️⚠️ 本模块**刻意不依赖 Tauri**，且对外接口一律是 `async`。
+//! 原因：`src/proxy.rs` 与本文件被 Electron 侧的 sidecar（`crates/proxy-server`）以
+//! `#[path]` 引入复用（单一真源）。sidecar 是纯 Rust 二进制，拉入 tauri 会带进整套
+//! glib/webview 依赖树，且 `tauri::async_runtime::block_on` 在非 Tauri 进程里根本没初始化。
+//! 所以「谁来驱动这些 future」交给调用方：
+//!   · 主 crate（Tauri）：`tauri::async_runtime::block_on(resolve_url_from_domains(..))`
+//!   · sidecar（纯 tokio）: 自己建 runtime 驱动。
+//! 往本文件里加 `use tauri::...` 会立刻编译不过 —— 这是有意的护栏。
 
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::system_conf::read_system_conf;
@@ -21,8 +30,7 @@ pub use resolve_core::{
 ///
 /// 走系统默认 DNS。hickory-resolver 0.26 起移除了同步便捷方法 `Resolver::from_system_conf`，
 /// 改为：`system_conf::read_system_conf()` 读系统配置 → `Resolver::builder_with_config` 构建
-/// （泛型 `Resolver<P>`，provider 用 `TokioRuntimeProvider`）→ `txt_lookup` 是 async，用
-/// `tauri::async_runtime::block_on` 驱动。
+/// （泛型 `Resolver<P>`，provider 用 `TokioRuntimeProvider`）→ `txt_lookup` 是 async。
 /// 构建一次 DNS Resolver，供整轮解析复用。
 ///
 /// 原来的实现每查一个域名都重建 Resolver（重新读系统配置、重建内部 reactor），
@@ -36,12 +44,13 @@ fn build_resolver() -> Result<Resolver<TokioRuntimeProvider>, String> {
 }
 
 /// 用给定的 Resolver 查询一个域名的【所有】 TXT 记录。
-fn query_txt_all(
+async fn query_txt_all(
     resolver: &Resolver<TokioRuntimeProvider>,
     domain: &str,
 ) -> Result<Vec<String>, String> {
-    // txt_lookup 是 async，用 Tauri 的异步运行时阻塞驱动。
-    let lookup = tauri::async_runtime::block_on(resolver.txt_lookup(domain))
+    let lookup = resolver
+        .txt_lookup(domain)
+        .await
         .map_err(|e| format!("查询 {domain} TXT 记录失败：{e}"))?;
 
     // 遍历 answers 里的每条记录，拼接 TXT 的所有字符串段；收集全部非空结果。
@@ -96,7 +105,9 @@ fn decrypt_first_valid_txt(
 ///
 /// 对每个域名：读取其【全部】 TXT 记录，逐条尝试解密 + 验签，任一成功即返回；
 /// 该域名所有 TXT 都失败则尝试下一个域名；全部失败返回 `RESOLVE_FAILED`。
-pub fn resolve_url_from_domains(
+///
+/// 调用方负责驱动这个 future（见文件头注释）。
+pub async fn resolve_url_from_domains(
     domains: &[String],
     public_key_pem: &str,
 ) -> Result<String, String> {
@@ -110,7 +121,7 @@ pub fn resolve_url_from_domains(
         if domain.is_empty() {
             continue;
         }
-        let txts = match query_txt_all(&resolver, domain) {
+        let txts = match query_txt_all(&resolver, domain).await {
             Ok(t) => t,
             Err(_) => {
                 // 单个域名查询失败：记录后尝试下一个域名。
@@ -134,34 +145,42 @@ mod tests {
 
     // 真实 DNS 端到端：查询真实域名 TXT → 解密 + 验签，得到真实 URL。
     // 依赖外部 DNS（需联网），用 #[ignore] 标注，默认不跑；手动 `cargo test -- --ignored` 触发。
+    // ⚠️ 用 multi_thread flavor：hickory 内部会 spawn 后台任务（UDP/TCP socket 读写），
+    // current_thread runtime 下容易出现「任务已 spawn 但没机会跑」的假超时。
     const TEST_PUB_B64: &str = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "需要联网查询真实 DNS TXT 记录"]
-    fn e2e_real_dns_resolve_baidu() {
+    async fn e2e_real_dns_resolve_baidu() {
         let domains = vec!["txttest1.lcjm.cc".to_string()];
-        let url = resolve_url_from_domains(&domains, TEST_PUB_B64).unwrap();
+        let url = resolve_url_from_domains(&domains, TEST_PUB_B64)
+            .await
+            .unwrap();
         assert_eq!(url, "https://www.baidu.com/");
     }
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "需要联网查询真实 DNS TXT 记录"]
-    fn e2e_real_dns_resolve_bilibili() {
+    async fn e2e_real_dns_resolve_bilibili() {
         let domains = vec!["txttest2.mygit.top".to_string()];
-        let url = resolve_url_from_domains(&domains, TEST_PUB_B64).unwrap();
+        let url = resolve_url_from_domains(&domains, TEST_PUB_B64)
+            .await
+            .unwrap();
         assert_eq!(url, "https://www.bilibili.com/");
     }
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread")]
     #[ignore = "需要联网查询真实 DNS TXT 记录"]
-    fn e2e_real_dns_failover_to_next() {
+    async fn e2e_real_dns_failover_to_next() {
         // txttest3 是旧 RSA 密文（新方案解不开），txttest1 是新密文。
         // 应自动跳过 txttest3 失败，命中 txttest1 成功。
         let domains = vec![
             "txttest3.lcjm.cloudns.biz".to_string(), // 旧密文，解密失败
             "txttest1.lcjm.cc".to_string(),          // 新密文，成功
         ];
-        let url = resolve_url_from_domains(&domains, TEST_PUB_B64).unwrap();
+        let url = resolve_url_from_domains(&domains, TEST_PUB_B64)
+            .await
+            .unwrap();
         assert_eq!(url, "https://www.baidu.com/");
     }
 

@@ -1,19 +1,19 @@
 use std::fs;
 use std::path::PathBuf;
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 use std::str::FromStr;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
-use crate::config::{sanitize_dir_name, APP_NAME};
+use crate::config::{config_dir, APP_NAME};
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -68,7 +68,7 @@ impl Default for SettingsState {
 
 /// 把 Hotkey 结构转换为 Shortcut（用于注册全局快捷键）。
 /// key 必须是可被 Code::from_str 解析的合法键名（JS event.code 即符合）。
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 pub fn hotkey_to_shortcut(h: &Hotkey) -> Option<Shortcut> {
     let code = Code::from_str(&h.key).ok()?;
     let mut mods = Modifiers::empty();
@@ -85,35 +85,15 @@ pub fn hotkey_to_shortcut(h: &Hotkey) -> Option<Shortcut> {
 }
 
 /// 打开设置界面的固定快捷键：Shift+F1（不可在设置里修改）。
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 pub fn settings_open_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SHIFT), Code::F1)
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
-    // Tauri 默认按 tauri.conf.json 的 identifier（com.example.web2app）生成目录末段，
-    // 这里改用清洗后的自定义 app_name，与 WebView2 数据目录保持一致（见 lib.rs）。
-    let base = app.path().app_config_dir().ok()?;
-
-    // 桌面端：app_config_dir 形如
-    //   Windows  %APPDATA%\<identifier>
-    //   Linux    ~/.config/<identifier>
-    //   macOS    ~/Library/Application Support/<identifier>
-    // 末段是 identifier，取父目录后再拼上自定义 app_name，让不同 app 的配置互相隔离。
-    #[cfg(not(target_os = "android"))]
-    let root = base.parent().unwrap_or(&base).to_path_buf();
-
-    // Android：Tauri 移动端的 app_config_dir 【不会】再拼 identifier，它直接返回
-    // 本应用私有根目录 /data/data/<package>
-    // （tauri/src/path/android.rs 的 app_config_dir → PathPlugin.kt 的 getConfigDir
-    //  = activity.dataDir）。所以这里【绝不能取 parent】——那会跳到 /data/data，
-    // 既不是本应用可写目录（selinux/权限拒绝），又会和其它包重名冲突。
-    // 正确做法是直接在自身私有目录内建子目录：<dataDir>/<app_name>/settings.json
-    #[cfg(target_os = "android")]
-    let root = base;
-
-    let dir = root.join(sanitize_dir_name(APP_NAME));
-    Some(dir.join(SETTINGS_FILE))
+    // 目录统一走 config::config_dir：桌面端取 app_config_dir 父目录、Android 用自身 dataDir，
+    // 再拼自定义 app_name（平台差异见该函数注释）。
+    Some(config_dir(app)?.join(SETTINGS_FILE))
 }
 
 /// 读取设置；文件不存在或解析失败时使用默认值。
@@ -142,7 +122,7 @@ pub fn persist_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
 /// 打开（或聚焦已存在的）设置窗口。仅桌面端使用。
 /// 设置页通过 `settings://localhost/` 自定义协议提供（协议在 Builder 上注册，
 /// HTML 由 Rust 侧编译期内嵌），因此不依赖 devUrl，dev / release 行为一致。
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 pub fn open_settings_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
@@ -168,7 +148,7 @@ pub(crate) fn get_settings(state: State<SettingsState>) -> Settings {
 /// 保存设置：校验 + 应用运行时变更（快捷键/托盘）+ 持久化。
 ///
 /// 注意：此命令在 Android 端同样注册（设置功能跨平台），但全局快捷键 / 托盘等
-/// 桌面专属逻辑已用 `#[cfg(not(target_os = "android"))]` 剔除，移动端只做持久化。
+/// 桌面专属逻辑已用 `#[cfg(desktop)]` 剔除，移动端只做持久化。
 #[tauri::command]
 pub(crate) fn save_settings(
     app: tauri::AppHandle,
@@ -178,7 +158,7 @@ pub(crate) fn save_settings(
     // 1)+2) 桌面端：唤醒快捷键可留空（表示“不设置快捷键”）；若填写则必须可被解析，
     // 且不能与“打开设置(Shift+F1)”冲突。Android 无全局快捷键，跳过此校验
     // （也不引用 tauri_plugin_global_shortcut 的类型）。
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     let new_sc = {
         let key = new_settings.wake_hotkey.key.trim();
         if key.is_empty() {
@@ -200,12 +180,12 @@ pub(crate) fn save_settings(
 
     // 1) 锁内一次性克隆旧设置，随即释放锁（临界区极小，只有一次 clone）。
     //    `old` 只用于桌面端的快捷键 / 托盘 diff；Android 无这两项，故一并隔离，避免 unused 警告。
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     let old = state.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
     // 2) 桌面端：应用运行时的快捷键 / 托盘变更（锁外执行——全局快捷键注册、
     //    托盘创建/销毁可能涉及系统调用，不应在持锁期间做）。
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     {
         let old_sc = hotkey_to_shortcut(&old.wake_hotkey);
         if new_sc != old_sc {
@@ -290,7 +270,63 @@ mod tests {
         assert!(back.minimize_on_close);
     }
 
-    #[cfg(not(target_os = "android"))]
+    /// ⚠️⚠️ **双壳互通契约**（electron-app/src/main/settings.ts）。
+    ///
+    /// 下面的字面量就是 Electron 壳 `saveSettings()` 写出来的**字节形态**
+    /// （`JSON.stringify(s, null, 2)`，2 空格缩进）。两个壳共用同一个
+    /// `%APPDATA%\<app_name>\settings.json`，所以这里一旦解析失败，
+    /// 表现是「在 Electron 版里勾了托盘，回到 Tauri 版又变回默认」——
+    /// 悄无声息，极难定位。故用字面量把字段名 / 嵌套结构 / 类型钉死。
+    ///
+    /// 反向（Tauri 写、Electron 读）由 Electron 侧的探针断言
+    /// 「序列化输出为规范 JSON」守着，两边合起来才是完整的互通保证。
+    #[test]
+    fn settings_parse_accepts_electron_written_json() {
+        let json = r#"{
+  "wake_hotkey": {
+    "ctrl": false,
+    "alt": true,
+    "shift": false,
+    "key": "Digit4"
+  },
+  "tray_enabled": true,
+  "minimize_on_close": false
+}"#;
+        let s: Settings =
+            serde_json::from_str(json).expect("必须能读 Electron 壳写的 settings.json");
+        assert_eq!(s.wake_hotkey.key, "Digit4");
+        assert!(s.wake_hotkey.alt);
+        assert!(!s.wake_hotkey.ctrl);
+        assert!(!s.wake_hotkey.shift);
+        assert!(s.tray_enabled);
+        assert!(!s.minimize_on_close);
+    }
+
+    /// 反方向：Tauri 写出来的两空格缩进 JSON，必须能被 Electron 侧的结构解析接受。
+    /// （Electron 侧用的是宽松解析，这里只保证「我们写的是规范 JSON」这个前提成立。）
+    #[test]
+    fn settings_pretty_output_is_canonical_json() {
+        let s = Settings {
+            wake_hotkey: Hotkey {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                key: "Digit4".into(),
+            },
+            tray_enabled: true,
+            minimize_on_close: false,
+        };
+        let json = serde_json::to_string_pretty(&s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["wake_hotkey"]["key"], "Digit4");
+        assert_eq!(v["tray_enabled"], serde_json::Value::Bool(true));
+        assert_eq!(v["minimize_on_close"], serde_json::Value::Bool(false));
+        // 布尔必须是 JSON 布尔，不能是字符串 —— Electron 侧的宽容解析能接受字符串，
+        // 但反过来若我们写了字符串，就说明序列化路径被改坏了。
+        assert!(v["tray_enabled"].is_boolean());
+    }
+
+    #[cfg(desktop)]
     #[test]
     fn hotkey_to_shortcut_valid_key() {
         let h = Hotkey {
@@ -304,7 +340,7 @@ mod tests {
         assert_eq!(sc.to_string(), "alt+Digit4");
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     #[test]
     fn hotkey_to_shortcut_empty_or_invalid_returns_none() {
         let empty = Hotkey {

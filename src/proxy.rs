@@ -159,12 +159,21 @@ async fn proxy_handler(
     let method = parts.method.clone();
     let mut rb = state.client.request(method.clone(), target.as_str());
 
-    // 透传请求头（去掉 hop-by-hop，并跳过我们会重新设置的 Host / X-Forwarded-* / Authorization，
-    // 以及 Content-Length——由 reqwest 按实际收集到的 body 重新计算，避免与原始值冲突/重复）。
+    // 透传请求头（去掉 hop-by-hop，并跳过我们会重新设置的 Host / Origin / X-Forwarded-* /
+    // Authorization，以及 Content-Length——由 reqwest 按实际收集到的 body 重新计算，
+    // 避免与原始值冲突/重复）。
+    //
+    // ⚠️⚠️ `origin` 必须在**这里**跳过，不能靠「后面再设一次来覆盖」：
+    // `http::request::Builder::header()`（以及 reqwest 的同名方法）是 **HeaderMap::append**
+    // 而不是 insert —— 后面那次设置只会**追加**第二个 Origin，上游最终收到的是逗号拼接的
+    // `http://127.0.0.1:代理端口, http://127.0.0.1:上游端口`。这比不改写更糟：任何做 Origin
+    // 校验的后端（防跨站）都会直接拒连，表现是「页面能开、但 POST / 实时联动全挂」。
+    // 2026-09-16 由 Electron 侧的探针抓出来的，同一份代码 Tauri 版也中招。
     for (name, value) in &parts.headers {
         let name_str = name.as_str();
         if is_hop_by_hop(name)
             || name_str.eq_ignore_ascii_case("host")
+            || name_str.eq_ignore_ascii_case("origin")
             || name_str.eq_ignore_ascii_case("authorization")
             || name_str.eq_ignore_ascii_case("x-forwarded-proto")
             || name_str.eq_ignore_ascii_case("x-forwarded-host")
@@ -179,6 +188,12 @@ async fn proxy_handler(
     // 上游收到的 Host 与“浏览器直连上游”时一致（例如直连时 Host=真实域名），
     // 避免服务器因 Host 不同返回不同内容 / 生成不同链接。
     rb = rb.header("Host", state.upstream_authority.as_str());
+    // Origin 同理：WebView 连的是本地代理，浏览器自发送出的 Origin 是 `http://127.0.0.1:端口`；
+    // 改写为「等价浏览器直连上游」的源，让做 Origin 校验的后端（CSRF 防护、WS 防劫持）也放行。
+    rb = rb.header(
+        "Origin",
+        format!("{}://{}", state.upstream.scheme(), state.upstream_authority).as_str(),
+    );
     rb = rb.header("X-Forwarded-Proto", state.upstream.scheme());
     rb = rb.header(
         "X-Forwarded-Host",
@@ -301,11 +316,17 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
     // 必须原样转发给上游——tokio-tungstenite 的 connect_async 不会替我们补 Connection/Upgrade，
     // 缺了就会报 "Missing ... header connection"；Sec-WebSocket-Key 必须保留浏览器原始值，否则
     // 上游回的 Accept 与浏览器校验对不上（tungstenite 检测到 key 已存在时用 or_insert_with 保留）。
-    // 仅去掉我们自行重设的 host/Authorization/X-Forwarded-*，以及真正的逐跳头（keep-alive 等）。
+    // 仅去掉我们自行重设的 host / origin / Authorization / X-Forwarded-*，以及真正的逐跳头（keep-alive 等）。
+    //
+    // ⚠️⚠️ `origin` 必须在这里跳过：下方那次 Origin 重写用的是 `builder.header(...)`，
+    // 而它是 **append** 而非 insert —— 不跳过就会向上游发出**两个** Origin
+    //（`http://127.0.0.1:代理端口, http://127.0.0.1:上游端口`），比不改写更糟：
+    // 做 Origin 校验的后端（WS 防跨站劫持）会直接拒连。这条由 Electron 侧探针实测抓到。
     for (name, value) in &headers {
         let name_str = name.as_str();
         if is_hop_by_hop(name)
             || name_str.eq_ignore_ascii_case("host")
+            || name_str.eq_ignore_ascii_case("origin")
             || name_str.eq_ignore_ascii_case("authorization")
             || name_str.eq_ignore_ascii_case("x-forwarded-proto")
             || name_str.eq_ignore_ascii_case("x-forwarded-host")
@@ -325,7 +346,9 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
     // 的 Origin 自然是 `http://127.0.0.1:端口`。而 Trilium 等后端常对 WS 握手做 Origin 校验
     // （防跨站 hijack），对照自身宿主；Origin 与真实宿主不一致时可能拒连——后果就是"页面能开
     // 但实时联动/拖动改序(moveBranchTo 走 WS)失效"。这里把 Origin 改写为等价"浏览器直连上游"
-    // 的源 `{scheme}://{host[:port]}`，规避该拒绝。覆盖时机在透传循环之后，以覆盖浏览器原值。
+    // 的源 `{scheme}://{host[:port]}`，规避该拒绝。
+    // ⚠️ 浏览器原值已在上面透传循环里**丢弃**（origin 在跳过列表里），所以这里是唯一的 Origin ——
+    // 不能指望「后设覆盖前设」，`Builder::header` 是 append。
     builder = builder.header(
         "Origin",
         format!("{}://{}", state.upstream.scheme(), state.upstream_authority).as_str(),
@@ -735,6 +758,67 @@ mod tests {
             .unwrap();
         assert_eq!(echo.status(), axum::http::StatusCode::OK);
         assert_eq!(echo.bytes().await.unwrap(), payload, "上传体应原样回传");
+
+        abort.abort();
+    }
+
+    /// 回归：代理给上游发出的 Origin 必须**恰好一个**，且是「等价浏览器直连上游」的源。
+    ///
+    /// 曾经这里是两个（浏览器原值 + 重写值，逗号拼成一个头）—— 因为 `http::request::Builder::header`
+    /// 与 `reqwest::RequestBuilder::header` 都是 `HeaderMap::append` 而非 insert，
+    /// 「后面再设一次来覆盖」的写法只会追加。上游若做 Origin 校验（WS 防跨站劫持、
+    /// CSRF 防护）会直接拒连，表现为「页面能打开，但实时联动 / 表单提交全挂」。
+    /// 由 Electron 侧的兼容契约探针首次抓到（`WebSocket 的 Origin 已被改写` 那条断言）。
+    #[tokio::test]
+    async fn proxy_sends_exactly_one_rewritten_origin() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_in = seen.clone();
+
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let seen_in = seen_in.clone();
+                async move {
+                    let mut got = seen_in.lock().unwrap();
+                    for v in headers.get_all("origin") {
+                        got.push(v.to_str().unwrap_or("<非 ASCII>").to_string());
+                    }
+                    "ok"
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let app_url = url::Url::parse(&format!("http://{}", addr)).unwrap();
+        let (proxy_url, abort) = super::start_proxy(&app_url).await.unwrap();
+
+        // 故意带一个「浏览器原值」Origin（真实场景里 WebView 会发 127.0.0.1:代理端口）
+        // no_proxy：避免测试机上的 HTTP_PROXY 环境变量把本地回环请求拐走。
+        let resp = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(&proxy_url)
+            .header("Origin", "http://127.0.0.1:9999")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "上游应只收到一个 Origin，实际 {got:?}");
+        assert_eq!(
+            got[0],
+            format!("http://{}", addr),
+            "Origin 应被改写为上游自身源"
+        );
 
         abort.abort();
     }

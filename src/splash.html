@@ -4,12 +4,22 @@
   · 经自定义协议 splash://localhost/ 提供，零网络请求，首帧即可见。
   · 用途：覆盖「进程已启动 → 首个页面开始加载」这段原本完全没有反馈的空白等待
     （域名解析、本地反向代理启动、WebView 初始化等都发生在这段时间里）。
-  · 真实地址准备好后，Rust 侧会导航到目标地址；新文档由 initialization_script 注入的
-    同一套加载层（overlay 模式）接续显示，因此观感上是一条连续的「加载中」，不会闪白。
-  · 三个占位符由 src/loading.rs 在运行时替换：
-      __WEB2APP_TITLE__      窗口标题（已做 HTML 转义）
-      __WEB2APP_TITLEBAR_JS__ src/titlebar.js 全文
-      __WEB2APP_LOADING_JS__ src/loading.js 全文
+  · 真实地址准备好后由壳侧导航到目标地址；新文档由同一套加载层（overlay 模式）接续显示，
+    因此观感上是一条连续的「加载中」，不会闪白。
+  · 三处占位符由壳侧在运行时替换（Tauri：src/loading.rs；Electron：src/main/index.ts）：
+      1) <title> 里的窗口标题（替换值已做 HTML 转义）
+      2) 第一个 <script> 里的自绘标题栏脚本（src/titlebar.js 全文）
+      3) 第二个 <script> 里的加载层脚本（src/loading.js 全文）
+
+  ⚠️⚠️ 本注释【故意不写出占位符字面量】，两个 <script> 里也【必须】直接放占位符本体，
+     不能像旧版那样写成 /* 占位符 */。原因（2026-09-16 修正，两壳共有）：
+       · 替换是全局的，占位符写在注释里 → 两份脚本正文（约 50KB）被灌进 HTML 注释。
+         注释里一旦出现两个连续连字符就会提前闭合，脚本正文随之变成页面正文。
+       · /* 占位符 */ 这种包装只有在「脚本第一个 */ 之前恰好没有第二个闭合符」时才碰巧
+         成立。旧版靠的是 titlebar.js 第 1 行是 /* 、第 70 行才是它自己那段头注释的 */，
+         于是外层 /* 被那句 */ 顶掉、余下正文照常解析 —— 纯属巧合。
+         两个脚本里各有十几处 */（loading.rs 有回归测试盯着），一旦头注释改成
+         // 行注释（或脚本被压缩），内联脚本立刻变成语法错误、整条顶部栏不再出现。
 -->
 <html lang="zh-CN" data-page-node-id="mH30ix6vHW0TC6iOjLKgMU">
   <head data-page-node-id="Efy0MZz1NpaTR2Hj9atACk">
@@ -40,19 +50,13 @@
       window.__web2appLoadingMode = 'splash';
     </script>
     <!--
-      自绘标题栏（单窗口模式）内联在启动页里。
-      ⚠️ 为什么内联：titlebar.js 的挂载是「等 DOM 宿主节点出现」的异步过程，内联进首屏 HTML
-      能让它与页面同时就绪，不必依赖注入时机——观感上「窗口一出现就有顶部栏」。
+      自绘标题栏（单窗口模式）内联在启动页里：让「窗口一出现就有顶部栏」，
+      不必依赖注入时机。真实页面上则由初始化脚本注入（两边靠 `__web2appTitlebar` 防重）。
       注：早先这里写「首个文档拿不到 initialization_script」——该说法**已被实测推翻**
       （wry 先完成 AddScriptToExecuteOnDocumentCreated 再 Navigate，首个文档同样有脚本，
-      见 examples/probe_new_window.rs）。两条路都会尝试，靠 `__web2appTitlebar` 防重，
-      保持内联只是更稳，不要据此推断其它问题。
+      见 examples/probe_new_window.rs）。保持内联只是更稳，不要据此推断其它问题。
     -->
-    <script>
-      /*__WEB2APP_TITLEBAR_JS__*/
-    </script>
-    <script>
-      /*__WEB2APP_LOADING_JS__*/
-    </script>
+    <script>__WEB2APP_TITLEBAR_JS__</script>
+    <script>__WEB2APP_LOADING_JS__</script>
   </body>
 </html>

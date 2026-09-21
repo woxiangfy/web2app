@@ -26,7 +26,7 @@ use webview2_com::{
     CustomItemSelectedEventHandler, DownloadStartingEventHandler, NewWindowRequestedEventHandler,
     WebResourceRequestedEventHandler,
 };
-// base64 0.22 的 `.encode()` 是 Engine trait 上的方法，必须显式引入该 trait 才能调用
+// base64 0.23 的 `.encode()` 是 Engine trait 上的方法，必须显式引入该 trait 才能调用
 // （proxy.rs 顶部已 `use base64::Engine;`，这里的 WebView2 钩子里同样需要）。
 use base64::Engine;
 use tauri::Manager;

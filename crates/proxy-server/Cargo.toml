@@ -1,0 +1,48 @@
+[package]
+name = "w2a-proxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "web2app Electron 绿色版的 sidecar：本地反向代理（注入 Basic 鉴权，含 WebSocket）+ 动态域名解析（DNS TXT + Ed25519 验签 + AES-GCM 解密）"
+publish = false
+
+[[bin]]
+name = "w2a-proxy"
+path = "src/main.rs"
+
+# ⚠️ 本 crate 的 src/main.rs 用 `#[path]` 直接引用上层 webview-app/src/proxy.rs 与
+# src/resolve.rs —— 单一真源，零重写。因此这里的依赖必须覆盖这两个文件用到的全部 crate，
+# 且版本与 webview-app/Cargo.toml 保持一致（否则两个 crate 会各自拉一份不兼容的版本）。
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.23"
+bytes = "1"
+futures-util = "0.3"
+hickory-resolver = "0.26"
+http = "1"
+http-body-util = "0.1"
+resolve-core = { path = "../resolve-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# io-std：读 stdin 判断宿主是否已退出（防僵尸进程）。
+# rt-multi-thread + macros：驱动 resolve.rs 的 async DNS 查询、跑 proxy.rs 的 #[tokio::test]。
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "macros",
+    "io-util",
+    "io-std",
+    "time",
+] }
+url = "2"
+
+# 与 webview-app/Cargo.toml 逐字对齐的平台分支：Windows 走系统证书库（schannel），
+# 其它平台走 rustls（内置 webpki-roots），便于交叉编译。
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "stream"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }

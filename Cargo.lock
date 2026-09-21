@@ -5308,6 +5308,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "w2a-proxy"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.23.1",
+ "bytes",
+ "futures-util",
+ "hickory-resolver",
+ "http",
+ "http-body-util",
+ "reqwest 0.12.28",
+ "resolve-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

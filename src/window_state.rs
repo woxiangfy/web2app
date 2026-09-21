@@ -7,8 +7,6 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-use crate::config::{sanitize_dir_name, APP_NAME};
-
 const FILE: &str = "window-state.json";
 
 /// 窗口几何快照。x/y = 窗口左上角在屏幕上的坐标（outer），
@@ -26,11 +24,8 @@ pub struct State {
 }
 
 fn path(app: &AppHandle) -> Option<PathBuf> {
-    // 目录与 settings_path 保持一致：桌面端 app_config_dir 末段是 identifier，
-    // 取父目录后再拼上清洗后的自定义 app_name（不同 app 配置互相隔离）。
-    let base = app.path().app_config_dir().ok()?;
-    let root = base.parent().unwrap_or(&base).to_path_buf();
-    Some(root.join(sanitize_dir_name(APP_NAME)).join(FILE))
+    // 目录与 settings_path 一致（见 crate::config::config_dir）：桌面端取 app_config_dir 父目录再拼自定义 app_name。
+    Some(crate::config::config_dir(app)?.join(FILE))
 }
 
 /// 读取上次保存的几何；文件不存在 / 解析失败返回 None（用默认窗口尺寸）。
@@ -139,5 +134,28 @@ mod tests {
         // 兼容旧版配置文件（无 maximized 字段时 serde 默认补 false）。
         let back: State = serde_json::from_str(r#"{"x":1,"y":2,"width":3,"height":4}"#).unwrap();
         assert!(!back.maximized);
+    }
+
+    /// ⚠️ **双壳互通契约**（electron-app/src/main/window-state.ts）。
+    ///
+    /// 字面量 = Electron 壳写出来的字节形态（2 空格缩进、字段顺序一致），
+    /// 且 x/y/width/height 是**物理像素**（Electron 侧用 dipToScreenRect 换算，见那边的注释）。
+    /// 这里解析不了就意味着「两个壳轮流启动时窗口尺寸会互相重置」。
+    #[test]
+    fn state_parse_accepts_electron_written_json() {
+        let json = r#"{
+  "x": 455,
+  "y": 179,
+  "width": 1657,
+  "height": 986,
+  "maximized": false
+}"#;
+        let st: State =
+            serde_json::from_str(json).expect("必须能读 Electron 壳写的 window-state.json");
+        assert_eq!(st.x, 455);
+        assert_eq!(st.y, 179);
+        assert_eq!(st.width, 1657);
+        assert_eq!(st.height, 986);
+        assert!(!st.maximized);
     }
 }

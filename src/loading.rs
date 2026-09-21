@@ -33,6 +33,14 @@ const LOADING_JS: &str = include_str!("loading.js");
 /// 自绘标题栏脚本（仅单窗口模式有意义）。启动页需要内联它，原因见 `splash_html`。
 const TITLEBAR_JS: &str = include_str!("titlebar.js");
 
+/// 启动页模板里的三个占位符。
+///
+/// ⚠️ 默认 `&str` 字面量写在这里是**故意**的：它是唯一的真源清单，而模板里刻意不写它们的
+/// 字面量（写出来会让全局替换把近似 50KB 脚本正文灌进 HTML 注释）。见 `splash.html` 注释。
+pub const TOKEN_TITLE: &str = "__WEB2APP_TITLE__";
+pub const TOKEN_TITLEBAR_JS: &str = "__WEB2APP_TITLEBAR_JS__";
+pub const TOKEN_LOADING_JS: &str = "__WEB2APP_LOADING_JS__";
+
 /// 注入到每一次导航目标文档的加载层脚本。
 ///
 /// 通过 `WebviewWindowBuilder::initialization_script` 注册，在 document-created 阶段执行，
@@ -46,17 +54,22 @@ pub fn splash_url() -> Url {
 
 /// 渲染启动页 HTML：把窗口标题、加载层脚本、自绘标题栏脚本填进模板占位符。
 ///
-/// 先替换标题再插入脚本，避免脚本内容被后续替换误伤。
+/// 先替换标题再插入脚本，避免标题内容被后续替换误伤（脚本里不含任何占位符字面量，
+/// 由 `injected_scripts_contain_no_placeholder_tokens` 测试盯着）。
 ///
-/// ⚠️ 标题栏脚本必须内联进启动页：`initialization_script` 是在 WebView 建好**之后**才注册的
-/// （wry 走 `AddScriptToExecuteOnDocumentCreated`，只对「之后创建的文档」生效），所以启动页
-/// 这个**首个文档**拿不到它 —— 旧版单窗口模式下「首次打开」这段时间窗口顶部什么都没有，
-/// 正是用户反馈的「无多标签时没有顶部的菜单栏」。
+/// ⚠️ 模板里两个 `<script>` **直接**放占位符本体，不能包 `/* … */`：
+/// 包装写法只有在「脚本第一个 `*/` 之前没有第二个闭合符」时才碰巧成立，而两个脚本里
+/// 各有十几处 `*/`（头注释一改成行注释就会炸，表现为整条顶部栏消失）。
+///
+/// ⚠️ 标题栏脚本内联进启动页的真实理由：`initialization_script` 是 WebView 建好**之后**
+/// 才注册的，内联能让「窗口一出现就有顶部栏」，不依赖注入时机；真实页面上两条路都会走，
+/// 靠 `titlebar.js` 的 `__web2appTitlebar` 防重。（旧注释声称「首个文档拿不到
+/// initialization_script」——该说法已被 `examples/probe_new_window.rs` 实测推翻，别再引用。）
 pub fn splash_html(title: &str) -> String {
     SPLASH_TEMPLATE
-        .replace("__WEB2APP_TITLE__", &html_escape(title))
-        .replace("/*__WEB2APP_TITLEBAR_JS__*/", TITLEBAR_JS)
-        .replace("/*__WEB2APP_LOADING_JS__*/", LOADING_JS)
+        .replace(TOKEN_TITLE, &html_escape(title))
+        .replace(TOKEN_TITLEBAR_JS, TITLEBAR_JS)
+        .replace(TOKEN_LOADING_JS, LOADING_JS)
 }
 
 /// splash 自定义协议的处理器。
@@ -97,16 +110,6 @@ pub fn show_error(app: &AppHandle, label: &str, title: &str, detail: &str) {
         d = js_str(detail)
     );
     let _ = w.eval(js.as_str());
-}
-
-/// 通知加载层页面已就绪，可以淡出了（正常路径由 JS 自行判定，这里给 Rust 侧一个兜底入口）。
-///
-/// `label`：目标窗口 label（单窗口为 `"main"`，多页签为 `tab-N`）。
-pub fn hide(app: &AppHandle, label: &str) {
-    let Some(w) = app.get_webview_window(label) else {
-        return;
-    };
-    let _ = w.eval("try{window.__web2appLoading&&window.__web2appLoading.hide();}catch(e){}");
 }
 
 /// 把字符串转成可安全嵌入 JS 源码的双引号字符串字面量（含两侧引号）。
@@ -155,15 +158,9 @@ mod tests {
     #[test]
     fn splash_html_inlines_script_and_title() {
         let html = splash_html(r"Tom's <App> & \Co");
-        assert!(!html.contains("__WEB2APP_TITLE__"), "标题占位符应被替换");
-        assert!(
-            !html.contains("/*__WEB2APP_LOADING_JS__*/"),
-            "脚本占位符应被替换"
-        );
-        assert!(
-            !html.contains("/*__WEB2APP_TITLEBAR_JS__*/"),
-            "标题栏占位符也应被替换"
-        );
+        assert!(!html.contains(TOKEN_TITLE), "标题占位符应被替换");
+        assert!(!html.contains(TOKEN_LOADING_JS), "脚本占位符应被替换");
+        assert!(!html.contains(TOKEN_TITLEBAR_JS), "标题栏占位符也应被替换");
         assert!(html.contains("Tom&#39;s &lt;App&gt; &amp; \\Co"));
         assert!(html.contains("__web2appLoadingMode = 'splash'"));
         assert!(html.contains("w2l-ring"), "应内联加载层脚本");
@@ -171,6 +168,59 @@ mod tests {
             html.contains("__web2app_titlebar__"),
             "启动页应内联自绘标题栏（首个文档拿不到 initialization_script）"
         );
+    }
+
+    /// 启动页模板里，占位符**只能**出现在预期的两个 `<script>` 与 `<title>` 里。
+    ///
+    /// 背景（2026-09-16 修的 bug，两壳共有）：模板头部注释里原本也写了这三个占位符名，
+    /// 于是全局替换把约 50KB 脚本正文灌进了 HTML 注释 —— 注释里一旦出现两个连续连字符
+    /// 就会提前闭合，脚本正文随之变成页面正文。
+    #[test]
+    fn splash_template_has_no_token_in_comments() {
+        let comment = SPLASH_TEMPLATE
+            .split_once("-->")
+            .map(|(head, _)| head)
+            .unwrap_or("");
+        for tok in [TOKEN_TITLE, TOKEN_TITLEBAR_JS, TOKEN_LOADING_JS] {
+            // 整份模板里每个占位符恰好出现一次（就是它该出现的那处）
+            assert_eq!(
+                SPLASH_TEMPLATE.matches(tok).count(),
+                1,
+                "占位符 {tok} 在模板里应恰好出现一次"
+            );
+            assert!(
+                !comment.contains(tok),
+                "占位符 {tok} 不该出现在 HTML 注释里（会把脚本正文灌进注释）"
+            );
+        }
+    }
+
+    /// 两个 `<script>` 里必须是**裸**占位符，不能包在 `/* … */` 里。
+    ///
+    /// 包装写法只有在「脚本第一个 `*/` 之前没有第二个闭合符」时才碰巧成立：旧版依赖的是
+    /// titlebar.js 第 1 行是 `/*`、第 70 行才是它自己头注释的 `*/`，外层注释被那句顶掉后
+    /// 正文照常解析 —— 纯属巧合。头注释一改成行注释（或脚本被压缩）立刻变成语法错误。
+    #[test]
+    fn splash_script_tokens_are_not_comment_wrapped() {
+        assert!(SPLASH_TEMPLATE.contains("<script>__WEB2APP_TITLEBAR_JS__</script>"));
+        assert!(SPLASH_TEMPLATE.contains("<script>__WEB2APP_LOADING_JS__</script>"));
+        assert!(!SPLASH_TEMPLATE.contains("/*__WEB2APP_"));
+    }
+
+    /// 注入的脚本里不能含任何占位符字面量（否则会级联替换/自替换），
+    /// 也不能含 `</script`（内联进 `<script>` 时会提前闭合标签）。
+    #[test]
+    fn injected_scripts_contain_no_placeholder_tokens() {
+        for (name, js) in [("titlebar.js", TITLEBAR_JS), ("loading.js", LOADING_JS)] {
+            for tok in [TOKEN_TITLE, TOKEN_TITLEBAR_JS, TOKEN_LOADING_JS] {
+                assert!(!js.contains(tok), "{name} 不应包含占位符字面量 {tok}");
+            }
+            let lower = js.to_ascii_lowercase();
+            assert!(
+                !lower.contains("</script"),
+                "{name} 含 </script，内联进 <script> 会提前闭合标签"
+            );
+        }
     }
 
     /// 注入脚本运行在「文档尚未解析」的时刻，此时 `document.documentElement` / `head` /

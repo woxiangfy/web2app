@@ -2,6 +2,11 @@
 
 > 把一个网址打包成桌面 / 手机原生应用的轻量工具。
 > **Rust + Tauri 2** 编写，支持 **Windows（WebView2）** 与 **Android**。
+>
+> 仓库级规则、目录地图与文档索引见根目录 `README.md`。Windows 免安装绿色版由另一个壳
+> `electron-app/`（Electron + TS）交付，两者共用同一份注入脚本与 `config.json` 契约 ——
+> 改动**单一真源**（`src/{titlebar.js,loading.js,shell.html,splash.html}`、`src/{proxy.rs,resolve.rs}`、
+> `dist/settings.html`）后必须双壳同步验证，详见根 README「五、补充说明」。
 
 Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统托盘、用全局快捷键一键显隐；
 当网址带 `https://用户名:密码@host` 形式的 Basic 鉴权时，会自动给**每一个请求（含 WebSocket）**注入凭据，
@@ -16,7 +21,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 内嵌网址 | 默认打开编译时写死的网址，全屏/可缩放窗口 | Windows / Android |
 | 设置界面 | 按 **Shift+F1** 打开；可配置唤醒快捷键、托盘开关、关闭行为，设置持久化到 `settings.json` | Windows |
 | 系统托盘 | 可开关；最小化到托盘，左键显隐、菜单可退出（受设置控制） | Windows |
-| 全局快捷键 | 一键切换窗口显示 / 隐藏；按键与修饰符可在设置里修改（默认 **Alt+4**） | Windows |
+| 全局快捷键 | 一键切换窗口显示 / 隐藏；按键与修饰符在设置里配置（**默认不启用**） | Windows |
 | Basic 鉴权 | 支持 `https://user:pass@host`，自动注入 `Authorization` 头 | Windows / Android |
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
 | 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效） | Windows |
@@ -26,6 +31,11 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
+| 自绘标题栏 | 无系统装饰：前进 / 后退 / 最小化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换 | Windows |
+| 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏 | Windows / Android |
+| 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
+| 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
+| 拖拽修复 | WebView2 拖拽 bug 的 polyfill（用鼠标事件合成完整 HTML5 DnD 序列） | Windows |
 
 ---
 
@@ -42,12 +52,12 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 
 可配置项：
 
-1. **唤醒快捷键**：显示 / 隐藏主窗口的全局快捷键。支持“点击捕获”（按下组合键即可，按 Esc 取消）或从下拉框选择常用键。默认 **Alt+4**。
+1. **唤醒快捷键**：显示 / 隐藏主窗口的全局快捷键。支持“点击捕获”（按下组合键即可，按 Esc 取消）或从下拉框选择常用键。**默认不启用**（未设置时不注册任何全局快捷键）。
    - 保存后立即生效；不能与「打开设置(Shift+F1)」冲突。
 2. **是否启用托盘图标**：关闭后启动不创建托盘图标（关闭窗口即退出）。
 3. **关闭窗口后最小化到托盘**：勾选且同时启用托盘时，点关闭按钮 = 最小化到托盘；否则关闭窗口即退出应用。
 
-> 设置保存在应用配置目录下（例如 `%LOCALAPPDATA%\com.example.web2app\settings.json`），为 JSON 文件，下次启动自动读取。
+> 设置保存在配置目录下（`%APPDATA%\<app_name>\settings.json`，`app_name` 默认 `Web2App`），为 JSON 文件，下次启动自动读取。
 
 界面后续可在 `dist/settings.html` 上继续扩展更多能力（同一份 Rust 命令通道 `get_settings` / `save_settings` 即可复用）。
 
@@ -74,22 +84,48 @@ Web2App 的解法是内置一个**本地反向代理**（`src/proxy.rs`）：
 ## 目录结构
 
 ```
-web2app/
-├── Cargo.toml              # 依赖与 TLS 后端（Windows=native-tls / 其他=rustls）
+webview-app/
+├── Cargo.toml              # workspace 成员 + 依赖与 TLS 后端（Windows=native-tls / 其他=rustls）
 ├── tauri.conf.json         # Tauri 配置（含 Android bundle 配置）
 ├── build.rs                # Tauri 构建脚本
+├── config.example.json     # 配置模板（含全部字段，供手动打包工作流使用）
 ├── src/
-│   ├── main.rs             # 入口：窗口/托盘/快捷键/代理决策（按平台 cfg 隔离）
+│   ├── main.rs             # 桌面入口（薄壳，装配在 lib.rs）
+│   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
+│   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
+│   ├── bootstrap.rs        # 后台解析真实地址 → 就绪后导航
+│   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
+│   ├── resolve.rs          # DNS TXT 查询 + 验签解密
+│   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
 │   ├── settings.rs         # 设置结构、持久化(settings.json)、快捷键转换、设置窗口/命令
-│   └── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
+│   ├── tabs.rs             # 多页签（宿主窗口 + shell 标签栏 + tab 窗口）
+│   ├── tray.rs             # 系统托盘
+│   ├── window_state.rs     # 窗口几何持久化
+│   ├── webview_hooks.rs    # WebView2 原生事件（鉴权 / 新窗口 / 右键 / 下载）
+│   ├── save_dialog.rs      # 下载「另存为」原生对话框（IFileSaveDialog）
+│   ├── splash.html         # 启动页（内联 titlebar.js，解决首文档无初始化脚本）
+│   ├── shell.html          # 多页签外壳（标签栏）
+│   ├── titlebar.js         # 自绘标题栏注入脚本
+│   ├── loading.js          # 加载层注入脚本
+│   ├── tab_title.js        # 多页签真实标题回传
+│   └── dnd_polyfill.js     # WebView2 拖拽 polyfill
+├── crates/
+│   ├── resolve-core/       # 纯加密核心（Ed25519 + AES-256-GCM + HKDF），零平台依赖
+│   ├── resolve-tool/       # 服务端 CLI：生成密钥对 / 生成 DNS TXT 密文
+│   └── proxy-server/       # Electron 侧 sidecar（bin 名 w2a-proxy），#[path] 复用 src/proxy.rs
 ├── dist/
 │   ├── index.html          # 占位前端（纯 Rust 工程，实际内容来自远程 URL）
 │   └── settings.html       # 设置界面 UI 源码（编译期被 include_str! 内嵌，经 settings:// 自定义协议加载）
-├── icons/icon.ico          # 应用图标
+├── tools/                  # 服务端辅助脚本（encrypt_url.py / loading_test.js）
+├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs）
+├── capabilities/           # Tauri ACL 能力声明（default.json）
+├── icons/                  # 应用图标（icon.ico / icon.png 等）
+├── txttest_keys/           # 验签测试密钥对（见 docs/txttest-verify-materials.md）
 └── .github/workflows/
     ├── ci.yml                    # 提交即自动测试（lint + test + 多平台编译检查）
-    ├── release.yml               # 发版即自动编译（Windows 安装包 + Android APK）
+    ├── release.yml               # 发版（或手动触发）即自动编译：Windows 安装包 + Android APK
     ├── build-custom.yml          # 手动打包：填配置 JSON，产出 MSI + 绿色版 zip + 已签名 APK
+    ├── resolve-keys.yml          # 生成 DNS TXT 解析用的 Ed25519 密钥对 + 密文
     └── generate-signing-key.yml  # 手动触发：云端生成一把固定签名 keystore + 密码 + 配置 JSON（全自动，零输入）
 ```
 
@@ -97,14 +133,24 @@ web2app/
 
 ## 编译时配置（改这里，然后重新编译）
 
-所有运行期参数都在 `src/main.rs` 顶部的**编译期常量**里写死（不读配置文件 / 环境变量）：
+所有运行期参数都是 **`src/config.rs` 的编译期常量**，由 `option_env!` 在编译时注入（不读运行期配置文件）。
+手动打包工作流（`build-custom.yml`）就是通过环境变量把这些值传进来的：
 
 ```rust
-// 默认打开的网址，支持带账号密码：
-//   "https://用户名:密码@www.example.com"
+// 默认打开的网址，支持带账号密码；写成域名数组时走 DNS TXT 验签解密（见下文「动态解析」）
 const APP_URL: &str = "https://用户名:密码@www.example.com";
 
-const WINDOW_TITLE: &str = "Web2App";
+const APP_NAME: &str = "Web2App";     // 安装名 / 数据目录名（Android 侧为应用名）
+const WINDOW_TITLE: &str = APP_NAME;  // 窗口标题，缺省回落 APP_NAME
+
+// 额外参数：编译期内联成 window.web2appExtra = {...}，页面 JS 可直接读；非法 JSON 自动回落 {}
+const EXTRA: &str = "{}";
+
+// 多页签（仅 Windows）：默认关闭
+const TABS_ENABLED: bool = false;
+
+// 动态解析（app_url 为域名数组时用）：Ed25519 公钥，裸 base64 或 SPKI PEM
+const PUBLIC_KEY: &str = "";
 
 // F12 开发者工具（仅 Windows WebView2）。已按构建模式自动判定：debug 开、release 关，无需手动改
 #[cfg(debug_assertions)]
@@ -113,7 +159,7 @@ const DEVTOOLS_ENABLED: bool = true;
 const DEVTOOLS_ENABLED: bool = false;
 
 // WebView2 用户数据目录：true=系统默认（紧挨 exe，安装版可能因无写权限而失败）；
-// false=固定到 %LOCALAPPDATA%\com.example.web2app（始终可写，安装版推荐）
+// false=固定到 %LOCALAPPDATA%\<app_name>（始终可写，安装版推荐）
 const DATA_DIR_DEFAULT: bool = false;
 
 // —— 代理 —— 不需要就保持 PROXY_ENABLED = false
@@ -121,13 +167,12 @@ const PROXY_ENABLED: bool = false;
 const PROXY_HTTP: &str  = "";   // 留空 = 走自实现本地代理（覆盖 WebSocket）
 const PROXY_HTTPS: &str = "";   // 留空 = 同上
 const PROXY_BYPASS: &str = "localhost;127.0.0.1;<-loopback>";
-
-// —— 全局快捷键（仅桌面端）：Alt + 4 ——
-const HOTKEY_CTRL:  bool = false;
-const HOTKEY_ALT:   bool = true;
-const HOTKEY_SHIFT: bool = false;
-const HOTKEY_KEY:   Code = Code::Digit4;
 ```
+
+另有 `RESOLVE_SECRET`（在 `resolve-core` 侧编译期注入，未设置时回落内置默认值；改它必须与服务端同步）。
+
+⚠️ 全局快捷键**不走编译期常量**：快捷键现在在**设置页（Shift+F1）**中配置并落盘到 `settings.json`，
+**默认不启用**。
 
 改完直接 `cargo build`（见下文）。
 
@@ -174,25 +219,29 @@ cargo tauri android build --target aarch64-linux-android --apk
 # 若需上架 Play Store 的 AAB，去掉 --apk 即可
 ```
 
-> 首次 `android init` 后务必把生成的 `gen/android/` 目录提交进仓库，`release.yml` 的 Android 任务依赖它。
+> 本地首次构建前需跑一次 `cargo tauri android init`。该目录已被 `.gitignore` 忽略，**无需提交**；
+> `release.yml` 的 Android 任务会在 CI 里用 `cargo tauri android init --ci` 现生成。
 
 ---
 
 ## 测试
 
-项目内置 Rust 单元测试（Basic 头生成、hop-by-hop 头识别等）：
+项目内置 Rust 单元测试，覆盖代理（Basic 头生成、hop-by-hop 头识别、Set-Cookie 重写、WS Origin 重写）、
+WebView2 钩子与配置清洗，以及 `resolve-core` / `resolve-tool` 的加密往返与篡改检测：
 
 ```bash
-cargo test --all
+cargo test --all                # 全量单元测试（实测 64 条：resolve-core 13 + resolve-tool 7 + 主 crate 44）
+cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
-这些测试编译/运行的是与 **Android 完全一致**的 `#[cfg(not(windows))]` 代码路径，因此同时在验证移动端逻辑。
+主 crate 的多数测试跑在 `#[cfg(not(windows))]` 路径上，因此**同时**在验证 Android 侧逻辑；
+Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也会跑它们。
 
 ---
 
 ## 自动构建（GitHub Actions）
 
-仓库内置 4 条 workflow：2 条**自动**（`ci.yml` / `release.yml`，无需人为触发）+ 2 条**手动**（`generate-signing-key.yml` / `build-custom.yml`，在 Actions 页手动 Run workflow）。
+仓库内置 5 条 workflow：2 条**自动**（`ci.yml` / `release.yml`）+ 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，在 Actions 页手动 Run workflow）。
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 
@@ -200,28 +249,32 @@ cargo test --all
 
 在 `push` 到 `main`/`master` 或针对它们的 PR 时运行：
 
-- **Lint & Test (Ubuntu)**：安装 WebKit2GTK 等依赖 → `cargo fmt --check`（仅提示）→
+- **Lint & Test (Ubuntu)**：安装 WebKit2GTK 等依赖 → `cargo fmt --all -- --check`（**阻断**）→
   `cargo clippy -D warnings` → `cargo test --all`（同时验证 Android 代码路径）。
-- **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译。
-- **Check (Android)**（`continue-on-error`，不阻断）：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，
-  验证 Rust 侧可编译（不产出 APK）。
+- **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译，并跑 `clippy` / `test`。
+- **Check (Android)**：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，并跑 **Android 目标 clippy**
+  （**阻断**，不产出 APK）。
 
 ### 2. 发版即编译 — `.github/workflows/release.yml`
 
-在 GitHub 上 **Publish 一个 Release** 时运行：
+两种触发方式：**Publish 一个 Release**（跑 Windows + Android），或在 Actions 页手动 Run workflow
+（手动触发只跑 Android）。
 
-- **Build Windows installers**：`cargo tauri build` 产出 `msi` / `nsis`，自动上传到本次 Release 的资源附件。
-- **Build Android APK**（尽力而为）：构建 `aarch64` APK 并作为 workflow artifact 上传。
-  若仓库里还没有 `gen/android`，该任务会失败但**不影响 Windows 包发布**。
+- **Build Windows installers**（仅 Release 事件）：`cargo tauri build` 产出 `msi` / `nsis`，自动上传到本次 Release 的资源附件。
+- **Build Android APK**：在 CI 里现跑 `cargo tauri android init --ci` 生成 `gen/android`（该目录被
+  `.gitignore` 忽略，无需提交），再构建 `aarch64` APK 并作为 workflow artifact 上传。
 
-> 想正式签名 Android 包时，在 `release.yml` 的 Android 任务里配置
-> `KEY_ALIAS` / `KEY_PASSWORD` / `KEYSTORE` 等密钥（仓库 Secrets），再启用签名步骤即可。
+> Android 正式签名所需仓库 Secrets：`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` /
+> `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD`。流水线里由 `build-custom.yml` / `release.yml`
+> 的对应步骤读取（与手动打包用的是同一套名字）。
 
 ### 3. 手动打包 — `.github/workflows/build-custom.yml`
 
-在 GitHub Actions 页手动 **Run workflow**，先勾选本次要打哪些产物（默认全选、互不依赖），
+在 GitHub Actions 页手动 **Run workflow**，先勾选本次要打哪些产物（三个开关互不依赖），
 再填一份配置 JSON（或填一个返回 JSON 的 URL）。无需改源码，就能为不同的网址/名字/图标
 生成各自独立的安装包。
+
+> 三个开关的默认值：`windows_portable=true`（打单文件版），`windows_installer=false`、`android=false`。
 
 手动运行时有 **3 个独立复选框**，想打哪个就勾哪个，产物分别上传到各自的 artifact：
 
@@ -239,7 +292,7 @@ cargo test --all
 > `<app_name>.exe` 直接上传，由 GitHub 打成 **`<app_name>-portable.zip`**（文件名含应用名，
 > 且只有一层压缩，不会出现 "zip 套 zip"）。
 
-配置模板见仓库根目录的 **`config.example.json`**（复制到本地改好再粘贴即可）。
+配置模板见 **`webview-app/config.example.json`**（复制到本地改好再粘贴即可）。
 
 两个名字字段的区分（很容易混）：
 
@@ -380,10 +433,9 @@ cargo test --all
 
 ### 5. 本机手敲 keytool 生成（备选）
 
-如果你不想用上面的云端 workflow，也可以在本机自己生成（需 JDK；装过 Android Studio 的可直接用其自带
-keytool，例如 `"C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe"`，或先 `export PATH="$PATH:.../jbr/bin"`）：
+不想用云端 workflow 时可在本机生成（需 JDK；装了 Android Studio 可直接用它自带的 `jbr\bin\keytool.exe`）：
 
-**① 在本机生成一把 keystore**：
+**① 生成一把 keystore**：
 
 ```bash
 keytool -genkeypair -v \
@@ -394,33 +446,19 @@ keytool -genkeypair -v \
   -dname "CN=MyApp, OU=Dev, O=MyCompany, L=City, ST=State, C=CN"
 ```
 
-- `-storepass` 是 keystore 存储密码 → 填 JSON 的 `android_keystore_password`
-- `-keypass` 是条目 key 密码，通常与 storepass 相同 → 填 `android_key_password`（可省略，默认同 storepass）
-- `-alias` 填 `android_key_alias`
-- 有效性 `-validity 10000` 天 ≈ 27 年，够用；正式上架建议更长
+字段对应关系：`-alias` → `android_key_alias`，`-storepass` → `android_keystore_password`，
+`-keypass` → `android_key_password`（可省略，默认同 storepass）；`-validity 10000` 天 ≈ 27 年，够用。
 
-**② 把 keystore 编码成 base64 单行字符串**（CI 无法直接收文件，只能收 JSON 里的 base64）：
-PowerShell：
+**② 编码成单行 base64**（CI 只收 JSON 里的 base64，收不了文件）：
+```bash
+base64 -w0 release.keystore     # Git Bash / macOS / Linux
+```
 ```powershell
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\release.keystore"))
 ```
-Git Bash / macOS / Linux：
-```bash
-base64 -w0 release.keystore   # 输出即一整行 base64
-```
 
-**③ 把 base64 与别名/密码填入配置 JSON**（字段名严格对应 `config.example.json`）：
-```json
-{
-  "app_url": "https://user:pass@example.com",
-  "app_name": "MyApp",
-  "title": "我的应用",
-  "android_keystore_base64": "<第②步输出的整行 base64>",
-  "android_key_alias": "my-app-alias",
-  "android_keystore_password": "YourStorePass",
-  "android_key_password": "YourKeyPass"
-}
-```
+**③ 填入配置 JSON**：即 `config.example.json` 的字段，再加上 ② 的输出 → `android_keystore_base64`，
+字段名严格一致（可直接参考 `generate-signing-key.yml` 产出的 `packaging-config.single.json`）。
 
 > ⚠️ `android_keystore_base64` 是 keystore 的**明文等价物**（任何人拿到都能用它给同包名应用签名冒充你），
 > 等于一把私钥。**不要**把它提交进公开仓库的 JSON / README / 历史记录；正式长期使用更推荐放仓库
@@ -433,7 +471,8 @@ base64 -w0 release.keystore   # 输出即一整行 base64
 
 - **刷新 / 子页面打不开（鉴权丢失）**：确认 `APP_URL` 带 `user:pass`，且 `PROXY_ENABLED` 与
   `PROXY_HTTP/HTTPS` 的搭配符合「本地反向代理」分支（即启用代理时不填外部代理地址）。
-- **全局快捷键没反应**：检查 `HOTKEY_*` 组合是否与其他软件冲突；代码已严格只在「按下」那一刻触发。
+- **全局快捷键没反应**：先在设置页（Shift+F1）确认唤醒快捷键**已配置**（默认不启用）；若已配置，
+  再排查是否与其他软件冲突（代码只在「按下」那一刻触发）。
 - **Android 上访问 http 本地代理被拦**：移动端已配置 `INTERNET` 权限并允许 localhost 明文，正常可用。
 - **Android 端应用的数据存在哪？**（下文中 `<pkg>` = `tauri.conf.json` 的 `identifier`，当前为 `com.example.web2app`；
   `<app_name>` = 打包配置里的 `app_name`，清洗掉非法字符后的值）

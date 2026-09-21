@@ -14,9 +14,11 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # 1) 代码质量 + 单元测试（Ubuntu）
-  #    这里编译的是 Linux 主机目标——它走的是与 Android 完全一致的
-  #    `#[cfg(not(windows))]` 代码路径（托盘 / 全局快捷键被剔除，鉴权走本地代理），
-  #    因此本作业同时也验证了“移动端那一套”的 Rust 代码能正确编译与运行。
+  #    这里编译的是 Linux 主机目标：Windows 专属模块（webview_hooks / save_dialog / tabs）
+  #    被 `#[cfg(windows)]` 剔除；而托盘 / 窗口几何 / 全局快捷键走的是 `cfg(desktop)`
+  #    （= not(android/ios)），在 Linux 上**仍然参与编译**。
+  #    ⚠️ 所以本作业覆盖的是「非 Windows 的桌面路径」，**不等价于 Android 分支**——
+  #       Android 另有 `cfg(target_os="android")` 的专属分支，由下方 check-android 作业负责。
   # ---------------------------------------------------------------------------
   lint-and-test:
     name: Lint & Test (Ubuntu)
@@ -93,7 +95,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # 3) Android 端交叉编译检查（aarch64-linux-android）【阻断流水线】
   #    ⚠️ 曾经这里挂着 continue-on-error: true，结果 cfg 隔离不完整导致的
-  #    Android 编译错误（如 handle_main_close 被 cfg(not(android)) 剔除却在
+  #    Android 编译错误（如 handle_main_close 被 cfg(desktop) 剔除却在
   #    非隔离代码里被调用 → E0425）一路漏到打包 workflow 才暴露。
   #    ubuntu-latest 预装 Android NDK，本作业已验证可稳定运行 → 改为阻断。
   #    另：Linux 作业走的是 cfg(not(windows)) 分支，与 Android 的

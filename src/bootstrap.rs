@@ -147,13 +147,17 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
 fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
     // 若 APP_URL 是【域名数组】，则依次对这些域名做 DNS TXT 查询 + Ed25519 验签
     // + AES-GCM 解密得到真实 URL；全部失败时返回可展示的错误文案。
+    // ⚠️ `resolve_url_from_domains` 是 async（该模块刻意不依赖 Tauri，见 resolve.rs 头注释），
+    // 由这里用 Tauri 的异步运行时阻塞驱动 —— 本函数跑在后台线程，不在 async 上下文内。
     let resolved_url: String = if let Some(domains) = crate::resolve::parse_domains(APP_URL) {
         let domains: Vec<String> = domains
             .into_iter()
             .map(|d| crate::resolve::normalize_domain(&d))
             .collect();
-        crate::resolve::resolve_url_from_domains(&domains, PUBLIC_KEY)
-            .map_err(|_| "服务器连接失败，请检查网络后重试".to_string())?
+        tauri::async_runtime::block_on(crate::resolve::resolve_url_from_domains(
+            &domains, PUBLIC_KEY,
+        ))
+        .map_err(|_| "服务器连接失败，请检查网络后重试".to_string())?
     } else {
         APP_URL.to_string()
     };
