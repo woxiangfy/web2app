@@ -1,0 +1,28 @@
+node_modules/
+# pnpm 迁移期间留存的旧 npm 安装 / 失败产物，确认无误后可手动删除
+node_modules.npm-bak/
+node_modules.isolated-broken-*/
+package-lock.json.npm-bak
+out/
+release/
+# 备用输出目录：README 教过用 `-c.directories.output=<新目录>` 绕开被占用的 release/，
+# 而一次产物就是 150MB 量级 —— 不忽略它们等于给「误把产物提交进仓库」留门。
+# ⚠️ 自 2026-09-17 起，临时测试产物统一落到 tests/ 下，不再在根目录新建 dist-*。
+dist/
+dist-*/
+# 临时测试产物：electron-builder 输出、截图、抓屏、日志、探针结果等一次性验证文件。
+# 真机/CI 需要保留的产物请显式放到 release/ 或用户指定目录，不要存在 tests/。
+# ⚠️ `tests/*/` 只忽略**目录**。探针日志（`*.log`）与验证用的产物副本（`*.exe` / `*.zip`）
+#    是**文件**，必须单独列出 —— 否则 `electron-app/` 纳入版本控制（M7 的前提）时，
+#    `tests/` 下一份 ~96MB 的便携版 exe 副本会被直接提交进仓库。
+tests/*/
+tests/*.log
+tests/*.exe
+tests/*.zip
+!tests/.gitkeep
+# 构建期由 scripts/stage-assets.cjs 生成（图标复制品 + 随包分发的配置副本）
+build/
+
+# 运行期用户配置与数据（config.json 随绿色版一起分发，不进仓库）
+config.json
+data/

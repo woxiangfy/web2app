@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "lib": ["ES2022", "DOM"],
+    "outDir": "out",
+    "rootDir": "src",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "sourceMap": false,
+    // ⚠️⚠️ 必须开着。tsc 默认「有错也照样输出」，于是出现这种最难查的形态：
+    //     源码编译报错 → out/ 里留下一份「改了一半」的 JS → 之后只跑 typecheck 没重跑 build
+    //     → electron-builder 把旧的坏产物打进 asar → 打包出来的 exe 一点就弹
+    //     「A JavaScript error occurred in the main process: xxx is not defined」。
+    //     2026-09-17 实际踩到（loadConfig is not defined），排查链路见 docs/electron-plan.md。
+    //     开了这个开关，编译失败时 out/ 保持原样，不会产出半成品。
+    "noEmitOnError": true
+  },
+  "include": ["src/**/*.ts"]
+}

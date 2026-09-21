@@ -1,0 +1,85 @@
+# 绿色版（免安装）打包配置。
+#
+# ⚠️ 三个 target 一次产出，同一个构建目录里给出两种分发形态：
+#   dir      → Web2App-<ver>-win-x64/          解压即用的目录（自己压 zip 也行）
+#   zip      → Web2App-<ver>-win-x64.zip       解压即用，体积最小
+#   portable → Web2App-<ver>-win-x64-portable.exe  单文件自解压
+#
+# ⚠️ electron-builder 26 起**没有**顶层 `zip:` 配置块（写了会以
+#    `Invalid configuration object … unknown property 'zip'` 直接拒绝启动）。
+#    zip 产物名只能由顶层 artifactName 模板给 —— TargetConfiguration 只接受 target/arch。
+#    26.15.3 实测通过。
+#
+# 注意 portable 的语义（见 src/main/portable.ts）：启动时把运行时解压到 %TEMP%，
+# 因此 app.getPath('exe') 指向副本，数据目录靠 PORTABLE_EXECUTABLE_DIR 定位。
+appId: com.example.web2app
+productName: Web2App
+copyright: Copyright © 2026 Web2App
+
+# zip 用；portable 在自己的块里覆盖成带 -portable 后缀的名字
+artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+
+asar: true
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: dir
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+portable:
+  artifactName: ${productName}-${version}-win-${arch}-portable.${ext}
+  # 绿色版绝不要 UAC：默认就是 user，这里显式写死防止后续被改动
+  requestExecutionLevel: user
+
+extraFiles:
+  # 运行期配置：放到 exe **同级**（不是 resources/），因为 installRoot() 只在那里找它。
+  #   - 解压目录版（zip/dir）：解压出来就能直接改这个文件，改完重启即生效；
+  #   - 单文件自解压版（portable）：这份是**包内预置**的回落副本（resolved by
+  #     config::loadConfigAny 的第二顺位）；用户想覆盖，把 config.json 放到
+  #     portable exe 旁边即可，那份优先。
+  # ⚠️ 由 `scripts/stage-assets.cjs` 生成（源 = 项目根 config.json，缺失则生成默认模板）。
+  - from: build/config.json
+    to: config.json
+
+extraResources:
+  # 注入脚本：从 webview-app/src 拷贝，保持「单一真源」，禁止复制出第二份会分叉的副本。
+  # dnd_polyfill.js 是 WebView2 专属的拖拽 bug 补丁，Electron/Chromium 无此问题，不打包。
+  # shell.html：多页签（M5）壳页面，`tabs_enabled=true` 时经 shell:// 协议加载；
+  # 单窗口模式用不到它，但打包统一带上（M5 已实现，不再是死资源）。
+  - from: ../webview-app/src
+    to: inject
+    filter:
+      - splash.html
+      - titlebar.js
+      - loading.js
+      - shell.html
+  # 设置页：Tauri 侧的构建产物（`webview-app/dist/settings.html`）。
+  # ⚠️ 与注入脚本同理，**不复制进本仓库**：Electron 侧靠 preload 垫片提供
+  #    `window.__TAURI_INTERNALS__.invoke`，让这份 HTML 一行不改地在两个壳里通用
+  #   （见 src/renderer/settings-preload.ts）。放 resources/inject/ 下与启动页资源同处，
+  #    运行时由 `settings-window.ts::locateSettingsHtml()` 查找。
+  - from: ../webview-app/dist/settings.html
+    to: inject/settings.html
+  # 窗口 / 托盘图标：复用 Tauri 版的图标资源（Tray 用 256px PNG 再缩到 16px）。
+  - from: ../webview-app/icons/icon.png
+    to: icons/icon.png
+  # sidecar：本地反向代理 + 动态域名解析（`crates/proxy-server` 编出的 w2a-proxy.exe）。
+  # ⚠️⚠️ 必须走 extraResources，**绝不能**放进 asar —— asar 内的可执行文件无法被 spawn。
+  #     运行时由 `src/main/sidecar.ts::locateSidecar()` 在 `process.resourcesPath/sidecar/` 下查找。
+  # 构建前置：`pnpm run sidecar`（等价于
+  #   cargo build --release --manifest-path ../webview-app/Cargo.toml -p w2a-proxy）。
+  - from: ../webview-app/target/release/w2a-proxy.exe
+    to: sidecar/w2a-proxy.exe

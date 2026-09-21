@@ -52,6 +52,13 @@ on:
         required: false
         default: '172800'
 
+# ⚠️ 单仓库化（2026-09-22）：仓库根已上移，Rust 工程在 `webview-app/` 子目录。
+#    三个 job 的 `cargo run -p resolve-tool ...` 都统一在 webview-app/ 下执行。
+#    上传用的 path 全部是 ${{ runner.temp }} 绝对路径，无需加前缀。
+defaults:
+  run:
+    working-directory: webview-app
+
 jobs:
   # ---------------------------------------------------------------------------
   # ① 生成密钥对

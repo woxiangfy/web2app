@@ -7,6 +7,21 @@ on:
   pull_request:
     branches: [main, master]
 
+# ---------------------------------------------------------------------------
+# ⚠️ 单仓库化（2026-09-22）：仓库根已上移到仓库目录（本文件所在的上一级），
+#    Rust 工程仍在 `webview-app/` 子目录里。原先 `cargo` 命令能跑通，是因为
+#    仓库根恰好就是 Rust 工程根；现在必须显式指定工作目录，否则报
+#    "could not find `Cargo.toml` in `...` or any parent directory"。
+#
+#    注意 `defaults.run` 只作用于 `run:` 步骤，**不影响 `uses:` 步骤**：
+#    actions/checkout 仍在仓库根落盘，所以 webview-app/ 一定是存在的。
+#    但 upload-artifact / action-gh-release 的 `path:` 是以仓库根为基准解析的，
+#    那些地方必须手工加 `webview-app/` 前缀（见 release.yml / build-custom.yml）。
+# ---------------------------------------------------------------------------
+defaults:
+  run:
+    working-directory: webview-app
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1

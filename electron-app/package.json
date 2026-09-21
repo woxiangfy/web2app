@@ -1,0 +1,32 @@
+{
+  "name": "web2app-electron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "web2app for Windows — Electron 绿色版壳，与 webview-app（Tauri 版）行为兼容",
+  "author": "Web2App",
+  "main": "out/main/index.js",
+  "scripts": {
+    "postinstall": "install-electron",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "sidecar": "cargo build --release --manifest-path ../webview-app/Cargo.toml -p w2a-proxy",
+    "stage": "node scripts/stage-assets.cjs",
+    "shot": "node scripts/layout-shot.cjs",
+    "lab": "node scripts/scrollbar-lab.cjs",
+    "diag": "node scripts/titlebar-diag.cjs",
+    "png": "node scripts/png-inspect.cjs",
+    "tabs-v4": "node scripts/tabs-v4.cjs --no-sandbox --in-process-gpu",
+    "tabs-v4-negative": "node scripts/tabs-v4.cjs --negative --no-sandbox --in-process-gpu",
+    "start": "pnpm run build && node scripts/launch.cjs",
+    "smoke": "pnpm run build && node scripts/launch.cjs --smoke",
+    "probe": "pnpm run sidecar && pnpm run build && node scripts/launch.cjs --probe",
+    "pack": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win --dir",
+    "dist": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win zip portable"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.5",
+    "electron": "^44.4.1",
+    "electron-builder": "^26.15.3",
+    "typescript": "^7.0.2"
+  }
+}

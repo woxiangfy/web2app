@@ -10,6 +10,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# ⚠️ 单仓库化（2026-09-22）：仓库根已上移，Rust 工程在 `webview-app/` 子目录。
+#    所有 run 步骤（含 python 内联脚本读写的 `tauri.conf.json`、`gen/android/...`）
+#    都统一在 webview-app/ 下执行。`uses:` 步骤不受影响，checkout 仍落在仓库根。
+#    ⚠️ 但 `softprops/action-gh-release` 的 `files:` 以**仓库根**为基准解析，
+#       那里必须保留 `webview-app/` 前缀（见下方 Upload to Release）。
+defaults:
+  run:
+    working-directory: webview-app
+
 jobs:
   # ---------------------------------------------------------------------------
   # Windows 安装包（msi / nsis），构建后直接上传到本次 Release 的资源附件。
@@ -95,9 +104,13 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
+          # ⚠️ 这里的路径以【仓库根】为基准（不受 defaults.run.working-directory 影响），
+          #    故必须写成 webview-app/target/...；构建产物由 cargo tauri build 生成在
+          #    webview-app/target 下（target 目录位置不受工作目录影响，是 Cargo 按
+          #    manifest 所在目录决定的）。
           files: |
-            target/release/bundle/msi/*.msi
-            target/release/bundle/nsis/*.exe
+            webview-app/target/release/bundle/msi/*.msi
+            webview-app/target/release/bundle/nsis/*.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

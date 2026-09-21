@@ -85,6 +85,15 @@ on:
         default: false
         type: boolean
 
+# ⚠️ 单仓库化（2026-09-22）：仓库根已上移，Rust 工程在 `webview-app/` 子目录。
+#    所有 run 步骤（含读写 `tauri.conf.json`、`gen/android/...` 的内联脚本，
+#    以及 `target/release/web2app.exe` 的复制/改名）统一在 webview-app/ 下执行。
+#    `uses:` 步骤不受影响；但 upload-artifact 的 `path:` 以**仓库根**为基准解析，
+#    需要 `webview-app/` 前缀（本文件内两处已改，见下方 ⚠️ 注释）。
+defaults:
+  run:
+    working-directory: webview-app
+
 jobs:
   # 各 job 用【独立复选框】决定是否运行：
   #   windows_installer / windows_portable / android 是 workflow_dispatch 的三个 boolean 输入（默认 true）。
@@ -362,7 +371,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-msi
-          path: target/release/bundle/msi/*.msi
+          # ⚠️ 以仓库根为基准（upload-artifact 不受 defaults.run.working-directory 影响）。
+          path: webview-app/target/release/bundle/msi/*.msi
           if-no-files-found: warn
 
       - name: Upload Windows 单文件版（zip，文件名含 app_name）
@@ -372,7 +382,8 @@ jobs:
           # 动态命名 artifact：下载得到的就是 <app_name>-portable.zip（内含单个 <app_name>.exe）。
           # 名字取自生成步骤写回的 PORTABLE_NAME，与 exe 文件名保持一致。
           name: ${{ env.PORTABLE_NAME }}-portable
-          path: target/release/${{ env.PORTABLE_NAME }}.exe
+          # ⚠️ 同上前缀说明：以仓库根为基准。
+          path: webview-app/target/release/${{ env.PORTABLE_NAME }}.exe
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------

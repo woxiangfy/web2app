@@ -32,6 +32,12 @@ name: 生成 Android 签名密钥
 on:
   workflow_dispatch:
 
+# ℹ️ 单仓库化（2026-09-22）说明：本 workflow **故意不设** `defaults.run.working-directory`。
+#    它不执行 `actions/checkout`（纯 keytool + python 脚本，产物全部落在 ${{ runner.temp }}），
+#    因此工作区里根本没有 `webview-app/` 目录；若照抄其它 workflow 加 working-directory，
+#    每个 `run:` 步骤都会以 "No such file or directory" 直接失败。
+#    此处无需任何路径改动，保持原样。
+
 jobs:
   generate-key:
     name: 生成签名密钥并打包

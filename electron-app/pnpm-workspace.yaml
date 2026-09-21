@@ -1,0 +1,35 @@
+# pnpm 专属配置。
+#
+# ⚠️ 本文件是给 pnpm 用的；用 npm 时它会被忽略，不影响既有 `npm run *` 流程。
+#
+# allowBuilds —— 依赖构建脚本放行表（pnpm 11+ 的键名，pnpm 10 时代叫 onlyBuiltDependencies）。
+#   背景：pnpm 10 起默认不执行依赖的 preinstall/install/postinstall（供应链安全），
+#   且 pnpm 12 把"被忽略"从警告升级成**报错** `ERR_PNPM_IGNORED_BUILDS`，install 直接失败。
+#   electron 正是靠 postinstall 下载并解压 ~158MB 的平台二进制到 node_modules/electron/dist/，
+#   不放行 ⇒ 安装"成功"但 dist/electron.exe 与 path.txt 都不存在，
+#   `require('electron')` 拿到一个不存在的路径 ⇒ 启动即失败。
+#
+# ⚠️ 另有一条与 .npmrc 的分工（踩过）：pnpm **不会**把 .npmrc 里的自定义键透传给依赖脚本，
+#   而 electron 的 install.js / electron-builder 的下载器都只认**环境变量**。
+#   所以镜像必须靠环境变量传：
+#     $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"        # 装 electron 二进制
+#     $env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
+#   不设的话 install.js 会去连 GitHub Releases：国内表现为**卡住不返回**（不是报错，很难看出来）。
+#
+# nodeLinker: hoisted —— 让 pnpm 产出**扁平** node_modules（行为接近 npm），而不是默认的
+#   符号链接虚拟 store。两个理由：
+#   1. electron-builder 官方 README 对 pnpm 的既有指引就是 `node-linker=hoisted` /
+#      `shamefully-hoist=true`（虽然 26.x 已有 pnpm collector，扁平布局仍是坑最少的那条路）；
+#   2. 本机实测：默认 isolated 布局在"提升符号链接"这一步会失败
+#      （`Failed to create symlink … os error 2`，两次分别停在 color-name / source-map，
+#      包名会变 ⇒ 像竞态）。hoisted 布局不依赖这步。
+#   代价：失去 pnpm 的严格隔离（间接依赖也能被 require 到），
+#   但省磁盘的效果保留（文件仍是 store 硬链接）。
+nodeLinker: hoisted
+
+allowBuilds:
+  electron: true
+  # electron-builder 的传递依赖，只在打包 Squirrel.Windows 目标时用到；
+  # 本项目只出 dir / zip / portable，故显式拒绝其构建脚本
+  # （⛔ 不能"不写"：pnpm 12 对"既没允许也没拒绝"的包会直接报 ERR_PNPM_IGNORED_BUILDS 中断安装）。
+  electron-winstaller: false
