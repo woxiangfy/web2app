@@ -200,6 +200,23 @@ export class TabManager {
     }
   }
 
+  /**
+   * 重新加载全部页签，返回实际重载的页签数。
+   *
+   * 用途：设置页「清除全部」清完浏览数据后，让**每个**页签都回到「无本地数据」的干净状态。
+   * 只重载当前页签是不够的：其它页签的 DOM 里还留着登录后的内容，
+   * 用户切过去会以为「清了但没生效」。
+   */
+  reloadAll(): number {
+    let n = 0
+    for (const t of this.tabs.values()) {
+      if (t.view.webContents.isDestroyed()) continue
+      t.view.webContents.reload()
+      n++
+    }
+    return n
+  }
+
   /** 销毁全部页签（宿主退出前显式 close，官方明示视图不随窗口销毁自动回收）。 */
   destroyAllTabs(): void {
     for (const t of this.tabs.values()) {

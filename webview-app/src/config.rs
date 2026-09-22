@@ -20,6 +20,7 @@
 //!   TABS_ENABLED     true/false 是否启用多页签（tab）模式（仅 Windows）
 //!   PUBLIC_KEY       Ed25519 公钥（APP_URL 为域名数组时必填）
 //!   EXTRA            注入给页面的 JSON 文本（→ window.web2appExtra）
+//!   DEBUG            true/false 诊断日志开关（默认 false：不落盘、也不打诊断）
 //!
 //! ⚠️ 这些变量的**来源**统一是打包配置 JSON，解析实现只有一份：
 //!    `.github/scripts/parse-packaging-config.py`（字段表与多端行为见 docs/packaging-config.md）。
@@ -225,12 +226,12 @@ fn resolve_data_dir(app: &AppHandle) -> Option<PathBuf> {
     // 保证「能启动」优先于「够绿色」——否则 WebView2 初始化失败会让窗口**直接打不开**。
     let fallback = user_data_dir(app);
     match &fallback {
-        Some(dir) => eprintln!(
+        Some(dir) => dlog!(
             "[config] 数据目录不可写，已回退系统默认目录：{} → {}",
             candidate.display(),
             dir.display()
         ),
-        None => eprintln!(
+        None => dlog!(
             "[config] 数据目录不可写且系统默认目录不可用：{}（改用 WebView2 自身默认位置）",
             candidate.display()
         ),
@@ -302,7 +303,7 @@ pub(crate) fn extra_json() -> &'static str {
     if serde_json::from_str::<serde_json::Value>(EXTRA).is_ok() {
         EXTRA
     } else {
-        eprintln!("[config] EXTRA 不是合法 JSON，已回退为 {{}} 注入");
+        dlog!("[config] EXTRA 不是合法 JSON，已回退为 {{}} 注入");
         "{}"
     }
 }
@@ -351,6 +352,20 @@ pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.
 // 该能力仅在 Windows 实现（依赖多 WebviewWindow 叠放 + WebView2 共享数据目录），
 // 移动端按 target_os 剔除，本常量在移动端也一并保留但由 cfg 门控引用，避免 dead_code 警告。
 pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
+
+// ---------- 诊断日志开关 ----------
+// true  = 每次启动写 `<数据目录>\logs\startup.log`，并把 `dlog!` 的诊断同时打到 stderr；
+// false = 不落盘、也不输出任何诊断（默认）。
+//
+// ⚠️ 默认必须是 false：默认开启会在用户的数据目录里留下交付物以外的文件，那不是期望行为。
+// ⚠️ 它是**开关**而不是「日志级别」：关闭时没有任何第一现场（用户报「双击没反应」时手上无证据），
+//    因此留了运行时逃生口 —— 命令行 `--debug` 或环境变量 `WEB2APP_DEBUG=1`（见 debug_log 模块），
+//    不必为了排障重新编译。
+// ⚠️ 环境变量名就叫 DEBUG（与打包配置 JSON 的字段名 `debug` 同名，见
+//    `.github/scripts/parse-packaging-config.py` 的 write_env）。它是个常见名字，
+//    若开发机的环境里恰好存在 `DEBUG=1`，本地 release 构建会意外带上日志 —— 属于
+//    「多一份日志、不影响功能」的偏差，可接受，不值得为它把契约名搞特殊。
+pub(crate) const DEBUG: bool = env_bool!("DEBUG", false);
 
 /// 根据编译时写死的常量生成 Chromium 代理启动参数；未启用则返回 None（仅 Windows WebView2 使用）。
 #[cfg(windows)]

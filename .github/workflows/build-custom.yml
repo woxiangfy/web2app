@@ -737,17 +737,26 @@ jobs:
             APP_URL_VAL="${APP_URL:-}"
             APP_NAME_VAL="${APP_NAME:-Web2App}"
             TITLE_VAL="${TITLE:-$APP_NAME_VAL}"
+            # ⚠️⚠️ 下面这一串是**同一条命令**的环境变量前缀，靠行尾 `\` 续行。
+            #    **不要在续行链中间插注释**：bash 折掉 `\`+换行 之后 `#` 就开始注释，
+            #    注释到本行末即结束 ⇒ 续行链被**打断**，注释前后的赋值各自成为独立命令，
+            #    后面的 python 一个都读不到（表现为 KeyError: 'PKG'）。
+            #    2026-09-22 实测：`A=1 \` + 注释行 + `B=2 bash -c ...`，外部进程只看到 B。
+            #    ⇒ 解释性注释一律写在命令**之前**，链中间只留赋值。
+            #
+            # data_dir 用 `${DATA_DIR-data}`（**无冒号**）：带冒号的 `${VAR:-default}` 会把
+            # 「已设置但为空」也当成未设置并替换成默认值，而空串在本字段里正是合法取值
+            # （= 系统默认程序目录）。写成 `:-` 会让用户配的 "" 静默变成 "data"。
+            # debug 与其它布尔同理用 `${VAR:-false}` —— 它的空串**没有**额外语义（不像 data_dir）。
             PKG="$PKG" ALIAS="$alias" STORE="$storepass" KS_B64="$ks_b64" \
             APP_URL_VAL="$APP_URL_VAL" APP_NAME_VAL="$APP_NAME_VAL" TITLE_VAL="$TITLE_VAL" \
             EXTRA_VAL="${EXTRA:-{}}" ICON_URL_VAL="${ICON_URL:-}" \
             PROXY_ENABLED_VAL="${PROXY_ENABLED:-false}" \
             PROXY_HTTP_VAL="${PROXY_HTTP:-}" PROXY_HTTPS_VAL="${PROXY_HTTPS:-}" \
             PROXY_BYPASS_VAL="${PROXY_BYPASS:-}" \
-            # ⚠️⚠️ data_dir 用 `${DATA_DIR-data}`（**无冒号**）：带冒号的 `${VAR:-default}` 会把
-            #     「已设置但为空」也当成未设置并替换成默认值，而空串在本字段里正是合法取值
-            #     （= 系统默认程序目录）。写成 `:-` 会让用户配的 "" 静默变成 "data"。
             DATA_DIR_VAL="${DATA_DIR-data}" TABS_ENABLED_VAL="${TABS_ENABLED:-false}" \
             PUBLIC_KEY_VAL="${PUBLIC_KEY:-}" RESOLVE_SECRET_VAL="${RESOLVE_SECRET:-}" \
+            DEBUG_VAL="${DEBUG:-false}" \
             CONTRACT_KEYS="$CONTRACT_KEYS" \
             python3 -c '
           import json, os, sys, datetime
@@ -778,6 +787,8 @@ jobs:
               "tabs_enabled": env["TABS_ENABLED_VAL"].strip().lower() == "true",
               "public_key": env["PUBLIC_KEY_VAL"],
               "resolve_secret": env["RESOLVE_SECRET_VAL"],
+              # debug：诊断日志开关（默认关）。与其它布尔一样必须是真 bool。
+              "debug": env["DEBUG_VAL"].strip().lower() == "true",
               "android_keystore_base64": ks_b64,
               "android_key_alias": alias,
               "android_keystore_password": storepass,

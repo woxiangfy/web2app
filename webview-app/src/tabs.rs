@@ -282,9 +282,9 @@ pub(crate) fn spawn_tab_with_target(
         let state = app.state::<TabManager>();
         let live = state.tabs.lock().unwrap_or_else(|p| p.into_inner()).len();
         if live >= MAX_TABS {
-            eprintln!(
+            dlog!(
                 "[tabs] 已达 tab 上限 {MAX_TABS}，拒绝新建；若这是单次点击触发的，说明存在\
-                 「异常建窗风暴」——请把 stderr 里连续的「拦截到新窗口请求」日志发出来定位"
+                 「异常建窗风暴」——请把日志里连续的「拦截到新窗口请求」记录发出来定位"
             );
             return Err(format!("tab 数量已达上限 {MAX_TABS}"));
         }

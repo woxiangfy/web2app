@@ -130,7 +130,7 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
                 let _ = app.run_on_main_thread(move || navigate_main(&a, &l, nav));
             }
             Err(msg) => {
-                eprintln!("[bootstrap] {msg}");
+                dlog!("[bootstrap] {msg}");
                 let a = app.clone();
                 let l = label.clone();
                 // 启动页仍然显示着，直接把错误态推上去（含重试按钮），

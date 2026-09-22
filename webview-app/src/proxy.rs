@@ -105,7 +105,7 @@ pub async fn start_proxy(
     // （tauri::async_runtime::spawn 返回的是 Tauri 自己的 JoinHandle 包装，没有 abort_handle()）
     let handle = tokio::task::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("本地反向代理异常退出: {}", e);
+            dlog!("本地反向代理异常退出: {}", e);
         }
     });
 
@@ -250,7 +250,7 @@ async fn proxy_handler(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        eprintln!(
+        dlog!(
             "[proxy] {method} {dbg_path} -> {dbg_status} [content-type: {dbg_ct}] [content-disposition: {dbg_cd}]"
         );
     }
@@ -368,13 +368,13 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
     let (upstream_ws, resp) = match tokio_tungstenite::connect_async(request).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[proxy] WS 上游握手失败 {dbg_path}: {e}");
+            dlog!("[proxy] WS 上游握手失败 {dbg_path}: {e}");
             return;
         }
     };
     // 诊断日志：打印上游握手实际状态。正常应为 101 Switching Protocols；若返回 4xx/5xx，
     // 说明上游在握手阶段就拒绝了（鉴权 / Origin / 路由），可据此定位拖动改序失效。
-    eprintln!("[proxy] WS 握手 {dbg_path} -> {}", resp.status());
+    dlog!("[proxy] WS 握手 {dbg_path} -> {}", resp.status());
 
     let (mut client_write, mut client_read) = socket.split();
     let (mut upstream_write, mut upstream_read) = upstream_ws.split();

@@ -71,6 +71,15 @@ const SECRET: &[u8] = match option_env!("RESOLVE_SECRET") {
     _ => b"web2app-fixed-secret-2026",
 };
 
+/// 编译期是否由环境变量提供了非空的 `RESOLVE_SECRET`（`false` = 用的是上面那串公开默认值）。
+///
+/// ⚠️ 只暴露**状态**、绝不暴露 Secret 本体：唯一用途是启动日志里多一行
+/// 「已由配置提供 / 未配置（用内置默认串）」。这条信息有实际价值 —— 未配置时所有产物共享
+/// 同一个固定密钥串，而它的失败表现是「域名数组模式下必然解密失败」且**不报错**。
+pub fn secret_is_configured() -> bool {
+    matches!(option_env!("RESOLVE_SECRET"), Some(s) if !s.is_empty())
+}
+
 /// 从一段 PEM 文本或裸 base64 解析出 Ed25519 公钥（32 字节原始公钥）。
 ///
 /// 支持两种输入：

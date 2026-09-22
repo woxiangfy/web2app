@@ -29,6 +29,7 @@ r"""打包配置 JSON 的**唯一解析实现**（Tauri / Android / Electron 三
 | tabs_enabled             | bool                  | false                               |
 | public_key               | string                | ""（app_url 为数组时必填）          |
 | resolve_secret           | string                | ""                                  |
+| debug                    | bool                  | false                               |
 | android_keystore_base64  | string                | ""（仅 Android）                    |
 | android_key_alias        | string                | ""（仅 Android）                    |
 | android_keystore_password| string                | ""（仅 Android）                    |
@@ -45,6 +46,17 @@ r"""打包配置 JSON 的**唯一解析实现**（Tauri / Android / Electron 三
 
 ⚠️ 基准必须是 **exe 所在目录**而不是进程工作目录：快捷方式的「起始位置」、命令行、拖拽启动都会改变
 cwd，用它会让同一个包在不同启动方式下把数据落到不同地方。
+
+`debug`（诊断日志开关，默认 **false** = 不输出任何日志，两壳行为一致）：
+
+| 取值    | 行为                                                                          |
+|---------|-------------------------------------------------------------------------------|
+| `false` | 不写日志文件；stdout / stderr 的诊断也一并静默（终端启动同样安静）             |
+| `true`  | 写 `<数据目录>\logs\startup.log`，并把同一批诊断同时打到 stdout / stderr       |
+
+⚠️ 它是**开关**而不是「日志级别」：关闭时没有任何落盘产物，因此「用户报双击没反应」这类问题默认
+**没有第一现场**。排障时两种打开方式：重新打包（`"debug": true`），或在命令行临时打开
+（Tauri 与 Electron 都认 `--debug`；Electron 另认环境变量 `WEB2APP_DEBUG=1`）——后者不需要重打包。
 
 **已移除**（配置里出现即报错，并给出对应改法）：
 
@@ -105,13 +117,17 @@ DEFAULTS: dict[str, object] = {
     "tabs_enabled": False,
     "public_key": "",
     "resolve_secret": "",
+    # 诊断日志开关（默认关）：false = 两壳都不写启动日志、也不输出诊断到 stdout/stderr；
+    # true = 写 <数据目录>\logs\startup.log 并同时打印。详见文件头。
+    # ⚠️ 默认必须是 false：默认开启会在用户的数据目录里留下交付物以外的文件（非期望行为）。
+    "debug": False,
     "android_keystore_base64": "",
     "android_key_alias": "",
     "android_keystore_password": "",
     "android_key_password": "",
 }
 
-BOOL_KEYS = {"proxy_enabled", "tabs_enabled"}
+BOOL_KEYS = {"proxy_enabled", "tabs_enabled", "debug"}
 # 需要保持 JSON 结构（对象/数组/标量）的字段：序列化成单行 JSON 文本进 env，
 # 供 Rust 侧以 EXTRA 编译期变量原样内联成 `window.web2appExtra = <JSON>;`。
 JSON_KEYS = {"extra"}
@@ -518,6 +534,7 @@ def _selftest_cases() -> None:
     assert m["app_name"] == "Web2App"
     assert m["title"] == "Web2App", "title 空 → 回落 app_name"
     assert m["proxy_enabled"] == "False" and m["tabs_enabled"] == "False"
+    assert m["debug"] == "False", "debug 默认必须关闭（默认开启＝往用户数据目录里塞日志文件）"
     assert m["data_dir"] == "data", "data_dir 默认是相对路径 data"
     assert m["proxy_bypass"] == "localhost;127.0.0.1;<-loopback>"
 
@@ -526,6 +543,9 @@ def _selftest_cases() -> None:
 
     # 布尔：真 true 通过
     assert build_merged({"app_url": "https://a.com", "proxy_enabled": True})["proxy_enabled"] == "True"
+    # debug 也是布尔字段：真 true 通过，"true" 字符串拒绝
+    assert build_merged({"app_url": "https://a.com", "debug": True})["debug"] == "True"
+    _expect_error({"app_url": "https://a.com", "debug": "true"}, "必须是布尔值")
     # 布尔：字符串拒绝（两壳曾对 "on" 判定相反）
     for bad in ("true", "false", "1", "yes", "on", ""):
         _expect_error({"app_url": "https://a.com", "proxy_enabled": bad}, "必须是布尔值")
@@ -611,12 +631,14 @@ def _selftest_cases() -> None:
             "app_url": ["a.com"],
             "public_key": "AAAA",
             "tabs_enabled": True,
+            "debug": True,
             "data_dir": "",
             "android_keystore_base64": "eHh4",
         })
         write_config_json(p, merged, {})
         out = json.loads(pathlib.Path(p).read_text(encoding="utf-8"))
         assert out["tabs_enabled"] is True, "config.json 里必须是真 bool"
+        assert out["debug"] is True, "debug 在 config.json 里也必须是真 bool（Electron 侧按真 bool 解析）"
         assert out["app_url"] == ["a.com"], "config.json 里数组要保持数组"
         assert "android_keystore_base64" not in out, "android_* 不应进 Windows 包的 config.json"
         assert out["data_dir"] == "", "空串必须原样落到 config.json（不被改成默认值）"
@@ -629,6 +651,13 @@ def _selftest_cases() -> None:
         write_env(env_path, build_merged({"app_url": "https://a.com", "data_dir": ""}))
         env_text = pathlib.Path(env_path).read_text(encoding="utf-8")
         assert "DATA_DIR=\n" in env_text, f"空串必须落成一行 DATA_DIR=，实际：{env_text!r}"
+        # debug 也要落进 env（Rust 侧 DEBUG 是编译期常量，Electron 侧读 config.json）
+        assert "DEBUG=False\n" in env_text, f"debug 默认必须写出一行 DEBUG=False，实际：{env_text!r}"
+        with open(env_path, "w", encoding="utf-8"):
+            pass
+        write_env(env_path, build_merged({"app_url": "https://a.com", "debug": True}))
+        assert "DEBUG=True\n" in pathlib.Path(env_path).read_text(encoding="utf-8"), \
+            "debug=true 必须落成 DEBUG=True（落成 1/on 之类会被 Rust 侧 env_bool! 白名单挡下）"
 
 
 # ---------------------------------------------------------------------------

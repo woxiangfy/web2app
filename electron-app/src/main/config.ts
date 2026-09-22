@@ -62,6 +62,18 @@ export interface AppConfig {
    */
   resolve_secret: string
   /**
+   * 诊断日志开关（默认 false = 完全不输出日志）。
+   *
+   * `false`：不写 `data\logs\startup.log`，stdout/stderr 的诊断也一并静默
+   *          （终端启动同样安静）——默认值必须是 false，否则每次启动都在用户的
+   *          数据目录里留下交付物以外的文件，而那不是期望行为。
+   * `true` ：落盘 `<data_dir>\logs\startup.log`，并把同一批诊断打到 stdout/stderr。
+   *
+   * ⚠️ 它是**开关**不是「日志级别」：关掉时没有任何第一现场，排障要么重新打包，
+   *    要么用命令行临时打开（`--debug` / 环境变量 `WEB2APP_DEBUG=1`，无需重打包）。
+   */
+  debug: boolean
+  /**
    * 数据目录。⚠️ **空串是有含义的取值**（= 系统默认程序目录），不是「未设置」。
    *   · `"data"`（默认）→ 程序所在目录（exe 目录）下的 `data\`，跟着程序走（真绿色）；
    *   · `""`           → `%APPDATA%\<app_name>`，不受程序位置影响；
@@ -120,6 +132,8 @@ export const DEFAULTS: AppConfig = {
   tabs_enabled: false,
   public_key: '',
   resolve_secret: '',
+  // 诊断日志开关：默认关（开着就会在用户数据目录里留下 startup.log，那不是期望行为）
+  debug: false,
   // 数据目录：默认 "data" = exe 所在目录下的 data\，跟着程序走（真绿色）；
   // 空串 = %APPDATA%\<app_name>（系统默认程序目录，不受程序位置影响）。
   data_dir: 'data',
@@ -362,6 +376,7 @@ export function loadConfig(root: string): LoadedConfig {
     tabs_enabled: mustBool(raw.tabs_enabled, 'tabs_enabled', DEFAULTS.tabs_enabled),
     public_key: publicKey,
     resolve_secret: toStr(raw.resolve_secret),
+    debug: mustBool(raw.debug, 'debug', DEFAULTS.debug),
     data_dir: toDataDir(raw.data_dir),
   })
 

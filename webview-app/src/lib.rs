@@ -14,6 +14,7 @@
 //! - [`save_dialog`]   Windows 原生「另存为」对话框（下载落盘位置由用户决定）
 //! - [`tray`]          系统托盘 + 设置命令 + 窗口切换
 //! - [`window_state`]  窗口几何持久化（仅桌面端）
+//! - [`debug_log`]     诊断日志（默认关闭；`dlog!` 宏 + 启动信息落盘）
 
 // 允许各平台下未被使用的编译期常量（例如 Android 上不使用的 DEVTOOLS_ENABLED 等），
 // 避免出现 dead_code 警告导致 `cargo clippy -D warnings` 在 CI 中失败。
@@ -25,10 +26,36 @@ use tauri::{Manager, RunEvent, WindowEvent};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+/// 诊断日志宏：`eprintln!` 的同形替代品，**只在 `debug` 打开时**输出。
+///
+/// ⚠️ 诊断一律走这个宏而不是 `eprintln!`：Windows 上本程序是 GUI 子系统
+/// （`main.rs` 的 `windows_subsystem = "windows"`），stderr 没有去处；而默认
+/// （`config.json` 的 `debug=false`）**不允许**输出任何日志 —— 落盘与 stderr 都归它管，
+/// 详见 [`debug_log`] 模块文档。
+/// ⚠️ 用法与 `eprintln!` 一致（首参是格式字符串字面量）。关闭时连 `format!` 都不执行。
+/// ⚠️⚠️ 宏必须定义在下面的 `mod` 声明**之前**（靠 `macro_rules!` 的文本作用域）；
+///    挪到后面会让各模块里的 `dlog!` 全部找不到 —— 那是编译错误，不会静默降级。
+macro_rules! dlog {
+    ($($arg:tt)*) => {{
+        if crate::debug_log::enabled() {
+            crate::debug_log::log_line(&format!($($arg)*));
+        }
+    }};
+}
+
+// 诊断日志（默认关闭）：开启时 `dlog!` 同时写 stderr 与 `<数据目录>\logs\startup.log`。
+mod debug_log;
+
 pub mod config;
 mod proxy;
 pub mod resolve;
 mod settings;
+
+// 清除浏览数据（缓存 / Cookie / 本地存储 …）：设置页「清除全部」按钮的后端。
+// ⚠️ 模块与命令都**不按平台 gate**：`invoke_handler` 是跨平台的注册表，Android 上少了这条
+// 命令，设置页的调用会变成「命令不存在」而不是一条能看懂的错误。平台差异收敛在模块内部
+// （非 Windows 返回明确的「不支持」）。详见该模块文档。
+mod web_data;
 
 // 启动过渡：本地启动页（splash 自定义协议）+ 注入到每个文档的加载层脚本。
 mod loading;
@@ -85,6 +112,7 @@ pub fn run() {
             settings::get_settings,
             settings::save_settings,
             settings::close_settings_window,
+            web_data::clear_web_data,
             history_nav
         ]);
 
@@ -166,6 +194,10 @@ pub fn run() {
     }));
 
     let builder = builder.setup(move |app| {
+        // ⚠️ 诊断日志要**尽早**初始化：越早越能捕获启动早期的日志。
+        //    默认（debug=false）时它是空操作 —— 不建目录、不落文件、也不打印任何东西。
+        debug_log::init(app.handle());
+
         // 载入持久化设置（文件不存在时使用默认值），写入托管状态供运行时读取。
         let initial_settings = settings::load_settings(app.handle());
         *app.state::<SettingsState>()
@@ -313,16 +345,20 @@ pub fn run() {
             // 而非整个应用启动失败。占用冲突是最常见的桌面场景，不是“环境不支持”。
             if let Some(sc) = settings::hotkey_to_shortcut(&initial_settings.wake_hotkey) {
                 if let Err(e) = app.global_shortcut().register(sc) {
-                    eprintln!("[shortcut] 唤醒快捷键注册失败（可能已被其它程序占用）：{e}");
+                    dlog!("[shortcut] 唤醒快捷键注册失败（可能已被其它程序占用）：{e}");
                 }
             }
             if let Err(e) = app
                 .global_shortcut()
                 .register(settings::settings_open_shortcut())
             {
-                eprintln!("[shortcut] 设置快捷键(Shift+F1)注册失败（可能已被其它程序占用）：{e}");
+                dlog!("[shortcut] 设置快捷键(Shift+F1)注册失败（可能已被其它程序占用）：{e}");
             }
         }
+
+        // 启动信息（落地位置见 debug_log 模块）：与 Electron 侧 `index.ts::logStartup()`
+        // 一一对应，便于两壳的日志互相印证。默认 debug=false 时这里什么都没发生。
+        log_startup(app.handle(), &initial_settings);
 
         Ok(())
     });
@@ -391,6 +427,148 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+/// 启动信息（写进诊断日志；默认 `debug=false` 时整段是空操作）。
+///
+/// 与 Electron 侧 `electron-app/src/main/index.ts::logStartup()` **一一对应**，目的是让两壳的
+/// 日志能互相印证（同一个用户报同一个问题，换壳排查时不用重新学一遍字段名）。
+///
+/// ⚠️⚠️ **绝不记凭据**：地址一律经 `debug_log::mask_url()`（隐去 `user:pass@`），
+///    Secret 只报「已配置 / 未配置」，公钥只报状态不报内容。
+fn log_startup(app: &tauri::AppHandle, settings: &settings::Settings) {
+    dlog!("[web2app] 启动信息");
+    dlog!("  分发形态      : Tauri（配置是编译期常量 —— 改配置必须重新编译/打包）");
+    dlog!("  应用名 / 标题 : {} / {}", config::APP_NAME, config::TITLE);
+    dlog!("  目标地址      : {}", describe_target());
+    #[cfg(windows)]
+    dlog!(
+        "  数据目录      : {}",
+        match config::data_dir(app) {
+            Some(d) => d.display().to_string(),
+            None => "(不可用，改用 WebView2 自身默认位置)".to_string(),
+        }
+    );
+    #[cfg(not(windows))]
+    dlog!("  数据目录      : (非 Windows：由平台自行管理)");
+    dlog!("  代理          : {}", describe_proxy());
+    dlog!("  多页签        : {}", describe_tabs());
+    dlog!(
+        "  开发者工具    : {}",
+        if config::DEVTOOLS_ENABLED {
+            "已启用（按 F12 打开）"
+        } else {
+            "未启用"
+        }
+    );
+    dlog!(
+        "  设置文件      : {}",
+        settings::settings_path(app)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(取不到配置目录)".to_string())
+    );
+    dlog!("  唤醒快捷键    : {}", hotkey_label(&settings.wake_hotkey));
+    dlog!(
+        "  托盘 / 关闭行为: {} / {}",
+        if settings.tray_enabled {
+            "已启用"
+        } else {
+            "未启用"
+        },
+        if settings.tray_enabled && settings.minimize_on_close {
+            "关闭时隐藏到托盘"
+        } else {
+            "关闭即退出"
+        }
+    );
+    dlog!(
+        "  加解密 Secret : {}",
+        if resolve_core::secret_is_configured() {
+            "已由配置提供"
+        } else {
+            "未配置（用内置默认串：域名数组模式下安全门槛较低）"
+        }
+    );
+    dlog!(
+        "  日志文件      : {}",
+        debug_log::log_file_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(debug 已开启但不可写，本次只有 stderr)".to_string())
+    );
+    dlog!("  web2appExtra  : {}", config::extra_json());
+}
+
+/// 目标地址的一行描述（**脱敏**）：域名数组只报「几个 / 都是谁」，普通 URL 隐去 userinfo。
+fn describe_target() -> String {
+    if let Some(domains) = resolve::parse_domains(config::APP_URL) {
+        let list: Vec<String> = domains
+            .iter()
+            .map(|d| resolve::normalize_domain(d.as_str()))
+            .collect();
+        return format!(
+            "{} 个跳板域名（DNS TXT 解析 + 验签解密）：{}；公钥{}",
+            list.len(),
+            list.join("、"),
+            if config::PUBLIC_KEY.trim().is_empty() {
+                "未配置（数组模式必须配，否则解析必然失败）"
+            } else {
+                "已配置"
+            }
+        );
+    }
+    debug_log::mask_url(config::APP_URL)
+}
+
+/// 代理模式的一行描述。判据与 `bootstrap::local_proxy_enabled()` 同源，别各写一份。
+fn describe_proxy() -> String {
+    if !config::PROXY_ENABLED {
+        return "未启用（直连）".to_string();
+    }
+    if bootstrap::local_proxy_enabled() {
+        return "本地反向代理（HTTP + WebSocket 统一注入 Basic 鉴权）".to_string();
+    }
+    #[cfg(windows)]
+    {
+        match config::build_proxy_args() {
+            // ⚠️ 外部代理地址里可能带 `user:pass@`，同样要脱敏后才进日志
+            Some(args) => format!("外部代理：{}", debug_log::mask_url(&args)),
+            None => "已启用但没配任何代理地址（等价于直连）".to_string(),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "已启用（非 Windows 只有本地反向代理这一条路）".to_string()
+    }
+}
+
+/// 多页签是否启用（仅 Windows 有该能力）。
+fn describe_tabs() -> &'static str {
+    #[cfg(windows)]
+    {
+        if tabs::tabs_enabled() {
+            return "已启用";
+        }
+    }
+    "未启用"
+}
+
+/// 唤醒快捷键的可读文案（空 key = 未启用）。与 Electron 侧 `hotkeyLabel()` 同形。
+fn hotkey_label(h: &settings::Hotkey) -> String {
+    if h.key.trim().is_empty() {
+        return "（未设置）".to_string();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    if h.ctrl {
+        parts.push("Ctrl");
+    }
+    if h.alt {
+        parts.push("Alt");
+    }
+    if h.shift {
+        parts.push("Shift");
+    }
+    parts.push(h.key.as_str());
+    parts.join("+")
 }
 
 /// 处理「主窗口关闭」：若“启用托盘 + 关闭时最小化到托盘”同时满足 → 隐藏到托盘；

@@ -141,6 +141,7 @@ jobs:
               "tabs_enabled": False,
               "public_key": "",
               "resolve_secret": "",
+              "debug": False,                      # 诊断日志开关，默认关（开启才写 logs\startup.log）
               "android_keystore_base64": ks_b64,
               "android_key_alias": ALIAS,
               "android_keystore_password": storepass,

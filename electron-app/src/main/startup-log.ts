@@ -23,6 +23,14 @@
  *
  * ⚠️ 轮转失败（例如沙箱禁止删除）**不**降级为「不写日志」：轮转本身只是防止
  *    文件无限增长，写不进去才是真故障。两者必须是独立的失败域。
+ *
+ * ⚠️⚠️ 2026-09-22 起它变成**可选**的（`config.json` 的 `debug`，默认 false）：
+ *    关闭时本模块什么都不做 —— 不建 `logs\` 目录、不落文件，而且**连 stdout/stderr 的诊断
+ *    也一并静默**（见 `silenceConsole()`）——因为「每次启动都在用户数据目录里留一份日志」
+ *    不是期望行为，而终端启动时的满屏输出对最终用户同样是噪声。
+ *    代价必须写清楚：上面那两大段论证的「用户侧第一现场」在默认配置下**不存在**。
+ *    所以留了运行时逃生口 —— `--debug` / 环境变量 `WEB2APP_DEBUG=1`（见 index.ts 的 DEBUG），
+ *    不必为了排障重新打包；探针与冒烟模式则内部强制打开（它们的存在意义就是取证）。
  */
 import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
@@ -79,6 +87,15 @@ const originals = {
   error: console.error.bind(console),
 }
 
+/**
+ * 原始 console（未被包装、也不受静默影响）。
+ *
+ * ⚠️ 只给「必须让人看到」的兜底路径用 —— 目前只有一处：`index.ts` 里 ready 之后
+ *    异常终止那条（`启动流程异常终止（已强制非 0 退出）`）。默认 debug 关闭时
+ *    `console.error` 是空操作，用它打印等于把唯一的线索也抹掉，所以那儿走这里。
+ */
+export const rawConsole = originals
+
 let patched = false
 
 /**
@@ -111,6 +128,24 @@ function patchConsole(path: string): void {
   wrap('log')
   wrap('warn')
   wrap('error')
+}
+
+let silenced = false
+
+/**
+ * 静默控制台（`debug=false` 的默认路径）。
+ *
+ * ⚠️ 与 `patchConsole()` 互斥、且**必须先于**可能出错的那段启动代码调用（index.ts 里紧跟
+ *    DEBUG 判定）：晚一步就会漏掉几条本该安静的输出。两者都幂等。
+ * ⚠️ 静默后 `console.*` 是空操作 ⇒ 任何「必须让人看到」的错误都要改用 `rawConsole`。
+ * ⚠️ 只替换 log/warn/error 三种（与 `patchConsole` 对齐）：console.table 之类本仓库不用。
+ */
+export function silenceConsole(): void {
+  if (silenced || patched) return
+  silenced = true
+  console.log = () => {}
+  console.warn = () => {}
+  console.error = () => {}
 }
 
 /**

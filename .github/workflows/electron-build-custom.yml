@@ -72,10 +72,10 @@ jobs:
           node-version: '22'
 
       - name: Set up pnpm
-        # 版本跟随仓库的 pnpm-workspace.yaml（allowBuilds / nodeLinker 是 pnpm 10 起的语法）
-        uses: pnpm/action-setup@v4
+        # 版本跟随仓库的 pnpm-workspace.yaml（allowBuilds / nodeLinker 是 pnpm 12 起的语法）
+        uses: pnpm/action-setup@v6
         with:
-          version: '10'
+          version: '12'
 
       - name: Install Rust toolchain
         # sidecar 是 Rust 二进制（`crates/proxy-server`），与 Tauri 侧同一份源码。
@@ -117,6 +117,18 @@ jobs:
           if [ "$magic" != "89504e470d0a1a0a" ]; then
             echo "::error::icon_url 下载的不是 PNG 文件（文件头=$magic）"; exit 1
           fi
+          # ⚠️⚠️ 同一张图必须**同时**喂给托盘，否则「exe/任务栏是新图标、托盘还是默认图标」：
+          #    托盘图标取的是 `resources/icons/icon.png`，而那份由 electron-builder.yml 的
+          #    extraResources 从 `../webview-app/icons/icon.png`（**仓库默认图标**）拷进包。
+          #    托盘不是从 exe 的资源段取图标的，所以只设 `-c.win.icon` 对托盘**无效**
+          #    （这正是「托盘图标不是定义的 icon_url」的根因）。
+          #    Tauri 侧不存在这个问题 —— 它跑 `cargo tauri icon icon-custom.png`，整套 icons/
+          #    都会被重新生成（托盘取 default_window_icon）。这里就照抄那个做法：直接覆盖单一
+          #    真源，让 extraResources 拷进包里的那一份就是它。
+          #    CI 工作区是一次性的，覆盖被版本控制的文件没有副作用；本地 `pnpm run dist`
+          #    不经过这一步，仍用仓库默认图标。
+          cp build/icon.png ../webview-app/icons/icon.png
+          echo "托盘图标已同步为同一张图（webview-app/icons/icon.png）"
           echo "ICON_PNG=build/icon.png" >> "$GITHUB_ENV"
 
       - name: 编译 TypeScript + 铺打包资源

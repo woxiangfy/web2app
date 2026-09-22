@@ -84,6 +84,11 @@ export interface SettingsWindowDeps {
    * 抛异常表示失败，异常消息会原样显示在设置页上。
    */
   saveSettings: (next: Settings) => void
+  /**
+   * 清除全部浏览数据（缓存 / Cookie / 本地存储 …）。返回给设置页展示的一句话；
+   * 抛异常表示失败。实现见 `web-data.ts` —— 与 Tauri 版的 `clear_web_data` 对齐。
+   */
+  clearWebData: () => Promise<string>
   /** 设置窗用的 preload 绝对路径 */
   preloadPath: string
   /** 设置页 HTML 源码；null 时用兜底页 */
@@ -97,6 +102,10 @@ let settingsWin: BW | null = null
  *
  * ⚠️ 全部用 `handle`（返回 Promise）：设置页靠 `await` 拿结果，用 `on` 的话
  *    保存失败在界面上完全无声 —— 与主窗口按钮那条教训是同一个。
+ *
+ * ⚠️ 命令名必须与 `webview-app/dist/settings.html` 里 `invoke(...)` 的字面量逐字一致，
+ *    且要同时加进 `settings-preload.ts` 的 ALLOWED 白名单 —— 三处任一漏改，
+ *    表现都是「按钮点了没反应 / 报未授权命令」，而页面本身看不出任何异常。
  */
 export function registerSettingsIpc(deps: SettingsWindowDeps): void {
   ipcMain.handle('tauri:get_settings', () => deps.getSettings())
@@ -107,6 +116,8 @@ export function registerSettingsIpc(deps: SettingsWindowDeps): void {
     deps.saveSettings(normalizeIncoming(raw as Record<string, unknown>))
     return null
   })
+
+  ipcMain.handle('tauri:clear_web_data', () => deps.clearWebData())
 
   ipcMain.handle('tauri:close_settings_window', () => {
     closeSettingsWindow()

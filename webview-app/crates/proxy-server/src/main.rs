@@ -25,6 +25,27 @@
 //! ⚠️ 握手那行必须 `flush`：stdout 在管道上是块缓冲的，不 flush 宿主会一直等（Windows 上尤其明显）。
 //! ⚠️ 若 stdin 是终端（人工手动运行），不启用 EOF 监视 —— 否则一个人的交互式终端会立刻被判成 EOF。
 
+// ⚠️⚠️ 共享源码（`proxy.rs` / `resolve.rs`）里用 `dlog!` 写诊断。主 crate 的同名宏把输出落进
+// `logs\startup.log`（主程序是 GUI 子系统，`eprintln!` 没有任何去处），但 **`macro_rules!` 的作用域
+// 是 crate 级的**：不写 `#[macro_export]` 时它只在**定义它的 crate** 内可见，而共享源文件被本 bin
+// 用 `#[path]` 引进来时算**本 crate** 的模块 ⇒ 主 crate 那份定义在这里根本看不见
+// （实测报 `error: cannot find macro 'dlog' in this scope`，加 `crate::` 全限定也救不了，
+// 因为找不到的是**宏名本身**，不是展开体里的路径）。
+// 所以本 bin 必须自带一个同名宏 —— 文本作用域要求它**声明在 `mod proxy;` 之前**。
+//
+// 为什么展开成裸 `eprintln!`、这里不再判一次 debug：
+//   本进程是**控制台进程**，stderr 由宿主逐行读走（`electron-app/src/main/sidecar.ts` 的
+//   `log` 回调，宿主传的是 `(line) => console.log(line)`），再按**宿主的** `debug` 决定去向 ——
+//   关闭时宿主的 `console.log` 是空操作，这些行不会落到任何地方；打开时才同时进 stdout 与
+//   `logs\startup.log`。即**门控归宿主**。在这里再复制一份「debug 判定」只会多出一个可能与宿主
+//   不一致的真值来源，而「同一份配置在当前壳里判定相反」正是本项目吃过亏的那类缺陷
+//   （见 docs/packaging-config.md §3.3 的 `"on"`）。
+macro_rules! dlog {
+    ($($arg:tt)*) => {{
+        eprintln!($($arg)*);
+    }};
+}
+
 // 零重写复用：直接以上层 crate 的源文件为本模块（见文件头说明）。
 // 路径相对本文件所在目录：crates/proxy-server/src/ → ../../../src/
 #[path = "../../../src/proxy.rs"]

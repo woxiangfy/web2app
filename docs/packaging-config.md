@@ -29,7 +29,7 @@
 
 ## 2. 字段总表
 
-共 **17 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
+共 **18 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
 
 | 字段 | 类型 | 默认值 | 平台 | 含义 |
 |---|---|---|---|---|
@@ -44,6 +44,7 @@
 | `proxy_bypass` | string | `"localhost;127.0.0.1;<-loopback>"` | 仅 Windows | 不走代理的地址，**分号分隔** |
 | `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。见 §4.3 |
 | `tabs_enabled` | **`bool`** | `false` | 仅 Windows | 多页签模式（Electron 亦可）；Android 忽略 |
+| `debug` | **`bool`** | `false` | 全平台 | 诊断日志开关：`true` = 写 `<数据目录>\logs\startup.log` 并同时打印；`false` = **不建目录、不写文件，控制台输出也一并静默**。见 §3.5 |
 | `public_key` | string | `""` | 全平台 | Ed25519 公钥（裸 base64 或 SPKI PEM）。**`app_url` 为数组时必填** |
 | `resolve_secret` | string | `""` → 代码内置默认 | 全平台 | AES 对称 Secret，须与服务端生成密文时一致。⚠️ **编译期**注入 |
 | `android_keystore_base64` | string | `""` | 仅 Android | keystore(.jks/.keystore) 的 base64；优先于仓库 Secrets |
@@ -132,7 +133,7 @@ AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自�
 同一份配置里写 `"on"`，两个壳的判定**相反**。这类缺陷不报错、只在运行时表现为行为差异，
 是最难查的一类。**现在字符串一律拒绝**，歧义在打包期就消灭。
 
-哪些字段是布尔：`proxy_enabled`、`tabs_enabled`。
+哪些字段是布尔：`proxy_enabled`、`tabs_enabled`、`debug`。
 
 > ⚠️ 数据目录**曾经也是布尔**（旧字段 `data_dir_default`），现已改成**字符串** `data_dir`——
 > 布尔只能表达「二选一」，而这个概念需要表达「哪个相对路径 / 哪个绝对路径 / 用系统目录」。
@@ -158,6 +159,61 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
   字符串模式只走 direct / proxy 两条路，`SECRET`（`resolve-core::derive_key` 的唯一消费者）
   **没有任何调用点** ⇒ 此时告警属于「狼来了」，会把真该修的配置问题淹掉。
 
+### 3.5 `debug` —— 诊断日志开关（不是「日志级别」）
+
+两态开关，管的是「有没有诊断输出」这件事本身：
+
+| 取值 | 行为 |
+|---|---|
+| `false`（**默认**） | 不建 `logs\`、不写文件；**控制台输出也一并静默**（Electron 侧 `console.log/warn/error` 被换成空函数） |
+| `true` | 写 `<数据目录>\logs\startup.log`，**并且**照常打印到 stdout / stderr |
+
+- **为什么是布尔而不是 `off/error/info/debug` 那种级别**：分级会让默认值变成「有一条输出但不告诉你」。
+  排查时最先要回答的问题是「**到底有没有日志**」，四态里没有哪一态能一眼回答，两态可以。
+- **默认必须是 `false`**：默认开会在**用户的数据目录里留下交付物以外的文件**（`data\logs\`）。
+  用户拿到的应该是「一个程序」，不是「一个程序 + 一份他从没要过的日志」。
+  ⚠️ 两壳都曾踩过这个坑：Electron 侧此前**无条件**落盘（2026-09-18 引入），Tauri 侧则根本
+  没有出口（GUI 子系统下 `eprintln!` 等于没有输出）。现在统一到同一个开关。
+- **运行时逃生口**（不改配置、不重新打包，用于现场排障）：
+  - 命令行加 `--debug`；
+  - 或设环境变量 `WEB2APP_DEBUG=1`（真值白名单与 `env_bool!` 逐字一致：`1` / `true` / `yes`）。
+- ⚠️ **两个环境变量名不是一回事，别混**：
+
+  | 名字 | 谁在用 | 什么时候读 |
+  |---|---|---|
+  | `DEBUG` | **打包期**注入（`write_env` 写一行 `DEBUG=True`），对应 `config.rs` 的编译期常量 | 编译期（`option_env!`） |
+  | `WEB2APP_DEBUG` | **运行期**逃生口 | 每次启动（`debug_log::enabled()` / Electron 的 `process.env`） |
+
+  打包期的名字沿用「字段名大写」的既有规则（`TABS_ENABLED` / `PROXY_ENABLED` 同理），
+  不为此搞特例；运行期那个特意加了 `WEB2APP_` 前缀 —— `DEBUG` 是 shell / Node / Python / 大量库
+  都在用的通用名，外层环境里随便一个 `DEBUG=1` 就会让交付物开始写日志，属于「莫名其妙多个文件」。
+- **两壳必须同义**：Tauri 侧实现是 `webview-app/src/debug_log.rs`（`dlog!` 宏），
+  Electron 侧是 `electron-app/src/main/startup-log.ts`；落点规则都遵循 §4.3 的 `data_dir` 规则
+  ⇒ **`data_dir` 一改，两壳的日志位置一起改**。
+- **唯一例外**：Electron 的探针（`--probe`）与冒烟（`--smoke`）**内部强制打开** debug。
+  这两个模式的全部结论来自 stdout，不能因为「默认关日志」而自检失声。
+- **sidecar（`w2a-proxy.exe`）自己不做门控**：它是**控制台进程**，`stderr` 由宿主逐行读走
+  （`sidecar.ts` 的回调 → `index.ts` 的 `log: (line) => console.log(line)`），再按**宿主的**
+  `debug` 决定去向 —— 关闭时宿主的 `console.log` 是空操作，这些行不落到任何地方；打开时才进
+  stdout 与 `startup.log`。所以那边共享源码里的 `dlog!` 直接展开成裸 `eprintln!`：**门控归宿主**，
+  在 sidecar 里再复制一份判定只会多出第二个可能与宿主不一致的真值来源（§3.3 的 `"on"` 就是这么来的）。
+  > 实现坑：`macro_rules!` 不 `#[macro_export]` 时**只在定义它的 crate 内可见**，而共享源文件被
+  > sidecar 用 `#[path]` 引进来算 sidecar 自己的模块 ⇒ 主 crate 那份 `dlog!` 在 sidecar 里
+  > **根本看不见**（`cannot find macro dlog`，加 `crate::` 全限定也无效 —— 找不到的是宏名本身）。
+  > 因此 `crates/proxy-server/src/main.rs` 里自带一个同名宏，且必须声明在 `mod proxy;` **之前**。
+
+### 3.6 日志文件契约（两壳逐字相同）
+
+| 项 | 约定 |
+|---|---|
+| 文件名 | `startup.log`（轮转后的旧文件 `startup.prev.log`，**只留一代**） |
+| 轮转阈值 | 1 MiB，且在**启动时**检查（运行期不 stat，避免每行一次系统调用） |
+| 写失败 | **fail-open**：目录建不出 / 文件打不开 ⇒ 本次静默跳过，**不影响启动**（为了记日志让应用起不来是本末倒置） |
+| 凭据 | **绝不记凭据**：地址一律去掉 `user:pass@`（`mask_url`），Secret 只报「已配置 / 未配置」 |
+
+> 文件名、轮转阈值两处常量与 Electron 侧刻意**同值**（`debug_log.rs::LOG_FILE_NAME` /
+> `MAX_BYTES` ↔ `startup-log.ts::LOG_FILE_NAME` / `MAX_BYTES`）——「同一份契约」不能只写在文档里。
+
 ---
 
 ## 4. 多端行为对照
@@ -171,6 +227,7 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 | `app_name` | 安装包名 / 数据目录名 / **Android 包名**（派生） | 同左 | `productName` / `%APPDATA%` 子目录名 |
 | `title` | 窗口标题 + 托盘提示 + 「设置」窗标题 | **应用名称**（桌面 label） | 窗口标题 + 托盘提示 |
 | `tabs_enabled` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
+| `debug` | ✅ 写 `<数据目录>\logs\startup.log` | ✅ 写应用私有目录下的 `logs\startup.log` | ✅ 写 `<数据目录>\logs\startup.log`；探针 / 冒烟**强制开** |
 | `proxy_*` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
 | `data_dir` | 见 §4.3 | ❌ 忽略（始终私有目录） | 见 §4.3 |
 | `icon_url` | 构建期 `cargo tauri icon` | 同左 | 构建期交给 electron-builder 转 ico |
@@ -221,7 +278,8 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
    > 企业策略下的 `Program Files` 都可能「建目录成功但写文件失败」。
 4. **两壳的「系统默认」不是同一个磁盘位置**（Tauri 在 `%LOCALAPPDATA%`、Electron 在
    `%APPDATA%`），这是各自框架的惯例位置；但**语义完全相同**：由 `app_name` 命名、
-   与程序位置无关。⚠️ Electron 的日志目录 `<dataDir>\logs` 也随之移动（Tauri 无文件日志）。
+   与程序位置无关。⚠️ **两壳的日志目录 `<dataDir>\logs` 都随之移动** —— 这不再是 Electron 独有
+   （见 §3.5）：`data_dir` 一改，两边的日志位置**一起**改。Android 不走这套规则，用应用私有目录。
 
 > **与旧字段的对照**：旧的 `data_dir_default`（布尔）两壳**同名反义** —— Tauri `false` =
 > `%LOCALAPPDATA%`、Electron `false` = exe 同级 `data\`，仅凭 JSON 看不出来。
@@ -251,6 +309,7 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 | 未知字段 | **硬失败**，附近似名建议（`proxy_enable` → 是否想写 `proxy_enabled`？） |
 | `window_title` / `data_dir_default` | **硬失败**，提示改用 `title` / `data_dir`，并把新旧值对应关系讲清楚 |
 | 布尔写成字符串 | **硬失败**，给出正确/错误写法对照 |
+| `debug` 为 `true` | **不打 warning**，但要清楚：产物会在用户数据目录里留下 `logs\`（§3.5/§3.6）。发布前确认这是有意为之 |
 | `data_dir` 不是字符串 | **硬失败**（`true` 若被宽容地转成字符串，会静默建出一个名叫 `True` 的目录） |
 | `data_dir` 含 NUL | **硬失败** |
 | `data_dir` 含 `<>"\|?*` | warning（Windows 上建目录会失败，届时自动回退系统默认目录） |
@@ -336,7 +395,7 @@ python3 .github/scripts/check-workflows.py                                # work
 | `public_key` | `PUBLIC_KEY`（Secret 优先） |
 | `resolve_secret` | `RESOLVE_SECRET`（Secret 优先） |
 | `proxy_enabled` / `proxy_http` / `proxy_https` / `proxy_bypass` | 同名大写 |
-| `data_dir` / `tabs_enabled` | 同名大写 |
+| `data_dir` / `tabs_enabled` / `debug` | 同名大写（`DEBUG` 未配置 = 关闭） |
 | `android_*` | `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` |
 
 > ⚠️ `EXTRA` 与 `ICON_URL` 历史上在 `release.yml` 里**缺失**，等于 Release 路径下
@@ -357,8 +416,8 @@ python3 .github/scripts/check-workflows.py                                # work
 1. **删掉 `window_title`** —— 若与 `title` 并存，确认保留哪个；只留 `title`。
 2. **`data_dir_default` 改成 `data_dir`（字符串）** —— `false` → `"data"`、`true` → `""`。
    旧字段出现会**直接报错**并给出这个对应关系，照报错改即可。
-3. **布尔去掉引号** —— `"false"` → `false`，`"true"` → `true`
-   （现在只剩 `proxy_enabled` / `tabs_enabled` 两个布尔字段）。
+3. **布尔去掉引号** —— `"false"` → `false`、`"true"` → `true`
+   （现在有三个布尔字段：`proxy_enabled` / `tabs_enabled` / `debug`）。
 4. **`app_url` 数组改成真数组** —— `"[\"a.com\",\"b.com\"]"` → `["a.com","b.com"]`。
 
 **模板**：
@@ -389,6 +448,8 @@ python3 .github/scripts/check-workflows.py                                # work
 | 字段 / 类型 / 默认值 / 校验 | `.github/scripts/parse-packaging-config.py`（`DEFAULTS` / `BOOL_KEYS` / `REMOVED_KEYS` / `selftest`） |
 | Electron 运行期对等实现 | `electron-app/src/main/config.ts`（`DEFAULTS` / `mustBool` / `toAppUrl` / `rejectUnknownKeys`） |
 | 编译期常量 | `webview-app/src/config.rs` |
+| 落盘日志（Tauri 侧） | `webview-app/src/debug_log.rs`；`dlog!` 宏定义在 `src/lib.rs`，sidecar 侧的同名宏在 `crates/proxy-server/src/main.rs` |
+| 落盘日志（Electron 侧） | `electron-app/src/main/startup-log.ts`；装配（`DEBUG` 判定 / `silenceConsole()`）在 `src/main/index.ts` |
 | 打包入口（Tauri / Android） | `.github/workflows/build-custom.yml` |
 | 打包入口（Electron 绿色版） | `.github/workflows/electron-build-custom.yml` |
 | 打 tag 自动发布 | `.github/workflows/release.yml` |

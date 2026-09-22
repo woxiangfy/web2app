@@ -15,7 +15,7 @@
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
 | 架构 | cargo workspace 三 crate，职责边界清晰 |
 | 代码规模 | 主 crate `src/` 19 个文件（含 4 个注入脚本）+ 3 个 crate + 5 条 CI/打包工作流 |
-| 当前状态 | 单测全绿（resolve-core 13 + resolve-tool 7 + 主 crate 44 = 64 条）；双壳契约探针 112/112、多页签 23/23 |
+| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 13 + 52 通过，另有 3 + 3 条 ignored）；双壳契约探针 113/113、多页签 23/23 |
 
 ### crate 职责
 

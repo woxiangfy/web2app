@@ -1145,6 +1145,23 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     )) as string
     p.check('未授权命令被垫片拒绝', denied === 'rejected', denied)
 
+    // 清除缓存 / Cookie（设置页「清除全部」）：走完整链路
+    // 设置页 → 垫片白名单 → IPC 注册名 → 处理器 → 返回。
+    // ⚠️ 探针下处理器走**桩**分支（index.ts 传 `probe: PROBE`，见 web-data.ts）：
+    //    探针跑在用户自己的机器上，把人家真实的登录态与缓存清掉是不可接受的副作用。
+    //    但「页面字面量 / 垫片白名单 / IPC 命令名」三处逐字一致这条最容易断的链，
+    //    桩一样能验 —— 而它断掉时的表现正是「按钮点了没反应」。
+    const cleared = (await swin.webContents.executeJavaScript(
+      'window.__TAURI_INTERNALS__.invoke("clear_web_data")' +
+        '.then(function(r){return "ok:"+String(r)}).catch(function(e){return "err:"+String(e)})',
+      true
+    )) as string
+    p.check(
+      '设置页可调用 clear_web_data（清除缓存 / Cookie 链路打通）',
+      cleared.startsWith('ok:'),
+      cleared
+    )
+
     ctx.m3.closeSettingsWindow()
     const gone = await waitUntil(async () => !ctx.m3.getSettingsWindow(), 4000)
     p.check('设置窗可关闭', gone, '4s 内未关闭')

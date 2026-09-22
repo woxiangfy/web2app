@@ -19,7 +19,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 功能 | 说明 | 平台 |
 | --- | --- | --- |
 | 内嵌网址 | 默认打开编译时写死的网址，全屏/可缩放窗口 | Windows / Android |
-| 设置界面 | 按 **Shift+F1** 打开；可配置唤醒快捷键、托盘开关、关闭行为，设置持久化到 `settings.json` | Windows |
+| 设置界面 | 按 **Shift+F1** 打开；可配置唤醒快捷键、托盘开关、关闭行为（持久化到 `settings.json`），并可一键**清除缓存 / Cookie**（全清） | Windows |
 | 系统托盘 | 可开关；最小化到托盘，左键显隐、菜单可退出（受设置控制） | Windows |
 | 全局快捷键 | 一键切换窗口显示 / 隐藏；按键与修饰符在设置里配置（**默认不启用**） | Windows |
 | Basic 鉴权 | 支持 `https://user:pass@host`，自动注入 `Authorization` 头 | Windows / Android |
@@ -59,10 +59,25 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
    - 保存后立即生效；不能与「打开设置(Shift+F1)」冲突。
 2. **是否启用托盘图标**：关闭后启动不创建托盘图标（关闭窗口即退出）。
 3. **关闭窗口后最小化到托盘**：勾选且同时启用托盘时，点关闭按钮 = 最小化到托盘；否则关闭窗口即退出应用。
+4. **清除缓存与 Cookie**：一个按钮，**只有全清**（刻意不做分项选择）。一次清空本应用的全部本地数据
+   —— 缓存、Cookie（含登录状态）、Local Storage / IndexedDB、Service Worker 等，随后重新加载内容页，
+   需要重新登录。⚠️ 后端命令 `clear_web_data` **仅 Windows 桌面版有实现**，其它平台返回明确的
+   「不支持」错误（宁可报错，也不做「显示已清除、其实什么都没清」的假成功）。
+   实现见 `src/web_data.rs`（WebView2 原生 `ICoreWebView2Profile2::ClearBrowsingDataAll`）。
+   ⚠️ 两处**已真机实测**的坑（取证见 `examples/probe_clear_data.rs`）：
+   ①WebView2 的**完成回调不可靠** —— 探针 10+ 次运行里**一次都没执行过**，而数据**照样被清掉**
+   ⇒ 本命令**只在回调带回错误时报失败**，回调不来只如实说明、照常重载；
+   ②清除刚结束时该 WebView 的**导航会被静默丢弃、甚至直接阻塞** ⇒ 重载前刻意留 1.2s 落定
+   （`RELOAD_SETTLE`）。⚠️ 「清完重载一定生效」这条**本机未取证**，待真机目视。
 
 > 设置保存在配置目录下（`%APPDATA%\<app_name>\settings.json`，`app_name` 默认 `Web2App`），为 JSON 文件，下次启动自动读取。
+> ⚠️ 只有上面 1–3 项落在 `settings.json` 里；**第 4 项不落盘** —— 它是一次性动作，不是配置项。
 
-界面后续可在 `dist/settings.html` 上继续扩展更多能力（同一份 Rust 命令通道 `get_settings` / `save_settings` 即可复用）。
+界面后续可在 `dist/settings.html` 上继续扩展更多能力（Rust 命令通道 `get_settings` / `save_settings` /
+`close_settings_window` / `clear_web_data` 即可复用）。
+⚠️ 该 HTML 是**双壳共用的单一真源**：Electron 壳靠 `settings-preload.ts` 的命令白名单 +
+`settings-window.ts` 的 IPC 名对接，新增命令时**「页面字面量 / 白名单 / IPC 名」三处必须逐字一致**，
+否则表现是「按钮点了没反应」——探针与冒烟各有一条断言守着这个契约。
 
 ---
 
@@ -147,6 +162,10 @@ const EXTRA: &str = "{}";
 // 多页签（仅 Windows）：默认关闭
 const TABS_ENABLED: bool = false;
 
+// 诊断日志（全平台）：**默认关闭**。true = 写 <数据目录>\logs\startup.log 并同时打印；
+// false = 不建目录、不落文件，控制台输出也一并静默。运行期逃生口：`--debug` / WEB2APP_DEBUG=1
+const DEBUG: bool = false;
+
 // 动态解析（app_url 为域名数组时用）：Ed25519 公钥，裸 base64 或 SPKI PEM
 const PUBLIC_KEY: &str = "";
 
@@ -176,6 +195,49 @@ const PROXY_BYPASS: &str = "localhost;127.0.0.1;<-loopback>";
 **默认不启用**。
 
 改完直接 `cargo build`（见下文）。
+
+### 诊断日志（`debug`，**默认关闭**）
+
+⚠️ **Windows 上它是 GUI 子系统程序**（`src/main.rs` 的 `windows_subsystem = "windows"`）：双击运行时
+没有控制台可挂，`eprintln!` 的输出**没有任何去处**。于是「双击没反应 / 打开的是 example.com /
+标题不对」这类反馈在用户侧**零证据**，只能远程猜。
+
+`debug = true` 时把这些诊断同时落一份盘（`src/debug_log.rs`）：
+
+| 平台 | 位置 |
+|---|---|
+| Windows | `<数据目录>\logs\startup.log`（目录规则同 `DATA_DIR`，默认 `<exe 所在目录>\data\logs\`） |
+| Android | `/data/data/<pkg>/logs/startup.log`（应用私有目录，见「常见问题」） |
+
+**为什么不默认开**：每次启动都在用户的数据目录里留下交付物以外的文件，不是期望行为。代价要写清楚：
+上面那条「用户侧第一现场」在默认配置下**不存在**。所以留了**运行时逃生口**（交付出去的包也能临时
+取证，不必重新编译）：
+
+```powershell
+.\web2app.exe --debug                # 或
+$env:WEB2APP_DEBUG = "1"; .\web2app.exe
+```
+
+> ⚠️ 逃生口的环境变量是 **`WEB2APP_DEBUG`**（运行期），**不是** `DEBUG`。后者是**打包期**注入用的
+> 名字（沿用「字段名大写」规则，同 `TABS_ENABLED`）；`DEBUG` 在开发机上是常见变量名，把它当逃生口
+> 会让本地 release 构建莫名其妙开始写日志。
+
+契约（改这个模块时别破坏）：
+
+* **文件名 / 轮转与 Electron 侧逐字相同**：`startup.log`、1 MiB 轮转、只留 `startup.prev.log` 一代
+  —— 双壳同一份契约（`docs/packaging-config.md` §3.5 / §3.6）。
+* **fail-open**：目录建不出 / 文件不可写 ⇒ 本次静默跳过，**绝不影响启动**（为了记日志让应用起不来
+  是本末倒置）。
+* **绝不记凭据**：地址一律经 `mask_url` 去掉 `user:pass@`；Secret 只报「已配置 / 未配置」。
+* **零外部依赖**：只用 std（本仓库不引 `log` / `env_logger`），时间戳自己格式化成 ISO-8601 UTC。
+* 关闭时 `dlog!` **直接短路**：连 `format!` 都不做 —— 代理是热路径（每条响应都会走一遍），
+  不能为了「反正不输出」而白拼字符串。
+
+取证：
+
+```powershell
+Get-Content .\data\logs\startup.log -Tail 40
+```
 
 ---
 

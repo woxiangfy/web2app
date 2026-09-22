@@ -11,12 +11,12 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 112 条） |
+| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 113 条） |
 | M2 sidecar（本地反向代理 + 加密解析） | ✅ | 复用 Rust `proxy.rs` / `resolve.rs`，零重写 |
 | M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
-| M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
+| M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（**仅 `debug` 打开时才有**，见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
 | **M4 下载接管** | ⬜ **未实现** | `will-download` 目前只记日志、下载走 Chromium 默认「另存为」；对标 Tauri `save_dialog.rs` 的自绘对话框待做 |
-| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **112/112** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，112 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
+| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **113/113** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，113 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
 | **M7 CI 流水线** | ⬜ **未落库** | 本目录没有 CI 配置（仓库根 `.github/workflows/` 那几条只服务 Tauri 版），目前只能本地跑 |
 
 > 除上表三项外，后续「新增/改动会影响哪些验证」见文末「验证清单」——
@@ -34,8 +34,8 @@ pnpm run build       # 只编译到 out/
 
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe（本地代理 + 加密解析）
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json（pack/dist 会自动调用）
-pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘，退出码即结论
-pnpm run probe       # 兼容契约探针：112 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
+pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘（内部强制 debug=true），退出码即结论
+pnpm run probe       # 兼容契约探针：113 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
 pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 + 截一张 PNG（改标题栏/滚动条/几何后看它）
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
@@ -198,12 +198,30 @@ Electron 会**以纯 Node 身份启动**：
 > 与 Tauri 版的差异：`data_dir=""` 时 Tauri 写 `%LOCALAPPDATA%\<app_name>`，Electron 写 `%APPDATA%\<app_name>`。
 > 这是有意的——Electron 版定位为真绿色版（默认 `"data"` 根本不落系统盘）。部署文档需明示这一点。
 
-## 日志目录（`data\logs\startup.log`）
+## 日志目录（`data\logs\startup.log`，**`debug` 打开时才有**）
 
 ⚠️ **Windows 上 `electron.exe` 是 GUI 子系统程序**：用户双击运行时 `console.log` 没有任何去处
 （没有控制台可挂）；portable 单文件形态更彻底——自解压包装器会吞掉内层进程的 stdout。
 于是「双击没反应 / 打开的是 example.com / 标题不对」这类反馈在用户侧**零证据**，只能远程猜。
-所以启动后立刻把 console 的三路输出同时落一份盘（`src/main/startup-log.ts`）：
+
+**但「默认就落盘」同样不是期望行为**：它会在用户的交付目录里凭空多出 `data\logs\`，
+而绝大多数使用者根本不需要它。所以 2026-09-22 起日志改成**配置开关**：
+
+| 开关 | 效果 |
+|---|---|
+| `"debug": false`（**默认**） | 不建 `logs\`、不写任何文件，**控制台三路输出也一并静默** |
+| `"debug": true` | 写 `<数据目录>\logs\startup.log`，同时照常打印到 stdout / stderr |
+
+**运行时逃生口**（不改配置、不重新打包，用于现场排障）：命令行加 `--debug`，或设环境变量
+`WEB2APP_DEBUG=1`。两者任一生效即等同 `debug=true`。
+
+> 「完全静默」是有意选的：GUI 程序本来就没有控制台，`debug=false` 时把 `console.log` / `warn` /
+> `error` 换成空函数，避免这些输出被 portable 包装器或父进程捕获后又落到**别处**（CI 日志、
+> 用户的重定向文件……）。**关掉就要关干净。**
+> **唯一例外**：探针（`--probe`）与冒烟（`--smoke`）**内部强制打开** debug —— 它们的结论全靠
+> stdout，绝不能因为「默认关日志」而自检失声。
+
+开日志时，启动后立刻把 console 的三路输出同时落一份盘（`src/main/startup-log.ts`）：
 
 | 形态 | 日志位置 |
 |---|---|
@@ -233,6 +251,9 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 `pnpm run smoke` 有一条硬断言：日志文件必须**已经包含 `[web2app] 启动信息`**，不满足即退出码非 0。
 只判「文件存在」是不够的——一个只写了表头的空文件同样会骗过断言。
+（冒烟内部强制 `debug=true`，所以这条断言与「默认关闭」不冲突；若 `fileLog` 拿到 `null`，
+断言会直接报「未启用（冒烟模式本应强制打开 debug，出现即 bug）」——把「开关接错」与
+「写盘失败」两类原因分开。）
 
 > 负向对照（2026-09-18 实测）：把日志目录的父级设成文件 ⇒ `ok=false / ENOTDIR`；
 > 把 `startup.log` 建成目录 ⇒ `ok=false / EISDIR`。两次调用**都不抛异常**，
@@ -259,7 +280,8 @@ Get-Content .\data\logs\startup.log -Tail 40
 * 这是**预期行为**，既不是打包失败也不是病毒：`signing/` 下那份证书只服务 Tauri 侧。
 * 想根治只有两条路——买代码签名证书并配 `win.certificateFile`，或用组织内的白名单 / 域策略放行。
   ⛔ **不要**教用户关掉 SmartScreen（那是全局降安全，代价远大于收益）。
-* 交付话术建议照抄上一段，并附上 `data\logs\startup.log` 的位置：
+* 交付话术建议照抄上一段，并附上日志的位置（⚠️ `data\logs\startup.log` **只在 `debug` 打开时才有**；
+  默认关闭时让用户临时用 `--debug` 复现一次再收日志）：
   「点了没反应」十有八九是被 SmartScreen 拦在门外，而不是程序本身有问题。
 
 ## 配置文件
@@ -412,7 +434,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 | `bodyScrollable` | `true` | 页面照常能滚 |
 | `window.scrollTo(0,200)` | `scrollY≈200` **且** scroll 事件触发 | 转发没坏（事件异步，要等一帧再读） |
 
-`pnpm run probe`（112 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
+`pnpm run probe`（113 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
 ⚠️ **不要**再用 `rect.width == innerWidth` 或「滚动条宽度归零」当判据 —— 前者测不出覆盖，
 后者把缺陷锁死成期望值。**改完必须重新打包**：脚本在 `resources/inject/titlebar.js` 里，
 跑旧的 exe 永远看不到修复。
@@ -466,7 +488,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 
 ## 兼容契约探针（`pnpm run probe`）
 
-`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **112 条**契约，
+`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **113 条**契约，
 **退出码即结论**（不通过则非 0，可以直接挂 CI）。夹具全部内联在代码里，不落盘、不进打包产物。
 
 覆盖范围：启动页内联注入、标题栏几何与配色、38px 让位（fixed / sticky / `100vh` / `inset:0` 四种页面形态）、
@@ -546,7 +568,7 @@ M3 之后还覆盖**系统集成**（48 条，即第 11–15 节）：
 | `proxy.rs` / `resolve.rs`、sidecar 契约 | `probe`（内含 sidecar 三连断言）+ `cargo test` | 代理是两壳共用的 Rust 源码，改一处两个壳一起变 |
 | 设置 / 托盘 / 快捷键 / 窗口几何链路 | `probe` | 探针走的是与设置窗**完全相同**的那批函数，不是复刻实现 |
 | `config.ts`、路径装配（`portable.ts`） | `smoke` | 绿色版路径与配置解析全是「错了也静默」，`smoke` 会把生效路径打出来 |
-| 启动日志（`startup-log.ts`）、`data\logs` 落点 | `smoke` | 「日志没写出来」同样是静默故障，而它是用户侧唯一的证据来源；`smoke` 断言文件已含 `[web2app] 启动信息` |
+| 启动日志（`startup-log.ts`）、`data\logs` 落点、`debug` 开关与 `silenceConsole()` | `smoke` | 「日志没写出来」同样是静默故障，而它是用户侧唯一的证据来源；`smoke` 断言文件已含 `[web2app] 启动信息`（冒烟内部强制 `debug=true`）。⚠️ 改 `debug` 默认值或静默逻辑时必须连带看探针 —— `--probe` 同样强制开，**一旦把 `console` 永久静默就会让所有自检一起变哑** |
 | 打包配置 / 出包前后 | `probe` + 在**真机**双击产物 | 打包产物没有 stdout，只能靠窗口标题、`data\` 与缓存取证 |
 | 任何提交前 | `typecheck`（`build` 由 `pack`/`dist` 自动跑） | `typecheck` **不能**代替 `build`，见「打包」表第 2 行 |
 
@@ -558,6 +580,7 @@ M3 之后还覆盖**系统集成**（48 条，即第 11–15 节）：
 
 | 版本 | 日期 | 变更说明 |
 |---|---|---|
+| 0.1.0 | 2026-09-22 | **诊断日志改为 `debug` 开关 + 托盘图标对齐 `icon_url`**：①新增契约字段 `debug`（**bool，默认 `false`**）—— `false` 时**不建 `logs\`、不写文件，控制台三路输出也一并静默**（此前是无条件落盘，会在用户的交付目录里凭空多出 `data\logs\`）；`true` 时写 `<数据目录>\logs\startup.log` 并照常打印；运行期逃生口 `--debug` / `WEB2APP_DEBUG=1`；**探针与冒烟内部强制打开**（结论全靠 stdout，不能自检失声）；②`logStartup()` 增印「诊断日志：已开启 / 未开启」，冒烟断言在 `fileLog === null` 时报「未启用（冒烟模式本应强制打开 debug，出现即 bug）」—— 把「开关接错」与「写盘失败」两类原因分开；③**托盘图标修复**：`electron-build-custom.yml` 下载的 `icon_url` 此前只喂给 `-c.win.icon`（exe / 任务栏图标），托盘取的是 `resources/icons/icon.png`（由 `extraResources` 从 `webview-app/icons/` 拷入的**仓库默认图标**）⇒ 下载后**同时覆盖 `../webview-app/icons/icon.png`**，使托盘与 exe 用同一张 `icon_url`；复用既有单一真源，不改 `tray.ts` |
 | 0.1.0 | 2026-09-17 | M6 出包打通（dir / zip / portable 三形态）；修两个真 bug：`createWindow()` 漏传 `title`、`tsc` 有错也输出导致半成品封进 asar |
 | 0.1.0 | 2026-09-17 | 滚动条越界：从 `width:100vw` → `scrollbar-width:none` → 最终**换滚动根**（`html` 不滚、`body` 滚）；探针判据改成成对的「不侵入 + 仍存在」 |
 | 0.1.0 | 2026-09-17 | 文档与配置订正：①`config.example.json` 补全到契约的 17 个字段（原先缺 `icon_url` / `proxy_https` / `resolve_secret` 及两个 Android 密码字段）；②移除进包的死资源 `shell.html`；③`.gitignore` 补 `dist/`、`dist-*/`；④「无 GPU 环境」说明改为与实测一致（必须加 `--no-sandbox --in-process-gpu`） |

@@ -239,7 +239,7 @@ pub(crate) fn attach_webview_hooks(
             // 非主线程调用是异步投递，返回时闭包尚未执行，立刻检查必然是 false（→ 必然空转
             // 到 5s 并打出假告警）。放在这里则已经过了一整轮 50ms，标志有充分时间被置位。
             if done.load(Ordering::SeqCst) {
-                eprintln!(
+                dlog!(
                     "[webview_hooks] 窗口 {window_label} 的钩子已注册（尝试 {attempts} 次，耗时 {}ms）",
                     started.elapsed().as_millis()
                 );
@@ -254,7 +254,7 @@ pub(crate) fn attach_webview_hooks(
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     continue;
                 }
-                eprintln!(
+                dlog!(
                     "[webview_hooks] CoreWebView2 在 5s 内未就绪，窗口 {window_label} 的钩子未注册（已尝试 {attempts} 次）"
                 );
                 return;
@@ -360,7 +360,7 @@ fn register_webview_hooks(
                     // 下一个事件循环轮次建窗（与右键菜单「设置」的处理同理）。
                     // 诊断日志：确认弹窗拦截生效，以及 WebView2 给出的目标 URL。
                     // （`resolve_popup_url` 完全依赖它；读不到时会回落主地址。）
-                    eprintln!(
+                    dlog!(
                         "[webview_hooks] 窗口 {label_for_nw} 拦截到新窗口请求：{}",
                         uri.as_deref().unwrap_or("<无法读取>")
                     );
@@ -395,7 +395,7 @@ fn register_webview_hooks(
                     // WebView2 钩子（鉴权 / 下载 / 右键菜单）全部照常生效。
                     // 代价：`window.open()` 的返回值不再是可用的窗口对象——单窗口模式本就没有独立窗口，
                     // 属预期取舍；另见 examples/probe_new_window.rs 里踩过的坑。
-                    eprintln!(
+                    dlog!(
                         "[webview_hooks] 单窗口模式拦截到新窗口请求：{}",
                         uri.as_deref().unwrap_or("<无法读取>")
                     );
@@ -419,7 +419,7 @@ fn register_webview_hooks(
                                         Ok(u) => {
                                             let _ = window.navigate(u);
                                         }
-                                        Err(e) => eprintln!(
+                                        Err(e) => dlog!(
                                             "[webview_hooks] 新窗口目标地址不合法，已忽略：{e}（{target}）"
                                         ),
                                     }
@@ -428,7 +428,7 @@ fn register_webview_hooks(
                         }
                         // about:blank：典型用法是「先开空窗口再往里 document.write」。
                         // 单窗口模式无法提供独立窗口，硬套会把用户当前页面变成白板，故忽略。
-                        _ => eprintln!(
+                        _ => dlog!(
                             "[webview_hooks] 忽略无地址的 window.open()（单窗口模式无法提供独立窗口）"
                         ),
                     }
@@ -562,12 +562,12 @@ fn register_webview_hooks(
                     let dir = app_for_dl.path().download_dir().ok();
                     // 这行日志是「下载到底有没有走到钩子」的唯一判据：先打日志再弹框，
                     // 用户报「点了没反应」时据此区分「钩子没触发」与「对话框没弹出来」。
-                    eprintln!("[webview_hooks] 下载：正在询问保存位置（建议文件名 {name}）");
+                    dlog!("[webview_hooks] 下载：正在询问保存位置（建议文件名 {name}）");
                     // ⚠️ 这里**同步**跑模态对话框（含它自己的消息循环），全程在主线程。
                     // 理由见 `crate::save_dialog` 顶部注释：换线程会同时丢掉模态语义与 Send 保证。
                     match crate::save_dialog::ask_save_path(owner_hwnd, &name, dir.as_deref()) {
                         SaveChoice::Save(path) => {
-                            eprintln!(
+                            dlog!(
                                 "[webview_hooks] 下载：{name} → 用户选择保存到 {}",
                                 path.display()
                             );
@@ -576,11 +576,11 @@ fn register_webview_hooks(
                             let _ = args.SetHandled(true);
                         }
                         SaveChoice::Cancelled => {
-                            eprintln!("[webview_hooks] 下载：用户取消了保存（{name}）");
+                            dlog!("[webview_hooks] 下载：用户取消了保存（{name}）");
                             let _ = args.SetCancel(true);
                         }
                         SaveChoice::Unavailable => {
-                            eprintln!(
+                            dlog!(
                                 "[webview_hooks] 下载：系统「另存为」对话框不可用，本次维持 \
                                  WebView2 默认下载行为（{name}）"
                             );

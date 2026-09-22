@@ -58,7 +58,8 @@ import {
   registerSettingsIpc,
 } from './settings-window'
 import { TabManager } from './tabs'
-import { startFileLogging } from './startup-log'
+import { rawConsole, silenceConsole, startFileLogging, type FileLogHandle } from './startup-log'
+import { clearWebData } from './web-data'
 
 /** 自绘标题栏高度（逻辑像素）。与 Tauri 版一致，勿改。 */
 const CHROME_H = 38
@@ -79,6 +80,9 @@ const CHROME_H = 38
  *
  *  另：自定义开关不要用 `--no-xxx` 形式 —— Node 的选项解析把 `--no-X` 当作「把 X 设为
  *  false」，与既有开关语义容易撞车。一律用正向的 `--flag`。
+ *
+ *  已定义的开关：`--probe`（兼容契约探针）、`--tabs`（配合 probe 走页签断言组）、
+ *  `--smoke`（启动自检后退出）、`--debug`（打开诊断日志，见下方 DEBUG）。
  */
 const argFlags = new Set(process.argv.slice(1))
 const hasFlag = (f: string): boolean => argFlags.has(f)
@@ -139,6 +143,25 @@ function configRoot(): string {
 
 const loaded = loadConfigAny([configRoot()])
 const cfg: AppConfig = loaded.config
+
+/**
+ * 诊断日志开关（**默认关**）。
+ *
+ * 判据（任一成立即开启）：
+ *   · `config.json` 的 `debug` —— 打包期定下来，改它必须重新打包；
+ *   · `--debug` / 环境变量 `WEB2APP_DEBUG=1` —— 运行时逃生口，交付出去的包也能临时取证，
+ *     不必为了排障重新打包；
+ *   · 探针 / 冒烟模式**强制打开** —— 它们存在的意义就是取证，探针的「退出码即结论」与冒烟
+ *     的路径断言全都靠这些输出，静默会让自检退化成「永远绿」。
+ */
+const DEBUG = cfg.debug || process.env.WEB2APP_DEBUG === '1' || hasFlag('--debug') || PROBE || SMOKE
+
+// ⚠️ 静默要**尽可能早**：晚一步就会漏掉 setupPortablePaths 那类启动早期输出。
+//    此后 `console.*` 全是空操作，只有 rawConsole 还能出声（见 startup-log.ts）。
+// ⚠️ 配置解析在上一步（loadConfigAny）**之前**完成，所以「config.json 坏了」那条致命
+//    报错不会被静默吞掉 —— 那是必须让人看到的一类错误。
+if (!DEBUG) silenceConsole()
+
 const paths = setupPortablePaths({
   dataDir: cfg.data_dir,
   appName: sanitizeDirName(cfg.app_name),
@@ -166,16 +189,20 @@ if (PROBE) {
   windowStateLoc = { read: [join(tmpStore, WINDOW_STATE_FILE)], write: join(tmpStore, WINDOW_STATE_FILE) }
 }
 
-// ---------- 1.2 文件日志（M6）：绿色版唯一的第一现场 ----------
-// ⚠️ 为什么必须有：Windows 上 electron.exe 是 GUI 子系统程序，用户双击运行时
+// ---------- 1.2 文件日志（M6）：**只在 debug 打开时才有** ----------
+// ⚠️ 为什么它存在：Windows 上 electron.exe 是 GUI 子系统程序，用户双击运行时
 //    `console.log` 没有任何去处；portable 更是被自解压包装器吞掉内层 stdout。
-//    没有这份文件，「双击没反应 / 打开的是 example.com / 标题不对」在用户侧零证据。
+//    没有那份文件，「双击没反应 / 打开的是 example.com / 标题不对」在用户侧零证据。
+// ⚠️⚠️ 但「每次启动都往用户数据目录里留一份日志」本身不是期望行为（2026-09-22 改为可选）：
+//    debug=false（默认）时**连 logs 目录都不建**、不落文件、也不输出任何诊断。
+//    代价是上面那条「用户侧第一现场」在默认配置下不存在 —— 排障时用 `--debug`（或环境
+//    变量 WEB2APP_DEBUG=1）临时打开，不必重新打包。
 // ⚠️ 探针**不得**往真实目录写：与上面两个 JSON 同理，在打包产物上跑一次 `--probe`
 //    就会在用户 exe 旁边留下 `data\logs\`，污染交付物（`data\session` 已经踩过一次）。
 const logDir = PROBE
   ? join(app.getPath('temp'), 'w2a-probe-store')
   : join(paths.dataDir, 'logs')
-const fileLog = startFileLogging(logDir)
+const fileLog: FileLogHandle | null = DEBUG ? startFileLogging(logDir) : null
 
 const loadedSettings = loadSettings(settingsLoc)
 /** 运行期当前生效的设置（设置窗保存后立即更新） */
@@ -946,6 +973,20 @@ if (!gotLock) {
       saveSettings: (next) => applySettings(next, { persist: true }),
       preloadPath: settingsPreloadPath(),
       readHtml: readSettingsPageHtml,
+      // 设置页「清除全部」：清浏览数据 + 重载内容页（实现见 web-data.ts）。
+      // ⚠️ 只重载**内容**页：多页签模式 = 每个 tab 视图；单窗口模式 = 主窗口。
+      //    设置窗自己**不重载** —— 用户正盯着它看这行结果提示。
+      clearWebData: () =>
+        clearWebData({
+          probe: PROBE,
+          reloadContentPages: () => {
+            if (TABS_MODE) return tabManager?.reloadAll() ?? 0
+            const w = mainWindow
+            if (!w || w.isDestroyed()) return 0
+            w.webContents.reload()
+            return 1
+          },
+        }),
     })
 
     // 窗口几何：必须在 ready 之后读（planRestore 要用 screen 模块，它在 ready 前不可用）
@@ -1061,10 +1102,15 @@ if (!gotLock) {
       //   · settings.html 找不到 → 设置窗只剩一个兜底页，用户看不出异常但功能少了；
       //   · 命令名对不上 → preload 垫片会拒绝调用，设置页的「保存」点了没反应；
       //   · 托盘图标缺失 → 勾了「启用托盘」也没图标。
+      // ⚠️ 清缓存那条命令（clear_web_data）同样列进来：设置页点了没反应与上面同源 ——
+      //    页面里的字面量、垫片白名单、IPC 注册名三处必须逐字一致。
       const page = readSettingsPageHtml() ?? ''
-      const missingCmds = ['get_settings', 'save_settings', 'close_settings_window'].filter(
-        (c) => !page.includes(c)
-      )
+      const missingCmds = [
+        'get_settings',
+        'save_settings',
+        'close_settings_window',
+        'clear_web_data',
+      ].filter((c) => !page.includes(c))
       console.log(
         `[web2app] 设置页资源：${page ? `${page.length} 字符` : '未找到！'}` +
           `；命令契约：${missingCmds.length ? '缺少 ' + missingCmds.join(', ') : '齐全'}`
@@ -1087,21 +1133,29 @@ if (!gotLock) {
       //    「双击没反应」时我们手里就什么证据都没有。
       //    注意断言的是「内容已落盘」，不只是「文件存在」—— 只判存在的话，
       //    一个空文件（比如包装没装上、只有 header）也会让它通过。
+      // ⚠️ 日志现在是 debug 门控的（默认关）⇒ 冒烟模式**强制** DEBUG=true（见上方 DEBUG
+      //    的定义），否则这条断言会在默认配置下必然失败 —— 那不是发现缺陷，是判据错了。
       let logOk = false
       let logDetail: string
-      if (!fileLog.ok) {
-        logDetail = `不可写（${fileLog.error ?? '未知原因'}）`
+      let logPath = '(未启用)'
+      if (!fileLog) {
+        logDetail = '未启用（冒烟模式本应强制打开 debug，出现即 bug）'
       } else {
-        try {
-          const text = readFileSync(fileLog.path, 'utf8')
-          logOk = text.includes('[web2app] 启动信息')
-          logDetail = `${text.length} 字符`
-        } catch (e) {
-          logDetail = `读取失败：${(e as Error).message}`
+        logPath = fileLog.path
+        if (!fileLog.ok) {
+          logDetail = `不可写（${fileLog.error ?? '未知原因'}）`
+        } else {
+          try {
+            const text = readFileSync(fileLog.path, 'utf8')
+            logOk = text.includes('[web2app] 启动信息')
+            logDetail = `${text.length} 字符`
+          } catch (e) {
+            logDetail = `读取失败：${(e as Error).message}`
+          }
         }
       }
       console.log(
-        `[web2app] 日志文件：${fileLog.path}（${logDetail}）${logOk ? '' : '  ✗ 未包含启动信息！'}`
+        `[web2app] 日志文件：${logPath}（${logDetail}）${logOk ? '' : '  ✗ 未包含启动信息！'}`
       )
 
       console.log('[web2app] WEB2APP_SMOKE=1，自检完成，退出')
@@ -1118,7 +1172,9 @@ if (!gotLock) {
     //    (-2) loading 'splash://localhost/'`，探针既没说「哪一条失败」也没退出。
     //    「退出码即结论」是探针存在的全部意义，这条兜底就是它的最后一道保险。
     const err = e as Error | undefined
-    console.error(`[web2app] 启动流程异常终止（已强制非 0 退出）：${err?.stack ?? String(e)}`)
+    // ⚠️⚠️ 必须走 rawConsole：debug=false 时 `console.error` 已被替换成空操作，用它打印
+    //    等于把唯一的线索也抹掉。这条属于「必须让人看到」的错误，不是可静默的诊断。
+    rawConsole.error(`[web2app] 启动流程异常终止（已强制非 0 退出）：${err?.stack ?? String(e)}`)
     app.exit(1)
   })
 
@@ -1145,7 +1201,13 @@ if (!gotLock) {
   })
 }
 
-// ---------- 7. 启动日志：绿色版排障的第一现场 ----------
+// ---------- 7. 启动日志：绿色版排障的第一现场（**仅在 debug 打开时可见**） ----------
+/** 文件日志落点的一行描述（debug 关闭时如实说明，而不是打印一个并不存在的路径）。 */
+function describeFileLog(log: FileLogHandle | null): string {
+  if (!log) return '(debug 未开启，未落盘)'
+  return `${log.path}${log.ok ? '' : `  ✗ 不可写（${log.error ?? '未知原因'}）`}`
+}
+
 function logStartup(): void {
   console.log('[web2app] 启动信息')
   console.log(`  入口目录      : ${paths.root}`)
@@ -1154,10 +1216,11 @@ function logStartup(): void {
   console.log(`  配置文件      : ${loaded.path ?? '(未找到，使用默认值)'}`)
   console.log(`  应用名 / 标题 : ${cfg.app_name} / ${cfg.title}`)
   console.log(`  注入脚本目录  : ${injectDir()}`)
+  // 诊断开关本身必须写进日志：否则「日志文件里怎么只有一行 header / 怎么压根没有日志文件」
+  // 这类追问会反复出现 —— 用户看不出是「开关没开」还是「写盘失败」。
+  console.log(`  诊断日志      : ${DEBUG ? '已开启' : '未开启（config.json 的 debug 或命令行 --debug）'}`)
   // 文件日志是用户侧唯一能提供证据的东西，路径必须打在**第一行区域**（用户直接截图给我们）
-  console.log(
-    `  日志文件      : ${fileLog.path}${fileLog.ok ? '' : `  ✗ 不可写（${fileLog.error ?? '未知原因'}）`}`
-  )
+  console.log(`  日志文件      : ${describeFileLog(fileLog)}`)
   console.log(`  外部代理      : ${proxy.proxyServer ?? '(未启用)'}`)
   // M3：设置与几何的落点必须写进日志 —— 「我明明勾了托盘，重启又没了」这类反馈，
   // 只有靠这两行才能一眼看出是写到了哪儿、以及有没有读到旧版的文件。

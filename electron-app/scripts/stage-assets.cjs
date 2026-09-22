@@ -61,7 +61,7 @@ function assertShallowContract(text) {
       )
     }
   }
-  for (const key of ['proxy_enabled', 'tabs_enabled']) {
+  for (const key of ['proxy_enabled', 'tabs_enabled', 'debug']) {
     if (key in raw && typeof raw[key] !== 'boolean') {
       throw new Error(
         `字段 ${key} 必须是布尔值（true / false，不带引号），当前是 ${JSON.stringify(raw[key])}`,
@@ -103,6 +103,8 @@ if (existsSync(userConfig)) {
     tabs_enabled: false,
     public_key: '',
     resolve_secret: '',
+    // 诊断日志开关：默认关（与解析器契约一致，见 docs/packaging-config.md）
+    debug: false,
     data_dir: 'data',
   }
   writeFileSync(staged, JSON.stringify(tpl, null, 2) + '\n', 'utf8')

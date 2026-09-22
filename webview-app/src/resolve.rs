@@ -125,14 +125,14 @@ pub async fn resolve_url_from_domains(
             Ok(t) => t,
             Err(_) => {
                 // 单个域名查询失败：记录后尝试下一个域名。
-                eprintln!("[resolve] 域名 {domain} 解析失败，尝试下一个");
+                dlog!("[resolve] 域名 {domain} 解析失败，尝试下一个");
                 continue;
             }
         };
         match decrypt_first_valid_txt(&public_key, &txts) {
             Ok(url) => return Ok(url),
             Err(_) => {
-                eprintln!("[resolve] 域名 {domain} 的所有 TXT 均无法解出有效 URL，尝试下一个");
+                dlog!("[resolve] 域名 {domain} 的所有 TXT 均无法解出有效 URL，尝试下一个");
             }
         }
     }

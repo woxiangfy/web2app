@@ -95,7 +95,9 @@ pub fn settings_open_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SHIFT), Code::F1)
 }
 
-fn settings_path(app: &AppHandle) -> Option<PathBuf> {
+/// `settings.json` 的落点（`pub(crate)`：启动日志会把它打出来 —— 「我明明勾了托盘，
+/// 重启又没了」这类反馈只能靠这一行看出实际读的是哪个文件）。
+pub(crate) fn settings_path(app: &AppHandle) -> Option<PathBuf> {
     // 目录统一走 config::config_dir：桌面端取 app_config_dir 父目录、Android 用自身 dataDir，
     // 再拼自定义 app_name（平台差异见该函数注释）。
     Some(config_dir(app)?.join(SETTINGS_FILE))

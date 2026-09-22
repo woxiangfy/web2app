@@ -66,6 +66,10 @@ jobs:
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
       # 多页签（tab）模式（仅 Windows 生效；Android 端忽略）。仓库变量 TABS_ENABLED=true 开启。
       TABS_ENABLED: ${{ vars.TABS_ENABLED }}
+      # 诊断日志开关（默认关）。仓库变量 DEBUG=true 开启后，产物会写 <数据目录>\logs\startup.log。
+      # ⚠️ 变量未设置时透下来的是**空串**，而 config.rs 的 env_bool! 只认 true/1/yes/false/0/no
+      #    （空串落到默认值 false）⇒ 未配置 = 关闭，符合预期。
+      DEBUG: ${{ vars.DEBUG }}
     steps:
       - uses: actions/checkout@v7
 
@@ -177,6 +181,8 @@ jobs:
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
       TABS_ENABLED: ${{ vars.TABS_ENABLED }}
+      # 诊断日志开关（默认关），与 Windows 版同义。见上面 windows job 的说明。
+      DEBUG: ${{ vars.DEBUG }}
     steps:
       - uses: actions/checkout@v7
 

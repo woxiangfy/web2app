@@ -92,6 +92,15 @@
   }
   button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
   button:disabled { opacity: 0.55; cursor: not-allowed; }
+  /* 「清除全部」是破坏性操作：常态用危险色描边，二次确认时才填实。 */
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  button.danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.danger.confirming {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+    animation: pulse 1.2s infinite;
+  }
 
   select { min-width: 72px; appearance: none; padding-right: 28px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; }
   @media (prefers-color-scheme: dark) {
@@ -140,6 +149,20 @@
       <label class="chk"><input type="checkbox" id="trayEnabled"/> 启用系统托盘图标</label>
       <label class="chk"><input type="checkbox" id="minimizeOnClose"/> 关闭窗口时最小化到托盘</label>
       <div class="sub">默认关闭窗口即退出程序。勾选“启用系统托盘图标”并勾选“最小化到托盘”后，关闭窗口才会隐藏到托盘而非退出。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div class="label">清除缓存与 Cookie</div>
+      <div class="ctrl">
+        <button class="danger" id="clearDataBtn">清除全部</button>
+      </div>
+      <div class="sub">
+        一次清空本应用的全部本地数据：缓存、Cookie（含登录状态）、Local Storage / IndexedDB、
+        Service Worker 等。<b>清除后需要重新登录</b>，所有页面会自动重新加载 ——
+        这一项没有分项选择，也<b>不可撤销</b>。
+      </div>
     </div>
   </div>
 
@@ -271,6 +294,44 @@
 
   document.getElementById("closeBtn").addEventListener("click", async () => {
     try { await invoke("close_settings_window"); } catch (_) {}
+  });
+
+  // ---- 清除缓存 / Cookie：只有一个「全清」动作，没有分项选项 ----
+  // 二次确认不用 window.confirm()：部分壳/严格 CSP 下会被拦，且脚本对话框无法被自动化断言。
+  const clearBtn = document.getElementById("clearDataBtn");
+  let confirming = false;
+  let confirmTimer = null;
+
+  function cancelConfirm() {
+    confirming = false;
+    clearBtn.textContent = "清除全部";
+    clearBtn.classList.remove("confirming");
+    if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
+  }
+
+  clearBtn.addEventListener("click", async () => {
+    // 第一次点击 → 进入确认态；第二次点击才真的清。
+    if (!confirming) {
+      confirming = true;
+      clearBtn.textContent = "再点一次确认清除";
+      clearBtn.classList.add("confirming");
+      setStatus("清除后需要重新登录，且无法撤销。点击上方按钮确认，或等 5 秒自动取消。", "muted");
+      confirmTimer = setTimeout(cancelConfirm, 5000);
+      return;
+    }
+
+    cancelConfirm();
+    clearBtn.disabled = true;
+    setStatus("正在清除缓存与 Cookie…", "muted");
+    try {
+      // 命令无参数；返回值是后端给的「清了什么」文案。
+      const msg = await invoke("clear_web_data");
+      setStatus(msg || "已清除。", "ok");
+    } catch (e) {
+      setStatus("清除失败：" + (e || "未知错误"), "err");
+    } finally {
+      clearBtn.disabled = false;
+    }
   });
 </script>
 </body>

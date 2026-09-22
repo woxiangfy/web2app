@@ -11,5 +11,6 @@
   "tabs_enabled": false,
   "public_key": "",
   "resolve_secret": "",
+  "debug": false,
   "data_dir": "data"
 }
