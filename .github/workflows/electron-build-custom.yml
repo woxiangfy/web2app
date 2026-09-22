@@ -105,6 +105,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ICON_URL:-}" ]; then echo "未配置 icon_url，沿用仓库默认图标"; exit 0; fi
+          # ⚠️⚠️ 必须先建 build/，否则 curl **必然**失败 —— 它由 .gitignore 忽略（`build/`），
+          #    fresh checkout 里不存在；唯一创建它的是 `pnpm run stage`，而那是**后面**一步。
+          #    典型症状：curl: (23) client returned ERROR on write of N bytes ——
+          #    看着像网络/地址问题，实则是「输出路径写不进去」，**换 URL 一点用没有**
+          #    （2026-09-22 实测：目标目录不存在 ⇒ 23；建好目录后同一个 URL 下 2906 字节全绿）。
+          mkdir -p build
           echo "下载图标: $ICON_URL"
           curl -fsSL --retry 3 "$ICON_URL" -o build/icon.png
           magic=$(head -c 8 build/icon.png | od -An -tx1 | tr -d ' \n')

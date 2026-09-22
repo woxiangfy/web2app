@@ -365,10 +365,24 @@ def build_merged(data: dict) -> dict[str, str]:
         title = str(merged["app_name"])
     merged["title"] = title
 
+    # ⚠️⚠️ 告警的**触发条件**必须对齐「运行期到底哪条路会解密」：
+    #    · Tauri：`bootstrap.rs` 里 `parse_domains(APP_URL)` 命中（文本以 `[` 开头）才走
+    #      DNS TXT → 解密的路径；否则直接用字符串 URL。
+    #    · Electron：`navigate.ts` 的 `needsDnsResolve` = `Array.isArray(app_url)`；
+    #      字符串模式只可能是 direct / proxy 两条路，都不解密。
+    #    `SECRET` 的唯一消费点是 `resolve-core::derive_key`（而它只被 `decrypt_txt` 用），
+    #    所以**单 URL 字符串模式下这个字段在运行期没有任何调用点** —— 此时报 warning 是
+    #    狼来了：真该修的配置问题会被淹没在噪声里。原实现对两种形态一律告警，与此处
+    #    `docs/packaging-config.md`（§3.4 与校验表）写的「仅域名数组模式才需要」相矛盾。
     if not merged["resolve_secret"]:
-        print("::warning::resolve_secret 未配置：将使用代码内置默认 Secret"
-              "（所有产物共享同一固定密钥串，安全门槛较低）。"
-              "建议配置独立的 resolve_secret，并同步服务端 encrypt_url.py / resolve-tool。")
+        if str(merged["app_url"]).strip().startswith("["):
+            print("::warning::resolve_secret 未配置：app_url 是域名数组，运行期要靠它解密 TXT 密文；"
+                  "将使用代码内置默认 Secret（所有产物共享同一固定密钥串，安全门槛较低）。"
+                  "建议配置独立的 resolve_secret，并同步服务端 encrypt_url.py / resolve-tool。")
+        else:
+            # 单 URL 模式：明确说明「当前不参与」，比默认告警更有用，且不产生 CI 注解。
+            print("resolve_secret 未配置：app_url 是单 URL 字符串，运行期不解密 DNS TXT "
+                  "⇒ 该字段当前不参与，无需配置（将来改用域名数组模式时才需要）。")
 
     # 全部收敛为字符串，供 env / 打印使用。
     return {k: (v if isinstance(v, str) else str(v)) for k, v in merged.items()}
@@ -560,6 +574,33 @@ def _selftest_cases() -> None:
 
     # resolve_secret 去空白
     assert build_merged({"app_url": "https://a.com", "resolve_secret": " s "})["resolve_secret"] == "s"
+
+    # 未配置 resolve_secret 时的提示**只在域名数组模式**出现 —— 判据与
+    # `resolve-core::parse_domains` / `navigate.ts::needsDnsResolve` 同源（文本以 `[` 开头）。
+    import contextlib
+    import io
+
+    def _stdout_of(payload: dict) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            build_merged(payload)
+        return buf.getvalue()
+
+    # 单 URL 字符串：不告警，只说明该字段当前不参与
+    out = _stdout_of({"app_url": "https://a.com"})
+    assert "::warning::" not in out, f"单 URL 模式不该产生 warning：{out!r}"
+    assert "resolve_secret" in out and "不参与" in out, f"应说明该字段当前不参与：{out!r}"
+
+    # 域名数组（含「JSON 数组文本」老写法）：必须告警
+    assert "::warning::resolve_secret 未配置" in _stdout_of(
+        {"app_url": ["a.com"], "public_key": "AAAA"})
+    assert "::warning::resolve_secret 未配置" in _stdout_of(
+        {"app_url": '["a.com"]', "public_key": "AAAA"})
+
+    # 配了 Secret：两种模式都安静（连说明行也不出现）
+    for payload in ({"app_url": "https://a.com", "resolve_secret": "s"},
+                    {"app_url": ["a.com"], "public_key": "AAAA", "resolve_secret": "s"}):
+        assert "resolve_secret" not in _stdout_of(payload)
 
     # write_config_json：bool 保持真 bool、数组保持数组、android_* 不落盘
     import tempfile

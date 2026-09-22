@@ -149,7 +149,14 @@ AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自�
 保证编译 sidecar 时 `RESOLVE_SECRET` 已在环境里。顺序错了，sidecar 内置的是公开默认
 Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律失败，且不报错）。
 
-未配置时会打 warning：所有产物共享同一个固定密钥串，安全门槛较低。
+未配置时的行为**取决于 `app_url` 形态**（判据与 `resolve-core::parse_domains` 同源：文本以 `[` 开头即域名数组）：
+
+- **域名数组模式**：打 warning —— 所有产物共享同一个固定密钥串，安全门槛较低；
+- **单 URL 字符串模式**：**不打 warning**，只输出一行「该字段当前不参与」的说明。
+  理由：客户端解密的唯一入口是 DNS TXT 那条路（Tauri `bootstrap.rs` 里 `parse_domains(APP_URL)`
+  命中才走，Electron 是 `navigate.ts` 的 `needsDnsResolve` = `Array.isArray(app_url)`），
+  字符串模式只走 direct / proxy 两条路，`SECRET`（`resolve-core::derive_key` 的唯一消费者）
+  **没有任何调用点** ⇒ 此时告警属于「狼来了」，会把真该修的配置问题淹掉。
 
 ---
 
@@ -253,7 +260,7 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 | `app_url` 不以 `http(s)://` 开头 | warning（本地夹具可能用别的 scheme） |
 | `app_url` 是「JSON 数组文本」写法 | warning（建议改真数组） |
 | `icon_url` 非 http(s) | warning（打包时下载失败会回落默认图标） |
-| `resolve_secret` 未配置 | warning（共享默认密钥，安全门槛较低） |
+| `resolve_secret` 未配置 | ⚠️ **仅当 `app_url` 是域名数组**才 warning（共享默认密钥，安全门槛较低）；单 URL 字符串模式只打一行说明、**不告警**——该模式运行期不解密 TXT，`SECRET` 没有任何调用点 |
 | `android_*` 出现在 Electron 侧 | 忽略并提示（同一份契约，本壳不实现） |
 | 字段值为 `null` | 视为**用默认值** |
 
