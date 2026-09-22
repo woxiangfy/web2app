@@ -52,7 +52,7 @@ on:
         required: false
         default: '172800'
       secret:
-        description: '【encrypt / all 用，可选】AES 对称加密 Secret，**必须与打包时 build-custom.yml 配置的 resolve_secret 一致**（否则该包解密失败）。不填 = 用内置默认串（兼容旧密文）。填了则本次生成的密文只能被"同一 secret 打的包"解密。'
+        description: '【encrypt / all 用，可选】AES 对称加密 Secret，**必须与打包时 build-custom.yml 配置的 resolve_secret 一致**（否则该包解密失败）。不填 = 自动生成一把随机 Secret（写入产物说明文件，打包时把它填进 resolve_secret 即可）。填了则本次密文只能用"同一 secret 打的包"解密。'
         required: false
 
 # ⚠️ 单仓库化（2026-09-22）：仓库根已上移，Rust 工程在 `webview-app/` 子目录。
@@ -165,12 +165,21 @@ jobs:
           SECRET: ${{ github.event.inputs.secret }}
         # ⚠️ resolve-tool 的 Secret 是编译期 option_env!("RESOLVE_SECRET")：必须在 cargo 编译
         #    前把 RESOLVE_SECRET 注入到环境，编进二进制的是这个 secret；cargo 会按
-        #    dep-info 的 env-dep 感知变化并重编。未填 secret 时 RESOLVE_SECRET 为空串，
-        #    option_env 命中空值 → 回落内置默认串（兼容现状）。
+        #    dep-info 的 env-dep 感知变化并重编。
+        #    ● 填了 secret：用它（本次密文只被"同一 secret 打的包"解密）。
+        #    ● 未填：自动生成一把随机 secret（避免所有产物共享同一固定默认串），写进
+        #      GITHUB_ENV（SECRET_EFFECTIVE）供后续步骤与说明文档复用同一值。
         run: |
-          # 仅对 cargo 命令注入 RESOLVE_SECRET（不 export，避免污染后续 step）；空值也注入，
-          # 让 option_env! 得到 Some("") → code 里 !is_empty() 分支 → 走默认串。
-          RESOLVE_SECRET="$SECRET" cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl "$TTL" --count "$COUNT" \
+          if [ -n "$SECRET" ]; then
+            SECRET_EFFECTIVE="$SECRET"
+          else
+            # openssl rand -hex 16 → 32 个 hex 字符，128bit 熵；github runner 自带 openssl。
+            SECRET_EFFECTIVE="$(openssl rand -hex 16)"
+            echo "未配置 secret，已自动生成随机 Secret"
+          fi
+          echo "SECRET_EFFECTIVE=$SECRET_EFFECTIVE" >> "$GITHUB_ENV"
+          # 只对这条 cargo 命令注入 RESOLVE_SECRET（不 export 避免污染后续 step）。
+          RESOLVE_SECRET="$SECRET_EFFECTIVE" cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl "$TTL" --count "$COUNT" \
             | tee "$RUNNER_TEMP/cipher.txt"
 
       - name: 导出密文 + 使用说明
@@ -179,17 +188,17 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
           COUNT: ${{ github.event.inputs.count }}
-          SECRET: ${{ github.event.inputs.secret }}
+          SECRET: ${{ env.SECRET_EFFECTIVE }}
         run: |
-          # 空 secret 用内置默认串，与 resolve-core 的 SECRET 默认值保持一致（此处仅提示用）。
-          SECRET_LABEL="${SECRET:-<未指定，使用内置默认串 web2app-fixed-secret-2026>}"
+          # 读取上一步写入的最终生效 Secret（填了=用户的；未填=刚自动生成的随机串）。
+          SECRET_LABEL="${SECRET:-<未指定>}"
           {
             echo "TXT 密文（每条均可写入 DNS TXT 记录）"
             echo "======================================================"
             echo "URL : $URL"
             echo "ttl : $TTL 秒（0=永不失效）"
             echo "份数: 每个 URL 生成 $COUNT 份（同一 URL 的多份密文解密结果相同）"
-            echo "Secret: $SECRET_LABEL（打包时 build-custom.yml 的 resolve_secret 必须与此一致）"
+            echo "Secret: $SECRET_LABEL（打包时 build-custom.yml 的 resolve_secret 必须填这同一个，否则该包解密失败）"
             echo ""
             echo "密文（一组，逐条对应上面的 URL）："
             grep -v '^#' "$RUNNER_TEMP/cipher.txt" | tr -d '[:space:]' | grep -v '^$'
@@ -202,7 +211,7 @@ jobs:
             echo "  build-custom.yml 的 config_json 里："
             echo "    \"app_url\": [\"你的跳板域名\"],"
             echo "    \"public_key\": \"<与此私钥配对的公钥>\""
-            echo "    \"resolve_secret\": \"${SECRET}\"   # 若上方 Secret 非缺省，这里必须填同一串"
+            echo "    \"resolve_secret\": \"${SECRET}\""
           } > "$RUNNER_TEMP/cipher-info.txt"
           echo "--- cipher-info.txt ---"
           cat "$RUNNER_TEMP/cipher-info.txt"
@@ -259,9 +268,16 @@ jobs:
           # resolve-tool create_dir_all 创建时（首次编译需十几秒）打开失败 → 退出码 1，
           # 管道退出码取 tee 的 → 整个 step 报 exit code 1（即使 all 本身已成功产出）。
           mkdir -p "$RUNNER_TEMP/resolve-all"
-          # 同 encrypt 的注释：必须在 cargo 编译前注入 RESOLVE_SECRET，编进的是该 secret；
-          # 未填时为空串 → option_env 命中空值 → 回落内置默认串。
-          RESOLVE_SECRET="$SECRET" cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl "$TTL" --count "$COUNT" \
+          # secret 解析与 encrypt 一致：填了用它；未填自动生成随机串，写进 GITHUB_ENV 供说明复用。
+          if [ -n "$SECRET" ]; then
+            SECRET_EFFECTIVE="$SECRET"
+          else
+            SECRET_EFFECTIVE="$(openssl rand -hex 16)"
+            echo "未配置 secret，已自动生成随机 Secret"
+          fi
+          echo "SECRET_EFFECTIVE=$SECRET_EFFECTIVE" >> "$GITHUB_ENV"
+          # 同 encrypt 的注释：必须在 cargo 编译前注入 RESOLVE_SECRET。
+          RESOLVE_SECRET="$SECRET_EFFECTIVE" cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl "$TTL" --count "$COUNT" \
             | tee "$RUNNER_TEMP/resolve-all/result.txt"
 
       - name: 附上使用说明
@@ -270,7 +286,7 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           TTL: ${{ github.event.inputs.ttl }}
           COUNT: ${{ github.event.inputs.count }}
-          SECRET: ${{ github.event.inputs.secret }}
+          SECRET: ${{ env.SECRET_EFFECTIVE }}
         run: |
           cat >> "$RUNNER_TEMP/resolve-all/README.txt" <<'EOF'
           Ed25519 密钥对 + TXT 密文（一次性生成，用于 app_url 域名数组 + DNS TXT 动态解析）
@@ -295,10 +311,10 @@ jobs:
           # Secret 单独追加（不用 heredoc，避免内容被注释符干扰）：打包 resolve_secret 必须与此一致。
           echo "" >> "$RUNNER_TEMP/resolve-all/README.txt"
           if [ -n "$SECRET" ]; then
-            echo "本次 Secret：${SECRET}（打包时 build-custom.yml 的 resolve_secret 必须填同一串，否则该包解密失败）" \
+            echo "本次 Secret：${SECRET}（打包时 build-custom.yml 的 resolve_secret 必须填这一串，否则该包解密失败）" \
               >> "$RUNNER_TEMP/resolve-all/README.txt"
           else
-            echo "本次 Secret：未指定，使用内置默认串 web2app-fixed-secret-2026（打包时 resolve_secret 留空即可）" \
+            echo "本次 Secret：未取到值（应已在生成步骤自动生成）" \
               >> "$RUNNER_TEMP/resolve-all/README.txt"
           fi
           echo "--- README.txt ---"
