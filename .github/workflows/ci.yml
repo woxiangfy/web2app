@@ -171,3 +171,56 @@ jobs:
         #    ⇒ 给某个 item 加 cfg(desktop) 时，同步检查它的导入是否也要按 cfg 拆开。
         #    （本 crate 有全量 `#![allow(dead_code)]`，所以这里唯一会拦的就是 unused import 这一类。）
         run: cargo ndk -t arm64-v8a clippy -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # 4) 打包配置契约门禁
+  #
+  #    守三件事，都是「本地不跑、CI 不跑 ⇒ 等于没有护栏」的那一类：
+  #      a) 解析器自测 —— 契约唯一真源（字段/默认值/废弃字段报错）不漂移；
+  #      b) 所有 workflow 的 YAML 与**内联 python/bash 语法** —— 这类错只在 CI 上才炸，
+  #         而且要等 checkout / 装工具链之后；见 .github/scripts/check-workflows.py 的说明；
+  #      c) 仓库内每个配置样例都能被解析器接受 —— 曾经 `test1.json` / `test2.json`
+  #         停留在字符串布尔（`"proxy_enabled": "false"`），新契约已硬拒，靠这一步
+  #         在提交时就现形，而不是等用户跑手动打包才失败。
+  #
+  #    ⚠️⚠️ 本作业**必须在仓库根执行**：契约脚本与 workflow 都在仓库根的 `.github/` 下。
+  #        而本文件顶部的 `defaults.run.working-directory: webview-app` 会把每个 `run:`
+  #        拽进 `webview-app/`，在那里 `.github/scripts/...` 并不存在 ⇒ 必须用
+  #        **作业级 `defaults` 覆盖回仓库根**（作业级优先级高于 workflow 级）。
+  # ---------------------------------------------------------------------------
+  config-contract:
+    name: Config contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 解析器契约自测（唯一真源不漂移）
+        run: python3 .github/scripts/parse-packaging-config.py --selftest
+
+      - name: 静态检查所有 workflow（YAML + 内联 python/bash）
+        run: python3 .github/scripts/check-workflows.py
+
+      - name: 仓库内配置样例必须符合契约
+        shell: bash
+        # 逐个喂给解析器（它默认从 CONFIG_JSON 环境变量读配置）。
+        # ⚠️ 不在这里校验 `signing/packaging-config*.json`：`signing/` 被根 .gitignore
+        #    忽略（内含明文 keystore 与密码），CI 上根本不存在这些文件。
+        run: |
+          set -uo pipefail
+          fail=0
+          for f in webview-app/config.example.json \
+                   electron-app/config.example.json \
+                   test1.json \
+                   test2.json; do
+            if CONFIG_JSON="$(cat "$f")" python3 .github/scripts/parse-packaging-config.py > /dev/null; then
+              echo "OK   $f"
+            else
+              echo "::error file=$f::$f 不符合打包配置契约（见 docs/packaging-config.md）"
+              fail=1
+            fi
+          done
+          exit "$fail"
+

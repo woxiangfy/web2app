@@ -16,10 +16,16 @@
  */
 import { app } from 'electron'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
-/** 数据目录策略：sibling = exe 同级 data\（默认，真绿色）；user = %APPDATA%（config 指定或只读介质退路） */
-export type DataDirMode = 'sibling' | 'user'
+/**
+ * 数据目录策略（用于启动日志 / 关于页展示，不参与路径决策）：
+ *   · `relative` —— 配置的是相对路径，已解析到 exe 目录下（默认 `data\`，真绿色）；
+ *   · `absolute` —— 配置的是绝对路径，原样使用；
+ *   · `system`   —— 配置为空串，用系统默认程序目录 `%APPDATA%\<app_name>`（不受程序位置影响）；
+ *   · `fallback` —— 配置的目录不可写，已退回系统默认目录（保证「能启动」优先）。
+ */
+export type DataDirMode = 'relative' | 'absolute' | 'system' | 'fallback'
 
 export interface PortablePaths {
   /** 用户放置 exe 的目录（绿色基准目录） */
@@ -79,51 +85,71 @@ function isWritable(dir: string): boolean {
 
 export interface SetupOptions {
   /**
-   * 来自 config.json 的 `data_dir_default`（对齐 webview-app 语义）：
-   *   false（默认）= 数据放 exe 同级 data\，整目录可搬走；
-   *   true         = 跟随系统，放 %APPDATA%\<app_name>。
-   * 注意与 Tauri 版的差异：Tauri 的 false 是写 %LOCALAPPDATA%\<app_name>，
-   * Electron 绿色版改写同级 data\，该差异已记录在 docs/electron-plan.md §1.4。
+   * 来自 config.json 的 `data_dir`（与 webview-app 同一契约、同一规则）：
+   *   · `"data"`（默认）→ exe 同级 `data\`，整目录可搬走（真绿色）；
+   *   · `""`           → `%APPDATA%\<app_name>`，系统默认程序目录，不受程序位置影响；
+   *   · 其它相对路径    → 同上，基准是 **exe 目录**（不是 shell 的 cwd）；
+   *   · 绝对路径        → 原样使用。
    */
-  preferUserDir?: boolean
-  /** 应用名（config.app_name），用于 user 模式下的子目录名 */
+  dataDir?: string
+  /** 应用名（config.app_name），用于系统默认模式下的子目录名 */
   appName?: string
 }
 
+/** 系统默认程序目录：`%APPDATA%\<app_name>`（由 app_name 命名，不受程序位置影响） */
+function systemDataDir(appName?: string): string {
+  return join(app.getPath('appData'), appName || 'Web2App')
+}
+
 /**
- * 装配绿色版数据路径，返回实际生效的路径信息供启动日志 / 关于页展示。
+ * 把四个路径**一起**重定向到 `dir`。
+ *
+ * ⚠️ 必须一起改。只改 userData 会留下 sessionData（Cookies / Local Storage 的一部分）与
+ * 日志、崩溃转储仍在系统盘，导致「绿色版不干净」。
+ */
+function applyDataDir(dir: string): void {
+  app.setPath('userData', dir)
+  app.setPath('sessionData', join(dir, 'session'))
+  app.setPath('logs', join(dir, 'logs'))
+  app.setPath('crashDumps', join(dir, 'crash'))
+}
+
+/**
+ * 装配数据路径，返回实际生效的路径信息供启动日志 / 关于页展示。
  */
 export function setupPortablePaths(opts: SetupOptions = {}): PortablePaths {
   const root = installRoot()
   const selfExtracting = isSelfExtracting()
+  // config.ts 的 toDataDir 已归一成字符串；默认值与契约同为 "data"。
+  const configured = (opts.dataDir ?? 'data').trim()
 
-  if (opts.preferUserDir) {
-    const dir = join(app.getPath('appData'), opts.appName || 'Web2App')
-    app.setPath('userData', dir)
-    app.setPath('sessionData', join(dir, 'session'))
-    app.setPath('logs', join(dir, 'logs'))
-    app.setPath('crashDumps', join(dir, 'crash'))
-    return { root, dataDir: dir, mode: 'user', fellBack: false, selfExtracting }
+  // 空串 = 系统默认程序目录（由 app_name 命名），与程序放在哪无关。
+  if (configured === '') {
+    const dir = systemDataDir(opts.appName)
+    applyDataDir(dir)
+    return { root, dataDir: dir, mode: 'system', fellBack: false, selfExtracting }
   }
 
-  const sibling = join(root, 'data')
+  // 相对路径的基准是 **exe 所在目录**（installRoot），不是进程工作目录 —— 后者会随启动方式
+  // 变化（快捷方式「起始位置」、命令行、拖拽启动），同一个包会把数据落到不同地方。
+  const absolute = isAbsolute(configured)
+  const target = absolute ? configured : join(root, configured)
 
-  if (!isWritable(sibling)) {
+  if (!isWritable(target)) {
     // 只读介质（写保护 U 盘 / Program Files / 只读网络盘）：
-    // 退到用户目录，保证「能启动」优先于「够绿色」，并在日志里明示。
-    const fallback = app.getPath('userData')
-    console.error(
-      `[web2app] 同级数据目录不可写，已回退用户目录：${sibling} → ${fallback}`
-    )
-    return { root, dataDir: fallback, mode: 'user', fellBack: true, selfExtracting }
+    // 退到系统默认目录，保证「能启动」优先于「够绿色」，并在日志里明示。
+    const fallback = systemDataDir(opts.appName)
+    console.error(`[web2app] 数据目录不可写，已回退系统默认目录：${target} → ${fallback}`)
+    applyDataDir(fallback)
+    return { root, dataDir: fallback, mode: 'fallback', fellBack: true, selfExtracting }
   }
 
-  // ⚠️ 以下四项必须一起重定向。只改 userData 会留下 sessionData（Cookies /
-  // Local Storage 的一部分）与日志、崩溃转储仍在系统盘，导致「绿色版不干净」。
-  app.setPath('userData', sibling)
-  app.setPath('sessionData', join(sibling, 'session'))
-  app.setPath('logs', join(sibling, 'logs'))
-  app.setPath('crashDumps', join(sibling, 'crash'))
-
-  return { root, dataDir: sibling, mode: 'sibling', fellBack: false, selfExtracting }
+  applyDataDir(target)
+  return {
+    root,
+    dataDir: target,
+    mode: absolute ? 'absolute' : 'relative',
+    fellBack: false,
+    selfExtracting,
+  }
 }

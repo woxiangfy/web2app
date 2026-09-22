@@ -24,6 +24,8 @@ directories:
   buildResources: build
 
 files:
+  # `out/**/*` 已包含运行期配置 `out/config.json`（由 scripts/stage-assets.cjs 生成），
+  # 所以它随 asar 一起封进包内 —— 这是**刻意**的，见下方 extraFiles 的说明。
   - out/**/*
   - package.json
 
@@ -44,15 +46,19 @@ portable:
   # 绿色版绝不要 UAC：默认就是 user，这里显式写死防止后续被改动
   requestExecutionLevel: user
 
-extraFiles:
-  # 运行期配置：放到 exe **同级**（不是 resources/），因为 installRoot() 只在那里找它。
-  #   - 解压目录版（zip/dir）：解压出来就能直接改这个文件，改完重启即生效；
-  #   - 单文件自解压版（portable）：这份是**包内预置**的回落副本（resolved by
-  #     config::loadConfigAny 的第二顺位）；用户想覆盖，把 config.json 放到
-  #     portable exe 旁边即可，那份优先。
-  # ⚠️ 由 `scripts/stage-assets.cjs` 生成（源 = 项目根 config.json，缺失则生成默认模板）。
-  - from: build/config.json
-    to: config.json
+# ⚠️⚠️ 这里**没有** `extraFiles`，是有意的（2026-09-22 改造）：
+#
+# 运行期配置 `config.json` 原本用 extraFiles 放到 exe 同级，好处是「改完重启即生效」。
+# 但那份是**明文、可读、可改**的 —— 放在包外等于配置形同虚设：任何人都能改掉 app_url、
+# 或关掉域名解析校验，再把包原样分发出去，而使用者看不出任何区别。
+#
+# 现在它由 `scripts/stage-assets.cjs` 生成到 `out/config.json`，跟着上面的 `files`
+# 一起进 `app.asar`；运行时由 `src/main/index.ts::configRoot()` 读 `app.getAppPath()/out/config.json`。
+# ⇒ 想改配置必须重新打包（与 Tauri 版一致）；代价是绿色版不再支持用户侧改配置。
+#
+# ⛔ 不要试图把它放回 `build/`（directories.buildResources）：electron-builder 会
+#    把 buildResources 目录整个排除在包外（app-builder-lib/out/fileMatcher.js 里的
+#    `!<buildResources>{,/**/*}`），放那儿会**静默**不打包、应用退回内置默认配置。
 
 extraResources:
   # 注入脚本：从 webview-app/src 拷贝，保持「单一真源」，禁止复制出第二份会分叉的副本。

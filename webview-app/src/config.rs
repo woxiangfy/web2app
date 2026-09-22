@@ -5,15 +5,24 @@
 //! 未设置 / 为空时回落到默认值，保证任何环境都能直接编译。
 //!
 //! 可注入的变量：
-//!   APP_URL          要嵌入的网址（支持 https://user:pass@host 形式）
-//!   APP_NAME         运行期显示名（窗口标题 / 托盘提示 / 设置页标题）
-//!   WINDOW_TITLE     窗口标题（缺省等于 APP_NAME）
-//!   DATA_DIR_DEFAULT true=WebView2 系统默认目录 / false=%LOCALAPPDATA%
+//!   APP_URL          要嵌入的网址。两种形态：普通 URL（支持 https://user:pass@host 形式），
+//!                    或【域名数组】的 JSON 文本（如 `["a.com","b.com"]`）——后者运行时做
+//!                    DNS TXT 查询 + 验签解密得到真实 URL
+//!   APP_NAME         【安装名】Windows 安装包名 / 数据目录名 / 设置目录名 / Android 包名（派生）
+//!   TITLE            【显示名】窗口标题 / 托盘提示 / 设置页标题（缺省等于 APP_NAME）
+//!                    字段名与打包配置 JSON 的 `title` 一致（旧名 WINDOW_TITLE 已移除）
+//!   DATA_DIR         数据目录。"" = 系统默认程序目录（%LOCALAPPDATA%\<app_name>，不受程序位置影响）；
+//!                    其余按路径处理，相对路径以【exe 所在目录】为基准（默认 "data"）
 //!   PROXY_ENABLED    true/false 是否启用本地反向代理
 //!   PROXY_HTTP       外部 HTTP 代理地址（留空=走自身代理）；仅 Windows
 //!   PROXY_HTTPS      外部 HTTPS 代理地址（留空=同 HTTP）
 //!   PROXY_BYPASS     不走代理的地址（分号分隔）
 //!   TABS_ENABLED     true/false 是否启用多页签（tab）模式（仅 Windows）
+//!   PUBLIC_KEY       Ed25519 公钥（APP_URL 为域名数组时必填）
+//!   EXTRA            注入给页面的 JSON 文本（→ window.web2appExtra）
+//!
+//! ⚠️ 这些变量的**来源**统一是打包配置 JSON，解析实现只有一份：
+//!    `.github/scripts/parse-packaging-config.py`（字段表与多端行为见 docs/packaging-config.md）。
 //! 例：APP_URL="https://u:p@example.com" APP_NAME="MyApp" cargo build --release
 
 use std::path::PathBuf;
@@ -144,7 +153,8 @@ pub(crate) fn config_dir(app: &AppHandle) -> Option<PathBuf> {
 
 /// WebView2 用户数据目录：`%LOCALAPPDATA%\<app_name>`（仅 Windows）。
 ///
-/// 否定了 `DATA_DIR_DEFAULT` 时，主窗口与每个 tab 共用这个目录（同账号、共享 cookie/localStorage）。
+/// 即 `DATA_DIR` 为空串（或配置的目录不可写）时使用的系统默认程序目录 —— 它与程序位置无关，
+/// 始终可写，适合安装版与多用户场景。
 /// `app_local_data_dir` 在极少数环境可能返回 Err，此时返回 None、由调用方退回系统默认目录。
 #[cfg(windows)]
 pub(crate) fn user_data_dir(app: &AppHandle) -> Option<PathBuf> {
@@ -153,11 +163,111 @@ pub(crate) fn user_data_dir(app: &AppHandle) -> Option<PathBuf> {
     Some(base.join(sanitize_dir_name(APP_NAME)))
 }
 
-// 默认打开的网址；支持带账号密码的形式：
-//   "https://用户名:密码@www.example.com"
-// 注意：现代 Chromium / WebView2 已废弃“URL 内嵌 userinfo 自动发 Basic 鉴权”的行为，
-// 不会自动发送。程序会把账号密码解析出来，通过本地反向代理给所有 HTTP/WebSocket 请求统一
-// 注入 `Authorization: Basic ...` 头，再转发到真实服务器。
+/// 程序**自身所在目录**（exe 所在目录）。
+///
+/// ⚠️ 不能用 `std::env::current_dir()`：进程工作目录会随启动方式变化（快捷方式的「起始位置」、
+/// 命令行 `cd` 后启动、从资源管理器拖拽/另存启动），同一份包在不同启动方式下会把数据落到
+/// 不同地方 —— 用户表现为「设置丢了 / 又要重新登录」。「数据跟着程序走」必须以 exe 目录为基准。
+#[cfg(windows)]
+fn program_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.parent().map(|p| p.to_path_buf())
+}
+
+/// 可写性探测：真建目录 + 真写一个文件再删掉。
+///
+/// 只调 `create_dir_all` 是不够的：写保护 U 盘、只读网络盘、企业策略下的 `Program Files`，
+/// 都可能「建目录成功但写文件失败」。Electron 侧用同一判据（`electron-app/src/main/portable.ts`）。
+#[cfg(windows)]
+fn is_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".web2app-write-probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// 解析 `DATA_DIR` 得到实际使用的数据目录（仅 Windows）。
+///
+/// 规则（与打包配置契约一致，见 `docs/packaging-config.md` §4.3）：
+///   · `""`    → 系统默认程序目录 `%LOCALAPPDATA%\<app_name>`，不受程序位置影响；
+///   · 绝对路径 → 原样使用；
+///   · 相对路径 → 程序所在目录（exe 目录）下的该路径（默认 `"data"`）。
+///
+/// ⚠️⚠️ 进程内**只解析一次并缓存**，两个理由：
+///   1. 多页签模式下每个 tab 都会调用它。各算各的一旦结果不同，tab 之间就不再共享
+///      cookie/localStorage —— 那正是多页签赖以成立的硬契约；
+///   2. 可写探测要真写文件，没必要每建一个窗口就跑一次。
+#[cfg(windows)]
+pub(crate) fn data_dir(app: &AppHandle) -> Option<PathBuf> {
+    static CACHE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| resolve_data_dir(app)).clone()
+}
+
+#[cfg(windows)]
+fn resolve_data_dir(app: &AppHandle) -> Option<PathBuf> {
+    // 空串（= 系统默认目录）或拿不到 exe 目录时，都退回系统默认程序目录。
+    let Some(candidate) = candidate_data_dir(DATA_DIR, program_dir().as_deref()) else {
+        return user_data_dir(app);
+    };
+
+    if is_writable(&candidate) {
+        return Some(candidate);
+    }
+
+    // 只读介质（写保护 U 盘 / Program Files / 只读网络盘）：退到系统默认目录，
+    // 保证「能启动」优先于「够绿色」——否则 WebView2 初始化失败会让窗口**直接打不开**。
+    let fallback = user_data_dir(app);
+    match &fallback {
+        Some(dir) => eprintln!(
+            "[config] 数据目录不可写，已回退系统默认目录：{} → {}",
+            candidate.display(),
+            dir.display()
+        ),
+        None => eprintln!(
+            "[config] 数据目录不可写且系统默认目录不可用：{}（改用 WebView2 自身默认位置）",
+            candidate.display()
+        ),
+    }
+    fallback
+}
+
+/// `DATA_DIR` 的**纯逻辑**解析（不依赖 `AppHandle`，因此可单测）：
+/// 把配置值算成一个「候选目录」，是否需要回退由调用方再探测。
+///
+/// - 空串 / 纯空白 → `None`（调用方改用系统默认程序目录，由 `app_name` 命名）；
+/// - 绝对路径       → 原样返回；
+/// - 相对路径       → 以 `program_dir`（exe 所在目录）为基准拼接；基准拿不到时 `None`。
+///
+/// ⚠️ 基准只能是 exe 目录，**不能**用 `std::env::current_dir()`：见 `program_dir()` 的说明。
+#[cfg(windows)]
+fn candidate_data_dir(configured: &str, program_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    let wanted = PathBuf::from(configured);
+    if wanted.is_absolute() {
+        return Some(wanted);
+    }
+    Some(program_dir?.join(wanted))
+}
+
+// 默认打开的网址。两种形态（打包配置 JSON 里分别是 `string` 与 `string[]`，
+// 到编译期都收敛成一段文本，由 `resolve::parse_domains` 判别）：
+//   ① 普通 URL：
+//      "https://用户名:密码@www.example.com"
+//      注意：现代 Chromium / WebView2 已废弃"URL 内嵌 userinfo 自动发 Basic 鉴权"的行为，
+//      不会自动发送。程序会把账号密码解析出来，通过本地反向代理给所有 HTTP/WebSocket 请求统一
+//      注入 `Authorization: Basic ...` 头，再转发到真实服务器。
+//   ② 域名数组（JSON 数组文本，如 `["a.com","b.com"]`）：
+//      运行时依次对这些域名做 DNS TXT 查询，用 PUBLIC_KEY 验签 + AES-GCM 解密 TXT 值得到真实 URL。
 pub(crate) const APP_URL: &str = env_str!("APP_URL", "https://用户名:密码@www.example.com");
 
 // Ed25519 公钥（PEM/SPKI 或裸 base64，32 字节原始公钥）。当 APP_URL 是【域名数组】时
@@ -165,10 +275,18 @@ pub(crate) const APP_URL: &str = env_str!("APP_URL", "https://用户名:密码@w
 // AES-GCM 解密 TXT 值得到真实 URL。普通字符串 URL 模式下忽略本字段。
 pub(crate) const PUBLIC_KEY: &str = env_str!("PUBLIC_KEY", "");
 
-// 应用名称（用于窗口标题、托盘提示、单实例聚焦等）
+// 应用名称（**安装名**）：用于数据目录名 / 设置目录名 / 单实例标识。
+// ⚠️ 语义边界：这里的 APP_NAME **不再**是界面显示名 —— 显示名见下方 TITLE。
+//    两者分开是为了支持「安装名用英文、界面显示中文」。
 pub(crate) const APP_NAME: &str = env_str!("APP_NAME", "Web2App");
-// 窗口标题（取自主机名，留空则用下面这个默认标题）
-pub(crate) const WINDOW_TITLE: &str = env_str!("WINDOW_TITLE", APP_NAME);
+// 显示名（**给用户看的名字**）：窗口标题、托盘悬停提示、设置窗标题。
+//
+// ⚠️ 编译期变量名与打包配置 JSON 的字段名**同为 `title`**（环境变量即 TITLE）——
+//    历史上这里叫 WINDOW_TITLE、JSON 里还并存过一个已废弃的 `window_title`，
+//    同一个概念有三个名字，改一处必漏另一处。现在只保留这一个。
+// ⚠️ 取值链只有一跳：JSON 的 title 为空 ⇒ 在打包期就被填成 app_name（见解析器），
+//    这里再回落一次 APP_NAME 只是「不依赖上游也自洽」的兜底。
+pub(crate) const TITLE: &str = env_str!("TITLE", APP_NAME);
 
 // 额外参数（编译期注入的 JSON 文本，默认 "{}"）。由手动打包 JSON 的 `extra` 字段提供，
 // 会以 `window.web2appExtra = {...}` 注入到被包裹网页，前端 JS 可直接读取。
@@ -200,12 +318,17 @@ pub(crate) const DEVTOOLS_ENABLED: bool = true;
 pub(crate) const DEVTOOLS_ENABLED: bool = false;
 
 // ---------- 数据目录（WebView2 用户数据文件夹，存 cookie / localStorage / 缓存等，仅 Windows）----------
-// true  = 使用 WebView2 系统默认位置（{exe 名}.WebView2，紧挨 exe 文件）。
-//         注意：打包安装（msi/nsis）后 exe 通常在 Program Files，标准用户对该目录无写权限，
-//         此时 WebView2 初始化会失败、窗口直接打不开。故【安装版强烈建议设为 false】。
-// false = 固定到“用户本地数据目录 / 程序名”（%LOCALAPPDATA%\<清洗后的 app_name>，
-//         始终可写，适合安装版与多用户场景（推荐）。
-pub(crate) const DATA_DIR_DEFAULT: bool = env_bool!("DATA_DIR_DEFAULT", false);
+// 空串 = 系统默认程序目录（%LOCALAPPDATA%\<清洗后的 app_name>），不受程序位置影响、始终可写；
+// 其余 = 目录路径：相对路径以【exe 所在目录】为基准（默认 "data" ⇒ <exe 目录>\data\，跟着程序走），
+//        绝对路径原样使用。路径解析与「不可写自动回退」见下方 `data_dir()`。
+//
+// ⚠️⚠️ 这里**不能**用 `env_str!`：那个宏把空串当成「未设置」并回落到默认值，而空串在本字段里
+//    是**有含义的取值**（= 用系统默认目录）。必须用裸 `option_env!` 原样保留空串。
+//    它与打包配置契约绑定：解析器把 `"data_dir": ""` 写成一行 `DATA_DIR=`（值就是空）。
+pub(crate) const DATA_DIR: &str = match option_env!("DATA_DIR") {
+    Some(s) => s,
+    None => "data",
+};
 
 // ---------- 代理配置 ----------
 // 不需要代理时把 PROXY_ENABLED 设为 false 即可。
@@ -216,7 +339,9 @@ pub(crate) const PROXY_ENABLED: bool = env_bool!("PROXY_ENABLED", false);
 pub(crate) const PROXY_HTTP: &str = env_str!("PROXY_HTTP", "");
 // HTTPS 代理地址；留空 "" 表示和 HTTP 代理用同一个（同样：留空即走自实现代理）。
 pub(crate) const PROXY_HTTPS: &str = env_str!("PROXY_HTTPS", "");
-// 不走代理的地址（分号分隔），可留空 ""
+// 不走代理的地址（分号分隔）。默认值与打包配置 JSON 的默认值、
+// 以及 Electron 绿色版 config.ts::DEFAULTS 三处**必须一致**（同一个串）。
+// 留空 = 不下发 --proxy-bypass-list（即沿用 Chromium 自身默认）。
 pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.0.1;<-loopback>");
 
 // ---------- 多页签（tab）模式（仅 Windows）----------
@@ -329,5 +454,94 @@ mod tests {
     #[test]
     fn build_proxy_args_none_when_disabled() {
         assert!(build_proxy_args().is_none());
+    }
+
+    // ---------- data_dir ----------
+    // 这些是「数据目录」契约里最容易错的部分：空串有含义、相对路径的基准是 exe 目录而非 cwd。
+    // 依赖 AppHandle 的部分（系统默认目录）无法在单测里构造，由探针 / 真机验证。
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_data_dir_empty_means_system_default() {
+        let base = std::path::Path::new(r"C:\app");
+        // 空串 ⇒ None（调用方改用系统默认程序目录），绝不能拼出一个叫 "" 的路径
+        assert_eq!(candidate_data_dir("", Some(base)), None);
+        // 纯空白视同空串
+        assert_eq!(candidate_data_dir("   ", Some(base)), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_data_dir_relative_uses_program_dir_not_cwd() {
+        let base = std::path::Path::new(r"C:\app");
+        assert_eq!(
+            candidate_data_dir("data", Some(base)),
+            Some(PathBuf::from(r"C:\app\data"))
+        );
+        assert_eq!(
+            candidate_data_dir("sub/mydata", Some(base)),
+            Some(PathBuf::from(r"C:\app\sub\mydata"))
+        );
+        // 首尾空白会被去掉（配置里手抖多打的空格不该变成一个带空格的目录名）
+        assert_eq!(
+            candidate_data_dir("  data  ", Some(base)),
+            Some(PathBuf::from(r"C:\app\data"))
+        );
+        // 拿不到 exe 目录 ⇒ None（由调用方退回系统默认目录），不 panic
+        assert_eq!(candidate_data_dir("data", None), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_data_dir_absolute_passthrough() {
+        let base = std::path::Path::new(r"C:\app");
+        assert_eq!(
+            candidate_data_dir(r"D:\appdata", Some(base)),
+            Some(PathBuf::from(r"D:\appdata"))
+        );
+        // 绝对路径不依赖基准目录，基准缺失时依然可用
+        assert_eq!(
+            candidate_data_dir(r"D:\appdata", None),
+            Some(PathBuf::from(r"D:\appdata"))
+        );
+        // 绝对路径不会被 base 污染（曾担心 join 会把它当相对路径拼在后面）
+        assert_eq!(
+            candidate_data_dir(r"D:\appdata", Some(base)),
+            candidate_data_dir(r"D:\appdata", None)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_data_dir_default_is_relative_to_program() {
+        // 编译期默认值是 "data" ⇒ 默认行为就是「数据跟着程序走」
+        assert_eq!(DATA_DIR, "data");
+        assert_eq!(
+            candidate_data_dir(DATA_DIR, Some(std::path::Path::new(r"C:\app"))),
+            Some(PathBuf::from(r"C:\app\data"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_writable_accepts_fresh_dir_and_leaves_no_litter() {
+        let dir = std::env::temp_dir().join("w2a-ut-writable");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(is_writable(&dir));
+        // 探针文件必须被清掉，不能在用户数据目录里留垃圾
+        assert!(!dir.join(".web2app-write-probe").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_writable_rejects_a_file_at_that_path() {
+        // 「目标路径上已存在一个同名文件」时建目录会失败 ⇒ 必须判定不可写，而不是 panic。
+        let path = std::env::temp_dir().join("w2a-ut-not-a-dir");
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"x").expect("写探针文件");
+        assert!(!is_writable(&path));
+        let _ = std::fs::remove_file(&path);
     }
 }

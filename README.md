@@ -47,16 +47,19 @@
 ## 四、文档索引清单
 | 文档名称 | 文档路径 | 说明 |
 | :------- | :------- | :--- |
-| 项目全盘分析与优化建议 | `docs/project-analysis.md` | 架构分析、模块职责地图、优化建议与待复验清单 |
-| 全流程审计报告（2026-09-20） | `docs/audit-2026-09-20.md` | 本轮「文档 / 实现 / 门禁一致性」审计：问题清单（不足·冗余·缺失）、P0/P1/P2 改动方案与验证证据、遗留建议与本轮局限 |
+| 项目全盘分析与优化建议 | `docs/project-analysis.md` | 架构分析、模块职责地图、优化建议与遗留问题 |
+| 全流程审计报告（2026-09-20） | `docs/audit-2026-09-20.md` | 「文档 / 实现 / 门禁一致性」审计：门禁对比、P0/P1 修复项、遗留事项与局限 |
 | Web2App 使用说明 | `webview-app/README.md` | Tauri 版配置、构建、打包与使用 |
 | Electron 绿色版说明 | `electron-app/README.md` | 绿色版配置、构建、验证与使用 |
-| Electron 落地方案 | `docs/electron-plan.md` | M0–M7 里程碑划分与已锁定决策 |
-| Electron 多页签设计方案 | `docs/electron-tabs-design.md` | M5 多页签：选型对比、本地实测依据、落地清单与验收判据 |
-| Electron 多页签真机测试步骤 | `docs/electron-tabs-test-steps.md` | M5 T0 之后：打包产物自证 + V1/V2/V4 目视项的真机验收清单 |
-| Electron 方案分析 | `docs/electron-analysis.md` | 与 Tauri 版对齐的选型与兼容性分析 |
+| Electron 落地方案 | `docs/electron-plan.md` | M0–M7 里程碑与已锁定决策、兼容契约（权威状态以子项目 README 为准） |
+| Electron 多页签设计方案 | `docs/electron-tabs-design.md` | M5 多页签：A′ 架构定案（已实现并真机验收）、落地清单与验收判据 |
+| Electron 多页签真机测试步骤 | `docs/electron-tabs-test-steps.md` | M5 真机验收清单（2026-09-18 完成，V1–V4 已关闭）+ 代理/域名解析待办 |
+| Electron 方案分析 | `docs/electron-analysis.md` | 功能对等矩阵、复用策略、兼容性要点与安全基线 |
 | 验签测试素材说明 | `docs/txttest-verify-materials.md` | DNS TXT 密文手工验签素材 |
 | Electron 打包瘦身方案 | `docs/electron-size-reduction.md` | Electron 绿色版打包产物实测基线：语言包/DLL/压缩形态分级瘦身（P0 可直接落地） |
+| **打包配置 JSON 契约** | **`docs/packaging-config.md`** | **打包配置的唯一契约说明**：17 个字段的类型/默认值/含义、多端（Windows / Android / Electron 绿色版）行为对照、校验规则、两条打包入口与迁移指引 |
+| （过程稿）配置字段总表 | `docs/config-fields-2026-09-22.md` | Step 1 取证：6 个配置面的字段清单与已确认缺口（结论已并入 `packaging-config.md`） |
+| （过程稿）打包 JSON 评审 | `docs/config-json-review-2026-09-22.md` | 改造前的配置 JSON 问题清单与优化建议 |
 | （历史）标题栏导航按钮设计 | `docs/archive/add_titlebar_nav_buttons.md` | 已归档，仅作追溯（2026-09-22 由 `.trae/documents/` 迁入） |
 | （历史）诊断与优化 | `docs/archive/web2app-diagnosis-optimization.md` | 已归档，仅作追溯（2026-09-22 由 `.trae/documents/` 迁入） |
 
@@ -79,17 +82,21 @@
 | 版本 | 日期 | 变更说明 |
 | :--- | :--- | :------- |
 | v1.0 | 2026-09-15 | 初始版本 |
-| v1.1 | 2026-09-17 | 补全项目概述、仓库结构地图与文档索引清单；新增补充说明（单一真源、编码、敏感文件等）；规则条文未改动 |
-| v1.2 | 2026-09-17 | 专项文档归位至 `docs/`：`PLAN.md`→`docs/electron-plan.md`、`ANALYSIS.md`→`docs/electron-analysis.md`、`txttest_verify_materials.md`→`docs/txttest-verify-materials.md`、`docs/project.md`→`docs/project-analysis.md`；清单路径与引用同步 |
-| v1.3 | 2026-09-17 | 全部文档与仓库现状逐条核对并优化：`project-analysis.md` 补 13 项建议落地状态与实测数据；`txttest-verify-materials.md` 补 ttl 字段、改用 `resolve-tool`；`electron-app/README.md`、`webview-app/README.md` 勘误命令/路径/配置字段；`electron-plan.md` 同步进度并标注被取代结论 |
-| v1.4 | 2026-09-17 | 新增 `docs/electron-tabs-design.md`（M5 多页签设计方案）并登记入索引清单 |
-| v1.5 | 2026-09-17 | `electron-tabs-design.md` 升 v1.1：**社区核查后更正选型**——由「`BaseWindow` + 独立壳视图」改为「`BrowserWindow` 当壳 + 子 `WebContentsView`」（新增 §2.3 落地实现核查、§3.5 补充实测 8 项）；`electron-app/README.md` 的 M5 行同步 |
-| v1.6 | 2026-09-17 | `electron-tabs-design.md` 升 v1.2：**T0 完成**——新增 `electron-app/scripts/tabs-v4.cjs`，用 `desktopCapturer` 系统级抓屏 + 像素断言把「子视图绘制顺序」（V4）从目视项降级为可自动断言，正反两向对照通过 ⇒ A′ 定案、electron#41044 未回归 |
-| v1.7 | 2026-09-17 | 新增 `docs/electron-tabs-test-steps.md`（M5 T0 之后的真机测试步骤：打包产物自证 + V1/V2/V4 目视项）并登记入索引清单 |
-| v1.8 | 2026-09-17 | **M5 T1 骨架完成**：`electron-tabs-design.md` 升 v1.3；新增 `electron-app/src/main/tabs.ts`（TabManager）、`src/renderer/shell-preload.ts`（壳命令垫片）；`index.ts` 接入 `createWindow()` 分叉 + `shell://` 协议 + 壳命令 sender 校验 + `resolveInitialTarget()`；`electron-builder.yml` 加回 `shell.html`。单窗口 `probe` 112/112 回归通过、多页签 `smoke` 退出码 0 |
-| v1.9 | 2026-09-17 | **M5 T2 页签管理完成**：`electron-tabs-design.md` 升 v1.4；`probe.ts` 新增 `runTabsProbe`（`--tabs` 标志，19 条断言）；修复两处缺陷（`closeTab` 补显式 `removeChildView`、`get_tabs` 契约元组化）；单窗口 112/112 零回归、多页签 19/19 |
-| v1.10 | 2026-09-17 | **M5 T3/T4 完成（多页签收尾）**：`electron-tabs-design.md` 升 v1.5；补 P9/P10/P11 断言（window.open 单页签、target path 保留、特权命令 sender 拒绝）+ 内容视图 `did-fail-load` + 探针专用 `tabs-probe-preload.ts`；打包产物（dir/zip/portable）双模式探针退出码 0。多页签探针 **23/23**、单窗口 112/112 零回归 |
-| v1.11 | 2026-09-18 | **M6 结清 + 审计修复**：①启动日志落盘（`electron-app/src/main/startup-log.ts` → `data\logs\startup.log`，fail-open / 1 MiB 轮转 / 探针隔离到 `%TEMP%`），`smoke` 增硬断言；②版本信息经 VERSIONINFO 实证**本就已生效**（原「待补」判断有误），`electron-plan.md` §5/§8.8 按实证订正；③SmartScreen 文案补入 `electron-app/README.md`；④审计修复 `renderSplash` 的 `String.replace` 注入模式、`tabs_enabled` 过期注释、重复文案表、`contentBounds` 负高度。复测：单窗口 112/112、多页签 23/23、冒烟 0 回归 |
-| v1.12 | 2026-09-20 | **文档索引补登 + webview-app 死代码清理**：①`docs/electron-size-reduction.md`（2026-09-18 生成）补登记入「四、文档索引清单」；②删除 `webview-app/src/config.rs` 中已无人引用的 `HOTKEY_CTRL/ALT/SHIFT/KEY` 四个编译期死常量（快捷键早已改为设置页落盘），同步订正 `webview-app/README.md` 与 `lib.rs` 的过期注释；复测 `cargo test --all` 全绿 |
-| v1.13 | 2026-09-20 | **文档/实现一致性 + CI 门禁审计（本轮全流程）**：①修平**既有**的 `cargo fmt --all -- --check` 违规 5 处 / 4 文件（`proxy-server/main.rs`×2、`proxy.rs`×1 尾随空格、`bootstrap.rs`×1、`settings.rs`×1）—— 该命令是 CI 阻断门禁，此前在本机就是红的；②`electron-app/` 源码与 `tsconfig.json` 中 10 处失效引用 `PLAN.md` 归正为 `docs/electron-plan.md`，注释内 `npm run *` 统一为 `pnpm run *`（`electron-builder.yml` 同步）；③`webview-app` 把 `cfg(not(target_os = "android"))` 改用 Tauri 惯用 `cfg(desktop)`，与 `Cargo.toml` 的 `not(any(android, ios))` 门控对齐（原写法在 iOS 目标上会引入「模块在、依赖不在」的编译隐患）；④`electron-app/.gitignore` 补 `tests/*.log`、`tests/*.exe`、`tests/*.zip`（原 `tests/*/` 只忽略目录，~96MB 便携版副本与 10 个探针日志会被提交）；⑤删除 `webview-app/src/loading.rs` 的 `pub fn hide` 死函数；⑥订正过期文档结论：`electron-plan.md` 头部新增「文档状态」表（M4 改「部分交付」、`BaseWindow` 选型已推翻、`.npmrc` 配镜像对 pnpm 无效、体积 320MB→367.67MB、无 GPU 环境必须加 `--no-sandbox --in-process-gpu`），`electron-analysis.md`（「空目录」/「18 字段」）、`electron-tabs-design.md`（V1–V3 已关闭）同步；⑦README 交叉引用补齐（`electron-app/README.md` ↔ `docs/electron-size-reduction.md`、根 README；`webview-app/README.md` → 根 README），并声明「里程碑状态以子项目 README 为准」；⑧新增 `docs/audit-2026-09-20.md`（本轮全流程审计报告）并登记入「四、文档索引清单」 |
-| v1.14 | 2026-09-22 | **全项目单仓库化（`.git` 上移一级，未重写历史）**：①仓库根由 `webview-app/` 上移到本目录，`electron-app/`（此前**无任何版本控制**）与根目录 `docs/`、`test1.json`、`test2.json` 首次入库，实现「双壳同处一仓」，且 `webview-app/` **目录内部零改动**；②`.git` 直移 ⇒ 40 个老文件被 git 识别为重命名，历史总量保留，但逐文件历史需 `git log --follow` 穿透；③新增**仓库根 `.gitignore`**（在首次 `git add` 之前落地，显式忽略 `signing/` 明文凭据、`.workbuddy/` 本地记忆、`.trae/` IDE 目录），并用 `git check-ignore` 逐条验证、census 暂存区零敏感项；④`.github/` 迁至仓库根：`ci.yml`/`release.yml`/`build-custom.yml`/`resolve-keys.yml` 统一加 `defaults.run.working-directory: webview-app`；因 `defaults.run` **不作用于 `uses:`**，`action-gh-release` 的 `files:` 与两处 `upload-artifact` 的 `path:` 必须手改加 `webview-app/` 前缀；`generate-signing-key.yml` 无 `checkout`（工作区无 `webview-app/`），**刻意不设**该默认值并注释说明；⑤`.trae/documents/` 两份归档稿迁入 `docs/archive/` 并在索引清单改路径；⑥§二 结构地图、§四 索引、§五.6 同步（新增「跨壳路径契约禁改」与 tag 前缀待办）。 |
+| v1.1 | 2026-09-17 | 补全项目概述、仓库结构地图、文档索引与补充说明 |
+| v1.2 | 2026-09-17 | 专项文档归位至 `docs/`，清单与引用同步 |
+| v1.3 | 2026-09-17 | 全部文档与仓库现状逐条核对优化 |
+| v1.4 | 2026-09-17 | 新增 `docs/electron-tabs-design.md` 并登记索引 |
+| v1.5 | 2026-09-17 | M5 选型更正为 A′（`BrowserWindow` 壳 + 子 `WebContentsView`） |
+| v1.6 | 2026-09-17 | M5 T0 完成：`tabs-v4.cjs` 程序化验证 V4（A′ 定案） |
+| v1.7 | 2026-09-17 | 新增 `docs/electron-tabs-test-steps.md` 并登记索引 |
+| v1.8 | 2026-09-17 | M5 T1 骨架完成（tabs.ts / shell:// 协议 / sender 校验） |
+| v1.9 | 2026-09-17 | M5 T2 页签管理完成（19 条断言；修 removeChildView、get_tabs 契约） |
+| v1.10 | 2026-09-17 | M5 T3/T4 收尾：探针单窗口 112/112、页签 23/23、打包产物双模式退出码 0 |
+| v1.11 | 2026-09-18 | M6 结清 + 审计修复（启动日志落盘、VERSIONINFO 实证订正） |
+| v1.12 | 2026-09-20 | 文档索引补登 + webview-app 死代码清理 |
+| v1.13 | 2026-09-20 | 文档/实现一致性 + CI 门禁审计（fmt 归零、失效引用归正、cfg(desktop) 等） |
+| v1.14 | 2026-09-22 | 全项目单仓库化（`.git` 上移、workflow 迁至仓库根、归档稿入 `docs/archive/`） |
+| v1.15 | 2026-09-22 | 全仓库文档精简：删除过期结论与逐日过程记录，保留决策、契约与已验证结论 |
+| v1.16 | 2026-09-22 | 打包配置契约统一：移除 `window_title`、布尔规范为真 `bool`、`app_url` 支持 `string \| string[]`、两壳行为对齐；Electron `config.json` 收入 `app.asar`；新增 Electron 手动打包 workflow；新增 `docs/packaging-config.md` 并登记索引 |
+| v1.17 | 2026-09-22 | `data_dir_default` 废弃为 **`data_dir`（字符串，两壳同名同义）**：默认 `"data"` = 程序目录下 `data\`（相对基准 = exe 目录，非 cwd）、`""` = 系统默认程序目录（由 `app_name` 定义）；⚠️ 空串是有意义的值，禁止被 `env_str!` / `${VAR:-}` / `\|\|` 吞掉；Android 应用包名改由 `app_name` 派生（工作流在 `android init` 前改写 `identifier` 为 `com.web2app.<清洗值>`），`docs/packaging-config.md` §4.2/§4.3 同步 |
+| v1.18 | 2026-09-22 | `ci.yml` 新增 **`config-contract` 作业**（此前文档声称「CI 里会跑」但并无该作业）：解析器 `--selftest` + 全 workflow YAML/内联脚本静态检查 + 逐个校验仓库内配置样例；作业级 `defaults.run.working-directory: .` 覆盖 workflow 级（契约脚本在仓库根，不在 `webview-app/`）。修 `check-workflows.py` 的 `find_bash()` 误选中 WSL 启动器（`C:\Windows\System32\bash.exe` 退出码 -1，导致**每个** `bash -n` 都假失败） |

@@ -1,0 +1,389 @@
+# 打包配置 JSON 契约（多端行为对照）
+
+> **这份文档是打包配置的契约说明。** 字段名、类型、默认值、校验规则的**唯一实现**是
+> [`.github/scripts/parse-packaging-config.py`](../.github/scripts/parse-packaging-config.py)（含内置自测）。
+> 文档与之冲突时**以脚本为准**；改脚本 = 改契约，必须同步本文件。
+>
+> 另有一个运行期对等实现：[`electron-app/src/main/config.ts`](../electron-app/src/main/config.ts)
+> （Electron 绿色版读 asar 内的 `config.json`），校验规则逐条对齐。
+
+---
+
+## 1. 一句话模型
+
+**一份配置 JSON → 三个产物。** 同一份 JSON，在三条流水线上得到**同样语义**的产物：
+
+| 产物 | 入口 workflow | 配置什么时候被读 |
+|---|---|---|
+| Windows 安装版（MSI）/ 单文件绿色版（zip） | `.github/workflows/build-custom.yml` | **编译期**：值被写成二进制里的常量 |
+| Android APK（已签名） | `.github/workflows/build-custom.yml`（勾选 `android`） | **编译期**：同上 |
+| Windows 绿色版（Electron，zip / portable exe） | `.github/workflows/electron-build-custom.yml` | **打包期**：规范化后写进 `app.asar` |
+
+> ⚠️ **两个壳都是「改配置必须重新打包」**，区别只是 Tauri 侧需要重新**编译**、Electron 侧只需重新**打包**。
+> 两者都**不支持**交付后改配置——这正是配置被放进程序本体的原因（见 §6）。
+>
+> 另有一条**不打 workflow** 的路径：`release.yml`（打 tag 时触发），配置来自**仓库变量 / Secrets**，
+> 字段名不同（`TITLE` / `PROXY_ENABLED` …）。见 §7。
+
+---
+
+## 2. 字段总表
+
+共 **17 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
+
+| 字段 | 类型 | 默认值 | 平台 | 含义 |
+|---|---|---|---|---|
+| `app_url` | **`string` \| `string[]`** | 必填 | 全平台 | 要嵌入的地址。两种形态见 §3.1 |
+| `app_name` | string | `"Web2App"` | 全平台 | **安装名**：安装包名 / 快捷方式 / 安装目录 / "程序和功能"显示名；**同时是数据目录名**，并派生出 **Android 包名**（见 §4.2） |
+| `title` | string | `""` → 回落 `app_name` | 全平台 | **显示名**：窗口标题 / 托盘悬停 / 设置窗标题（Win）；Android 应用名（桌面图标下） |
+| `extra` | 任意 JSON | `{}` | 全平台 | 注入被包裹网页的附加参数，前端读 `window.web2appExtra` |
+| `icon_url` | string | `""` | 全平台（**构建期消费**） | 应用图标 PNG 的 URL；空 = 沿用仓库默认图标 |
+| `proxy_enabled` | **`bool`** | `false` | 仅 Windows | 启用本地反向代理（统一注入 Basic 鉴权，覆盖 WebSocket） |
+| `proxy_http` | string | `""` | 仅 Windows | 外部 HTTP 代理地址 |
+| `proxy_https` | string | `""` | 仅 Windows | 外部 HTTPS 代理地址（留空 = 复用 `proxy_http`） |
+| `proxy_bypass` | string | `"localhost;127.0.0.1;<-loopback>"` | 仅 Windows | 不走代理的地址，**分号分隔** |
+| `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。见 §4.3 |
+| `tabs_enabled` | **`bool`** | `false` | 仅 Windows | 多页签模式（Electron 亦可）；Android 忽略 |
+| `public_key` | string | `""` | 全平台 | Ed25519 公钥（裸 base64 或 SPKI PEM）。**`app_url` 为数组时必填** |
+| `resolve_secret` | string | `""` → 代码内置默认 | 全平台 | AES 对称 Secret，须与服务端生成密文时一致。⚠️ **编译期**注入 |
+| `android_keystore_base64` | string | `""` | 仅 Android | keystore(.jks/.keystore) 的 base64；优先于仓库 Secrets |
+| `android_key_alias` | string | `""` | 仅 Android | keystore 别名（给了 keystore 则必填） |
+| `android_keystore_password` | string | `""` | 仅 Android | keystore 密码（给了 keystore 则必填） |
+| `android_key_password` | string | `""` | 仅 Android | key 密码（可空 = 同 keystore 密码） |
+
+### 已移除的字段
+
+| 字段 | 状态 | 改用 |
+|---|---|---|
+| `window_title` | **已移除**，配置里出现即**报错** | `title`（语义完全相同） |
+
+移除原因：同一个「显示名」概念曾有三套名字（JSON 的 `title` / `window_title`、仓库变量的
+`APP_TITLE` / `WINDOW_TITLE`）。名字越多，越容易出现「同一份配置在两个壳里标题不同」这种
+不报错的缺陷。
+
+### 类型约定（三条硬规则）
+
+1. **布尔一律写真 `bool`，不带引号。** `"proxy_enabled": "false"` 这种字符串写法**已不再接受**，
+   会直接失败并给出改法。
+2. **`app_url` 支持真 JSON 类型 `string` 或 `string[]`**，不再是「字符串里套 JSON」。
+3. **未知字段硬失败**（含近似名建议）。历史上未知字段只打 `::warning::` 就跳过，
+   于是「字段名拼错」和「字段不生效」表现完全一样，只能靠猜。
+
+---
+
+## 3. 重点字段详解
+
+### 3.1 `app_url` —— 直连地址 或 跳板域名数组
+
+**形态一：字符串（直连）**
+
+```json
+{ "app_url": "https://user:pass@example.com" }
+```
+
+URL 里的 `user:pass@`（userinfo）由**本地代理**转换成 `Authorization: Basic` 注入上游，
+这样凭据不出现在页面的 JS 里。
+
+**形态二：字符串数组（DNS TXT 跳板）**
+
+```json
+{
+  "app_url": ["a.com", "b.com"],
+  "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU="
+}
+```
+
+运行时**按序**对每个域名做 DNS TXT 查询，TXT 值是一段 base64 密文，用 `public_key` 验签 +
+AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自动尝试下一个，全部失败则报
+"服务器连接失败"。
+
+> ⚠️ **数组形态必须提供 `public_key`** —— 没有公钥就无法验签。解析器在打包期就会强制校验。
+>
+> **兼容**：老配置里 `"app_url": "[\"a.com\"]"`（字符串形态的 JSON 数组文本）仍可用，
+> 但会打一条 warning 提示改成真数组。
+
+### 3.2 `app_name` vs `title` —— 安装名 / 显示名分离
+
+两者刻意分开，为了支持「**安装包叫英文名、界面叫中文名**」：
+
+| | `app_name`（安装名） | `title`（显示名） |
+|---|---|---|
+| 给谁看 | 系统 / 安装器 | 用户 |
+| Windows | 安装包名、开始菜单与桌面快捷方式、安装目录、"程序和功能" | 窗口标题、托盘悬停、右键菜单"设置"标题 |
+| Android | **包名（applicationId）由它派生** = `com.web2app.<清洗后的值>` | 桌面图标下的名字 |
+| Electron | `productName`（zip/portable 文件名）、`%APPDATA%` 子目录名（`data_dir` 为空串时） | 窗口标题、托盘悬停 |
+| 缺省 | `Web2App` | 回落 `app_name` |
+
+> ⚠️ **`app_name` 语义过载**：它同时是「安装名」「数据目录名」和「Android 包名来源」。
+> 应用发布后**改 `app_name` 等于丢掉全部登录态**（数据目录换了名字），而且会换掉 Android 包名
+> —— 在手机上那就是**另一个应用**（不能覆盖升级）。改之前请想清楚。
+
+### 3.3 布尔字段：为什么不再接受 `"true"`
+
+旧模板写的是 `"proxy_enabled": "false"`。字符串 `"false"` 在**真值判断下是 true**，
+所以两个壳各自用不同的宽容规则去"猜"它：
+
+| 写法 | Tauri（`env_bool!`） | Electron（旧 `toBool`） |
+|---|---|---|
+| `"true"` / `"1"` / `"yes"` | `true` | `true` |
+| `"false"` / `"0"` / `"no"` | `false` | `false` |
+| `"on"` | **`false`**（不在白名单） | **`true`** |
+
+同一份配置里写 `"on"`，两个壳的判定**相反**。这类缺陷不报错、只在运行时表现为行为差异，
+是最难查的一类。**现在字符串一律拒绝**，歧义在打包期就消灭。
+
+哪些字段是布尔：`proxy_enabled`、`tabs_enabled`。
+
+> ⚠️ 数据目录**曾经也是布尔**（旧字段 `data_dir_default`），现已改成**字符串** `data_dir`——
+> 布尔只能表达「二选一」，而这个概念需要表达「哪个相对路径 / 哪个绝对路径 / 用系统目录」。
+> 见 §4.3。
+
+### 3.4 `resolve_secret` —— 编译期注入，改完必须重新打包
+
+它是 `resolve-core` 里 `option_env!("RESOLVE_SECRET")` 的**编译期常量**：
+
+- **Tauri 侧**：编进主程序；
+- **Electron 侧**：编进 sidecar `w2a-proxy.exe`（它是**单独编译**的）。
+
+⚠️ 因此 Electron 手动打包 workflow 里，「解析配置」必须**排在「编译 sidecar」之前**——
+保证编译 sidecar 时 `RESOLVE_SECRET` 已在环境里。顺序错了，sidecar 内置的是公开默认
+Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律失败，且不报错）。
+
+未配置时会打 warning：所有产物共享同一个固定密钥串，安全门槛较低。
+
+---
+
+## 4. 多端行为对照
+
+### 4.1 总表
+
+| 维度 | Windows（Tauri） | Android（Tauri） | Windows 绿色版（Electron） |
+|---|---|---|---|
+| 配置读取时机 | 编译期常量 | 编译期常量 | 打包期写进 `app.asar` |
+| 改配置 | 重新编译 | 重新编译 | 重新打包 |
+| `app_name` | 安装包名 / 数据目录名 / **Android 包名**（派生） | 同左 | `productName` / `%APPDATA%` 子目录名 |
+| `title` | 窗口标题 + 托盘提示 + 「设置」窗标题 | **应用名称**（桌面 label） | 窗口标题 + 托盘提示 |
+| `tabs_enabled` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
+| `proxy_*` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
+| `data_dir` | 见 §4.3 | ❌ 忽略（始终私有目录） | 见 §4.3 |
+| `icon_url` | 构建期 `cargo tauri icon` | 同左 | 构建期交给 electron-builder 转 ico |
+| `android_*` | ❌ 忽略 | ✅ 用于签名 | ❌ 忽略（且不写进包内 config.json） |
+| `public_key` | ✅ 数组模式必填 | ✅ 同左 | ✅ 同左 |
+| `resolve_secret` | 编进主程序 | 编进主程序 | 编进 sidecar `w2a-proxy.exe` |
+
+### 4.2 Android 侧的三个额外动作
+
+1. **应用名称（桌面图标下的 label）取 `title`** —— `init` 之后打补丁覆盖 `strings.xml` 与
+   Manifest 内联 label（未配 `title` 时回落 `app_name`）；
+2. **包名（applicationId）由 `app_name` 派生** = `com.web2app.<清洗后的 app_name>`。
+   必须在 `init` **之前**改写 `tauri.conf.json` 的 `identifier` —— Tauri 2 **没有**
+   `bundle.android.package` 字段，安卓包名只能来自 `identifier`。
+   清洗规则：只留 ASCII 字母/数字/下划线并小写；首字符是数字则加 `app` 前缀；
+   一个 ASCII 字符都没有（如纯中文名）则用名字指纹兜底；命中 Java 关键字则补下划线。
+   ⇒ 不同 `app_name` 得到不同包名，**可在同一台手机上共存**（此前固定 `com.example.web2app`，
+   不同配置的 APK 会互相覆盖安装）。要换成自己公司的域前缀（如 `com.yourcorp.*`），
+   改 workflow 里那一行 `pkg = "com.web2app." + seg`。
+3. `android_*` 4 个字段落盘成 `release.keystore` + `ANDROID_KEYSTORE_*` 环境变量，
+   并 `::add-mask::` 掩码密码。keystore 由 **CI 一次性生成的专用 keystore** 兜底（未提供时）。
+
+### 4.3 `data_dir`：四种取值，两壳同一套规则
+
+| 取值 | Windows（Tauri） | Windows 绿色版（Electron） |
+|---|---|---|
+| `"data"`（**默认**） | `<exe 目录>\data\` | `<exe 目录>\data\` |
+| `""`（空串） | `%LOCALAPPDATA%\<app_name>` | `%APPDATA%\<app_name>` |
+| 其它相对路径 | `<exe 目录>\<该路径>` | `<exe 目录>\<该路径>` |
+| 绝对路径 | 原样使用 | 原样使用 |
+
+**四条要点**：
+
+1. **相对路径的基准是 exe 所在目录，不是 `cwd`。** 进程工作目录会随启动方式变化（快捷方式的
+   「起始位置」、命令行 `cd` 后启动、从资源管理器拖拽启动），用它会让同一个包在不同启动方式下
+   把数据落到不同地方 —— 用户表现为「设置丢了 / 又要重新登录」。两壳都取「程序自身所在目录」
+   （Tauri：`std::env::current_exe()` 的父目录；Electron：`installRoot()`）。
+2. **空串是「有含义的取值」，不是「未设置」。** 它表达「用系统默认程序目录，别跟着程序跑」。
+   ⚠️ 这条在意料之外的地方埋了两个坑，两处都已按「保留空串」实现：
+   - Rust 侧**不能**用 `env_str!` —— 它把空串当未设置并回落到默认值，必须用裸 `option_env!`；
+   - shell / GitHub 变量侧**不能**用带冒号的 `${DATA_DIR:-data}` 或 `vars.DATA_DIR || 'data'`
+     —— 它们把「已设置但为空」也替换掉，必须用 `${DATA_DIR-data}`。
+3. **不可写会自动回退**，保证「能启动」优先于「够绿色」。安装版（MSI）默认装进
+   `Program Files`，标准用户在那里没有写权限；若不回退，WebView2 初始化会失败、
+   **窗口直接打不开**。两壳都用**真写文件探测**（建目录 → 写探针文件 → 删除），
+   失败则退回系统默认目录并打印一行原因。
+   > 只调 `create_dir_all` / `access(W_OK)` 是不够的：写保护 U 盘、只读网络盘、
+   > 企业策略下的 `Program Files` 都可能「建目录成功但写文件失败」。
+4. **两壳的「系统默认」不是同一个磁盘位置**（Tauri 在 `%LOCALAPPDATA%`、Electron 在
+   `%APPDATA%`），这是各自框架的惯例位置；但**语义完全相同**：由 `app_name` 命名、
+   与程序位置无关。⚠️ Electron 的日志目录 `<dataDir>\logs` 也随之移动（Tauri 无文件日志）。
+
+> **与旧字段的对照**：旧的 `data_dir_default`（布尔）两壳**同名反义** —— Tauri `false` =
+> `%LOCALAPPDATA%`、Electron `false` = exe 同级 `data\`，仅凭 JSON 看不出来。
+> 新方案把「跟着程序走」变成两壳的**同一个默认值且同名同义**：
+> `false` ⇒ `"data"`、`true` ⇒ `""`。
+
+### 4.4 `proxy_bypass` 的默认值三处必须一致
+
+同一个串 `localhost;127.0.0.1;<-loopback>` 同时写在：
+
+1. `webview-app/src/config.rs` 的 `PROXY_BYPASS` 常量（编译期默认）；
+2. `electron-app/src/main/config.ts` 的 `DEFAULTS.proxy_bypass`（运行期默认）；
+3. `.github/scripts/parse-packaging-config.py` 的 `DEFAULTS["proxy_bypass"]`（打包期默认）。
+
+**留空 = 不下发 bypass 参数**（即空值不覆盖 Chromium 默认）。三处不一致会导致
+「没配 bypass 时两个壳的直连范围不同」。
+
+---
+
+## 5. 校验与报错行为
+
+解析器（打包期）与 `config.ts`（运行期）**逐条对齐**，任何一边放宽都会让
+「CI 通过、双击却起不来」或反过来。
+
+| 情况 | 行为 |
+|---|---|
+| 未知字段 | **硬失败**，附近似名建议（`proxy_enable` → 是否想写 `proxy_enabled`？） |
+| `window_title` / `data_dir_default` | **硬失败**，提示改用 `title` / `data_dir`，并把新旧值对应关系讲清楚 |
+| 布尔写成字符串 | **硬失败**，给出正确/错误写法对照 |
+| `data_dir` 不是字符串 | **硬失败**（`true` 若被宽容地转成字符串，会静默建出一个名叫 `True` 的目录） |
+| `data_dir` 含 NUL | **硬失败** |
+| `data_dir` 含 `<>"\|?*` | warning（Windows 上建目录会失败，届时自动回退系统默认目录） |
+| `app_url` 数组但无 `public_key` | **硬失败** |
+| `app_url` 空数组 / 空串 | **硬失败** |
+| `app_url` 以 `[` 开头但不是合法数组 | **硬失败** |
+| `app_url` 不以 `http(s)://` 开头 | warning（本地夹具可能用别的 scheme） |
+| `app_url` 是「JSON 数组文本」写法 | warning（建议改真数组） |
+| `icon_url` 非 http(s) | warning（打包时下载失败会回落默认图标） |
+| `resolve_secret` 未配置 | warning（共享默认密钥，安全门槛较低） |
+| `android_*` 出现在 Electron 侧 | 忽略并提示（同一份契约，本壳不实现） |
+| 字段值为 `null` | 视为**用默认值** |
+
+> **为什么未知字段要硬失败？** 手误与"字段不生效"在宽容模式下表现完全一样。
+> 硬失败 + 近似名建议是唯一能让手误在打包时就现形的做法。
+
+**自测与门禁**：解析器内置契约自测，CI 的 **`config-contract` 作业**（`ci.yml`）里会跑，防止契约悄悄漂移。
+该作业同时做另外两件同样只能靠 CI 兜住的事 —— 静态检查所有 workflow 的 YAML 与内联 `python`/`bash` 语法
+（这类错「只在 CI 上才炸」，本地不跑就等于没有护栏），以及**逐个校验仓库内的配置样例**是否符合契约
+（`test1.json` / `test2.json` 曾停留在字符串布尔，靠这一步在提交时就现形）。
+
+```bash
+python3 .github/scripts/parse-packaging-config.py --selftest
+python3 .github/scripts/parse-packaging-config.py --print-contract-keys   # 打印字段名，供模板断言
+python3 .github/scripts/check-workflows.py                                # workflow YAML + 内联脚本语法
+```
+
+---
+
+## 6. 配置存在哪里（为什么写不进 exe 同级）
+
+| 壳 | 位置 | 可读性 |
+|---|---|---|
+| Tauri | 值已编进 `web2app.exe`（常量），交付物里**没有配置文件** | 需反编译才可见 |
+| Electron | `app.asar` 内的 `out/config.json` | **不可直接读改**；解开 asar 才能看到 |
+
+**Electron 侧为什么不再把 `config.json` 放在 exe 同级？**
+
+早期实现用 electron-builder 的 `extraFiles` 把配置放在 exe 旁边，结果是**任何拿到包的人
+都能直接改地址**（记事本打开改成自己的站，再发给别人）——配置就失去了意义。
+现在配置随 asar 进包，改动必须重新打包。
+
+> 实现要点：`src/main/index.ts` 里 `configRoot()` 指向 `app.getAppPath()/out`（打包态 = asar 内）；
+> 开发态回落到项目根，方便本地调试。
+>
+> ⚠️ **护栏**：`electron-build-custom.yml` 出包后跑 `scripts/check-asar-config.cjs`，
+> 断言 `out/config.json` **确实在 `app.asar` 内**。这条防的是**静默失败**——配置没进包时
+> electron-builder 照样出包、双击照样打开，只是静默退回内置默认地址，构建日志全绿。
+
+---
+
+## 7. 两条打包入口怎么选
+
+### 7.1 手动打包（推荐为每个应用出一份包）
+
+| | Tauri 版 | Electron 绿色版 |
+|---|---|---|
+| workflow | `build-custom.yml` | `electron-build-custom.yml` |
+| 勾选项 | `windows_installer` / `windows_portable` / `android` | `electron_zip` / `electron_portable` |
+| 配置来源 | `config_json` 或 `config_url`（二选一，前者优先） | 同左 |
+| 产物 | `.msi` / `-portable.zip` / `.apk` | `.zip`（解压即用）/ `-portable.exe`（单文件） |
+| 产物体积 | 单文件绿色版 **< 20MB**（自有 exe 11.06MB） | zip ≈147.6MB / portable ≈96.5MB（Chromium 载荷） |
+
+**配置怎么给**：
+
+- `config_json`：直接粘贴单行 JSON。JSON 标准不支持注释，**粘贴时请去掉注释**。
+- `config_url`：填一个公开可访问、返回该 JSON 的 URL（可指向仓库内 `.json` 的 raw 链接）。
+  「想一键生成某个固定应用」就把 `config_url` 固定指向仓库里那份 `.json`。
+
+> `config_json` 与 `config_url` 都填时，**以 `config_json` 为准**。
+
+### 7.2 `release.yml`（打 tag 自动发布）
+
+配置来自**仓库变量 / Secrets**，字段名与 JSON 不同：
+
+| JSON 字段 | 仓库变量 / Secret |
+|---|---|
+| `app_url` | `APP_URL`（Secret 优先，回落 Variable） |
+| `app_name` | `APP_NAME` |
+| `title` | **`TITLE`**（旧名 `APP_TITLE` / `WINDOW_TITLE` 仅作回落） |
+| `extra` | `EXTRA` |
+| `icon_url` | `ICON_URL` |
+| `public_key` | `PUBLIC_KEY`（Secret 优先） |
+| `resolve_secret` | `RESOLVE_SECRET`（Secret 优先） |
+| `proxy_enabled` / `proxy_http` / `proxy_https` / `proxy_bypass` | 同名大写 |
+| `data_dir` / `tabs_enabled` | 同名大写 |
+| `android_*` | `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` |
+
+> ⚠️ `EXTRA` 与 `ICON_URL` 历史上在 `release.yml` 里**缺失**，等于 Release 路径下
+> `window.web2appExtra` 恒为 `{}`、且不能用自定义图标。现已补齐（两条 job 都有）。
+>
+> ⚠️ **`release.yml` 的 `DATA_DIR` 默认是「空串」（= 系统默认目录），与 JSON 侧的默认 `"data"` 不同。**
+> 这是有意的：`release.yml` 产出的是 MSI 安装版，装进 `Program Files` 后 exe 同级不可写，
+> 系统默认目录对它才是最稳的默认值。要让它也「跟着程序走」，设仓库变量 `DATA_DIR=data`。
+> ⚠️ 该行**不能**写成 `vars.DATA_DIR || 'data'`：`||` 会把「已配置但为空」也替换成 `data`，
+> 于是仓库变量里再也表达不出「用系统默认目录」这个取值。
+
+---
+
+## 8. 迁移指引
+
+**从旧配置升级到本契约，只需四步：**
+
+1. **删掉 `window_title`** —— 若与 `title` 并存，确认保留哪个；只留 `title`。
+2. **`data_dir_default` 改成 `data_dir`（字符串）** —— `false` → `"data"`、`true` → `""`。
+   旧字段出现会**直接报错**并给出这个对应关系，照报错改即可。
+3. **布尔去掉引号** —— `"false"` → `false`，`"true"` → `true`
+   （现在只剩 `proxy_enabled` / `tabs_enabled` 两个布尔字段）。
+4. **`app_url` 数组改成真数组** —— `"[\"a.com\",\"b.com\"]"` → `["a.com","b.com"]`。
+
+**模板**：
+
+- [`webview-app/config.example.json`](../webview-app/config.example.json) —— Tauri / Android 侧（含全部字段）
+- [`electron-app/config.example.json`](../electron-app/config.example.json) —— Electron 绿色版侧（省略仅 Android 的 `android_*`）
+
+---
+
+## 9. 已知缺口（待办，不在本次改造范围）
+
+| 编号 | 字段 | 现状 | 影响 |
+|---|---|---|---|
+| P0 | `resolve_secret` | Electron 侧须在编译 sidecar 前注入 | 顺序错则**静默失效**；workflow 已按正确顺序编排 |
+| P1 | `app_name` | 语义过载（安装名 + 数据目录名 + Android 包名前缀来源） | 发布后改名 = 丢登录态；同时换掉 Android 包名（在手机上等于另一个应用） |
+| P1 | `android_*` 4 键 | 与「产物参数」混在同一个 JSON 里 | 一个 base64 keystore + 明文密码塞进配置 JSON |
+| P2 | Android 包名前缀 | 固定 `com.web2app.`，只能用改 workflow 源码的方式更换 | 上架应用市场若要换成自己公司域名，需改代码而非配置 |
+
+> ✅ **本次已解决**：`data_dir_default` 两壳同名反义（改为 `data_dir`，两壳同一套规则）；
+> Android 包名固定为 `com.example.web2app`（改为由 `app_name` 派生）。
+
+---
+
+## 附：契约的取证方式（可复核）
+
+| 内容 | 位置 |
+|---|---|
+| 字段 / 类型 / 默认值 / 校验 | `.github/scripts/parse-packaging-config.py`（`DEFAULTS` / `BOOL_KEYS` / `REMOVED_KEYS` / `selftest`） |
+| Electron 运行期对等实现 | `electron-app/src/main/config.ts`（`DEFAULTS` / `mustBool` / `toAppUrl` / `rejectUnknownKeys`） |
+| 编译期常量 | `webview-app/src/config.rs` |
+| 打包入口（Tauri / Android） | `.github/workflows/build-custom.yml` |
+| 打包入口（Electron 绿色版） | `.github/workflows/electron-build-custom.yml` |
+| 打 tag 自动发布 | `.github/workflows/release.yml` |
+| asar 配置护栏 | `.github/scripts/check-asar-config.cjs` |
+| 静态检查所有 workflow | `.github/scripts/check-workflows.py` |

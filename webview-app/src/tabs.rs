@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::bootstrap::Navigation;
-use crate::config::{TABS_ENABLED, WINDOW_TITLE};
+use crate::config::{TABS_ENABLED, TITLE};
 
 /// 宿主窗口（标签栏所在）与 tab 窗口的固定 label 前缀。
 pub(crate) const HOST_LABEL: &str = "host";
@@ -299,14 +299,14 @@ pub(crate) fn spawn_tab_with_target(
         let mut tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
         tabs.push(TabInfo {
             label: label.clone(),
-            title: WINDOW_TITLE.to_string(),
+            title: TITLE.to_string(),
         });
     }
     // tab 窗口：去边框 + 不占任务栏按钮，尺寸/位置按宿主客户区一次到位。
     // ⚠️ 建窗时先 `visible(false)`：否则会以框架默认尺寸（800×600）闪一帧再被 relayout 纠正。
     // 首次导航照样发起（页面在不可见状态下开始加载），最后由 activate_tab 显示。
     let mut window = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
-        .title(WINDOW_TITLE)
+        .title(TITLE)
         .decorations(false)
         // ⚠️ 必须与宿主窗口用**完全相同**的 `shadow(false)`：两边都不内缩客户区，
         // 窗口矩形 == 客户区，[`place_tab`] 的坐标换算才成立。
@@ -349,14 +349,12 @@ pub(crate) fn spawn_tab_with_target(
         .initialization_script(include_str!("dnd_polyfill.js"));
 
     // 数据目录：与主窗口共享同一 WebView2 数据目录（同账号、共享 cookie/localStorage）。
+    // ⚠️ `config::data_dir` 在进程内只解析一次并缓存，所以这里拿到的一定与主窗口同一个目录 ——
+    //    这正是「多个 tab 共享登录态」赖以成立的前提，不要改成各算各的。
     #[cfg(windows)]
-    let window = if !crate::config::DATA_DIR_DEFAULT {
-        match crate::config::user_data_dir(app) {
-            Some(dir) => window.data_directory(dir),
-            None => window,
-        }
-    } else {
-        window
+    let window = match crate::config::data_dir(app) {
+        Some(dir) => window.data_directory(dir),
+        None => window,
     };
 
     // ⚠️⚠️ tab 窗口必须设成宿主窗口的 **owned window**（owner，不是 child / parent 定位）。
@@ -670,7 +668,7 @@ fn push_tabs_to_shell(app: &tauri::AppHandle) {
 /// 宿主窗口本身不承载网页，只渲染 `shell://` 标签栏；首个 tab 随后由调用方创建。
 pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
     let host = WebviewWindowBuilder::new(app, HOST_LABEL, shell_url())
-        .title(WINDOW_TITLE)
+        .title(TITLE)
         .decorations(false)
         // ⚠️ `.shadow(false)` 是宿主与 tab 对齐的关键，别删。
         //

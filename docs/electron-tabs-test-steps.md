@@ -1,11 +1,9 @@
 # electron-app 真机测试步骤（多页签版交付）
 
 > 目的：在**有 GPU 的真机**上验证多页签版打包产物，补齐沙箱里做不了的目视项。
-> 前置：本清单对应 `docs/electron-tabs-design.md` **v1.6**（T0–T4 已完成 + 多页签版出包）。
->
-> ⚠️ **本轮测什么**：交付形态 = `tabs_enabled=true`（解压即多页签）。
-> 沙箱已程序化验证（本节 §1 可复现）：三模式探针在解压目录版与便携版上均退出码 0。
-> 剩下的真机项是**目视**：V1 拖标签栏移窗 / V2 跨 DPI 不错位 / V3 切页签无白闪。
+> **现状**：2026-09-18 真机验收已完成（M5 目视项 V1–V4 全部关闭），仅「代理 / 域名解析」一项留待后续。
+> 本文同时是**可复用的真机清单**（下次回归 / 补测待办项时照此执行）。
+> 设计依据见 `docs/electron-tabs-design.md`；探针判据见该文档 §8。
 
 ## 实测结论（2026-09-18，真机 · 有 GPU）
 
@@ -14,13 +12,13 @@
 | §1 打包产物自证（三模式探针） | ✅ 解压目录版 + 便携版：`--probe` / `--probe --tabs` / `--smoke` 退出码均 **0** |
 | §2 多页签功能目视 | ✅ **8/8 正常** |
 | §3 跨 DPI 目视（V2） | ✅ **正常** |
-| §4 单窗口模式回归 | 🟡 **7/8 正常** —— 仅「代理 / 域名解析」未测（**留待后续单独测试**；该链路走 sidecar，与页签改造无交集，探针 M2 断言已在源码态与打包态跑通） |
+| §4 单窗口模式回归 | 🟡 **7/8 正常** —— 仅「代理 / 域名解析」未测（见下） |
 
 **结论：M5 的目视验收项 V1 / V2 / V3 / V4 至此全部关闭**（V4 另经 `scripts/tabs-v4.cjs` 程序化验证）。
 
 ---
 
-### 待办：代理 / 域名解析的真机验证（下次）
+### 待办：代理 / 域名解析的真机验证（下次补测）
 
 `config.json` 两种触发方式任选其一后双击 exe，确认目标站正常加载（而不是白屏 / 直连降级）：
 
@@ -35,10 +33,8 @@
 ## 0. 环境与前置
 
 - Windows 10/11 x64，**有 GPU 的实体机或远程桌面**（沙箱无 GPU，正是要绕开的限制）。
-- 目标包：`electron-app/release/` 下
-  - `Web2App-0.1.0-win-x64.zip`（解压即用，**推荐**；单文件最小形态）
-  - `Web2App-0.1.0-win-x64-portable.exe`（单文件自解压；数据目录靠 `PORTABLE_EXECUTABLE_DIR` 定位）
-  - `Web2App-0.1.0-win-x64/`（解压目录；⚠️ 见 §4 末尾「已知瑕疵」）
+- 目标包：`electron-app/release/` 下 `Web2App-0.1.0-win-x64.zip`（解压即用，推荐）、
+  `Web2App-0.1.0-win-x64-portable.exe`（单文件自解压）、`Web2App-0.1.0-win-x64/`（解压目录）。
 - 包内 `config.json`（exe 同级）已置 `"tabs_enabled": true`，双击即多页签模式。
 - 真机**不加** `--no-sandbox --in-process-gpu`（那两个参数是沙箱专用）。
 
@@ -49,8 +45,7 @@
 ### 1.1 解压目录版（关键：两种探针各跑一遍）
 
 ```powershell
-# 关键：GUI 子系统 exe 必须用 Start-Process -Wait 取 ExitCode；
-# 直接 & 调用是「假绿」（PowerShell 不等待，$LASTEXITCODE 立刻为 0）
+# GUI 子系统 exe 必须 Start-Process -Wait 取 ExitCode；直接 & 调用是「假绿」（$LASTEXITCODE 立刻为 0）
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue   # ⚠️ 必做，否则退出码 9
 $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 
@@ -59,10 +54,9 @@ $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 (Start-Process $exe -ArgumentList '--smoke'        -Wait -PassThru).ExitCode   # 期望 0
 ```
 
-> ⚠️⚠️ **`--probe` 与 `--probe --tabs` 必须都是 0**。若 `--probe` 退 **1**，先怀疑「跑的是旧包」
-> （`resources/inject/*.js` 与源码 sha256 比对、看 `data\` 的 mtime），而不是急着改代码。
-> v1.6 修过一类同症状缺陷：探针起窗模式曾被 `tabs_enabled` 劫持，断言往壳页面注入脚本必抛
-> `Script failed to execute`。修后探针模式与断言组一一对应。
+> ⚠️ 若 `--probe` 退 **1**，先怀疑「跑的是旧包」（`resources/inject/*.js` 与源码 sha256 比对、
+> 看 `data\` 的 mtime），而不是急着改代码——v1.6 修过一类同症状缺陷（探针起窗模式被 `tabs_enabled`
+> 劫持，断言往壳页面注入脚本必抛 `Script failed to execute`）。
 
 ### 1.2 便携版同样三跑
 
@@ -81,7 +75,7 @@ $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 
 | # | 检查项 | 期望 |
 | :-- | :--- | :--- |
-| 1 | 标签栏出现 | 顶部一条标签栏，首个页签标题 = 目标页 `<title>`（如「百度一下，你就知道」） |
+| 1 | 标签栏出现 | 顶部一条标签栏，首个页签标题 = 目标页 `<title>` |
 | 2 | 内容区 | 目标页在标签栏**下方**渲染（内容不被壳页面盖住 = V4，沙箱已程序化验证） |
 | 3 | 新建页签 | 点「+」新增页签，`window.open` / `target="_blank"` 一次只开 **1** 个页签，且保留目标 path |
 | 4 | 切换页签 | 切换后内容随之切换；隐藏页签不再可见（不是被盖住） |
@@ -94,15 +88,14 @@ $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 
 ## 3. 跨 DPI 目视（V2，20 分钟）
 
-V2 =「最大化/还原/跨 DPI 拖动后标签栏与内容不错位、无 1px 缝」。**本机若要覆盖多档需手动切缩放**。
+V2 =「最大化/还原/跨 DPI 拖动后标签栏与内容不错位、无 1px 缝」。**本机若要覆盖多档需手动切缩放**
+（`设置 → 系统 → 显示 → 缩放`）。
 
 | # | 缩放 | 检查 |
 | :-- | :--- | :--- |
 | 1 | 100% | 最大化 → 还原 → 拖到另一块屏：标签栏与内容区无 1px 缝、无错位 |
 | 2 | 150% | 同上 |
 | 3 | 200% | 同上（本机若就是 200% 可略过 100% 那一档） |
-
-切换缩放：`设置 → 系统 → 显示 → 缩放`。
 
 ---
 
@@ -119,11 +112,11 @@ V2 =「最大化/还原/跨 DPI 拖动后标签栏与内容不错位、无 1px �
 | 5 | 托盘图标（若启用） | 右键菜单：显示/隐藏/退出 都生效 |
 | 6 | 唤醒快捷键（若配置） | 能唤出/隐藏窗口 |
 | 7 | 设置页（若有入口） | 打开正常、命令齐全、保存生效 |
-| 8 | 代理/域名解析 | 目标站能正常加载（sidecar 工作） |
+| 8 | 代理/域名解析 | 目标站能正常加载（sidecar 工作）——**本轮未测，待办见上文** |
 
-> **已知瑕疵（本次出包记录）**：`release/` 下还有一个 `win-unpacked/` 目录，
-> 它是 electron-builder 的**中间产物**，因一次失败的覆盖打包被删成残缺（只剩 `resources/`），
-> **已作废、不要使用**；解压目录版请用 `Web2App-0.1.0-win-x64/` 或直接解压 zip。
+> ⚠️ `release/` 下的 `win-unpacked/` 是 electron-builder 的**中间产物**，因一次失败的覆盖打包被
+> 删成残缺目录（只剩 `resources/`），**已作废、不要使用**；解压目录版请用 `Web2App-0.1.0-win-x64/`
+> 或直接解压 zip。
 
 ---
 

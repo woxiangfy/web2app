@@ -205,7 +205,7 @@ pub fn run() {
                 "main",
                 tauri::WebviewUrl::CustomProtocol(loading::splash_url()),
             )
-            .title(config::WINDOW_TITLE)
+            .title(config::TITLE)
             .resizable(true)
             .inner_size(1100.0, 650.0)
             .min_inner_size(400.0, 300.0)
@@ -249,15 +249,13 @@ pub fn run() {
                 None => wb,
             };
 
-            // 数据目录：true = WebView2 系统默认；false = %LOCALAPPDATA%\{自定义 app_name}（推荐）。
+            // 数据目录：空串 = 系统默认（%LOCALAPPDATA%\<app_name>，不受程序位置影响）；
+            // 相对路径 = exe 所在目录下（默认 "data"）；绝对路径 = 原样。
+            // 不可写会自动回退到系统默认目录（见 config::data_dir）。
             #[cfg(windows)]
-            let wb = if !config::DATA_DIR_DEFAULT {
-                match config::user_data_dir(app) {
-                    Some(dir) => wb.data_directory(dir),
-                    None => wb,
-                }
-            } else {
-                wb
+            let wb = match config::data_dir(app) {
+                Some(dir) => wb.data_directory(dir),
+                None => wb,
             };
 
             wb.build().expect("创建主窗口失败")

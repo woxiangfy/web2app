@@ -6,7 +6,7 @@
 
 use tauri::Manager;
 
-use crate::config::WINDOW_TITLE;
+use crate::config::TITLE;
 
 /// 返回「主窗口」的 label：多页签模式下是宿主窗口，单窗口模式下是 "main"。
 fn main_window_label() -> &'static str {
@@ -70,9 +70,9 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         )
         .menu(&menu)
         .show_menu_on_left_click(false)
-        // 悬停提示文本用"显示名"title（即 WINDOW_TITLE，CI 里由配置 JSON 的 title 导出），
+        // 悬停提示文本用"显示名"title（即 TITLE，CI 里由配置 JSON 的 title 导出），
         // 而非"安装名"APP_NAME，与窗口标题保持一致。
-        .tooltip(WINDOW_TITLE)
+        .tooltip(TITLE)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
                 if let Some(w) = app.get_webview_window(main_window_label()) {

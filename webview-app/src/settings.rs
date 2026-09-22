@@ -14,11 +14,11 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
 use crate::config::config_dir;
-// ⚠️ APP_NAME 只被下方 `#[cfg(desktop)]` 的 open_settings_window 使用（拼设置窗标题）。
+// ⚠️ TITLE 只被下方 `#[cfg(desktop)]` 的 open_settings_window 使用（拼设置窗标题）。
 // 若与 config_dir 合并成一条无条件 use，Android 目标下该导入即「未使用」，
 // 在 `-D warnings`（CI 的 check-android → clippy）下直接编译失败。必须按 cfg 拆开。
 #[cfg(desktop)]
-use crate::config::APP_NAME;
+use crate::config::TITLE;
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -137,7 +137,8 @@ pub fn open_settings_window(app: &AppHandle) {
     }
     let url = url::Url::parse("settings://localhost/").expect("构造 settings 协议 URL 失败");
     let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::CustomProtocol(url))
-        .title(format!("设置 - {}", APP_NAME))
+        // 标题用【显示名】TITLE 而不是【安装名】APP_NAME —— 这个标题是给用户看的。
+        .title(format!("设置 - {}", TITLE))
         .inner_size(480.0, 470.0)
         .resizable(false)
         .position(420.0, 180.0)

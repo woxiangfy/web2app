@@ -9,11 +9,19 @@ name: 自定义打包
 #   ② 粘贴一份配置 JSON（或填一个返回 JSON 的 URL），即可生成对应应用。
 #
 # 配置 JSON 字段（除 app_url 必填外，其余均可省略、自动合并默认值）：
+#
+#   ⚠️ 完整字段表、类型、默认值与「多端（Windows / Android / Electron 绿色版）行为对照」
+#      见 docs/packaging-config.md —— 本注释只是摘要，冲突时以那份文档为准。
+#   ⚠️ 解析的**唯一实现**在 .github/scripts/parse-packaging-config.py，
+#      三个打包入口（本文件 windows / android 两个 job + electron-build-custom.yml）
+#      调用的是同一份代码。合约变更必须同时改那份脚本与其自测。
+#
 #   {
-#     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）
-#                                            //   也支持【域名数组】形式：["a.com","b.com"]，
-#                                            //   运行时依次对这些域名做 DNS TXT 查询、用 public_key
-#                                            //   解密 TXT 值得到真实 URL（详见 public_key 说明）
+#     "app_url": "https://user:pass@host",   // 必填，要嵌入的网址（支持带账号密码）。
+#                                            //   也可写成【域名数组】：["a.com","b.com"] ——
+#                                            //   此时必填 public_key，运行时依次对这些域名做
+#                                            //   DNS TXT 查询、验签 + 解密得到真实 URL。
+#                                            //   两种形态都是合法 JSON 类型（string / array）。
 #
 #     "app_name": "MyApp",                   // 【安装名】（默认 Web2App）——给系统/安装器看的：
 #                                            //   Windows 安装包名、开始菜单与桌面快捷方式、
@@ -23,16 +31,19 @@ name: 自定义打包
 #                                            //   Windows 端窗口标题、托盘悬停提示、右键菜单"设置"项标题、
 #                                            //   Android 端应用名称（桌面图标下的名字）
 #                                            //   （与 app_name 分开，便于"安装包叫英文名、界面叫中文名"）
+#                                            //   ⚠️ 旧字段 window_title 已移除，写了会直接报错
 #
 #     "extra": { "k": "v" },                 // 附加参数（默认 {}）：任意 JSON 对象/数组/标量，
 #                                            //   会被注入到被包裹网页，前端 JS 通过
 #                                            //   window.web2appExtra 直接读取
 #     "icon_url": "https://example.com/logo.png", // 应用图标 PNG 的 URL（默认空=沿用仓库默认图标）
-#     "window_title": "我的应用",             // 【已废弃】旧字段，等价于 title，仅保留兼容老配置
-#     "proxy_enabled": "true",               // 是否启用本地反向代理注入鉴权（默认 false）
+#                                            //   建议 1024x1024 正方形 PNG；两壳都用它生成全套图标
+#     "proxy_enabled": true,                 // 布尔，**不带引号**（默认 false）：
+#                                            //   是否启用代理注入鉴权
 #     "proxy_http": "",                      // 外部 HTTP 代理（默认空）
 #     "proxy_https": "",                     // 外部 HTTPS 代理（默认空）
-#     "proxy_bypass": "",                    // 不走代理的地址，分号分隔（默认空=代码内置）
+#     "proxy_bypass": "",                    // 不走代理的地址，分号分隔
+#                                            //   （默认 "localhost;127.0.0.1;<-loopback>"，两壳一致）
 #     "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=", // Ed25519 公钥（裸 base64 或 SPKI PEM）。
 #                                            //   仅当 app_url 为【域名数组】时必填：运行时对每个域名
 #                                            //   做 DNS TXT 查询，TXT 值是一段 base64 密文，用本公钥
@@ -42,8 +53,22 @@ name: 自定义打包
 #                                            //   生成 TXT 密文时用的 Secret 一致。默认空=用代码内置默认值
 #                                            //   （向后兼容旧密文）。填了就为本次产物单独指定 Secret，
 #                                            //   使每个包不再共享同一个固定密钥串（提高反编译门槛）。
-#     "data_dir_default": "false",           // WebView2 数据目录（默认 false=LOCALAPPDATA）
-#     "tabs_enabled": "false",               // 多页签（tab）模式（默认 false，仅 Windows 生效）：
+#                                            //   ⚠️ 它是**编译期**注入：两个壳都一样，改了必须重新打包。
+#     "data_dir": "data",                    // 字符串（默认 "data"，两壳行为一致）= 应用数据放哪：
+#                                            //   "data"   = 程序所在目录（exe 目录）下的 data\，
+#                                            //              跟着程序走（绿色 / 便携）
+#                                            //   ""(空串) = 系统默认程序目录，由 app_name 命名、
+#                                            //              不受程序位置影响
+#                                            //   其它相对路径 = 同上，基准仍是 exe 目录（不是 cwd）
+#                                            //   绝对路径     = 原样使用
+#                                            //   ⚠️ 目录不可写会自动回退到系统默认目录（保证能启动）
+#                                            //   Windows(Tauri)：系统默认 = %LOCALAPPDATA%\<app_name>
+#                                            //   Electron 绿色版：系统默认 = %APPDATA%\<app_name>
+#                                            //   Android：忽略（始终用应用私有目录）
+#                                            //   ⚠️ 旧布尔字段 data_dir_default 已移除：
+#                                            //      false ⇒ "data"、true ⇒ ""（写了会直接报错）
+#                                            //   对照表见 docs/packaging-config.md §4.3
+#     "tabs_enabled": false,                 // 布尔，**不带引号**（默认 false，仅 Windows 生效）：
 #                                            //   true = 宿主窗口 + 顶部标签栏，每个 tab 是独立 WebView
 #                                            //   且共享同一数据目录（同账号，cookie/localStorage 互通），
 #                                            //   target="_blank" / window.open() 直接新开一个 tab；
@@ -55,8 +80,13 @@ name: 自定义打包
 #     "android_key_password": ""             // key 密码（可选，默认同 keystore 密码）
 #   }
 #
-# 仓库根目录的 config.example.json 是一份可直接复制使用的配置模板。
-#（JSON 标准不支持注释，故模板保持纯 JSON；各字段含义见上面这份说明与 README。）
+# 字段名拼错 / 类型不对 / 写了已移除的字段 ⇒ **直接失败**（不是警告）。
+# 曾经只打 ::warning:: 就跳过，于是「拼错」与「不生效」表现完全一样，只能靠猜。
+#
+# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 17 个字段）
+#           electron-app/config.example.json（Electron 绿色版侧，省略仅 Android 用的 android_*）
+#   ⚠️ 两份模板覆盖同一份契约，字段名与类型完全一致；差异只在「本端不用的字段是否列出」。
+#      JSON 标准不支持注释，故模板保持纯 JSON，各字段含义见上面这份说明与 docs/packaging-config.md。
 #
 # 想"一键生成某个固定应用"：把 config_url 固定指向仓库内一份 .json（如 config.example.json），
 # 或把 config_json 直接写死在下面 job 的 env 里，无需改源码即可为每个应用产出独立安装包。
@@ -106,8 +136,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 单一入口：接受 JSON 字符串或 JSON URL，解析后与默认值合并，
-      # 把最终编译期变量写入 GITHUB_ENV，后续步骤直接作为环境变量读取。
+      # 解析的唯一实现见 .github/scripts/parse-packaging-config.py
+      # （Electron 手动打包 workflow 调用的是同一份，契约不再有第二个副本）。
       - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量）
         shell: bash
         env:
@@ -117,163 +147,9 @@ jobs:
           # 这里强制 UTF-8（双保险：环境变量 + 脚本内 reconfigure）。
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
-        run: |
-          python - <<'PY'
-          import os, sys, json, re, urllib.request
-
-          # 强制 stdout/stderr 走 UTF-8，避免 Windows cp1252 编码中文时报错。
-          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-          sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-          DEFAULTS = {
-              "app_url": "",
-              "app_name": "Web2App",
-              # title = 显示名（Windows 窗口标题 / Android 应用名称）；未配置时回落 app_name
-              "title": "",
-              # extra = 任意 JSON（对象/数组/标量），会以 window.web2appExtra 注入网页供前端 JS 读取
-              "extra": {},
-              "icon_url": "",
-              # window_title 是 title 的旧字段名，保留仅为兼容老配置（读取后统一并入 title）
-              "window_title": "",
-              "proxy_enabled": "false",
-              "proxy_http": "",
-              "proxy_https": "",
-              "proxy_bypass": "",
-              "data_dir_default": "false",
-              "tabs_enabled": "false",
-              # Ed25519 公钥（裸 base64 或 SPKI PEM）。当 app_url 为【域名数组】时，运行时对每个域名
-              # 做 DNS TXT 查询，用本公钥验签 + AES-GCM 解密 TXT 值得到真实 URL。
-              "public_key": "",
-              # AES 对称加密 Secret（可选，默认空=用代码内置默认值）。与服务端生成 TXT 密文时一致。
-              "resolve_secret": "",
-              # Android 签名（仅 Android job 使用，这里合并进配置避免"未知字段"告警）
-              "android_keystore_base64": "",
-              "android_key_alias": "",
-              "android_keystore_password": "",
-              "android_key_password": "",
-          }
-          BOOL_KEYS = {"proxy_enabled", "data_dir_default", "tabs_enabled"}
-          # 需要保持 JSON 结构、写入 GITHUB_ENV 后仍能被 Rust 原样解析的字段（对象/数组）。
-          # extra 注入为 JSON 文本，供源码以 EXTRA 编译期变量内联成 window.web2appExtra。
-          JSON_KEYS = {"extra"}
-          # 签名相关字段不写入 GITHUB_ENV（keystore 体积大/含敏感信息，由 Android job 自行落盘处理）
-          SKIP_ENV = {"android_keystore_base64", "android_key_alias",
-                      "android_keystore_password", "android_key_password"}
-
-          raw = (os.environ.get("CONFIG_JSON") or "").strip()
-          url = (os.environ.get("CONFIG_URL") or "").strip()
-
-          if not raw and url:
-              req = urllib.request.Request(url, headers={"User-Agent": "web2app-ci"})
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  raw = r.read().decode("utf-8").strip()
-
-          if not raw:
-              sys.exit("必须提供 config_json 或 config_url，二者至少填一个")
-
-          try:
-              data = json.loads(raw)
-          except Exception as e:
-              sys.exit(f"配置不是合法 JSON：{e}")
-          if not isinstance(data, dict):
-              sys.exit("配置 JSON 必须是对象（字典）")
-
-          merged = dict(DEFAULTS)
-          for k, v in data.items():
-              if k not in merged:
-                  print(f"::warning::忽略未知字段 {k}")
-                  continue
-              if v is None:
-                  continue
-              if isinstance(v, bool):
-                  v = "true" if v else "false"
-              elif isinstance(v, (dict, list)) or k in JSON_KEYS:
-                  # 对象/数组字段：JSON 序列化后存成单行 JSON 文本，写入 env 后 Rust 侧能原样解析
-                  v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-              else:
-                  v = str(v)
-              merged[k] = v
-
-          # app_url 支持两种形态：
-          #   ① 字符串：单个 URL（原逻辑，含 user:pass@host）
-          #   ② 数组：一组"跳板域名"，运行时做 DNS TXT 查询 + Ed25519 验签解密得到真实 URL
-          if isinstance(data.get("app_url"), list):
-              domains = [str(d).strip() for d in data["app_url"] if str(d).strip()]
-              if not domains:
-                  sys.exit("app_url 为数组时不能为空")
-              merged["app_url"] = json.dumps(domains, ensure_ascii=False, separators=(",", ":"))
-              # 数组模式强制要求 public_key
-              if not merged["public_key"].strip():
-                  sys.exit("app_url 为域名数组时，必须提供 public_key（Ed25519 公钥）")
-          else:
-              merged["app_url"] = merged["app_url"].strip()
-              if not merged["app_url"]:
-                  sys.exit("缺少必填字段 app_url")
-          merged["icon_url"] = merged["icon_url"].strip()
-          # resolve_secret：去首尾空白（空串 = 用代码内置默认值，向后兼容旧密文）。
-          merged["resolve_secret"] = merged["resolve_secret"].strip()
-          # 安全门槛：resolve_secret 留空 = 回落到代码内置的公开默认 Secret（所有产物共享同一固定
-          # 密钥串，反编译门槛较低）。打包时醒目告警，提醒为本次产物配置独立 Secret。
-          if not merged["resolve_secret"]:
-              print("::warning::resolve_secret 未配置：将使用代码内置默认 Secret（所有产物共享同一固定密钥串，"
-                    "安全门槛较低）。建议配置独立的 resolve_secret，并同步服务端 encrypt_url.py / resolve-tool。")
-          # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
-          # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
-          if merged["public_key"]:
-              merged["public_key"] = (
-                  merged["public_key"]
-                  .replace("\\n", "\n")
-                  .replace("\\r", "")
-                  .strip()
-              )
-          for k in BOOL_KEYS:
-              merged[k] = merged[k].strip().lower()
-          # JSON 型字段（对象/数组）统一序列化为单行 JSON 文本；默认值 {} 也要转成 "{}"，
-          # 保证写入 GITHUB_ENV 后 Rust 侧能作为 EXTRA 原样解析成合法 JS 对象。
-          for k in JSON_KEYS:
-              v = merged[k]
-              if not isinstance(v, str):
-                  merged[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-
-          # title（显示名）与 app_name（安装名）分离：
-          #   title        → Windows 窗口标题、Android 应用名称
-          #   app_name     → 安装包名/快捷方式/安装目录/数据存储目录名
-          # 取值链：title → window_title（旧字段，兼容） → app_name。
-          if not merged["title"] and merged["window_title"]:
-              merged["title"] = merged["window_title"]
-          if not merged["title"]:
-              merged["title"] = merged["app_name"]
-          # 源码（src/lib.rs）读的编译期变量叫 WINDOW_TITLE，这里统一由 title 导出，保证两处一致。
-          merged["window_title"] = merged["title"]
-
-          # 打印时隐藏敏感内容，避免泄漏到日志。
-          def mask(u):
-              return re.sub(r"(://[^/@\s]+)@", "://***@", u)
-
-          def display(k, v):
-              if k in ("app_url", "icon_url"):
-                  return mask(v)
-              if k in ("android_keystore_password", "android_key_password", "resolve_secret"):
-                  return "***（已配置）" if v else "（未配置）"
-              if k == "android_keystore_base64":
-                  return f"（已配置，{len(v)} 字符）" if v else "（未配置）"
-              return v
-
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              for k, v in merged.items():
-                  if k in SKIP_ENV:
-                      continue
-                  # public_key 是 PEM 多行文本，含换行符，用 GITHUB_ENV 的 heredoc 语法写入，
-                  # 否则换行会被截断成多个环境变量，导致 Rust 侧读不到完整公钥。
-                  if k == "public_key" and "\n" in v:
-                      f.write(f"{k.upper()}<<EOF\n{v.rstrip()}\nEOF\n")
-                  else:
-                      f.write(f"{k.upper()}={v}\n")
-
-          print("已注入环境变量：")
-          for k, v in merged.items():
-              print(f"  {k.upper()}={display(k, v)}")
-          PY
+        # 配置非法（未知字段 / 字符串布尔 / app_url 形态错 / 数组缺 public_key …）时脚本以退出码 1
+        # 结束并打 ::error::，本步骤随之失败 —— 宁可在打包期挡住，也不要产出行为不对的包。
+        run: python "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" --env-out "$GITHUB_ENV"
 
       - name: 统一安装名称（app_name → productName）
         # 把 app_name 写入 tauri.conf.json 的 productName，统一 Windows 端的"安装名称"：
@@ -399,8 +275,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 与 Windows job 相同的解析逻辑：把 JSON 配置注入为环境变量，供 cargo 编译期读取；
-      # 额外处理 Android 签名：若 JSON 提供了 keystore，解码落盘并注入签名相关变量。
+      # 与 Windows job 共用同一份解析实现（见 .github/scripts/parse-packaging-config.py）；
+      # 多一个 --android-keystore：把 JSON 里的 keystore 解码落盘并注入 ANDROID_KEYSTORE_* 变量。
       - name: 解析配置（JSON / URL → 合并默认值 → 注入环境变量 + 签名 keystore 落盘）
         shell: bash
         env:
@@ -409,209 +285,28 @@ jobs:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
         run: |
-          python3 - <<'PY'
-          import os, sys, json, re, base64, pathlib, urllib.request
+          python3 "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" \
+            --env-out "$GITHUB_ENV" --android-keystore
 
-          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-          sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-          DEFAULTS = {
-              "app_url": "",
-              "app_name": "Web2App",
-              # title = 显示名（Windows 窗口标题 / Android 应用名称）；未配置时回落 app_name
-              "title": "",
-              # extra = 任意 JSON（对象/数组/标量），会以 window.web2appExtra 注入网页供前端 JS 读取
-              "extra": {},
-              "icon_url": "",
-              # window_title 是 title 的旧字段名，保留仅为兼容老配置（读取后统一并入 title）
-              "window_title": "",
-              "proxy_enabled": "false",
-              "proxy_http": "",
-              "proxy_https": "",
-              "proxy_bypass": "",
-              "data_dir_default": "false",
-              "tabs_enabled": "false",
-              # Ed25519 公钥（裸 base64 或 SPKI PEM）。当 app_url 为【域名数组】时，运行时对每个域名
-              # 做 DNS TXT 查询，用本公钥验签 + AES-GCM 解密 TXT 值得到真实 URL。
-              "public_key": "",
-              # AES 对称加密 Secret（可选，默认空=用代码内置默认值）。与服务端生成 TXT 密文时一致。
-              "resolve_secret": "",
-              "android_keystore_base64": "",
-              "android_key_alias": "",
-              "android_keystore_password": "",
-              "android_key_password": "",
-          }
-          BOOL_KEYS = {"proxy_enabled", "data_dir_default", "tabs_enabled"}
-          # 需要保持 JSON 结构、写入 GITHUB_ENV 后仍能被 Rust 原样解析的字段（对象/数组）。
-          # extra 注入为 JSON 文本，供源码以 EXTRA 编译期变量内联成 window.web2appExtra。
-          JSON_KEYS = {"extra"}
-          # 签名相关字段不直接进 GITHUB_ENV（keystore 体积大、密码敏感），由下方专门处理
-          SKIP_ENV = {"android_keystore_base64", "android_key_alias",
-                      "android_keystore_password", "android_key_password"}
-
-          raw = (os.environ.get("CONFIG_JSON") or "").strip()
-          url = (os.environ.get("CONFIG_URL") or "").strip()
-
-          if not raw and url:
-              req = urllib.request.Request(url, headers={"User-Agent": "web2app-ci"})
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  raw = r.read().decode("utf-8").strip()
-
-          if not raw:
-              sys.exit("必须提供 config_json 或 config_url，二者至少填一个")
-
-          try:
-              data = json.loads(raw)
-          except Exception as e:
-              sys.exit(f"配置不是合法 JSON：{e}")
-          if not isinstance(data, dict):
-              sys.exit("配置 JSON 必须是对象（字典）")
-
-          merged = dict(DEFAULTS)
-          for k, v in data.items():
-              if k not in merged:
-                  print(f"::warning::忽略未知字段 {k}")
-                  continue
-              if v is None:
-                  continue
-              if isinstance(v, bool):
-                  v = "true" if v else "false"
-              elif isinstance(v, (dict, list)) or k in JSON_KEYS:
-                  # 对象/数组字段：JSON 序列化后存成单行 JSON 文本，写入 env 后 Rust 侧能原样解析
-                  v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-              else:
-                  v = str(v)
-              merged[k] = v
-
-          # app_url 支持两种形态：
-          #   ① 字符串：单个 URL（原逻辑，含 user:pass@host）
-          #   ② 数组：一组"跳板域名"，运行时做 DNS TXT 查询 + Ed25519 验签解密得到真实 URL
-          if isinstance(data.get("app_url"), list):
-              domains = [str(d).strip() for d in data["app_url"] if str(d).strip()]
-              if not domains:
-                  sys.exit("app_url 为数组时不能为空")
-              merged["app_url"] = json.dumps(domains, ensure_ascii=False, separators=(",", ":"))
-              # 数组模式强制要求 public_key
-              if not merged["public_key"].strip():
-                  sys.exit("app_url 为域名数组时，必须提供 public_key（Ed25519 公钥）")
-          else:
-              merged["app_url"] = merged["app_url"].strip()
-              if not merged["app_url"]:
-                  sys.exit("缺少必填字段 app_url")
-          merged["icon_url"] = merged["icon_url"].strip()
-          # resolve_secret：去首尾空白（空串 = 用代码内置默认值，向后兼容旧密文）。
-          merged["resolve_secret"] = merged["resolve_secret"].strip()
-          # 安全门槛：resolve_secret 留空 = 回落到代码内置的公开默认 Secret（所有产物共享同一固定
-          # 密钥串，反编译门槛较低）。打包时醒目告警，提醒为本次产物配置独立 Secret。
-          if not merged["resolve_secret"]:
-              print("::warning::resolve_secret 未配置：将使用代码内置默认 Secret（所有产物共享同一固定密钥串，"
-                    "安全门槛较低）。建议配置独立的 resolve_secret，并同步服务端 encrypt_url.py / resolve-tool。")
-          # 规范化 public_key：把用户可能在 JSON 里手写的字面量 "\n" 转成真实换行，
-          # 并压掉行内多余空格，便于 Rust 侧按 PEM 解析（多行/单行均可）。
-          if merged["public_key"]:
-              merged["public_key"] = (
-                  merged["public_key"]
-                  .replace("\\n", "\n")
-                  .replace("\\r", "")
-                  .strip()
-              )
-          for k in BOOL_KEYS:
-              merged[k] = merged[k].strip().lower()
-          # JSON 型字段（对象/数组）统一序列化为单行 JSON 文本；默认值 {} 也要转成 "{}"，
-          # 保证写入 GITHUB_ENV 后 Rust 侧能作为 EXTRA 原样解析成合法 JS 对象。
-          for k in JSON_KEYS:
-              v = merged[k]
-              if not isinstance(v, str):
-                  merged[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-
-          # title（显示名）与 app_name（安装名）分离：
-          #   title        → Windows 窗口标题、Android 应用名称
-          #   app_name     → 安装包名/快捷方式/安装目录/数据存储目录名（Android 应用名不再取 app_name）
-          # 取值链：title → window_title（旧字段，兼容） → app_name。
-          if not merged["title"] and merged["window_title"]:
-              merged["title"] = merged["window_title"]
-          if not merged["title"]:
-              merged["title"] = merged["app_name"]
-          # 源码（src/lib.rs）读的编译期变量叫 WINDOW_TITLE，这里统一由 title 导出，保证两处一致。
-          merged["window_title"] = merged["title"]
-
-          # ---------- Android 签名（可选）：JSON 提供的 keystore 优先于仓库 secrets ----------
-          signing = {}
-          ks_b64 = merged["android_keystore_base64"].strip()
-          if ks_b64:
-              alias = merged["android_key_alias"].strip()
-              storepass = merged["android_keystore_password"]
-              if not alias or not storepass:
-                  sys.exit("配置了 android_keystore_base64 时，必须同时提供 android_key_alias 和 android_keystore_password")
-              try:
-                  ks_bytes = base64.b64decode(ks_b64, validate=False)
-              except Exception as e:
-                  sys.exit(f"android_keystore_base64 不是合法 base64：{e}")
-              if len(ks_bytes) < 64:
-                  sys.exit("android_keystore_base64 解码后内容过小，疑似不完整（正常 keystore 至少几百字节）")
-              out_dir = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "android-signing"
-              out_dir.mkdir(parents=True, exist_ok=True)
-              ks_path = out_dir / "release.keystore"
-              ks_path.write_bytes(ks_bytes)
-              keypass = merged["android_key_password"] or storepass
-              for s in (storepass, keypass):
-                  if s:
-                      print(f"::add-mask::{s}")
-              signing = {
-                  "ANDROID_KEYSTORE_PATH": str(ks_path),
-                  "ANDROID_KEY_ALIAS": alias,
-                  "ANDROID_KEYSTORE_PASSWORD": storepass,
-                  "ANDROID_KEY_PASSWORD": keypass,
-              }
-              print(f"Android 签名：使用 JSON 提供的 keystore（{len(ks_bytes)} 字节，已写入 {ks_path}）")
-          else:
-              print("Android 签名：JSON 未提供 keystore（将回落到仓库 secrets / 一次性 CI keystore）")
-
-          def mask(u):
-              return re.sub(r"(://[^/@\s]+)@", "://***@", u)
-
-          def display(k, v):
-              if k in ("app_url", "icon_url"):
-                  return mask(v)
-              if k in ("android_keystore_password", "android_key_password", "resolve_secret"):
-                  return "***（已配置）" if v else "（未配置）"
-              if k == "android_keystore_base64":
-                  return f"（已配置，{len(v)} 字符）" if v else "（未配置）"
-              return v
-
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              for k, v in merged.items():
-                  if k in SKIP_ENV:
-                      continue
-                  # public_key 是 PEM 多行文本，含换行符，用 GITHUB_ENV 的 heredoc 语法写入，
-                  # 否则换行会被截断成多个环境变量，导致 Rust 侧读不到完整公钥。
-                  if k == "public_key" and "\n" in v:
-                      f.write(f"{k.upper()}<<EOF\n{v.rstrip()}\nEOF\n")
-                  else:
-                      f.write(f"{k.upper()}={v}\n")
-              for k, v in signing.items():
-                  f.write(f"{k}={v}\n")
-
-          print("已注入环境变量：")
-          for k, v in merged.items():
-              print(f"  {k.upper()}={display(k, v)}")
-          PY
-
-      - name: 统一安装名称（app_name → productName，供 android init 烘焙）
+      - name: 统一安装名称与 Android 包名（app_name → productName + identifier，供 android init 烘焙）
         # Android 端必须在 `cargo tauri android init` 之前把 app_name 写入
         # tauri.conf.json 的 productName，否则 init 会把默认名 "Web2App"/"web2app"
         # 烘焙进安卓工程（strings.xml / Manifest），后续 strings.xml 补丁只是兜底。
+        #
+        # 包名（applicationId）同理：Tauri 2 **没有** bundle.android.package 字段，安卓包名只能
+        # 来自 tauri.conf.json 的 identifier ⇒ 必须在 init 之前把 identifier 也改成 app_name 派生值。
+        # 否则所有配置的 APK 共用 com.example.web2app，相互覆盖安装（装了一个就把上一个顶掉）。
         env:
           PYTHONUTF8: "1"
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, re, sys
+          import hashlib, json, os, re, sys
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
           name = os.environ.get("APP_NAME", "").strip()
           if not name:
-              print("未配置 app_name，沿用默认名称")
+              print("未配置 app_name，沿用默认名称与包名")
               raise SystemExit(0)
           # 去掉 Windows 文件名非法字符；压缩连续空白；去首尾空格与句点；空则回落默认名
           safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
@@ -619,13 +314,36 @@ jobs:
           if not safe:
               safe = "Web2App"
 
+          # ---- Android 包名：由 app_name 派生，必须同时满足 aapt 与 Java 的包名规则 ----
+          # 只保留 ASCII 字母/数字/下划线并小写；首字符不能是数字（否则补 app 前缀）。
+          seg = re.sub(r"[^0-9A-Za-z_]", "", name).lower()
+          if not seg or seg[0].isdigit():
+              seg = "app" + seg
+          if seg == "app":
+              # 原名里一个可用 ASCII 字符都没有（如纯中文 app_name）⇒ 用名字指纹兜底，
+              # 保证不同 app_name 派生出不同包名，而不是统统撞在同一个上。
+              seg = "app" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+          # 包名的任一段都不能是 Java 关键字（aapt/gradle 会直接报 invalid package name）
+          if seg in ("abstract","assert","boolean","break","byte","case","catch","char","class","const",
+                     "continue","default","do","double","else","enum","extends","final","finally","float",
+                     "for","goto","if","implements","import","instanceof","int","interface","long","native",
+                     "new","package","private","protected","public","return","short","static","strictfp",
+                     "super","switch","synchronized","this","throw","throws","transient","try","void",
+                     "volatile","while"):
+              seg += "_"
+          # 前缀固定 com.web2app —— 上架应用市场时若要换成自己公司域名（如 com.yourcorp.*），改这一行。
+          pkg = "com.web2app." + seg
+
           with open("tauri.conf.json", encoding="utf-8") as f:
               conf = json.load(f)
+          old_pkg = conf.get("identifier", "")
           conf["productName"] = safe
+          conf["identifier"] = pkg
           with open("tauri.conf.json", "w", encoding="utf-8") as f:
               json.dump(conf, f, ensure_ascii=False, indent=2)
               f.write("\n")
           print(f"productName = {safe}（android init 将据此烘焙安卓应用名称）")
+          print(f"identifier  = {old_pkg} → {pkg}（android init 将据此烘焙 Android 包名）")
           PY
 
       - name: Install Rust toolchain (with Android target)
@@ -1014,36 +732,63 @@ jobs:
             mkdir -p "$PKG"
             cp "$keystore" "$PKG/release.keystore"
             ks_b64=$(base64 -w0 "$keystore")
+            # 契约字段名从解析器取（唯一真源），下面用它断言生成的模板一个字段都没漏。
+            CONTRACT_KEYS="$(python3 "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" --print-contract-keys)"
             APP_URL_VAL="${APP_URL:-}"
             APP_NAME_VAL="${APP_NAME:-Web2App}"
             TITLE_VAL="${TITLE:-$APP_NAME_VAL}"
             PKG="$PKG" ALIAS="$alias" STORE="$storepass" KS_B64="$ks_b64" \
             APP_URL_VAL="$APP_URL_VAL" APP_NAME_VAL="$APP_NAME_VAL" TITLE_VAL="$TITLE_VAL" \
+            EXTRA_VAL="${EXTRA:-{}}" ICON_URL_VAL="${ICON_URL:-}" \
+            PROXY_ENABLED_VAL="${PROXY_ENABLED:-false}" \
+            PROXY_HTTP_VAL="${PROXY_HTTP:-}" PROXY_HTTPS_VAL="${PROXY_HTTPS:-}" \
+            PROXY_BYPASS_VAL="${PROXY_BYPASS:-}" \
+            # ⚠️⚠️ data_dir 用 `${DATA_DIR-data}`（**无冒号**）：带冒号的 `${VAR:-default}` 会把
+            #     「已设置但为空」也当成未设置并替换成默认值，而空串在本字段里正是合法取值
+            #     （= 系统默认程序目录）。写成 `:-` 会让用户配的 "" 静默变成 "data"。
+            DATA_DIR_VAL="${DATA_DIR-data}" TABS_ENABLED_VAL="${TABS_ENABLED:-false}" \
+            PUBLIC_KEY_VAL="${PUBLIC_KEY:-}" RESOLVE_SECRET_VAL="${RESOLVE_SECRET:-}" \
+            CONTRACT_KEYS="$CONTRACT_KEYS" \
             python3 -c '
           import json, os, sys, datetime
           pkg = os.environ["PKG"]
           alias = os.environ["ALIAS"]
           storepass = os.environ["STORE"]
           ks_b64 = os.environ["KS_B64"]
-          app_url = os.environ["APP_URL_VAL"]
-          app_name = os.environ["APP_NAME_VAL"]
-          title = os.environ["TITLE_VAL"]
+          env = os.environ
+          app_url = env["APP_URL_VAL"]
+          # env 里的 app_url 是「文本」形态（域名数组被序列化过），模板要还原成真 JSON 类型。
+          if app_url.lstrip().startswith("["):
+              app_url = json.loads(app_url)
           cfg = {
               "app_url": app_url,
-              "app_name": app_name,
-              "title": title,
-              "icon_url": "",
-              "proxy_enabled": "false",
-              "proxy_http": "",
-              "proxy_https": "",
-              "proxy_bypass": "",
-              "data_dir_default": "false",
-              "tabs_enabled": "false",
+              "app_name": env["APP_NAME_VAL"],
+              "title": env["TITLE_VAL"],
+              "extra": json.loads(env["EXTRA_VAL"] or "{}"),
+              "icon_url": env["ICON_URL_VAL"],
+              # 布尔一律真 bool（不是 "false" 字符串）—— 与解析器契约一致，
+              # 否则这份模板拿回去复用时会被直接拒绝。
+              "proxy_enabled": env["PROXY_ENABLED_VAL"].strip().lower() == "true",
+              "proxy_http": env["PROXY_HTTP_VAL"],
+              "proxy_https": env["PROXY_HTTPS_VAL"],
+              "proxy_bypass": env["PROXY_BYPASS_VAL"],
+              # data_dir 是**字符串**：空串有含义（系统默认程序目录），原样保留 ——
+              # 不要 `.strip() or "data"`，那会把用户配的空串吃掉。
+              "data_dir": env["DATA_DIR_VAL"],
+              "tabs_enabled": env["TABS_ENABLED_VAL"].strip().lower() == "true",
+              "public_key": env["PUBLIC_KEY_VAL"],
+              "resolve_secret": env["RESOLVE_SECRET_VAL"],
               "android_keystore_base64": ks_b64,
               "android_key_alias": alias,
               "android_keystore_password": storepass,
               "android_key_password": "",
           }
+          # ⚠️ 契约里的字段必须一个不漏 —— 曾经这份模板只写 14 个键，用户拿它复用会静默丢掉
+          #    extra / public_key / resolve_secret，表现为「前端读不到 web2appExtra」「解密回落
+          #    公开默认 Secret」，而打包日志里没有任何提示。这里直接断言，改契约时同步暴露。
+          assert set(cfg) == set(json.loads(env["CONTRACT_KEYS"])), (
+              "packaging-config 模板字段与契约不一致："
+              + str(set(json.loads(env["CONTRACT_KEYS"])) ^ set(cfg)))
           now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
           info = [
               "本次打包使用【一次性 CI keystore】签名（因为未提供 JSON/Secrets 签名）",

@@ -1,19 +1,15 @@
 {
   "app_url": "https://user:pass@example.com",
   "app_name": "MyDemo",
-  "title": "",
+  "title": "我的演示应用",
   "extra": { "build": "example", "deploy_env": "prod" },
   "icon_url": "",
-  "proxy_enabled": "true",
-  "proxy_http": "http://10.0.0.1:8080",
+  "proxy_enabled": false,
+  "proxy_http": "",
   "proxy_https": "",
-  "proxy_bypass": "<local>;*.local",
-  "tabs_enabled": "true",
-  "public_key": "AAAA",
+  "proxy_bypass": "localhost;127.0.0.1;<-loopback>",
+  "tabs_enabled": false,
+  "public_key": "",
   "resolve_secret": "",
-  "data_dir_default": "false",
-  "android_keystore_base64": "xx",
-  "android_key_alias": "yy",
-  "android_keystore_password": "zz",
-  "android_key_password": "zz"
+  "data_dir": "data"
 }

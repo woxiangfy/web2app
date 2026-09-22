@@ -3,7 +3,7 @@
 web2app 的 **Windows 绿色版**壳（Electron），与 `../webview-app`（Rust + Tauri 2）行为兼容。
 Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.json` 契约与同一套注入脚本。
 
-> 完整方案见 `docs/electron-plan.md`（⚠️ 那是**设计方案 + 过程记录**，里程碑状态与命令**以本 README 为准**）；
+> 完整方案见 `docs/electron-plan.md`（⚠️ 那是**决策与架构记录**，里程碑状态与命令**以本 README 为准**）；
 > 前期可行性论证见 `docs/electron-analysis.md`；打包体积与分发形态见 `docs/electron-size-reduction.md`；
 > 全仓库规则与目录地图见根目录 `README.md`。
 
@@ -16,8 +16,8 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 | M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
 | M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
 | **M4 下载接管** | ⬜ **未实现** | `will-download` 目前只记日志、下载走 Chromium 默认「另存为」；对标 Tauri `save_dialog.rs` 的自绘对话框待做 |
-| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与逐版过程**见 `docs/electron-tabs-design.md`（含 §13 变更记录）；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **112/112** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，112 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
-| **M7 CI 流水线** | ⬜ **未落库** | 本目录没有 CI 配置（`webview-app/.github/workflows/` 那几条只服务 Tauri 版），目前只能本地跑 |
+| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **112/112** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，112 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
+| **M7 CI 流水线** | ⬜ **未落库** | 本目录没有 CI 配置（仓库根 `.github/workflows/` 那几条只服务 Tauri 版），目前只能本地跑 |
 
 > 除上表三项外，后续「新增/改动会影响哪些验证」见文末「验证清单」——
 > 这是本壳唯一能防「改了一个壳、把另一个壳带坏」的手段。
@@ -33,7 +33,7 @@ pnpm run typecheck   # 只做类型检查（不能代替 build，见「打包」
 pnpm run build       # 只编译到 out/
 
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe（本地代理 + 加密解析）
-pnpm run stage       # 打包前置：铺 build/icon.ico 与 build/config.json（pack/dist 会自动调用）
+pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json（pack/dist 会自动调用）
 pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘，退出码即结论
 pnpm run probe       # 兼容契约探针：112 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
 pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 + 截一张 PNG（改标题栏/滚动条/几何后看它）
@@ -97,8 +97,26 @@ electron-builder 的包管理器检测落空、回退到环境变量判断）。
 | `Invalid configuration object … unknown property 'zip'` | electron-builder **26 起移除了顶层 `zip:` 配置块**（`TargetConfiguration` 只认 `target`/`arch`） | 产物名改用顶层 `artifactName` 模板；已在 `electron-builder.yml` 注明 |
 | 双击 exe 弹「A JavaScript error occurred in the main process: xxx is not defined」 | tsc **默认「有错也照样输出」**，`out/` 里留下改了一半的 JS，之后只跑 `typecheck` 没重跑 `build`，打包就把坏产物封进 asar | `tsconfig` 已开 `noEmitOnError: true`（编译失败时 `out/` 保持原样），`pack`/`dist` 里也是先 `pnpm run build` 再打包 |
 | 目录里已有 `release/` 时构建报删除失败 | 环境可能拦截删除（如 agent 沙箱的 safe-delete 策略） | 换输出目录：`npx electron-builder --win -c.directories.output=<新目录>` |
-| 单文件版双击后是空白官网/`example.com` | `config.json` 没放在 portable exe 旁边，且包内也没有预置副本 | 现在已预置（`stage` + `extraFiles`）；想覆盖就把 `config.json` 放到 exe 旁边 |
+| 单文件版双击后是空白官网/`example.com` | 包内 **`app.asar` 里没有 `out/config.json`**（打包前漏了 `pnpm run stage` / 漏了 `pnpm run build`） | 配置已随 asar 进包，**不再**支持放 exe 旁边覆盖；重跑 `build` + `stage` 再打包。CI 侧由 `scripts/check-asar-config.cjs` 硬断言兜底 |
 | **改了注入脚本、重新打包后「现象依旧」** | 双击的是**旧产物**：`release/` 下 zip / portable / 解压目录多份并存，旧文件不会被自动清理 | 见下节「先确认跑的是哪一版包」——先核对 sha256 与运行痕迹 mtime，再动代码 |
+
+#### 手动打包（推荐为每个应用出一份包）
+
+本地 `pnpm run pack` / `pnpm run dist` 出的是**当前 `config.json`**的包，适合开发调试。
+要为某个具体应用出一份正式绿色版，走 GitHub Actions 的
+**`自定义打包（Electron 绿色版）`**（`.github/workflows/electron-build-custom.yml`）：
+
+1. Actions → 该 workflow → **Run workflow**；
+2. 粘贴一份配置 JSON（或填一个返回 JSON 的 URL）—— 与 Tauri 版**同一份契约、同一个解析器**；
+3. 勾选要打的形态：`electron_zip`（解压即用）/ `electron_portable`（单文件 exe）。
+
+它比本地打包多做了三件事：用共享解析器**规范化**配置（真 bool / 真数组）并写进 `out/config.json`；
+在 `RESOLVE_SECRET` 存在的环境下**编译 sidecar**（否则 `resolve_secret` 会静默失效）；
+出包后断言 `config.json` 确实在 `app.asar` 内。
+
+> ⚠️ **顺序关键**：解析配置必须排在编译 sidecar **之前**。`resolve-core` 的 Secret 是
+> `option_env!("RESOLVE_SECRET")` 的编译期常量，而 `w2a-proxy.exe` 是单独编译的 ——
+> 顺序错了，sidecar 内置的是公开默认 Secret，域名解析会一律失败且不报错。
 
 ### ⚠️ 先确认「跑的是哪一版包」（30 秒，省一轮返工）
 
@@ -118,8 +136,9 @@ dir /tc "%APPDATA%\Baidu\window-state.json"
 
 对齐办法（**覆盖式**，不用删除）：把源码的注入脚本 + 新包的 `app.asar` copy 覆盖进用户实际在跑的
 那份包，再重出 zip / portable 覆盖旧产物。
-⚠️ **必须成套换**：`Web2App.exe` + `resources\app.asar` + `resources\inject\*.js` + `config.json`
-四件一起覆盖（`data\` 保留）。只换注入脚本不换 `app.asar` 时，包内**旧探针**会因旧断言与新行为
+⚠️ **必须成套换**：`Web2App.exe` + `resources\app.asar` + `resources\inject\*.js`
+三件一起覆盖（`data\` 保留）。配置已在 `app.asar` 内，所以改配置必须**重新打包**，不能只换外面的文件。
+只换注入脚本不换 `app.asar` 时，包内**旧探针**会因旧断言与新行为
 冲突而失败（`--probe` 退出码 1），看起来像「修复把东西改坏了」。
 
 ## ⚠️ 为什么必须经 `scripts/launch.cjs`
@@ -160,17 +179,24 @@ Electron 会**以纯 Node 身份启动**：
 
 ## 数据目录
 
-| `config.json` 的 `data_dir_default` | 数据位置 |
-|---|---|
-| `false`（默认） | **exe 同级 `data\`** — 整个目录可搬走，不写系统盘、不写注册表 |
-| `true` | `%APPDATA%\<app_name>`（如 `app_name=Baidu` 即 `%APPDATA%\Baidu`）— 跟随系统 |
+`config.json` 的 `data_dir`（字符串，与 Tauri 版**同名同语义**）：
 
-同级目录不可写时（写保护的 U 盘、`Program Files`、只读网络盘）会**自动回退**到用户目录并打日志，
+| `data_dir` 取值 | 数据位置 |
+|---|---|
+| `"data"`（默认） | **exe 同级 `data\`**（相对路径基准 = exe 所在目录，非 cwd）— 整个目录可搬走，不写系统盘、不写注册表 |
+| `""`（空字符串） | `%APPDATA%\<app_name>`（如 `app_name=Baidu` 即 `%APPDATA%\Baidu`）— 跟随系统，不受程序位置影响 |
+| 其它相对路径（如 `"profile"`） | exe 同级 `\profile\` |
+| 绝对路径（如 `D:\w2a`） | 原样使用 |
+
+⚠️ **空字符串是有意义的值**（= 系统默认目录），不是「未设置」：读取时不能写成
+`data_dir || 'data'`，否则 `""` 会被 `'data'` 吃掉、静默退回 exe 同级。
+
+目录不可写时（写保护的 U 盘、`Program Files`、只读网络盘）会**自动回退**到系统默认目录并打日志，
 保证「能启动」优先于「够绿色」。四个路径一起重定向：`userData` / `sessionData` / `logs` / `crashDumps`
 （只改 `userData` 会留下 Cookies 和日志在系统盘）。
 
-> 与 Tauri 版的差异：Tauri 的 `data_dir_default=false` 写的是 `%LOCALAPPDATA%\<app_name>`。
-> 这是有意的——Electron 版定位为真绿色版。部署文档需明示这一点。
+> 与 Tauri 版的差异：`data_dir=""` 时 Tauri 写 `%LOCALAPPDATA%\<app_name>`，Electron 写 `%APPDATA%\<app_name>`。
+> 这是有意的——Electron 版定位为真绿色版（默认 `"data"` 根本不落系统盘）。部署文档需明示这一点。
 
 ## 日志目录（`data\logs\startup.log`）
 
@@ -181,8 +207,8 @@ Electron 会**以纯 Node 身份启动**：
 
 | 形态 | 日志位置 |
 |---|---|
-| 解压目录版（`data_dir_default=false`，默认） | 「用户放置 exe 的目录」`\data\logs\startup.log` |
-| `data_dir_default=true` | `%APPDATA%\<app_name>\logs\startup.log` |
+| 解压目录版（`data_dir="data"`，默认） | 「用户放置 exe 的目录」`\data\logs\startup.log` |
+| `data_dir=""`（系统默认目录） | `%APPDATA%\<app_name>\logs\startup.log` |
 | 探针（`--probe`） | `%TEMP%\w2a-probe-store\startup.log` ← **不写真实目录**（与 `settings.json` / `window-state.json` 同一套隔离） |
 
 ⚠️ 探针那条不是洁癖：在打包产物上跑一次 `--probe` 就会在用户 exe 旁边留下 `data\logs\`，
@@ -238,24 +264,42 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 ## 配置文件
 
-启动时按顺序找 `config.json`（`config::loadConfigAny`）：
+**配置随包进 `app.asar`，不放 exe 同级。** 启动时读 `app.getAppPath()/out/config.json`：
 
-1. **`installRoot()\config.json`** —— 开发态为项目根目录；绿色版为 exe 所在目录（用户可直接改）；
-2. **包内预置的那份** —— 仅单文件自解压形态会用到：`extraFiles` 把 `config.json` 放到
-   `resources\` 的上一级，若用户没在 portable exe 旁边放配置，就回落到它，而不是内置默认值。
+| 形态 | 读取位置 |
+|---|---|
+| 打包后（绿色版） | `resources\app.asar` 内的 `out/config.json` |
+| 开发态 | 项目根 `electron-app/config.json`（`configRoot()` 的回退分支） |
 
-> 没有第 2 条时，portable 单文件版会连着内置默认的 `example.com` 启动 ——
-> 「双击就打不开目标站点」会被误判成打包失败。两个位置都没有时才用内置默认值，并在启动日志里打印查找过的路径。
+> ⚠️ **为什么不再放 exe 同级**：早期用 `extraFiles` 把配置放在 exe 旁边，结果**任何拿到包的人
+> 都能用记事本改掉地址**（改成自己的站再转发）—— 配置就失去了意义。现在改动必须重新打包。
+> 代价是**不能**再用「放一份 config.json 到 exe 旁边」来覆盖，改配置 = 重跑 `build` + `stage` + 打包。
 
-字段与 `webview-app` 的配置契约**同名同义、不增不改名**；`android_*` 四个字段在本壳中静默忽略。
-`config.example.json` 已按契约**列全 17 个字段**（13 个通用 + 4 个 Android），复制成 `config.json`
-再改即可用；其中布尔值故意写成字符串（`"true"` / `"false"`），用来演示下面这条宽容解析规则。
-解析是**宽容**的：布尔值接受 `true` / `"true"` / `"1"` / `"yes"`（因为上游 `build-custom.yml` 的模板里是字符串）。
-文件存在但 JSON 非法时**直接抛错**（不静默回落）—— 否则「改坏一个字符」的表现是「配置像没生效」，最难查。
+> ⚠️ **护栏**：`scripts/check-asar-config.cjs` 断言 `out/config.json` 确实在 `app.asar` 内。
+> 这条防的是**静默失败** —— 配置没进包时 electron-builder 照样出包、双击照样打开，
+> 只是静默退回内置默认地址（`example.com`），构建日志全绿。
 
-`config.json` 随包分发：打包脚本 `scripts/stage-assets.cjs` 把项目根的 `config.json`
-（缺失则生成一份全字段默认模板）复制到 `build/config.json`，再由 `extraFiles` 放到 exe 同级。
-`config.json` 与 `data/` 都在 `.gitignore` 里 —— 它们是运行期产物，不是源码。
+字段与 `webview-app` 的配置契约**同名同义**，唯一实现见
+[`.github/scripts/parse-packaging-config.py`](../.github/scripts/parse-packaging-config.py)，
+完整字段表与多端行为对照见 [`docs/packaging-config.md`](../docs/packaging-config.md)。
+
+`config.example.json` 按契约列出本壳可用的 **13 个字段**（省略仅 Android 使用的 `android_*`），
+复制成 `config.json` 再改即可用。
+
+**校验是严格的**（与解析器逐条对齐）：
+
+- **布尔只接受真 `bool`**（`true` / `false`，不带引号）。字符串形式一律报错并给出改法 ——
+  曾经这里宽容地接受 `"1"` / `"yes"` / `"on"`，而 Tauri 侧规则不同，于是同一份配置里写 `"on"`
+  两个壳判定**相反**。
+- **未知字段直接失败**（`android_*` 除外，它们属同一份契约、只是本壳不实现，会提示后忽略）。
+- **`app_url` 接受 `string` 或 `string[]`**（真 JSON 类型），数组模式必须带 `public_key`。
+- **已移除的字段出现即报错**：`window_title` → 改用 `title`；`data_dir_default`（布尔）→ 改用 `data_dir`（字符串，`false` ⇒ `"data"` / `true` ⇒ `""`）。
+- 文件存在但 JSON 非法时**直接抛错**（不静默回落）—— 否则「改坏一个字符」的表现是「配置像没生效」，最难查。
+
+`config.json` 与 `data/` 都在 `.gitignore` 里 —— 它们是运行期/本地产物，不是源码。
+打包脚本 `scripts/stage-assets.cjs` 把项目根的 `config.json`（缺失则生成一份全字段默认模板）
+复制到 **`out/config.json`**（随 `files: out/**/*` 进 asar），并在复制前做一次浅层契约校验
+（`window_title`、字符串布尔会在这里就失败，而不是等用户双击）。
 
 ### `app_name` 与 `title`
 
@@ -520,5 +564,7 @@ M3 之后还覆盖**系统集成**（48 条，即第 11–15 节）：
 | 0.1.0 | 2026-09-17 | 健壮性补强：①`whenReady` 之后加顶层兜底，任何 await 抛错都收敛成**非 0 退出码**（此前只是 `UnhandledPromiseRejectionWarning`，既不报结论也不退出，CI 里表现为挂死）；②保存设置失败时**回滚已生效的唤醒快捷键**，兑现「任一步失败都不写内存态」 |
 | 0.1.0 | 2026-09-18 | **M6 收尾：启动日志落盘** —— 新增 `src/main/startup-log.ts`（零 Electron 依赖、fail-open、1 MiB 轮转），装配到 `data\logs\startup.log`，探针模式下重定向到 `%TEMP%\w2a-probe-store\` 以免污染真实目录；`smoke` 增加「日志已含启动信息」硬断言；`logStartup()` 打印日志路径。负向对照：`ENOTDIR` / `EISDIR` 两种写失败均 `ok=false` 且不抛异常 |
 | 0.1.0 | 2026-09-18 | 审计修复：①`renderSplash()` 的失败态注入由 `String.replace` 改 `split/join` —— 原写法把含失败 URL 的文案当**替换串**解释，`$&` / `` $` `` / `$'` 会截断启动页脚本（该约束本就写在同文件注释里，属自食其言）；②`config.ts` 里「`tabs_enabled` M5 实现前仅记录、不生效」的过期注释订正；③`index.ts` 两处逐字重复的解析路径文案表抽成 `howLabel()`；④`tabs.ts` 的 `contentBounds()` 高度钳零（窗口被压到比标签栏还矮时会让 `setBounds` 收到负高度） |
+| 0.1.0 | 2026-09-22 | **`data_dir` 取代 `data_dir_default` + Android 包名随 `app_name`**：①`data_dir_default`（布尔，两壳同名反义）废弃为 `data_dir`（**字符串，两壳同名同义**）—— `"data"`（默认）= exe 同级 `data\`、`""` = 系统默认目录、其它相对路径 = exe 同级、绝对路径 = 原样；⚠️ 空串是**有意义的值**，读取处禁止 `data_dir \|\| 'data'`（会被 `'data'` 吃掉）；②相对路径基准明确为 **exe 所在目录**（`installRoot()`）而非 cwd；③`portable.ts` 的 `DataDirMode` 扩为 `relative \| absolute \| system \| fallback`，三模式均经 `launch.cjs --smoke` 实测；④`config.ts` 的 `rejectUnknownKeys` 改用 `hasOwnProperty`（`in` 会在 `toString` 这类键上被原型链误判） |
+| 0.1.0 | 2026-09-22 | **配置契约统一 + 手动打包 workflow**：①`config.json` 从「exe 同级（`extraFiles`）」改为**随 `app.asar` 进包**，杜绝拿到包就能改地址；`configRoot()` 读 `app.getAppPath()/out`，新增 `scripts/check-asar-config.cjs` 断言配置确在 asar 内（防静默退回 `example.com`）；②`config.ts` 重写为与 `.github/scripts/parse-packaging-config.py` 逐条对齐的严格解析：布尔只认真 `bool`（字符串报错并给改法）、未知字段硬失败、`app_url` 接受真 `string \| string[]`、`window_title` 报错；③`DEFAULTS.proxy_bypass` 与 Tauri/解析器三处对齐；④新增手动打包 workflow `自定义打包（Electron 绿色版）`，与 Tauri 版共用同一解析器，并在 `RESOLVE_SECRET` 环境下编译 sidecar |
 | 0.1.0 | 2026-09-20 | 文档与仓库卫生审计：①源码/构建配置里 10 处失效引用 `PLAN.md` → `docs/electron-plan.md`（该文件 2026-09-17 已归位）；②注释里 `npm run *` 统一为 `pnpm run *`（包管理器已迁移，`electron-builder.yml` 同步）；③`.gitignore` 补 `tests/*.log`、`tests/*.exe`、`tests/*.zip` —— 原 `tests/*/` 只忽略目录，`tests/` 下一份 ~96MB 便携版副本与 10 个探针日志会被随仓库提交（M7 纳入版本控制前的必要前置）；④README 补 `docs/electron-size-reduction.md` 与根 `README.md` 的交叉引用，并声明「里程碑状态以本 README 为准」 |
 

@@ -1,0 +1,179 @@
+name: 自定义打包（Electron 绿色版）
+
+# 手动触发：Actions 页点 "Run workflow"，粘贴一份配置 JSON（或填一个返回 JSON 的 URL），
+# 产出 Windows 免安装绿色版。
+#
+# 与 `build-custom.yml`（Tauri 版）的关系：
+#   - **同一份配置 JSON 契约、同一个解析实现**（`.github/scripts/parse-packaging-config.py`），
+#     所以「同一个 JSON 在两条流水线上得到同样的语义」这件事由代码保证，不靠人工同步；
+#   - 差别只在产物形态：Tauri 出 MSI / APK，这里出 zip / 单文件 portable exe；
+#   - 字段表与多端行为对照见 `docs/packaging-config.md`。
+#
+# ⚠️ 与「本地 pnpm run dist」的差别（为什么建议走这里）：
+#   1. 配置由共享解析器规范化后写进 `electron-app/config.json`，再随 asar 进包 —— 本地手工
+#      改 config.json 一样能出包，但容易漏掉字段类型；
+#   2. sidecar（`w2a-proxy.exe`）在 `RESOLVE_SECRET` 存在的同一环境下编译，
+#      保证 `resolve_secret` 真正生效（见下方编译 sidecar 步骤的注释）。
+on:
+  workflow_dispatch:
+    inputs:
+      config_json:
+        description: '配置 JSON 字符串（单行）。与 config_url 二选一，都填则以本项为准'
+        required: false
+      config_url:
+        description: '或填一个返回上述 JSON 的 URL（公开可访问）'
+        required: false
+      electron_zip:
+        description: '打解压目录 zip —— 解压即用，体积最小'
+        required: false
+        default: true
+        type: boolean
+      electron_portable:
+        description: '打单文件自解压版（portable exe）—— 一个文件带走，冷启动较慢'
+        required: false
+        default: true
+        type: boolean
+
+# ⚠️ 单仓库化：Electron 工程在 `electron-app/` 子目录，所有 run 步骤都在它下面执行。
+#    但 `upload-artifact` / `uses:` 的路径以**仓库根**为基准，那些地方要带 `electron-app/` 前缀。
+defaults:
+  run:
+    working-directory: electron-app
+
+jobs:
+  windows:
+    name: Build Electron (Windows 绿色版)
+    runs-on: windows-latest
+    if: ${{ github.event.inputs.electron_zip != 'false' || github.event.inputs.electron_portable != 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # 与 build-custom.yml 共用同一份解析实现。这里多一个 `--config-out`：把**规范化后**的
+      # 配置落成 electron-app/config.json（真 bool、app_url 保持数组形态），
+      # 之后 `pnpm run stage` 会把它复制到 out/config.json，随 asar 进包。
+      #
+      # ⚠️ 同时它把编译期变量写进 GITHUB_ENV（APP_NAME / TITLE / RESOLVE_SECRET …），
+      #    下面编译 sidecar 的那一步就是靠这些变量。
+      - name: 解析配置（共享解析器 → config.json + 环境变量）
+        shell: bash
+        env:
+          CONFIG_JSON: ${{ github.event.inputs.config_json }}
+          CONFIG_URL: ${{ github.event.inputs.config_url }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          python "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" \
+            --env-out "$GITHUB_ENV" \
+            --config-out "$GITHUB_WORKSPACE/electron-app/config.json"
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        # 版本跟随仓库的 pnpm-workspace.yaml（allowBuilds / nodeLinker 是 pnpm 10 起的语法）
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+
+      - name: Install Rust toolchain
+        # sidecar 是 Rust 二进制（`crates/proxy-server`），与 Tauri 侧同一份源码。
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        # ⚠️ 不要在这里设 ELECTRON_MIRROR 之类国内镜像：GitHub 托管 runner 直连官方源最快，
+        #    指向 npmmirror 反而可能更慢/超时。镜像只在本机（国内网络）安装时才需要。
+        run: pnpm install --frozen-lockfile
+
+      # ⚠️⚠️ 顺序关键：**必须在注入 RESOLVE_SECRET 的环境里编译 sidecar**。
+      #   `resolve-core` 的 Secret 是 `option_env!("RESOLVE_SECRET")` 的**编译期常量**，
+      #   而 `w2a-proxy.exe` 是单独编译的 —— 如果先编 sidecar 再设变量，它内置的就是
+      #   公开默认 Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律失败）。
+      #   上一步已把 RESOLVE_SECRET 写进 GITHUB_ENV，这里直接 `pnpm run sidecar` 即可继承。
+      #   cargo 会按 dep-info 里的 `# env-dep:RESOLVE_SECRET` 感知变化并重编译，无需 clean。
+      - name: 编译 sidecar（w2a-proxy.exe，继承 RESOLVE_SECRET）
+        run: pnpm run sidecar
+
+      - name: 下载自定义图标（可选，来自 icon_url）
+        # 与 Tauri 侧同一个入口（配置里的 `icon_url`）：下载 PNG 后交给 electron-builder
+        # 作为 win.icon（它会自行转成 ico，要求 ≥256×256）。未配置时沿用仓库默认图标。
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ICON_URL:-}" ]; then echo "未配置 icon_url，沿用仓库默认图标"; exit 0; fi
+          echo "下载图标: $ICON_URL"
+          curl -fsSL --retry 3 "$ICON_URL" -o build/icon.png
+          magic=$(head -c 8 build/icon.png | od -An -tx1 | tr -d ' \n')
+          if [ "$magic" != "89504e470d0a1a0a" ]; then
+            echo "::error::icon_url 下载的不是 PNG 文件（文件头=$magic）"; exit 1
+          fi
+          echo "ICON_PNG=build/icon.png" >> "$GITHUB_ENV"
+
+      - name: 编译 TypeScript + 铺打包资源
+        # stage 会把 config.json 复制到 out/config.json（随 asar 进包），并校验三种布尔字段
+        # 的类型 —— 写错就在这里失败，而不是等用户双击。
+        run: |
+          pnpm run build
+          pnpm run stage
+
+      - name: 出包（electron-builder）
+        shell: bash
+        env:
+          WANT_ZIP: ${{ github.event.inputs.electron_zip }}
+          WANT_PORTABLE: ${{ github.event.inputs.electron_portable }}
+        run: |
+          set -euo pipefail
+
+          # app_name（安装名）→ productName：与 Tauri 侧同源，让 zip/portable 的**文件名**
+          # 带上应用名，而不是恒为 Web2App。清洗规则与 build-custom.yml 一致
+          # （去掉 Windows 文件名非法字符、压缩空白、去首尾空格与句点、空则回落默认名）。
+          NAME=$(printf '%s' "${APP_NAME:-}" | sed -E 's#[\\/:*?"<>|]+#_#g' | tr -s '[:space:]' ' ')
+          NAME=$(printf '%s' "$NAME" | sed -E 's/^[ .]+//; s/[ .]+$//')
+          if [ -z "$NAME" ]; then NAME="Web2App"; fi
+          echo "PKG_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "productName = $NAME"
+
+          TARGETS=""
+          if [ "$WANT_ZIP" != "false" ]; then TARGETS="$TARGETS zip"; fi
+          if [ "$WANT_PORTABLE" != "false" ]; then TARGETS="$TARGETS portable"; fi
+          if [ -z "$TARGETS" ]; then
+            echo "::error::zip 与 portable 都未勾选，没有可打的形态"; exit 1
+          fi
+          echo "目标形态：$TARGETS"
+
+          EXTRA=()
+          if [ -n "${ICON_PNG:-}" ]; then
+            EXTRA+=("-c.win.icon=$ICON_PNG")
+            echo "使用自定义图标：$ICON_PNG"
+          fi
+
+          # shellcheck disable=SC2086
+          pnpm exec electron-builder --win$TARGETS -c.productName="$NAME" "${EXTRA[@]}"
+        # ⚠️ `pnpm exec` 而不是 `npx`：包管理器已统一到 pnpm，且 pnpm 不会像 npm 那样
+        #    因 `--` 被字面透传而踩到参数解析的坑。
+
+      - name: 校验 config.json 已进 app.asar
+        # 这条护栏防的是**静默失败**：配置没进包时 electron-builder 照样出包、双击照样打开，
+        # 只是静默退回内置默认地址（example.com），构建日志全绿。
+        run: node scripts/check-asar-config.cjs
+
+      - name: Upload 解压目录版（zip）
+        if: ${{ github.event.inputs.electron_zip != 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PKG_NAME }}-win-x64
+          # ⚠️ 以仓库根为基准（upload-artifact 不受 defaults.run.working-directory 影响）
+          path: electron-app/release/*.zip
+          if-no-files-found: error
+
+      - name: Upload 单文件版（portable exe）
+        if: ${{ github.event.inputs.electron_portable != 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PKG_NAME }}-win-x64-portable
+          path: electron-app/release/*-portable.exe
+          if-no-files-found: error

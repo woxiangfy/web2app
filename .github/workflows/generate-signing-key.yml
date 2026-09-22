@@ -33,16 +33,25 @@ on:
   workflow_dispatch:
 
 # ℹ️ 单仓库化（2026-09-22）说明：本 workflow **故意不设** `defaults.run.working-directory`。
-#    它不执行 `actions/checkout`（纯 keytool + python 脚本，产物全部落在 ${{ runner.temp }}），
-#    因此工作区里根本没有 `webview-app/` 目录；若照抄其它 workflow 加 working-directory，
-#    每个 `run:` 步骤都会以 "No such file or directory" 直接失败。
-#    此处无需任何路径改动，保持原样。
+#    它不进入仓库目录工作（产物全部落在 ${{ runner.temp }}），因此工作区里没有 `webview-app/`；
+#    若照抄其它 workflow 加 working-directory，每个 `run:` 步骤都会以
+#    "No such file or directory" 直接失败。此处保持不设。
+#
+#    ⚠️ 但仍需要一次 checkout：本步骤要调用契约的唯一真源
+#    `.github/scripts/parse-packaging-config.py --print-contract-keys` 来断言生成的
+#    `packaging-config.json` 模板**字段一个不漏、布尔是真 bool**。
+#    （曾经该模板只写 14 个键、布尔写成 "false" 字符串，用户复用时会被解析器直接拒绝。）
+#    checkout 只为了读这个脚本，产物依旧全部写 ${{ runner.temp }}，与工作区无关。
 
 jobs:
   generate-key:
     name: 生成签名密钥并打包
     runs-on: ubuntu-latest
     steps:
+      # 仅为读取契约唯一真源 `.github/scripts/parse-packaging-config.py`（断言生成的模板字段齐全）。
+      # 本 workflow 其余部分不依赖工作区，产物全部写 ${{ runner.temp }}。
+      - uses: actions/checkout@v7
+
       # keytool 随 JDK 提供；GitHub 的 ubuntu-latest 自带 openjdk，这里显式装 JDK17 保证 keytool 可用、与打包 CI 一致。
       - name: 安装 JDK 17（提供 keytool）
         uses: actions/setup-java@v4
@@ -108,21 +117,39 @@ jobs:
           ks_b64 = base64.b64encode(ks_bytes).decode("ascii")
 
           # ---------- 6. 组装「手动打包配置 JSON」模板（已填好签名，app 字段用默认，需你自己改成真实值）----------
+          # ⚠️ 契约字段名从解析器取（唯一真源），下面用它断言模板一个字段都没漏。
+          #    曾经这份模板只写 14 个键且布尔是 "false" 字符串，用户拿它复用会：
+          #      · 静默丢掉 extra / tabs_enabled / public_key / resolve_secret；
+          #      · 被解析器以「布尔必须是真 bool」直接拒绝。
+          script = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / ".github" / "scripts" / "parse-packaging-config.py"
+          CONTRACT_KEYS = json.loads(subprocess.run(
+              [sys.executable, str(script), "--print-contract-keys"],
+              capture_output=True, text=True, check=True).stdout)
+
           cfg = {
-              "app_url": "https://example.com",   # ← 改成你的真实网址
+              "app_url": "https://example.com",   # ← 改成你的真实网址（或域名数组 ["a.com","b.com"]，需配 public_key）
               "app_name": "Web2App",              # ← 改成你的安装名
               "title": "Web2App",                 # ← 改成你的显示名（留空回落 app_name）
+              "extra": {},
               "icon_url": "",
-              "proxy_enabled": "false",
+              # 布尔一律真 bool（不是 "false" 字符串）—— 与解析器契约一致。
+              "proxy_enabled": False,
               "proxy_http": "",
               "proxy_https": "",
-              "proxy_bypass": "",
-              "data_dir_default": "false",
+              "proxy_bypass": "localhost;127.0.0.1;<-loopback>",
+              "data_dir": "data",
+              "tabs_enabled": False,
+              "public_key": "",
+              "resolve_secret": "",
               "android_keystore_base64": ks_b64,
               "android_key_alias": ALIAS,
               "android_keystore_password": storepass,
               "android_key_password": "",          # 空=回落同 storepass
           }
+          assert set(cfg) == set(CONTRACT_KEYS), (
+              "packaging-config 模板字段与契约不一致："
+              + str(set(CONTRACT_KEYS) ^ set(cfg)))
+
           pretty = json.dumps(cfg, ensure_ascii=False, indent=2)
           oneline = json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
 

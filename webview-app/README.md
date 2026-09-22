@@ -42,7 +42,10 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 ## 支持平台
 
 - **Windows**：原生 WebView2 渲染，支持托盘、全局快捷键、F12 调试、外部代理。
-- **Android**：复用同一份 Rust 代码，鉴权走纯 Rust 本地反向代理（零平台依赖）；无系统托盘/快捷键（移动端由系统任务管理替代）。`tauri.conf.json` 的 `bundle.android` 目前仅设 `minSdkVersion: 24`（当前 Tauri 2 版本尚未支持 `package` / `targetSdkVersion` / `useKotlin` / `permissions` 字段，应用包名默认取自 `identifier`）；更细的 SDK 版本与权限在 `cargo tauri android init` 生成 `gen/android` 后于原生工程中调整。
+- **Android**：复用同一份 Rust 代码，鉴权走纯 Rust 本地反向代理（零平台依赖）；无系统托盘/快捷键（移动端由系统任务管理替代）。`tauri.conf.json` 的 `bundle.android` 目前仅设 `minSdkVersion: 24`（当前 Tauri 2 版本尚未支持 `package` / `targetSdkVersion` / `useKotlin` / `permissions` 字段，**应用包名只能取自 `identifier`**）；更细的 SDK 版本与权限在 `cargo tauri android init` 生成 `gen/android` 后于原生工程中调整。
+  > ⚠️ 打包工作流会在 `android init` **之前**把 `identifier` 改写成 **`com.web2app.<由 app_name 清洗得到>`**，
+  > 于是不同 `app_name` 的 APK 包名不同、可以在同一台手机共存（否则全都叫 `com.example.web2app` 会互相覆盖安装）。
+  > 清洗规则与「上架要换自己域名前缀」的说明见 `docs/packaging-config.md` §4.2。
 
 ---
 
@@ -121,12 +124,7 @@ webview-app/
 ├── capabilities/           # Tauri ACL 能力声明（default.json）
 ├── icons/                  # 应用图标（icon.ico / icon.png 等）
 ├── txttest_keys/           # 验签测试密钥对（见 docs/txttest-verify-materials.md）
-└── .github/workflows/
-    ├── ci.yml                    # 提交即自动测试（lint + test + 多平台编译检查）
-    ├── release.yml               # 发版（或手动触发）即自动编译：Windows 安装包 + Android APK
-    ├── build-custom.yml          # 手动打包：填配置 JSON，产出 MSI + 绿色版 zip + 已签名 APK
-    ├── resolve-keys.yml          # 生成 DNS TXT 解析用的 Ed25519 密钥对 + 密文
-    └── generate-signing-key.yml  # 手动触发：云端生成一把固定签名 keystore + 密码 + 配置 JSON（全自动，零输入）
+└── （CI 与打包工作流已上移至仓库根 `.github/workflows/`，见下文「自动构建」）
 ```
 
 ---
@@ -140,8 +138,8 @@ webview-app/
 // 默认打开的网址，支持带账号密码；写成域名数组时走 DNS TXT 验签解密（见下文「动态解析」）
 const APP_URL: &str = "https://用户名:密码@www.example.com";
 
-const APP_NAME: &str = "Web2App";     // 安装名 / 数据目录名（Android 侧为应用名）
-const WINDOW_TITLE: &str = APP_NAME;  // 窗口标题，缺省回落 APP_NAME
+const APP_NAME: &str = "Web2App";     // 安装名 / 数据目录名（Android 侧为应用 ID 派生）
+const TITLE: &str = APP_NAME;         // 显示名 / 窗口标题，缺省回落 APP_NAME（旧名 WINDOW_TITLE 已移除）
 
 // 额外参数：编译期内联成 window.web2appExtra = {...}，页面 JS 可直接读；非法 JSON 自动回落 {}
 const EXTRA: &str = "{}";
@@ -158,9 +156,12 @@ const DEVTOOLS_ENABLED: bool = true;
 #[cfg(not(debug_assertions))]
 const DEVTOOLS_ENABLED: bool = false;
 
-// WebView2 用户数据目录：true=系统默认（紧挨 exe，安装版可能因无写权限而失败）；
-// false=固定到 %LOCALAPPDATA%\<app_name>（始终可写，安装版推荐）
-const DATA_DIR_DEFAULT: bool = false;
+// WebView2 用户数据目录（"app_name" 派生的目录名）。
+// ⚠️ 空串是**有含义的取值**：表示「用系统默认程序目录 %LOCALAPPDATA%\<app_name>，不跟着程序跑」，
+//    因此这里必须用裸 option_env! 读取，**不能**用把空串当未设置的 env_str!。
+// 默认 "data" = <exe 所在目录>\data\（跟着程序走）。也可填其它相对路径或绝对路径。
+// 目录不可写会自动回退到系统默认目录（安装版装进 Program Files 时不至于打不开窗）。
+const DATA_DIR: &str = "data";
 
 // —— 代理 —— 不需要就保持 PROXY_ENABLED = false
 const PROXY_ENABLED: bool = false;
@@ -241,7 +242,9 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 ## 自动构建（GitHub Actions）
 
-仓库内置 5 条 workflow：2 条**自动**（`ci.yml` / `release.yml`）+ 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，在 Actions 页手动 Run workflow）。
+5 条 workflow 统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移；命令经
+`defaults.run.working-directory: webview-app` 落到本工程目录，产物路径则显式带 `webview-app/` 前缀）：
+2 条**自动**（`ci.yml` / `release.yml`）+ 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，在 Actions 页手动 Run workflow）。
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 
@@ -292,7 +295,7 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 > `<app_name>.exe` 直接上传，由 GitHub 打成 **`<app_name>-portable.zip`**（文件名含应用名，
 > 且只有一层压缩，不会出现 "zip 套 zip"）。
 
-配置模板见 **`webview-app/config.example.json`**（复制到本地改好再粘贴即可）。
+配置模板见 **`config.example.json`**（复制到本地改好再粘贴即可）。
 
 两个名字字段的区分（很容易混）：
 
@@ -302,7 +305,9 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 | `title` | **显示名**（给用户看） | **Windows 窗口标题**、**Android 应用名称**（桌面图标下的名字） |
 
 `title` 省略时自动回落为 `app_name`。二者分开后即可实现「安装包叫英文名 `MyApp`、界面叫中文名 `我的应用`」。
-旧字段 `window_title` 等价于 `title`，仅为兼容老配置保留，新配置请直接用 `title`。
+⚠️ 旧字段 `window_title` **已移除**（写了会在打包时直接报错）——它和 `title` 曾是同一个概念的两个名字，
+现已只保留 `title`；编译期变量名也从 `WINDOW_TITLE` 改为 `TITLE`，与字段名一致。
+完整字段表与两壳行为对照见 `docs/packaging-config.md`。
 
 `extra`（可选，**对象**）—— 随打包一起注入到被包裹网页里的自定义配置，前端 JS 可直接读取：
 
@@ -474,7 +479,9 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
 - **全局快捷键没反应**：先在设置页（Shift+F1）确认唤醒快捷键**已配置**（默认不启用）；若已配置，
   再排查是否与其他软件冲突（代码只在「按下」那一刻触发）。
 - **Android 上访问 http 本地代理被拦**：移动端已配置 `INTERNET` 权限并允许 localhost 明文，正常可用。
-- **Android 端应用的数据存在哪？**（下文中 `<pkg>` = `tauri.conf.json` 的 `identifier`，当前为 `com.example.web2app`；
+- **Android 端应用的数据存在哪？**（下文中 `<pkg>` = 构建时的应用包名，即打包工作流在 `android init` 前
+  由 `app_name` 清洗后写入 `tauri.conf.json` 的 `identifier` = **`com.web2app.<app_name 清洗值>`**
+  （仓库里 `tauri.conf.json` 的静态值只是占位；本地不跑工作流直接 `cargo tauri android` 构建时才会用到它）；
   `<app_name>` = 打包配置里的 `app_name`，清洗掉非法字符后的值）
   - **设置文件**：`/data/data/<pkg>/<app_name>/settings.json`
   - **WebView 数据**（Cookie / localStorage / IndexedDB）：`/data/data/<pkg>/app_webview/`
@@ -495,8 +502,12 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
   同样报出（因为 `tauri-build` 始终解析整份 `tauri.conf.json`）。**不要升级 Tauri 版本**（会破坏已调通的
   WebView2 钩子），直接把 `bundle.android` 精简为只保留 `minSdkVersion`，其余在 `cargo tauri android init`
   生成 `gen/android` 后再于原生工程里配置即可。
-- **换产品名 / 包名**：改 `Cargo.toml` 的 `package.name`、`tauri.conf.json` 的
-  `productName` / `identifier` 即可（当前分别为 `web2app` / `Web2App` / `com.example.web2app`；Android 应用包名默认由 `identifier` 派生，当前 Tauri 2 版本暂不支持在 `tauri.conf.json` 里用 `bundle.android.package` 覆盖）。
+- **换产品名 / 包名**：改 `Cargo.toml` 的 `package.name`（决定 exe / 进程名）、`tauri.conf.json` 的
+  `productName`（决定窗口标题 / 托盘提示）即可。**Android 应用包名不再手改 `identifier`**：打包工作流会在
+  `android init` 之前按打包配置里的 `app_name` 自动把 `identifier` 改写成 `com.web2app.<清洗值>`
+  （清洗规则见 `docs/packaging-config.md` §4.2）。若直接跑 `cargo tauri android`（不经工作流），才会用到
+  `tauri.conf.json` 里的静态 `identifier`——此时请自行确保它已是你要的包名（Tauri 2 的 `bundle.android`
+  尚不支持 `package` 字段，包名只能取自 `identifier`）。
 - **任务管理器里显示的是「WebView2 管理器 / WebView2 渲染器」而不是应用名？**：
   Web2App 的**主进程**已经以 `web2app.exe` 显示（由 `package.name` 决定），窗口标题/托盘提示也已经是
   `Web2App`。但 WebView2 内部会拉起「浏览器管理器 / 渲染器」**子进程**，它们的进程名被写死在微软 WebView2

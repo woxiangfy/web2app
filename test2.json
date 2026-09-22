@@ -3,6 +3,6 @@
     "app_name": "osfipin.test",
     "title": "bilibili",
     "icon_url": "https://ai260621.osfipin.com/trilium.png",
-    "proxy_enabled": "false",
-    "tabs_enabled": "true"
+    "proxy_enabled": false,
+    "tabs_enabled": true
 }

@@ -85,7 +85,7 @@ pub fn handle_splash(
         crate::bootstrap::bootstrap(ctx.app_handle().clone());
     }
 
-    let html = splash_html(crate::config::WINDOW_TITLE);
+    let html = splash_html(crate::config::TITLE);
     Response::builder()
         .header("Content-Type", "text/html; charset=utf-8")
         // 启动页是即时生成的，禁止缓存，确保"重试"拿到的是干净状态。

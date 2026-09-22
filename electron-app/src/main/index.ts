@@ -11,7 +11,7 @@ import { app, BrowserWindow, ipcMain, protocol } from 'electron'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { setupPortablePaths, installRoot } from './portable'
+import { setupPortablePaths } from './portable'
 import { buildProxySwitches, extraJson, loadConfigAny, sanitizeDirName, type AppConfig } from './config'
 import { needsSidecar, resolveTarget, type ResolveHow, type ResolvedTarget } from './navigate'
 import {
@@ -123,24 +123,24 @@ function readInject(name: string): string | null {
   return out
 }
 
-// ---------- 1. 绿色版数据目录（必须最先） ----------
-const root = installRoot()
-/**
- * 随包分发的 config.json 所在目录（回落用，见 config::loadConfigAny 的文件头）。
- *
- * - 解压目录版（zip / dir）：exe 同级就是用户放置目录，两者相同，回落无副作用；
- * - 单文件自解压版（portable）：exe 在 `%TEMP%` 解压副本里，resources 的上一级正是
- *   `extraFiles` 放 config.json 的位置 —— 也就是「包内预置」的那份；
- * - 开发态：`app.getAppPath()` = 项目根，与 installRoot() 相同。
- */
-function bundledRoot(): string {
-  return app.isPackaged ? join(process.resourcesPath, '..') : join(__dirname, '..', '..')
+// ---------- 1. 运行期配置：读自包内 asar（不可读改） ----------
+//
+// ⚠️ 为什么**不再**从 exe 同级读 `config.json`：
+//    那份是明文、可读、可改的。放在包外等于配置形同虚设 —— 任何人都能改掉 app_url、
+//    或关掉域名校验，再把包分发出去，而使用者看不出任何区别。
+//    现在它随 `out/config.json` 打进 `app.asar`，想改配置就得重新打包（与 Tauri 版一致）。
+//
+// - 打包后：`app.getAppPath()` = `…\resources\app.asar`，配置在 `app.asar\out\config.json`
+//   （Electron 的 fs 对 asar 透明，`readFileSync` 直接可读）；
+// - 开发态：项目根目录的 `config.json`（`pnpm run stage` 会把它同步到 `out/`）。
+function configRoot(): string {
+  return app.isPackaged ? join(app.getAppPath(), 'out') : join(__dirname, '..', '..')
 }
 
-const loaded = loadConfigAny([root, bundledRoot()])
+const loaded = loadConfigAny([configRoot()])
 const cfg: AppConfig = loaded.config
 const paths = setupPortablePaths({
-  preferUserDir: cfg.data_dir_default,
+  dataDir: cfg.data_dir,
   appName: sanitizeDirName(cfg.app_name),
 })
 
