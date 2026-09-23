@@ -786,6 +786,30 @@ mod ipc_command_registry {
             .collect()
     }
 
+    /// 平台专属的前端页面：多页签标签栏 —— 它们调用的命令本身也是 `#[cfg(windows)]` 注册的。
+    ///
+    /// ⚠️⚠️ 平台差异只允许落在**数据**上，绝不能落在**可变性**上。早先这里写的是
+    /// `let mut sources = vec![跨平台页面];` + `#[cfg(windows)] { sources.push(页签页面) }`，
+    /// 而那句 `push` 在**非 Windows 目标**（CI 的 Ubuntu `lint-and-test` / Android 作业）
+    /// 上根本不参与编译 ⇒ `mut` 变成未使用 ⇒ `-D warnings` 下直接编译失败
+    /// （2026-09-23 CI 报 `error: variable does not need to be mutable`）。
+    /// 改写成「cfg 分叉只决定数组内容」后，任何目标上都不可能再出现 unused_mut。
+    #[cfg(windows)]
+    const PLATFORM_SOURCES: &[(&str, &str)] = &[
+        ("src/shell.html", include_str!("shell.html")),
+        ("src/tab_title.js", include_str!("tab_title.js")),
+    ];
+    /// 非 Windows 目标没有页签页面（命令未注册，验了必然假失败）⇒ 空表。
+    #[cfg(not(windows))]
+    const PLATFORM_SOURCES: &[(&str, &str)] = &[];
+
+    /// 待校验的全部前端页面：跨平台页面（设置页）+ 平台专属页面（页签）。
+    fn frontend_sources() -> Vec<(&'static str, &'static str)> {
+        std::iter::once(("dist/settings.html", include_str!("../dist/settings.html")))
+            .chain(PLATFORM_SOURCES.iter().copied())
+            .collect()
+    }
+
     /// ① 调用点唯一：`Builder::invoke_handler` 调第二次就是「命令集体消失」。
     #[test]
     fn exactly_one_invoke_handler_call_site() {
@@ -802,16 +826,8 @@ mod ipc_command_registry {
     #[test]
     fn every_frontend_invoked_command_is_registered() {
         let registered = registered_commands();
-
-        // 跨平台页面：设置页在 Windows / Android 上都要能存设置。
-        let mut sources: Vec<(&str, &str)> =
-            vec![("dist/settings.html", include_str!("../dist/settings.html"))];
-        // 多页签（仅 Windows）页面：其命令本身也是 `#[cfg(windows)]` 注册的。
-        #[cfg(windows)]
-        {
-            sources.push(("src/shell.html", include_str!("shell.html")));
-            sources.push(("src/tab_title.js", include_str!("tab_title.js")));
-        }
+        // 页面清单见 `frontend_sources()`（平台差异只影响清单内容，不影响可变性）。
+        let sources = frontend_sources();
 
         let mut missing: Vec<String> = Vec::new();
         for (file, src) in sources {
