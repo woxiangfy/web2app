@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings-window-chrome",
+  "description": "设置窗（label = settings）。它是**无边框窗**（settings.rs 的 decorations(false)）：没有系统标题栏，标题 / 关闭 / 拖动都由 dist/settings.html 自绘。本 capability 只授予自绘面板真正需要的两条窗口命令 —— `start-dragging` 拖动窗口、`internal-toggle-maximize` 双击面板头部最大化/还原（由 tauri 注入的 drag.js 在 data-tauri-drag-region 上派发）。⚠️ 少了 start-dragging 的典型表象是「窗口拖不动，且控制台里只有一条被拒绝的 plugin:window|start_dragging」——不会崩溃、不会报错弹窗，所以别以为少了它没事。⚠️ 设置窗与主窗的权限刻意分开：这里**不**给 minimize/close/toggle-maximize，设置页关闭窗口走应用命令 close_settings_window（本地 origin 不需要 ACL）。",
+  "windows": ["settings"],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}
