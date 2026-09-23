@@ -162,7 +162,7 @@ win:
 
 1. **尺寸判据**（量之前先确认没有 `data\` 污染）：
    `release/Web2App-<ver>-win-x64/locales/` 应只剩 3 个 `.pak`；干净目录应从 371.66MB 降到 ≈325.6MB。
-2. **功能判据（回归门禁）**：`pnpm run probe`（**112** 条）与 `pnpm run smoke` 必须全绿 —— 裁语言包会影响 Chromium 的 i18n 初始化，**必须实测而不是"应该没事"**。
+2. **功能判据（回归门禁）**：`pnpm run probe`（**126** 条，条数随探针演进，以实测输出为准）与 `pnpm run smoke` 必须全绿 —— 裁语言包会影响 Chromium 的 i18n 初始化，**必须实测而不是"应该没事"**。
 3. ⚠️ **探针必须在 `tests/` 下的副本里跑**，不要在交付目录里跑（会在 exe 同级重建 `data\session`，把刚瘦下来的目录又撑胖 18MB）。
 4. ⚠️ 打包 exe 走 `--probe` 前记得 `Remove-Item Env:ELECTRON_RUN_AS_NODE`，否则退出码 9（0x80000003）会被误判成业务崩溃。
 5. 出包后交付目录里除保留的 3 个 `.pak` 语言包外，`data\`、`logs\` 等运行时残留都不应存在。

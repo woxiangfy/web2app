@@ -59,6 +59,10 @@ const api = {
   minimize: (): Promise<void> => ipcRenderer.invoke('win:minimize'),
   toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke('win:toggle-maximize'),
   close: (): Promise<void> => ipcRenderer.invoke('win:close'),
+  // 打开设置窗（标题栏「设置」按钮，位置在最小化右侧）。
+  // Tauri 侧没有对应的方法：主窗是远程页面，调不了 `open_settings` 这种应用命令，
+  // 那边改发核心插件的事件（见 webview-app/src/titlebar.js 的 openSettings）。
+  openSettings: (): Promise<void> => ipcRenderer.invoke('win:open-settings'),
 }
 
 contextBridge.exposeInMainWorld('web2app', api)

@@ -11,12 +11,12 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 117 条） |
+| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 126 条） |
 | M2 sidecar（本地反向代理 + 加密解析） | ✅ | 复用 Rust `proxy.rs` / `resolve.rs`，零重写 |
 | M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
 | M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（**仅 `debug` 打开时才有**，见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
 | **M4 下载接管** | ⬜ **未实现** | `will-download` 目前只记日志、下载走 Chromium 默认「另存为」；对标 Tauri `save_dialog.rs` 的自绘对话框待做 |
-| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **117/117** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，117 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
+| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **26/26**、单窗口 **126/126** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，126 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
 | **M7 CI 流水线** | ⬜ **未落库** | 本目录没有 CI 配置（仓库根 `.github/workflows/` 那几条只服务 Tauri 版），目前只能本地跑 |
 
 > 除上表三项外，后续「新增/改动会影响哪些验证」见文末「验证清单」——
@@ -35,7 +35,7 @@ pnpm run build       # 只编译到 out/
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe（本地代理 + 加密解析）
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json（pack/dist 会自动调用）
 pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘（内部强制 debug=true），退出码即结论
-pnpm run probe       # 兼容契约探针：117 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
+pnpm run probe       # 兼容契约探针：126 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
 pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 + 截一张 PNG（改标题栏/滚动条/几何后看它）
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
@@ -305,7 +305,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 [`.github/scripts/parse-packaging-config.py`](../.github/scripts/parse-packaging-config.py)，
 完整字段表与多端行为对照见 [`docs/packaging-config.md`](../docs/packaging-config.md)。
 
-`config.example.json` 按契约列出本壳可用的 **13 个字段**（省略仅 Android 使用的 `android_*`），
+`config.example.json` 按契约列出本壳可用的 **14 个字段**（省略仅 Android 使用的 `android_*`），
 复制成 `config.json` 再改即可用。
 
 **校验是严格的**（与解析器逐条对齐）：
@@ -372,11 +372,17 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 ### 设置窗
 
-设置窗是 `settings://localhost/` 协议提供的**普通窗口**（480×470，带系统标题栏，不可缩放），
-内容直接取自 `../webview-app/dist/settings.html` —— 也就是 Tauri 版的那一份，**一行都不改**。
+设置窗是 `settings://localhost/` 协议提供的**无边框窗**（620×600，可缩放，最小 460×400，居中，
+`frame:false`），内容直接取自 `../webview-app/dist/settings.html` —— 也就是 Tauri 版的那一份，
+**一行都不改**。版式是「面板居中 + 正文滚动」：标题 / 关闭 / 拖动都由设置页自绘在面板头部
+（`-webkit-app-region:drag` 负责拖动），窗口本体只作为面板四周的底衬。
+
+打开方式有三条，走的是**同一个** `openSettings()`：托盘菜单「设置」、全局快捷键 **Shift+F1**、
+以及标题栏「设置」按钮（位置在最小化右侧；单窗口模式经 `win:open-settings`，
+多页签模式经标签栏的 `tabs:open_settings`）。
 
 它靠 `src/renderer/settings-preload.ts` 提供的 `window.__TAURI_INTERNALS__.invoke` 垫片工作，
-垫片只放行三个命令（`get_settings` / `save_settings` / `close_settings_window`），其余一律拒绝。
+垫片只放行四个命令（`get_settings` / `save_settings` / `close_settings_window` / `clear_web_data`），其余一律拒绝。
 好处是设置页永远不会分叉：改一次两个壳同时生效。
 
 > 找不到 `settings.html` 时会退到一个内置精简页（只保留两个复选框），不会出现空白窗。
@@ -440,7 +446,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 | `bodyScrollable` | `true` | 页面照常能滚 |
 | `window.scrollTo(0,200)` | `scrollY≈200` **且** scroll 事件触发 | 转发没坏（事件异步，要等一帧再读） |
 
-`pnpm run probe`（117 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
+`pnpm run probe`（126 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
 ⚠️ **不要**再用 `rect.width == innerWidth` 或「滚动条宽度归零」当判据 —— 前者测不出覆盖，
 后者把缺陷锁死成期望值。**改完必须重新打包**：脚本在 `resources/inject/titlebar.js` 里，
 跑旧的 exe 永远看不到修复。
@@ -494,7 +500,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 
 ## 兼容契约探针（`pnpm run probe`）
 
-`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **117 条**契约，
+`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **126 条**契约，
 **退出码即结论**（不通过则非 0，可以直接挂 CI）。夹具全部内联在代码里，不落盘、不进打包产物。
 
 覆盖范围：启动页内联注入、标题栏几何与配色、38px 让位（fixed / sticky / `100vh` / `inset:0` 四种页面形态）、
@@ -509,7 +515,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 * `Origin` 被改写为**上游源**（且只有一个）—— 详见下面那条已修的坑；
 * `stop()` 之后 sidecar 进程**真的退出**（`kill(pid, 0)` 探活），不留孤儿。
 
-M3 之后还覆盖**系统集成**（52 条，即第 11–15 节）：
+M3 之后还覆盖**系统集成**（60 条，即第 11–15 节）：
 
 * `Hotkey`（旧版存 JS `event.code`）→ Electron accelerator 的映射，含「不认识的键名返回 null，绝不猜」；
 * `settings.json` 的**序列化字节形态**必须与 `serde_json` 写出来的一致（字段名 / 嵌套 / 布尔类型 /
@@ -588,6 +594,7 @@ M3 之后还覆盖**系统集成**（52 条，即第 11–15 节）：
 
 | 版本 | 日期 | 变更说明 |
 |---|---|---|
+| 0.1.0 | 2026-09-23 | **设置界面改为「无边框窗 + 居中面板 + 正文滚动」+ 标题栏新增「设置」按钮**：①`settings.html` 重做版式 —— 窗口无系统标题栏，整页只有一块居中的圆角面板（四周留底衬），标题 / 关闭 / 拖动由面板头部自绘；`html/body` 都不滚，**唯一滚动容器是 `.panel-bd`**（否则滚动条会横穿面板圆角），底部操作区固定（内容再多「保存」也不会被滚出视野）；元素 id 与脚本逻辑一字未改；②设置窗参数 480×470 / 带系统标题栏 / 不可缩放 → **620×600 / `frame:false` / 可缩放（最小 460×400）/ 居中**，Tauri 侧同步改 `decorations(false)` + `.center()`；③标题栏在**最小化右侧**新增「设置」按钮，两壳两模式都接上：单窗口走 `window.web2app.openSettings` → IPC `win:open-settings`，多页签走标签栏 `invoke("open_settings")` → `tabs:open_settings`（`shell.html` 字面量 ↔ `shell-preload` 白名单 ↔ 主进程三处逐字一致）；④探针 117 → **126** 条（新增「按钮位置」「点按钮真能开设置窗且页面已渲染」「设置窗无边框」「面板四周留底衬」「面板居中」「正文是唯一滚动容器」「头部可拖动」等），多页签 23 → **26** 条。⚠️ 反例教训：第一版「点按钮开设置窗」只断言了窗口对象存在 —— 页面加载失败时它也成立（假绿），且探针抢在加载完成前 `close()` 会中止导航、在日志里留下 `ERR_FAILED(-2)` 噪声；改成等 `document.querySelector('.panel')` 出现后两条一起消失 |
 | 0.1.0 | 2026-09-23 | **窗口几何并入 `settings.json`（运行期只剩一个 JSON）**：①`window-state.json` 取消，几何改为 `settings.json` 的 `window` 段（设置字段仍平铺顶层），与 Tauri 版同契约；旧文件**不迁移**、不再读写（升级后窗口回一次默认尺寸/位置）；②合并的唯一风险是「两个写入方互相覆盖」（`window-state.ts` 文件头当初正是用这个理由论证不该合并）⇒ 两个方向都改成**读-改-写**（`saveSettings` / `saveWindowState`，只替换自己那一段），探针新增 4 条断言钉住（含键序 `设置三键 → window`），113 → **117** 条；③Rust 侧新增 `src/store.rs` 承载文档契约（`WindowGeom` + 读-改-写 + 「一段坏掉不拖垮另一段」的独立解析），`settings.rs` / `window_state.rs` 退化为薄封装；单测 65 → 71（新增 9 条含双壳字面量互通） |
 | 0.1.0 | 2026-09-22 | **诊断日志改为 `debug` 开关 + 托盘图标对齐 `icon_url`**：①新增契约字段 `debug`（**bool，默认 `false`**）—— `false` 时**不建 `logs\`、不写文件，控制台三路输出也一并静默**（此前是无条件落盘，会在用户的交付目录里凭空多出 `data\logs\`）；`true` 时写 `<数据目录>\logs\startup.log` 并照常打印；运行期逃生口 `--debug` / `WEB2APP_DEBUG=1`；**探针与冒烟内部强制打开**（结论全靠 stdout，不能自检失声）；②`logStartup()` 增印「诊断日志：已开启 / 未开启」，冒烟断言在 `fileLog === null` 时报「未启用（冒烟模式本应强制打开 debug，出现即 bug）」—— 把「开关接错」与「写盘失败」两类原因分开；③**托盘图标修复**：`electron-build-custom.yml` 下载的 `icon_url` 此前只喂给 `-c.win.icon`（exe / 任务栏图标），托盘取的是 `resources/icons/icon.png`（由 `extraResources` 从 `webview-app/icons/` 拷入的**仓库默认图标**）⇒ 下载后**同时覆盖 `../webview-app/icons/icon.png`**，使托盘与 exe 用同一张 `icon_url`；复用既有单一真源，不改 `tray.ts` |
 | 0.1.0 | 2026-09-17 | M6 出包打通（dir / zip / portable 三形态）；修两个真 bug：`createWindow()` 漏传 `title`、`tsc` 有错也输出导致半成品封进 asar |

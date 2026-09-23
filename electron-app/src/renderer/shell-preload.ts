@@ -24,6 +24,9 @@ const ALLOWED = new Set([
   'minimize_host',
   'close_host',
   'history_nav',
+  // 「设置」按钮（位置在最小化右侧）—— shell.html 是双壳共用的单一真源，
+  // 那边写的是 invoke("open_settings")，这边必须逐字放行，否则按钮点了没反应。
+  'open_settings',
 ])
 
 contextBridge.exposeInMainWorld('__TAURI_INTERNALS__', {

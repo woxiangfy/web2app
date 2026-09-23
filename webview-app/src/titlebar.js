@@ -5,7 +5,7 @@
  * （electron-app，Windows）。差异全部收在下面两处能力探测里，其余逻辑一字不分叉。
  *
  * 提供的标题栏（高 38px，与多页签宿主 shell.html 的标签栏一致）：
- *      [← 后退] [→ 前进]          标题                [— 最小化] [▢ 最大化] [✕ 关闭]
+ *      [← 后退] [→ 前进]        标题        [— 最小化] [⚙ 设置] [▢ 最大化] [✕ 关闭]
  *   - 拖动 / 双击最大化：
  *       · Tauri（Windows）：交给 drag region（`data-tauri-drag-region` 属性，由 tauri 注入的
  *         drag.js 处理）。WebView2 上 `-webkit-app-region` 不可靠，故以属性为准。
@@ -25,6 +25,9 @@
  *   allow-start-dragging / allow-internal-toggle-maximize，并把 remote.urls 放开到实际站点。
  * 同理，本脚本【不要】去 invoke 应用自定义命令（history_nav / *_host 等）：
  * 那类命令无法在 capability 里授权给远程 origin（需要 build.rs 的 app_manifest），必被拒。
+ * ⚠️ 这条约束同样管着「设置」按钮：主窗是远程页面，调不了 `open_settings` 这种应用命令，
+ * 所以 Tauri 侧改发**核心插件的 event 命令**（`core:event:allow-emit` 可以授权给远程 origin），
+ * Rust 侧 `app.listen("web2app:open-settings")` 收到后开设置窗 —— 见下面的 openSettings()。
  * （Electron 侧没有这套 ACL：`window.web2app` 由 preload 直接暴露给页面，远程 origin 同样可用。
  *   也因此【不要】把这段 ACL 结论套到 Electron 上排查「按钮没反应」，那边要先看 preload 是否注入。）
  *
@@ -220,6 +223,22 @@
     '[' + SHRINK_ATTR + ']{height:' + FIXED_H + '!important;min-height:' + FIXED_H + '!important;}'
   ].join('\n');
 
+  // 设置按钮的图标用内联 SVG，而不是 "⚙" 字符：那个码位在部分系统上会带 emoji 的彩色字形，
+  // 与旁边 — / ▢ / ✕ 的单色字形放一起会很跳。
+  var GEAR =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+    '<path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58' +
+    'c0.18-0.14,0.23-0.41,0.12-0.61l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96' +
+    'c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41h-3.84' +
+    'c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33' +
+    'c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58' +
+    'C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58c-0.18,0.14-0.23,0.41-0.12,0.61' +
+    'l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54' +
+    'c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54' +
+    'c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32' +
+    'c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6' +
+    's1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>';
+
   // `data-tauri-drag-region`：Tauri 的 drag.js 只认这个属性（Windows WebView2 上
   // `-webkit-app-region` 不可靠）。空值语义是「只有直接点在本元素上才拖动」，
   // 所以按钮不加（避免点不动），标题与整条空白区各自带上。
@@ -228,6 +247,7 @@
     '<button type="button" class="w2t-btn w2t-fwd" title="前进">→</button>',
     '<div class="w2t-title" data-tauri-drag-region> </div>',
     '<button type="button" class="w2t-btn w2t-min" title="最小化">—</button>',
+    '<button type="button" class="w2t-btn w2t-settings" title="设置">' + GEAR + '</button>',
     '<button type="button" class="w2t-btn w2t-max" title="最大化/还原">▢</button>',
     '<button type="button" class="w2t-btn w2t-close" title="关闭">✕</button>'
   ].join('');
@@ -764,6 +784,63 @@
     }
   }
 
+  /// 打开设置窗口（标题栏「设置」按钮）。
+  ///
+  /// 两个壳走**不同通路**，因为主窗加载的是**远程页面**：
+  ///   · Electron：`window.web2app.openSettings()`（preload 白名单 → 主进程 openSettingsWindow）。
+  ///   · Tauri   ：**不能** invoke 应用命令 `open_settings` —— Tauri 2 对非本地 origin 的 IPC
+  ///     强制走 ACL，而应用命令没有 app 级 ACL 清单可授权，必被拒（与 history_nav 同一条约束）。
+  ///     改发**核心插件的事件命令**：`core:event:allow-emit` 是可以授权给远程 origin 的
+  ///     （见 capabilities/default.json），Rust 侧 `app.listen("web2app:open-settings")` 收到后
+  ///     调 open_settings_window。⚠️ 事件名必须与 lib.rs 里的字面量逐字一致。
+  /// 失败一律打到控制台：静默的话用户只看到「点了没反应」，排查得从零开始。
+  function openSettings() {
+    var E = electronApi();
+    if (E && typeof E.openSettings === 'function') {
+      try {
+        var p = E.openSettings();
+        if (p && p.then) {
+          p.then(null, function (err) {
+            try { console.error('[web2app] 打开设置被拒绝：', err); } catch (e) { /* noop */ }
+          });
+        }
+        return;
+      } catch (e) {
+        try { console.error('[web2app] 打开设置抛异常：', e); } catch (e2) { /* noop */ }
+        return;
+      }
+    }
+    var evt = 'web2app:open-settings';
+    try {
+      var T = window.__TAURI__;
+      if (T && T.event && typeof T.event.emit === 'function') {
+        var r = T.event.emit(evt);
+        if (r && r.then) {
+          r.then(null, function (err) {
+            try { console.error('[web2app] 打开设置事件被拒：', err); } catch (e) { /* noop */ }
+          });
+        }
+        return;
+      }
+      // 兜底：直接走底层 invoke（withGlobalTauri 关掉时 __TAURI__.event 不存在）。
+      var I = window.__TAURI_INTERNALS__;
+      if (I && typeof I.invoke === 'function') {
+        I.invoke('plugin:event|emit', { event: evt, payload: null });
+        return;
+      }
+    } catch (e) {
+      try { console.error('[web2app] 打开设置抛异常：', e); } catch (e2) { /* noop */ }
+      return;
+    }
+    try {
+      console.error(
+        '[web2app] 无法打开设置：壳控制器未就绪（shell=' + shellName() + '）。' +
+        'Electron 侧查 preload 是否暴露 window.web2app.openSettings；' +
+        'Tauri 侧查 __TAURI__ 与 capabilities 的 core:event:allow-emit。'
+      );
+    } catch (e) { /* noop */ }
+  }
+
   function wire(bar) {
     // ⚠️ 前进/后退【直接】驱动当前文档的历史，不要改回 invoke 自定义命令：
     // 主窗加载的是远程页面（非 local origin），Tauri 2 会强制走 ACL 校验，而应用自定义命令
@@ -791,6 +868,8 @@
     bar.querySelector('.w2t-back').addEventListener('click', function () { onNav('back'); });
     bar.querySelector('.w2t-fwd').addEventListener('click', function () { onNav('forward'); });
     bar.querySelector('.w2t-min').addEventListener('click', function () { callWindow('minimize'); });
+    // 设置按钮：紧挨最小化按钮右侧（与多页签标签栏 shell.html 的同名按钮位置一致）。
+    bar.querySelector('.w2t-settings').addEventListener('click', function () { openSettings(); });
     bar.querySelector('.w2t-max').addEventListener('click', function () { callWindow('toggleMaximize'); });
     bar.querySelector('.w2t-close').addEventListener('click', function () { callWindow('close'); });
     // 双击标题栏空白区最大化/还原由 Tauri 的 drag region 负责（drag.js 在 mousedown

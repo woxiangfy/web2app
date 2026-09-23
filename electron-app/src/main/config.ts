@@ -26,7 +26,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** Windows 壳可用的 13 个字段；`android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
+/** Windows 壳可用的 14 个字段；`android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
 export interface AppConfig {
   /**
    * 目标地址。两种形态（与打包配置 JSON 的类型一一对应）：

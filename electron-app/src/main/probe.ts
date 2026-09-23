@@ -395,6 +395,8 @@ interface Snapshot {
   api: string | null
   title: string | null
   buttons: number
+  /** 「设置」按钮与最小化按钮的相对位置（null = 有一个没找到） */
+  gear: { minRight: number; gearLeft: number; gap: number } | null
   shiftAttr: boolean
   shrinkAttr: boolean
   r: { hdr: Rect | null; root: Rect | null; shell: Rect | null; ftr: Rect | null; content: Rect | null }
@@ -455,7 +457,16 @@ const SNAPSHOT_JS = `(() => {
     extra: (window.web2appExtra && typeof window.web2appExtra === 'object') ? JSON.stringify(window.web2appExtra) : null,
     api: (window.web2app && typeof window.web2app === 'object') ? Object.keys(window.web2app).sort().join(',') : null,
     title: bar ? (bar.querySelector('.w2t-title') || {}).textContent : null,
-    buttons: ['w2t-back','w2t-fwd','w2t-min','w2t-max','w2t-close'].filter((c) => bar && bar.querySelector('.' + c)).length,
+    buttons: ['w2t-back','w2t-fwd','w2t-min','w2t-settings','w2t-max','w2t-close'].filter((c) => bar && bar.querySelector('.' + c)).length,
+    // 「设置按钮在最小化右侧」的位置判据：只比几何，不看 DOM 顺序 —— 顺序对了但被样式
+    // 挪到别处（float / order）一样是错的，而使用者提的就是「位置」。
+    gear: (() => {
+      const mn = bar && bar.querySelector('.w2t-min');
+      const st = bar && bar.querySelector('.w2t-settings');
+      if (!mn || !st) return null;
+      const a = mn.getBoundingClientRect(), b = st.getBoundingClientRect();
+      return { minRight: +a.right.toFixed(1), gearLeft: +b.left.toFixed(1), gap: +(b.left - a.right).toFixed(1) };
+    })(),
     shiftAttr: !!document.querySelector('[data-web2app-chrome-shift]'),
     shrinkAttr: !!document.querySelector('[data-web2app-chrome-shrink]'),
     r: { hdr: R('#hdr'), root: R('#root'), shell: R('#shell'), ftr: R('#ftr'), content: R('#content') },
@@ -679,8 +690,19 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   p.check('壳标识已写入 DOM', s.shell === 'electron', `实际 ${s.shell}`)
   p.check('38px 契约标记已写入 DOM', s.chromeH === '38', `实际 ${s.chromeH}`)
   p.check('顶部让位只做一次：html 不再留白（避免 76px 双留白）', s.htmlPadTop === '0px', `实际 ${s.htmlPadTop}`)
-  p.check('五个按钮齐全', s.buttons === 5, `实际 ${s.buttons}`)
-  p.check('window.web2app 白名单 API 就位', s.api === 'chromeH,close,isElectron,minimize,toggleMaximize', `实际 ${s.api}`)
+  p.check('六个按钮齐全', s.buttons === 6, `实际 ${s.buttons}`)
+  // 「设置」按钮必须在【最小化右侧】（使用者指定的位置）。顺序靠 DOM，位置靠几何 ——
+  // 两者都断言，免得「DOM 顺序对、CSS 把它挪走了」这种半对状态混过去。
+  p.check(
+    '设置按钮紧挨最小化右侧',
+    !!s.gear && s.gear.gearLeft >= s.gear.minRight - 1 && s.gear.gearLeft - s.gear.minRight < 12,
+    s.gear ? `minRight=${s.gear.minRight} gearLeft=${s.gear.gearLeft}` : '未找到设置按钮'
+  )
+  p.check(
+    'window.web2app 白名单 API 就位',
+    s.api === 'chromeH,close,isElectron,minimize,openSettings,toggleMaximize',
+    `实际 ${s.api}`
+  )
   p.check('window.web2appExtra 已注入', s.extra === '{"build":"probe","env":"test"}', `实际 ${s.extra}`)
   p.near('拖动区已声明（-webkit-app-region=drag）', s.appRegion === 'drag' ? 1 : 0, 1, 0)
   // 加载层有「最短展示时长 + 淡出动画」（loading.js：MIN_MS 220 + FADE_MS 280，另加
@@ -772,6 +794,36 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   await clickBtn('w2t-max')
   await sleep(500)
   p.check('最大化按钮可还原', !win.isMaximized(), `isMaximized=${win.isMaximized()}`)
+
+  // ---------- 9.1 标题栏「设置」按钮（最小化右侧）→ 真的打开设置窗 ----------
+  // 完整链路：注入脚本 → window.web2app.openSettings()（preload 白名单）→ IPC win:open-settings
+  //          → 主进程 openSettings() → openSettingsWindow()。
+  // 这里必须**真的点按钮**：任何一环断掉，表象都是「按钮点了没反应」，而直接调
+  // ctx.m3.openSettingsWindow()（13 段会做）完全绕过了前两环、抓不到这种断链。
+  await clickBtn('w2t-settings')
+  // ⚠️ 判据要等到**页面真的渲染出面板**，不能只等「窗口对象存在」：窗口建好但 URL 加载失败
+  //    时它照样存在，断言会假绿。而且提前 close 会中止加载，日志里留下一句
+  //    `设置窗加载失败：ERR_FAILED (-2)` —— 那是探针自己制造的噪声，不是缺陷。
+  const gearOpened = await waitUntil(async () => {
+    const w = ctx.m3.getSettingsWindow()
+    if (!w) return false
+    try {
+      return (await w.webContents.executeJavaScript(
+        '!!document.querySelector(".panel")',
+        true
+      )) as boolean
+    } catch {
+      return false
+    }
+  }, 6000)
+  p.check(
+    '点标题栏设置按钮 → 打开设置窗且页面已渲染',
+    gearOpened,
+    '6s 内未渲染（查 preload 的 openSettings / IPC win:open-settings / 页面按钮绑定 / settings:// 协议）'
+  )
+  ctx.m3.closeSettingsWindow()
+  const gearClosed = await waitUntil(async () => !ctx.m3.getSettingsWindow(), 4000)
+  p.check('设置按钮链路收尾：设置窗可关闭', gearClosed, '4s 内未关闭')
 
   // ---------- 10. 本地反向代理 sidecar（M2） ----------
   //
@@ -1135,7 +1187,81 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
       'document.querySelectorAll("#__web2app_titlebar__").length',
       true
     )) as number
-    p.check('设置窗未注入自绘标题栏（它是带系统标题栏的普通窗）', barCount === 0, `barCount=${barCount}`)
+    p.check('设置窗未注入主窗的自绘标题栏（它自带面板头部）', barCount === 0, `barCount=${barCount}`)
+
+    // 设置窗是**无边框窗**（frame:false）：版式改成「没有顶部的窗体、面板居中、正文可滚动」，
+    // 标题 / 关闭 / 拖动都由 dist/settings.html 自绘。
+    // 判据用「窗口区 == 内容区」：带系统标题栏时两者至少差一条标题栏（~31px），无边框时应为 0
+    //（容差 2px 兜住 DWM 取整）。
+    const wb = swin.getBounds()
+    const cb = swin.getContentBounds()
+    const frameDelta = Math.abs(wb.width - cb.width) + Math.abs(wb.height - cb.height)
+    p.check(
+      '设置窗是无边框窗（窗口区 == 内容区，没有系统标题栏）',
+      frameDelta <= 2,
+      `bounds=${JSON.stringify(wb)} content=${JSON.stringify(cb)}`
+    )
+
+    // 版式契约逐条钉住：面板四周留底衬 / 水平居中 / 正文是唯一滚动容器 / 头部可拖动。
+    // 这些正是使用者这次提的四件事，缺任何一条都会在界面上一眼看出来。
+    const uiJson = (await swin.webContents.executeJavaScript(
+      `(() => {
+        const g = (s) => { const e = document.querySelector(s); if (!e) return null;
+          const r = e.getBoundingClientRect();
+          return { l:+r.left.toFixed(1), t:+r.top.toFixed(1), r:+r.right.toFixed(1), b:+r.bottom.toFixed(1) }; };
+        const bd = document.querySelector('.panel-bd');
+        const hd = document.querySelector('.panel-hd');
+        let drag = null;
+        if (hd) { const cs = getComputedStyle(hd);
+          try { drag = cs.webkitAppRegion || cs.getPropertyValue('-webkit-app-region'); } catch (e) {} }
+        return JSON.stringify({
+          panel: g('.panel'), bd: g('.panel-bd'),
+          bdOv: bd ? getComputedStyle(bd).overflowY : null,
+          htmlOv: getComputedStyle(document.documentElement).overflowY,
+          bodyOv: getComputedStyle(document.body).overflowY,
+          drag: drag || null,
+          hasX: !!document.getElementById('closeBtn'),
+          sideDiff: (() => { const p = document.querySelector('.panel'); if (!p) return null;
+            const r = p.getBoundingClientRect();
+            return +(r.left - (window.innerWidth - r.right)).toFixed(1); })(),
+          iw: window.innerWidth, ih: window.innerHeight
+        });
+      })()`,
+      true
+    )) as string
+    const u = JSON.parse(uiJson) as {
+      panel: { l: number; t: number; r: number; b: number } | null
+      bd: { l: number; t: number; r: number; b: number } | null
+      bdOv: string | null
+      htmlOv: string | null
+      bodyOv: string | null
+      drag: string | null
+      hasX: boolean
+      sideDiff: number | null
+      iw: number
+      ih: number
+    }
+    p.check(
+      '设置页：面板四周留出底衬（无边框窗靠它界定窗口边界）',
+      !!u.panel && u.panel.l > 0 && u.panel.t > 0 && u.panel.r < u.iw && u.panel.b <= u.ih,
+      uiJson
+    )
+    p.check(
+      '设置页：面板水平居中（左右留白相等）',
+      u.sideDiff !== null && Math.abs(u.sideDiff) <= 1,
+      `左右留白差 ${u.sideDiff}`
+    )
+    p.check(
+      '设置页：正文是唯一的滚动容器（内容多时可滚动）',
+      u.bdOv === 'auto' && u.htmlOv === 'hidden' && u.bodyOv === 'hidden',
+      `panel-bd=${u.bdOv} html=${u.htmlOv} body=${u.bodyOv}`
+    )
+    p.check(
+      '设置页：面板头部可拖动窗口（无边框窗只能靠自绘拖动区）',
+      u.drag === 'drag',
+      `-webkit-app-region = ${u.drag}`
+    )
+    p.check('设置页：关闭按钮自绘在面板头部', u.hasX, '未找到 #closeBtn')
 
     const got = (await swin.webContents.executeJavaScript(
       'window.__TAURI_INTERNALS__.invoke("get_settings").then(function(s){return JSON.stringify(s)})',
@@ -1254,6 +1380,9 @@ export interface TabsProbeContext {
   base: string
   /** index.ts 已挂到主窗口上的页签管理器（复用真实 onSpawn 链路，不另建实例）。 */
   tabs: TabManager
+  /** 设置窗查询 / 关闭（标签栏「设置」按钮的断言要用真实窗口，不是桩）。 */
+  getSettingsWindow: () => BrowserWindow | null
+  closeSettingsWindow: () => void
 }
 
 /**
@@ -1387,6 +1516,49 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   // 收掉 window.open 新开的页签，恢复单一页签稳态，再进后续断言
   if (tabs.active && tabs.active.label !== label2) tabs.closeTab(tabs.active.label)
   tabs.activate(label2!)
+
+  // ---------- 标签栏「设置」按钮（最小化右侧）→ 打开设置窗 ----------
+  // 位置 + 链路成对断言。链路上「三处逐字一致」最容易断：shell.html 的
+  // invoke("open_settings") ↔ shell-preload 的 ALLOWED 白名单 ↔ 主进程
+  // ipcMain.handle('tabs:open_settings')；任一漏改，表象都是「按钮点了没反应」。
+  const gearJson = (await win.webContents.executeJavaScript(
+    `(() => {
+       const mn = document.getElementById('min'), st = document.getElementById('settings');
+       if (!mn || !st) return JSON.stringify({ found: false });
+       const a = mn.getBoundingClientRect(), b = st.getBoundingClientRect();
+       return JSON.stringify({ found: true, minRight: +a.right.toFixed(1), gearLeft: +b.left.toFixed(1) });
+     })()`,
+    true
+  )) as string
+  const gear = JSON.parse(gearJson) as { found: boolean; minRight?: number; gearLeft?: number }
+  p.check(
+    '标签栏有「设置」按钮，且在最小化右侧',
+    gear.found && (gear.gearLeft ?? 0) >= (gear.minRight ?? 0) - 1,
+    gearJson
+  )
+  await win.webContents.executeJavaScript(`document.getElementById('settings').click(); true`, true)
+  // 判据同单窗口组：等到设置页**真的渲染出面板**，而不是「窗口对象存在」——后者在
+  // URL 加载失败时也成立（假绿），且提前 close 会中止加载并留下 ERR_FAILED(-2) 噪声。
+  const gearOpened = await waitUntil(async () => {
+    const w = ctx.getSettingsWindow()
+    if (!w) return false
+    try {
+      return (await w.webContents.executeJavaScript(
+        '!!document.querySelector(".panel")',
+        true
+      )) as boolean
+    } catch {
+      return false
+    }
+  }, 6000)
+  p.check(
+    '点标签栏设置按钮 → 打开设置窗且页面已渲染（shell.html → 白名单垫片 → IPC → openSettingsWindow）',
+    gearOpened,
+    '6s 内未渲染（查白名单 / IPC 注册名 / 页面字面量三处是否一致）'
+  )
+  ctx.closeSettingsWindow()
+  const gearClosed = await waitUntil(async () => !ctx.getSettingsWindow(), 4000)
+  p.check('设置按钮链路收尾：设置窗可关闭', gearClosed, '4s 内未关闭')
 
   // ---------- P11：特权命令 sender 校验（内容视图发 close_host 必须被拒） ----------
   // 生产内容视图（spawnTab）刻意不挂 preload，远程页面连 ipcRenderer 都碰不到；这里用

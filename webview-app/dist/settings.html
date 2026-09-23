@@ -4,58 +4,160 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>设置 - Web2App</title>
+<!--
+  设置页（Tauri 版与 Electron 绿色版**共用这一份**，经 settings://localhost/ 提供）。
+
+  版式契约（2026-09-23 重做：无边框窗 + 居中面板 + 正文滚动）：
+    · 设置窗是**无边框窗**（Tauri `decorations(false)` / Electron `frame:false`），
+      所以窗口顶部【没有】系统标题栏 —— 标题与关闭按钮由本页面板头部自绘。
+    · 整页只有一块「面板」：`body` 是底衬（backdrop），面板居中、四周留出底衬；
+      `html/body` 都不滚，**唯一的滚动容器是 .panel-bd**（否则滚动条会横穿面板圆角）。
+    · 面板头部可拖动窗口（`-webkit-app-region:drag` 给 Electron；
+      `data-tauri-drag-region` 给 Tauri —— 后者要 capability 里的 `core:window:allow-start-dragging`，
+      见 webview-app/capabilities/settings-window.json）。
+    · 底部操作区固定：内容再多，保存按钮也不会被滚出视野。
+  ⚠️ 元素 id（hkCurrent / captureBtn / keySelect / trayEnabled / minimizeOnClose /
+     clearDataBtn / saveBtn / closeBtn / status）是与脚本、探针的接口，改名要同步改。
+-->
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #ffffff;
-    --surface: #f6f7f9;
+    /* 底衬：窗口本体露在面板四周的那一圈（面板本身是 --surface） */
+    --backdrop: #eceef1;
+    --surface: #ffffff;
     --surface-hover: #ebedf0;
-    --border: #d1d5db;
+    --border: #d8dce2;
     --text: #1f2937;
     --text-secondary: #6b7280;
     --primary: #2563eb;
     --primary-hover: #1d4ed8;
     --danger: #dc2626;
     --success: #16a34a;
-    --radius: 10px;
-    --shadow: 0 1px 2px rgba(0,0,0,0.05);
+    --radius: 12px;
+    --shadow: 0 12px 32px rgba(15, 23, 42, 0.18), 0 1px 2px rgba(15, 23, 42, 0.08);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #18181b;
-      --surface: #27272a;
+      --backdrop: #0f1115;
+      --surface: #18181b;
       --surface-hover: #3f3f46;
-      --border: #52525b;
+      --border: #3f3f46;
       --text: #f4f4f5;
       --text-secondary: #a1a1aa;
       --primary: #3b82f6;
       --primary-hover: #2563eb;
       --danger: #f87171;
       --success: #4ade80;
-      --shadow: 0 1px 2px rgba(0,0,0,0.25);
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.35);
     }
   }
   * { box-sizing: border-box; }
+  /* html / body 都不滚：滚动交给面板正文（见文件头版式契约） */
+  html, body { height: 100%; margin: 0; overflow: hidden; }
   body {
     font-family: system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
-    margin: 0;
-    padding: 22px 24px;
     font-size: 13px;
-    background: var(--bg);
-    color: var(--text);
     line-height: 1.5;
+    background: var(--backdrop);
+    color: var(--text);
+    /* 面板居中：四周留出的这一圈就是可拖动区域之外的底衬 */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
   }
-  h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.3px; }
-  .hint { font-size: 12px; color: var(--text-secondary); margin: 0 0 20px; }
+
+  /* ---------- 面板：整页唯一的一块实体 ---------- */
+  .panel {
+    width: 100%;
+    max-width: 560px;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden; /* 让头部 / 正文 / 底部三段的边角跟着圆角裁掉 */
+  }
+  .panel-hd {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 10px 10px 18px;
+    -webkit-app-region: drag; /* Electron：无边框窗靠它拖动 */
+  }
+  .panel-hd .title {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    -webkit-app-region: drag;
+  }
+  .panel-hd .x {
+    -webkit-app-region: no-drag;
+    flex: none;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .panel-hd .x:hover { background: var(--surface-hover); color: var(--text); }
+
+  /* ---------- 正文：唯一的滚动容器 ---------- */
+  .panel-bd {
+    flex: 1;
+    min-height: 0;      /* ⚠️ 少了它 flex 子项不会收缩，正文永远撑高、滚动条不出现 */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 2px 18px 10px;
+  }
+  /* 细滚动条：与面板内边距对齐，不喧宾夺主 */
+  .panel-bd::-webkit-scrollbar { width: 10px; }
+  .panel-bd::-webkit-scrollbar-thumb {
+    background: rgba(120, 133, 153, 0.45);
+    border: 3px solid transparent;
+    border-radius: 6px;
+    background-clip: content-box;
+  }
+  .panel-bd::-webkit-scrollbar-thumb:hover { background: rgba(120, 133, 153, 0.7); background-clip: content-box; }
+  .panel-bd::-webkit-scrollbar-track { background: transparent; }
+
+  /* ---------- 底部：固定不滚 ---------- */
+  .panel-ft {
+    flex: none;
+    border-top: 1px solid var(--border);
+    padding: 10px 18px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ft-row { display: flex; align-items: center; gap: 10px; }
+  .ft-hint { margin-left: auto; font-size: 12px; color: var(--text-secondary); }
 
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px;
-    margin-bottom: 16px;
-    box-shadow: var(--shadow);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
   }
+  .card:last-child { margin-bottom: 0; }
   .row { margin: 12px 0; }
   .row:first-child { margin-top: 0; }
   .row:last-child { margin-bottom: 0; }
@@ -66,18 +168,17 @@
     font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 13px;
     padding: 6px 12px;
-    background: var(--bg);
+    background: var(--surface-hover);
     border: 1px solid var(--border);
     border-radius: 8px;
     min-width: 80px;
     text-align: center;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
   }
   button, select {
     padding: 7px 13px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg);
+    background: var(--surface);
     color: var(--text);
     cursor: pointer;
     font-size: 13px;
@@ -111,8 +212,7 @@
   input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--primary); cursor: pointer; }
 
   .sub { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
-  .actions { margin-top: 18px; display: flex; gap: 10px; }
-  #status { margin-top: 14px; font-size: 12px; min-height: 18px; font-weight: 500; }
+  #status { font-size: 12px; min-height: 16px; font-weight: 500; }
   .ok { color: var(--success); }
   .err { color: var(--danger); }
   .muted { color: var(--text-secondary); }
@@ -128,50 +228,60 @@
 </style>
 </head>
 <body>
-  <h1>Web2App 设置</h1>
-  <p class="hint">随时按 <b>Shift + F1</b> 可打开本设置窗口。</p>
+  <!-- 整页只有这一块面板：无边框窗里，标题与关闭都由它自绘。
+       ⚠️ data-tauri-drag-region 给 Tauri（bare 值语义 = 只有点在【本元素】上才拖动），
+          所以标题文字那一格也带上，别只挂在容器上。 -->
+  <div class="panel">
+    <div class="panel-hd" data-tauri-drag-region>
+      <div class="title" data-tauri-drag-region>设置</div>
+      <button type="button" class="x" id="closeBtn" title="关闭" aria-label="关闭">✕</button>
+    </div>
 
-  <div class="card">
-    <div class="row">
-      <div class="label">唤醒快捷键（显示 / 隐藏主窗口）</div>
-      <div class="ctrl">
-        <span class="kbd" id="hkCurrent" title="当前生效的快捷键">—</span>
-        <button id="captureBtn">点击捕获</button>
-        <span class="muted">或手动选择：</span>
-        <select id="keySelect" title="选择主键"></select>
+    <div class="panel-bd">
+      <div class="card">
+        <div class="row">
+          <div class="label">唤醒快捷键（显示 / 隐藏主窗口）</div>
+          <div class="ctrl">
+            <span class="kbd" id="hkCurrent" title="当前生效的快捷键">—</span>
+            <button id="captureBtn">点击捕获</button>
+            <span class="muted">或手动选择：</span>
+            <select id="keySelect" title="选择主键"></select>
+          </div>
+          <div id="hkStatus" class="sub">默认不设置快捷键；可在下方选择或点击捕获一个组合键。</div>
+        </div>
       </div>
-      <div id="hkStatus" class="sub">默认不设置快捷键；可在下方选择或点击捕获一个组合键。</div>
+
+      <div class="card">
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="trayEnabled"/> 启用系统托盘图标</label>
+          <label class="chk"><input type="checkbox" id="minimizeOnClose"/> 关闭窗口时最小化到托盘</label>
+          <div class="sub">默认关闭窗口即退出程序。勾选“启用系统托盘图标”并勾选“最小化到托盘”后，关闭窗口才会隐藏到托盘而非退出。</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div class="label">清除缓存与 Cookie</div>
+          <div class="ctrl">
+            <button class="danger" id="clearDataBtn">清除全部</button>
+          </div>
+          <div class="sub">
+            一次清空本应用的全部本地数据：缓存、Cookie（含登录状态）、Local Storage / IndexedDB、
+            Service Worker 等。<b>清除后需要重新登录</b>，所有页面会自动重新加载 ——
+            这一项没有分项选择，也<b>不可撤销</b>。
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-ft">
+      <div id="status"></div>
+      <div class="ft-row">
+        <button class="primary" id="saveBtn">保存</button>
+        <span class="ft-hint">随时按 Shift + F1 打开本设置</span>
+      </div>
     </div>
   </div>
-
-  <div class="card">
-    <div class="row">
-      <label class="chk"><input type="checkbox" id="trayEnabled"/> 启用系统托盘图标</label>
-      <label class="chk"><input type="checkbox" id="minimizeOnClose"/> 关闭窗口时最小化到托盘</label>
-      <div class="sub">默认关闭窗口即退出程序。勾选“启用系统托盘图标”并勾选“最小化到托盘”后，关闭窗口才会隐藏到托盘而非退出。</div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="row">
-      <div class="label">清除缓存与 Cookie</div>
-      <div class="ctrl">
-        <button class="danger" id="clearDataBtn">清除全部</button>
-      </div>
-      <div class="sub">
-        一次清空本应用的全部本地数据：缓存、Cookie（含登录状态）、Local Storage / IndexedDB、
-        Service Worker 等。<b>清除后需要重新登录</b>，所有页面会自动重新加载 ——
-        这一项没有分项选择，也<b>不可撤销</b>。
-      </div>
-    </div>
-  </div>
-
-  <div class="actions">
-    <button class="primary" id="saveBtn">保存</button>
-    <button id="closeBtn">关闭窗口</button>
-  </div>
-
-  <div id="status"></div>
 
 <script>
   const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args || {});
@@ -292,6 +402,7 @@
     }
   });
 
+  // 关闭按钮在面板头部（无边框窗没有系统标题栏的 ✕，只能自绘）。
   document.getElementById("closeBtn").addEventListener("click", async () => {
     try { await invoke("close_settings_window"); } catch (_) {}
   });

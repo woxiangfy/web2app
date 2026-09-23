@@ -15,7 +15,7 @@
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
 | 架构 | cargo workspace 三 crate，职责边界清晰 |
 | 代码规模 | 主 crate `src/` 19 个文件（含 4 个注入脚本）+ 3 个 crate + 5 条 CI/打包工作流 |
-| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 22 + 71 通过，另有 3 + 3 条 ignored）；双壳契约探针 117/117、多页签 23/23 |
+| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 22 + 71 通过，另有 3 + 3 条 ignored）；双壳契约探针 126/126、多页签 26/26 |
 
 ### crate 职责
 
@@ -37,7 +37,7 @@
 | `proxy.rs` | 本地反向代理（HTTP + WS 统一注入 Basic 鉴权） | 全平台 | 流式转发、透传 Host/Content-Length、Set-Cookie Domain 重写、WS Origin 重写 |
 | `resolve.rs` | DNS TXT 查询 + 验签解密层 | 全平台 | 单 Resolver 复用；多域名 failover；re-export resolve-core |
 | `loading.rs` + `loading.js` | 启动过渡（splash + overlay 加载层） | 全平台 | 两段接力同一状态机；`whenHostReady` 等 DOM 宿主，失败轮询重试 |
-| `titlebar.js` | 自绘窗口标题栏（前进/后退/最小化/关闭） | Windows 单窗 | 首个文档拿不到 initialization_script → 内联进 splash.html |
+| `titlebar.js` | 自绘窗口标题栏（前进/后退/最小化/**设置**/最大化/关闭） | Windows 单窗 | 首个文档拿不到 initialization_script → 内联进 splash.html |
 | `webview_hooks.rs` | WebView2 原生事件：鉴权/新窗口/右键/下载 | Windows | `HOOKS_REGISTERED` 去重闸门；后台线程轮询 with_webview |
 | `save_dialog.rs` | 下载时弹 Windows 原生「另存为」对话框（`IFileSaveDialog`） | Windows | 复用系统对话框，自带覆盖确认 / 新建文件夹 / 最近位置记忆 |
 | `tabs.rs` | 多页签（宿主窗口 + shell 标签栏 + tab 窗口） | Windows | owned window 防遮挡；`place_tab` 闭环校准；`destroy()` 防重入；`MAX_TABS` 熔断 |

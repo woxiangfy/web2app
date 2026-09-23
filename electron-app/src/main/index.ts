@@ -322,9 +322,9 @@ let tabManager: TabManager | null = null
  *
  * ⚠️⚠️ **探针模式下必须让「起窗模式」与「断言组」一一对应**，因此 `cfg.tabs_enabled`
  *    **不参与**探针分叉：
- *      - `--probe`         → 强制单窗口模式，跑 112 条单窗口断言（按「主窗口加载
+ *      - `--probe`         → 强制单窗口模式，跑 126 条单窗口断言（按「主窗口加载
  *                            splash:// + 标题栏/滚动条/窗口按钮」设计）；
- *      - `--probe --tabs`  → 强制页签模式，跑 23 条页签断言。
+ *      - `--probe --tabs`  → 强制页签模式，跑 26 条页签断言。
  *    若写成 `cfg.tabs_enabled || TABS_PROBE`，则用户一旦把 config.json 的页签开关打开
  *    （正是多页签版交付形态），同一条 `--probe` 会以**页签模式**起窗：单窗口断言往壳页面
  *    （`shell://`）注入脚本会直接抛 `Error: Script failed to execute`，回归门禁退化成
@@ -503,6 +503,11 @@ function registerWindowIpc(): void {
     assertPrivileged(e)
     winOf(e)?.close()
   })
+  // 标题栏「设置」按钮（最小化右侧）—— 与托盘菜单 / Shift+F1 共用 openSettings()。
+  ipcMain.handle('win:open-settings', (e) => {
+    assertPrivileged(e)
+    openSettings()
+  })
 }
 
 /**
@@ -558,6 +563,13 @@ function registerTabsIpc(): void {
   })
   ipcMain.handle('tabs:close_host', (e) => {
     assertShell(e).close()
+    return null
+  })
+  // 标签栏的「设置」按钮：与单窗口模式的最小化右侧那个按钮同一个入口，
+  // 命令名 `open_settings` 与 shell.html / shell-preload 白名单 / 这里三处逐字一致。
+  ipcMain.handle('tabs:open_settings', (e) => {
+    assertShell(e)
+    openSettings()
     return null
   })
   ipcMain.handle('tabs:history_nav', (e, args: { direction?: unknown } | undefined) => {
@@ -1024,6 +1036,8 @@ if (!gotLock) {
           win: mainWindow,
           base: probeBase,
           tabs: tabManager!,
+          getSettingsWindow: () => getSettingsWindow(),
+          closeSettingsWindow: () => closeSettingsWindow(),
         })
         probeServer?.close()
         console.log(ok ? '[web2app] 多页签探针全部通过' : '[web2app] 多页签探针存在失败项')

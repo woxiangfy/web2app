@@ -114,6 +114,12 @@ pub fn persist_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
 /// 打开（或聚焦已存在的）设置窗口。仅桌面端使用。
 /// 设置页通过 `settings://localhost/` 自定义协议提供（协议在 Builder 上注册，
 /// HTML 由 Rust 侧编译期内嵌），因此不依赖 devUrl，dev / release 行为一致。
+///
+/// ⚠️ 设置窗是**无边框窗**（`decorations(false)`）：用户要求的版式是「没有顶部的窗体、
+/// 面板居中、内容多可滚动」——标题与关闭按钮由 `dist/settings.html` 自绘在面板头部
+/// （拖动靠 `data-tauri-drag-region`，需要 capabilities/settings-window.json 里的
+/// `core:window:allow-start-dragging`；少了它窗口会拖不动且**不会报错**）。
+/// 窗口 `center()` 到屏幕中央，底色取加载层同一个浅灰，盖住 WebView 初始化瞬间的白闪。
 #[cfg(desktop)]
 pub fn open_settings_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
@@ -124,11 +130,15 @@ pub fn open_settings_window(app: &AppHandle) {
     }
     let url = url::Url::parse("settings://localhost/").expect("构造 settings 协议 URL 失败");
     let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::CustomProtocol(url))
-        // 标题用【显示名】TITLE 而不是【安装名】APP_NAME —— 这个标题是给用户看的。
+        // 标题用【显示名】TITLE 而不是【安装名】APP_NAME —— 这个标题是给用户看的
+        //（无边框窗里系统不画它，但仍会出现在任务栏 / 任务视图与无障碍工具里）。
         .title(format!("设置 - {}", TITLE))
-        .inner_size(480.0, 470.0)
-        .resizable(false)
-        .position(420.0, 180.0)
+        .inner_size(620.0, 600.0)
+        .min_inner_size(460.0, 400.0)
+        .resizable(true)
+        .decorations(false)
+        .background_color(crate::bootstrap::SPLASH_BG)
+        .center()
         .build();
 }
 
@@ -213,6 +223,19 @@ pub(crate) fn save_settings(
     let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
     *guard = new_settings;
     Ok(())
+}
+
+/// 打开设置窗口（IPC 命令）。
+///
+/// ⚠️ 谁能调：
+///   · **本地页面**（多页签模式的标签栏 shell://localhost/）—— 直接 invoke 本命令，不需要 ACL；
+///   · **远程页面**（单窗口模式的主窗）—— **调不了**：Tauri 2 对非本地 origin 的 IPC 强制走
+///     ACL，而应用命令没有 app 级 ACL 清单可授权（与 `history_nav` 同一条约束）。自绘标题栏
+///     里那个「设置」按钮只能发核心插件的 `plugin:event|emit`，由 lib.rs 的事件监听转发到这里。
+#[cfg(desktop)]
+#[tauri::command]
+pub(crate) fn open_settings(app: tauri::AppHandle) {
+    open_settings_window(&app);
 }
 
 /// 关闭设置窗口。

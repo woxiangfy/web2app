@@ -31,7 +31,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
-| 自绘标题栏 | 无系统装饰：前进 / 后退 / 最小化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换 | Windows |
+| 自绘标题栏 | 无系统装饰：前进 / 后退 / 最小化 / **设置** / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」在最小化右侧） | Windows |
 | 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
@@ -51,7 +51,22 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 
 ## 设置界面（Shift+F1）
 
-在 Windows 下按 **Shift + F1** 随时打开设置窗口（该快捷键固定，不可在界面内修改）。
+在 Windows 下按 **Shift + F1** 随时打开设置窗口（该快捷键固定，不可在界面内修改）；
+标题栏的**「设置」按钮**（位置在最小化右侧，单窗口与多页签两种模式都有）和托盘菜单的「设置」
+打开的是同一个窗口。
+
+窗口本身**没有系统标题栏**：整页只有一块居中的圆角面板，标题 / 关闭 / 拖动都由
+`dist/settings.html` 自绘在面板头部，**正文是唯一可滚动的区域**（内容多了只滚中间，
+底部「保存」按钮始终可见）。窗口可缩放（最小 460×400）、打开时居中于屏幕。
+
+> ⚠️ 无边框 ⇒ 拖动靠 `data-tauri-drag-region`，它需要 capability 里的
+> `core:window:allow-start-dragging`（见 `capabilities/settings-window.json`）。
+> 少了这条权限的表现是「窗口拖不动，且只有控制台里一条被拒绝的调用」，不会报错弹窗。
+> ⚠️ 标题栏那个「设置」按钮走的是**事件**而不是命令：主窗加载的是远程页面，Tauri 2 对非本地
+> origin 的 IPC 强制走 ACL，而应用命令没有 app 级清单可授权 ⇒ 只能发核心插件的
+> `plugin:event|emit`（`capabilities/default.json` 里的 `core:event:allow-emit`），
+> 由 `lib.rs` 的 `web2app:open-settings` 监听落地成开窗。多页签标签栏是本页面（`shell://`），
+> 可以直接 `invoke("open_settings")`。
 
 可配置项：
 
@@ -118,12 +133,14 @@ webview-app/
 │   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
 │   ├── resolve.rs          # DNS TXT 查询 + 验签解密
 │   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
+│   ├── debug_log.rs        # 诊断日志（dlog! 宏 / 落盘 / 1 MiB 轮转 / mask_url 去凭据）
 │   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写）
 │   ├── settings.rs         # 设置结构、快捷键转换、设置窗口/命令（持久化委托 store）
 │   ├── tabs.rs             # 多页签（宿主窗口 + shell 标签栏 + tab 窗口）
 │   ├── tray.rs             # 系统托盘
 │   ├── window_state.rs     # 窗口几何：抓取 / 恢复策略（落盘在 store 的 window 段）
 │   ├── webview_hooks.rs    # WebView2 原生事件（鉴权 / 新窗口 / 右键 / 下载）
+│   ├── web_data.rs         # 清除浏览数据（缓存 / Cookie 全清，WebView2 ICoreWebView2Profile2）
 │   ├── save_dialog.rs      # 下载「另存为」原生对话框（IFileSaveDialog）
 │   ├── splash.html         # 启动页（内联 titlebar.js，解决首文档无初始化脚本）
 │   ├── shell.html          # 多页签外壳（标签栏）
@@ -139,8 +156,8 @@ webview-app/
 │   ├── index.html          # 占位前端（纯 Rust 工程，实际内容来自远程 URL）
 │   └── settings.html       # 设置界面 UI 源码（编译期被 include_str! 内嵌，经 settings:// 自定义协议加载）
 ├── tools/                  # 服务端辅助脚本（encrypt_url.py / loading_test.js）
-├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs）
-├── capabilities/           # Tauri ACL 能力声明（default.json）
+├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs / probe_clear_data.rs）
+├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗）
 ├── icons/                  # 应用图标（icon.ico / icon.png 等）
 ├── txttest_keys/           # 验签测试密钥对（见 docs/txttest-verify-materials.md）
 └── （CI 与打包工作流已上移至仓库根 `.github/workflows/`，见下文「自动构建」）
@@ -294,10 +311,13 @@ cargo tauri android build --target aarch64-linux-android --apk
 ## 测试
 
 项目内置 Rust 单元测试，覆盖代理（Basic 头生成、hop-by-hop 头识别、Set-Cookie 重写、WS Origin 重写）、
-WebView2 钩子与配置清洗，以及 `resolve-core` / `resolve-tool` 的加密往返与篡改检测：
+WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返与篡改检测，
+以及 2026-09-23 新增的两类**静态契约守卫**（都是「错了也静默」的那类缺陷）：
+运行期文档层 `src/store.rs`（读-改-写 / 双壳字面量互通）、`src/lib.rs` 的 IPC 注册表与
+capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（实测 104 条：resolve-core 13 + resolve-tool 7 + w2a-proxy 22 + 主 crate 62）
+cargo test --all                # 全量单元测试（实测 116 条：resolve-core 13 + resolve-tool 7 + w2a-proxy 22 + 主 crate 74；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 

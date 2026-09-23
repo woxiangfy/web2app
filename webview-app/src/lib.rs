@@ -26,6 +26,12 @@ use tauri::{Manager, RunEvent, WindowEvent};
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+// 事件监听（仅桌面端使用：见 setup 里的「打开设置」事件）。
+// ⚠️ 与使用点的 cfg 保持一致 —— 无条件 `use` 在 Android 上就是「未使用导入」，
+//    在 `-D warnings` 下直接编译失败。
+#[cfg(desktop)]
+use tauri::Listener;
+
 /// 诊断日志宏：`eprintln!` 的同形替代品，**只在 `debug` 打开时**输出。
 ///
 /// ⚠️ 诊断一律走这个宏而不是 `eprintln!`：Windows 上本程序是 GUI 子系统
@@ -128,6 +134,10 @@ pub fn run() {
             settings::get_settings,
             settings::save_settings,
             settings::close_settings_window,
+            // 打开设置窗：给**本地页面**用（多页签标签栏 shell.html）。
+            // 远程页面（单窗口主窗的自绘标题栏）只能用事件，见下面 setup 里的 `web2app:open-settings`。
+            #[cfg(desktop)]
+            settings::open_settings,
             web_data::clear_web_data,
             history_nav,
             // 多页签（仅 Windows）：命令与 `tabs` 模块同一个 cfg —— 模块不编译时命令也不能注册，
@@ -218,6 +228,23 @@ pub fn run() {
         // ⚠️ 诊断日志要**尽早**初始化：越早越能捕获启动早期的日志。
         //    默认（debug=false）时它是空操作 —— 不建目录、不落文件、也不打印任何东西。
         debug_log::init(app.handle());
+
+        // ---------- 「打开设置」事件（自绘标题栏的「设置」按钮） ----------
+        // 为什么不是一条 IPC 命令：单窗口模式的主窗加载的是**远程页面**，Tauri 2 对非本地
+        // origin 的 IPC 强制走 ACL，而应用命令没有 app 级 ACL 清单可授权 ⇒ `open_settings`
+        // 必被拒（与 history_nav 同一条约束，见 src/titlebar.js 顶部说明）。所以那边发的是
+        // **核心插件的 event 命令**（`core:event:allow-emit` 可以授权给远程 origin，
+        // 见 capabilities/default.json），在这里落地成真正的开窗动作。
+        // ⚠️ 事件名必须与 src/titlebar.js 里的字面量逐字一致，改一处必须改另一处。
+        // ⚠️ 这条事件只用来「开设置窗」，不携带任何参数 —— 远程页面能让壳做的事仅此一件，
+        //    别在这里接别的东西。
+        #[cfg(desktop)]
+        {
+            let handle = app.handle().clone();
+            app.listen("web2app:open-settings", move |_event| {
+                settings::open_settings_window(&handle);
+            });
+        }
 
         // 载入持久化设置（文件不存在时使用默认值），写入托管状态供运行时读取。
         let initial_settings = settings::load_settings(app.handle());
@@ -826,6 +853,16 @@ mod ipc_command_registry {
             );
         }
 
+        // 桌面端：打开设置窗（多页签标签栏 shell.html 会调它；Android 没有设置窗）。
+        #[cfg(desktop)]
+        {
+            let name = "open_settings";
+            assert!(
+                registered.iter().any(|r| r == name),
+                "IPC 命令 {name} 未注册（已注册：{registered:?}）"
+            );
+        }
+
         #[cfg(windows)]
         for name in [
             "create_tab",
@@ -841,5 +878,137 @@ mod ipc_command_registry {
                 "多页签 IPC 命令 {name} 未注册（已注册：{registered:?}）"
             );
         }
+    }
+}
+
+/// 能力声明（capability）与跨文件字面量的静态契约测试。
+///
+/// 存在理由：这一类错误**全是静默失败** —— 编译期零警告、clippy 与 CI 全绿，
+/// 只有用户手动点下去才现形，而表象只有一句「点了没反应 / 窗口拖不动」：
+///
+/// * `capabilities/default.json` 少了 `core:event:allow-emit`
+///   ⇒ 主窗（远程页面）里自绘标题栏的「设置」按钮发不出事件；
+/// * `capabilities/settings-window.json` 少了 `core:window:allow-start-dragging`
+///   ⇒ 无边框设置窗**拖不动**，控制台里只有一条被拒的 `plugin:window|start_dragging`；
+/// * 事件名在 `lib.rs` 与 `src/titlebar.js` 两侧不逐字一致 ⇒ 同上。
+///
+/// 另外：`settings-window.json` 曾经**漏纳入版本控制**（新增文件忘了 `git add`）。
+/// 用 `include_str!` 读它，可以让「文件缺失」直接变成**编译失败**，
+/// 而不是让人克隆出来的仓库静默丢掉拖动能力。
+#[cfg(test)]
+mod capability_contract {
+    /// 本文件源码：事件监听那一段的字面量在这里。
+    const LIB_RS: &str = include_str!("lib.rs");
+    /// 设置窗的创建处 —— 窗口标签的真源（`WebviewWindowBuilder::new(app, "…")`）。
+    const SETTINGS_RS: &str = include_str!("settings.rs");
+    /// 主窗的自绘标题栏（跑在远程页面里）。
+    const TITLEBAR_JS: &str = include_str!("titlebar.js");
+    /// 主窗（单窗口模式）能力声明。
+    const MAIN_CAP: &str = include_str!("../capabilities/default.json");
+    /// 设置窗（无边框）能力声明 —— 权限刻意与主窗分开。
+    const SETTINGS_CAP: &str = include_str!("../capabilities/settings-window.json");
+
+    /// 「打开设置」事件名两侧的字面量写法。
+    /// ⚠️ 必须**拆成两段拼接**：本文件就是被测对象之一，直接写完整字面量会让断言
+    /// **自我满足**（`ipc_command_registry` 首轮踩过同一个坑）。
+    const EVENT_IN_LIB: &str = concat!("app.listen(\"", "web2app:open-settings", "\"");
+    const EVENT_IN_TITLEBAR: &str = concat!("'", "web2app:open-settings", "'");
+
+    /// 读 capability 的某个字符串数组字段，顺带把「字段缺失 / 非字符串项」变成可读失败。
+    fn str_list(v: &serde_json::Value, key: &str, file: &str) -> Vec<String> {
+        let Some(items) = v[key].as_array() else {
+            panic!("{file} 缺少数组字段 `{key}`");
+        };
+        let mut out = Vec::new();
+        for x in items {
+            let Some(s) = x.as_str() else {
+                panic!("{file} 的 `{key}` 里有非字符串项：{x}");
+            };
+            out.push(s.to_string());
+        }
+        out
+    }
+
+    /// 取出 capability 的 `windows` 与 `permissions`。
+    fn cap(src: &str, file: &str) -> (Vec<String>, Vec<String>) {
+        let v: serde_json::Value = match serde_json::from_str(src) {
+            Ok(v) => v,
+            Err(e) => panic!("{file} 不是合法 JSON：{e}"),
+        };
+        (
+            str_list(&v, "windows", file),
+            str_list(&v, "permissions", file),
+        )
+    }
+
+    fn assert_grants(file: &str, perms: &[String], want: &str) {
+        assert!(
+            perms.iter().any(|p| p == want),
+            "{file} 没有授予 {want}（现有：{perms:?}）—— 少了它不报错，只会静默失效"
+        );
+    }
+
+    /// ① 主窗：远程页面里按钮 / 拖动 / 发事件所依赖的那几条。
+    #[test]
+    fn main_capability_grants_remote_titlebar_permissions() {
+        let (windows, perms) = cap(MAIN_CAP, "capabilities/default.json");
+        assert_eq!(windows, ["main"], "主窗 capability 必须只作用于标签 main");
+        for want in [
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close",
+            "core:window:allow-start-dragging",
+            "core:window:allow-internal-toggle-maximize",
+            // 「设置」按钮走事件而不是应用命令的原因，见 default.json 的 description。
+            "core:event:allow-emit",
+        ] {
+            assert_grants("capabilities/default.json", &perms, want);
+        }
+    }
+
+    /// ② 设置窗：无边框窗拖得动的前提；同时钉住「权限与主窗刻意分开」这个设计。
+    #[test]
+    fn settings_capability_matches_frameless_window() {
+        let (windows, perms) = cap(SETTINGS_CAP, "capabilities/settings-window.json");
+
+        // 标签必须与 settings.rs 里真实创建窗口时用的那个逐字一致，否则权限不会命中。
+        let needle = "WebviewWindowBuilder::new(app, \"";
+        let at = SETTINGS_RS
+            .find(needle)
+            .expect("settings.rs 里找不到设置窗的创建点 —— 本条断言扫不到窗口标签了");
+        let label = &SETTINGS_RS[at + needle.len()..];
+        let label = &label[..label.find('"').expect("设置窗标签没有收尾引号")];
+        assert_eq!(
+            windows,
+            [label],
+            "capability 的 windows 与 settings.rs 建窗时的标签不一致 ⇒ 权限不会生效"
+        );
+
+        assert_grants(
+            "capabilities/settings-window.json",
+            &perms,
+            "core:window:allow-start-dragging",
+        );
+
+        // 「无边框」正是「必须靠 capability 才拖得动」的前提，两者要么一起在、要么一起改。
+        assert!(
+            SETTINGS_RS.contains(".decorations(false)"),
+            "设置窗不再是无边框窗（decorations(false) 没了）⇒ \
+             自绘面板头部与 start-dragging 的前提已变，请重新复核本模块"
+        );
+    }
+
+    /// ③ 事件名两侧字面量：改一处忘另一处 ⇒ 「设置」按钮点了没反应，且没有任何报错。
+    #[test]
+    fn open_settings_event_name_matches_between_lib_and_titlebar() {
+        assert!(
+            LIB_RS.contains(EVENT_IN_LIB),
+            "lib.rs 里找不到 `app.listen(\"…\")` 形式的设置事件监听（找的是 {EVENT_IN_LIB}）"
+        );
+        assert!(
+            TITLEBAR_JS.contains(EVENT_IN_TITLEBAR),
+            "src/titlebar.js 里找不到同名的单引号事件字面量（找的是 {EVENT_IN_TITLEBAR}）\
+             —— 两侧必须逐字一致，否则按钮点了没反应"
+        );
     }
 }

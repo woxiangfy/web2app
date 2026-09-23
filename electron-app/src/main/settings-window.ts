@@ -1,8 +1,8 @@
 /**
  * 设置窗口 —— 对齐 Tauri 版（`webview-app/src/settings.rs`）。
  *
- * 窗口参数逐项照抄 `open_settings_window()`：480×470 内容区、不可缩放、位置 (420,180)、
- * 标题 `设置 - <APP_NAME>`。
+ * 窗口参数逐项照抄 `open_settings_window()`：620×600 内容区、可缩放（最小 460×400）、
+ * 居中、标题 `设置 - <APP_NAME>`。
  *
  * ⚠️⚠️ 设置页 HTML **不重写**，直接用 `webview-app/dist/settings.html`（单一真源）。
  *    那份 HTML 是写给 Tauri 的，调用的是 `window.__TAURI_INTERNALS__.invoke(...)`。
@@ -11,8 +11,11 @@
  *    界面一旦分叉，两个壳的设置页就会各修各的 bug，这正是不想看到的。
  *    见 `src/renderer/settings-preload.ts`。
  *
- * ⚠️ 设置窗用**系统标题栏**（frame 默认为 true），不像主窗口那样自绘 ——
- *    与 Tauri 版的设置窗一致（那边也只有主窗口是 decorations(false)）。
+ * ⚠️ 设置窗是**无边框窗**（`frame: false`，对齐 Tauri 版改的 `decorations(false)`）：
+ *    用户要求的版式是「没有顶部的窗体、面板居中、内容多可滚动」—— 标题与关闭按钮由
+ *    `dist/settings.html` 自绘在面板头部（`-webkit-app-region:drag` 负责拖动，
+ *    `frame:false` 下 Chromium 才会把 drag 区当标题栏处理）。
+ *    窗口本身居中显示（`center()`），底色取与页面底衬同一个浅灰，避免出现白边。
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -21,6 +24,13 @@ import { BrowserWindow, ipcMain, type BrowserWindow as BW } from 'electron'
 import type { Settings } from './settings'
 
 export const SETTINGS_URL = 'settings://localhost/'
+
+/** 设置窗内容区尺寸（与 Tauri 版 `inner_size(620, 600)` 一致）。 */
+const SETTINGS_SIZE = { width: 620, height: 600 }
+/** 设置窗最小尺寸（与 Tauri 版 `min_inner_size(460, 400)` 一致）。 */
+const SETTINGS_MIN_SIZE = { width: 460, height: 400 }
+/** 窗口底色 = 设置页的底衬（`--backdrop` 浅色值），无边框窗四周露出的那一圈就是它。 */
+const SETTINGS_BG = '#eceef1'
 
 /**
  * 定位设置页 HTML。
@@ -156,18 +166,20 @@ export function openSettingsWindow(deps: Pick<SettingsWindowDeps, 'preloadPath' 
   }
 
   const win = new BrowserWindow({
-    // useContentSize：Tauri 的 inner_size(480,470) 说的是**内容区**，
-    // 不写这个的话窗口外框会是 480×470，内容区少掉边框与标题栏的高度。
+    // useContentSize：Tauri 的 inner_size(620,600) 说的是**内容区**。
+    // 无边框窗下两者本来就相等，写上是为了与 Tauri 侧同一个语义、将来加回边框也不会错。
     useContentSize: true,
-    width: 480,
-    height: 470,
-    x: 420,
-    y: 180,
-    resizable: false,
+    width: SETTINGS_SIZE.width,
+    height: SETTINGS_SIZE.height,
+    minWidth: SETTINGS_MIN_SIZE.width,
+    minHeight: SETTINGS_MIN_SIZE.height,
+    resizable: true,
     minimizable: true,
-    maximizable: false,
+    maximizable: true,
     fullscreenable: false,
-    backgroundColor: '#f7f8fa',
+    // 无边框：没有系统标题栏，标题 / 关闭 / 拖动都由设置页自绘（见文件头）。
+    frame: false,
+    backgroundColor: SETTINGS_BG,
     show: false,
     webPreferences: {
       preload: deps.preloadPath,
@@ -179,7 +191,11 @@ export function openSettingsWindow(deps: Pick<SettingsWindowDeps, 'preloadPath' 
   })
 
   settingsWin = win
-  win.once('ready-to-show', () => win.show())
+  win.once('ready-to-show', () => {
+    // 居中放在 show 之前：先 show 再 center 会看到窗口跳一下。
+    win.center()
+    win.show()
+  })
   win.on('closed', () => {
     if (settingsWin === win) settingsWin = null
   })

@@ -21,7 +21,7 @@
 
 | # | 判据 | 手段 |
 | :-- | :--- | :--- |
-| A1 | 单窗口模式**零回归**：现有 `probe` 112 条全绿 | `pnpm run probe --no-sandbox --in-process-gpu`，退出码 0 |
+| A1 | 单窗口模式**零回归**：现有 `probe` 126 条全绿 | `pnpm run probe --no-sandbox --in-process-gpu`，退出码 0 |
 | A2 | 多页签模式：新增断言组全绿 | 同上，加 `--tabs`（本文 §8 清单） |
 | A3 | **打包产物**自带探针在两种模式下均退出码 0 | `Start-Process -Wait -PassThru` 取 `ExitCode`。⚠️ 前提：**探针的起窗模式必须由探针标志决定、不受 `tabs_enabled` 影响**（v1.6 修复）——否则 `tabs_enabled=true` 的包里 `--probe` 会以页签模式起窗而失败 |
 | A4 | 标签栏与内容区**逐像素**不重叠、不留缝 | §8 的「位置 + 存在性」成对判据 |
@@ -215,14 +215,14 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | P10 | `target="_blank"` 的目标 path 被保留（未被降级成入口地址） | 对齐 Tauri `resolve_popup_url` 回归判据 |
 | P11 | **特权命令 sender 校验**：从内容视图发 `close_host` 类消息必须被拒绝，且日志有拒绝记录 | §3-2 安全硬化；只断言「壳能关窗」会被「谁都能关窗」满足 |
 | P12 | 重复 `addChildView(view)` 后 children **不增**且该视图在数组末尾；`setVisible(false)` 后重复 add 仍为 `false` | §3-4 实测语义，防后续 Electron 升级改变行为后无人察觉 |
-| P13 | 单窗口模式跑全量断言 = 112 条不变、退出码 0 | 零回归闸门 |
+| P13 | 单窗口模式跑全量断言 = 126 条不变、退出码 0 | 零回归闸门 |
 
 ### 8.2 工具与命令
 
 ```bash
 # 无 GPU 沙箱必须带这两个参数（历史教训：只靠 disableHardwareAcceleration 不够）
-pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口 112 条
-pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 23 条
+pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口 126 条
+pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 26 条
 pnpm run tabs-v4 / tabs-v4-negative                          # V4 绘制顺序 正/负向对照（退出码即结论）
 
 # 打包产物自证（必须 Start-Process -Wait 取 ExitCode；直接 & 调用 GUI exe 是假绿）
