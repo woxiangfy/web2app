@@ -1,54 +1,29 @@
-//! 窗口几何持久化（仅桌面端）：记住上次窗口的大小/位置/最大化状态，
-//! 下次启动自动恢复。数据目录与 settings 一致（`<app_config>/<app_name>/`），
-//! 独立文件 window-state.json，不与“设置”混在一起（窗口几何随移动频繁变）。
+//! 窗口几何：记住上次窗口的大小 / 位置 / 最大化状态，下次启动自动恢复（仅桌面端）。
+//!
+//! ⚠️ **落盘位置（2026-09-23 起）**：与「设置」同住**同一个** `settings.json` 的 `window` 段，
+//! 不再有独立的 `window-state.json`（旧的 `window-state.json` 就此成为死文件，不再读也不再写）。
+//! 类型 `WindowGeom`、文件落点与「读-改-写」工具都在 [`crate::store`] —— 本模块只管
+//! 「抓几何 / 恢复几何」这件事本身；**绝不能**自己去写整个文件，那会把用户刚保存的设置抹掉。
 
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-const FILE: &str = "window-state.json";
+use crate::store::WindowGeom;
 
-/// 窗口几何快照。x/y = 窗口左上角在屏幕上的坐标（outer），
-/// width/height = 窗口外框尺寸（outer），均为【物理像素】，
-/// 以保证保存与 set_position/set_size 一致、跨会话不因 DPI 缩放而错位。
-#[derive(Serialize, Deserialize, Clone, Copy)]
-pub struct State {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    /// 旧版配置文件可能没有该字段：缺省按 false 解析（窗口不被误判为最大化）。
-    #[serde(default)]
-    pub maximized: bool,
+/// 读取上次保存的几何；没有（首次启动 / 文件里没有 `window` 段）返回 None（用默认窗口尺寸）。
+pub fn load(app: &AppHandle) -> Option<WindowGeom> {
+    crate::store::load(app).window
 }
 
-fn path(app: &AppHandle) -> Option<PathBuf> {
-    // 目录与 settings_path 一致（见 crate::config::config_dir）：桌面端取 app_config_dir 父目录再拼自定义 app_name。
-    Some(crate::config::config_dir(app)?.join(FILE))
-}
-
-/// 读取上次保存的几何；文件不存在 / 解析失败返回 None（用默认窗口尺寸）。
-pub fn load(app: &AppHandle) -> Option<State> {
-    let p = path(app)?;
-    let s = fs::read_to_string(&p).ok()?;
-    serde_json::from_str::<State>(&s).ok()
-}
-
-/// 写入窗口几何。
-pub fn save(app: &AppHandle, st: &State) {
-    let Some(p) = path(app) else {
-        return;
-    };
-    if let Some(parent) = p.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(st) {
-        let _ = fs::write(&p, json);
+/// 写入窗口几何（读-改-写，只替换 `window` 段）。
+///
+/// 失败只在诊断日志里留痕：为了记一个窗口尺寸让用户看到报错不值得。
+pub fn save(app: &AppHandle, st: &WindowGeom) {
+    if let Err(e) = crate::store::update(app, |doc| doc.window = Some(*st)) {
+        dlog!("[window_state] 写入窗口几何失败：{e}");
     }
 }
 
-/// 读取指定 label 窗口当前几何（若该窗口存在）。
+/// 读取指定 label 窗口当前几何并落盘（若该窗口存在）。
 ///
 /// 单窗口模式主窗口为 `"main"`；多页签模式主窗口是宿主窗口（label 为 `tabs::HOST_LABEL`），
 /// 由调用方传入实际 label。
@@ -62,11 +37,11 @@ pub fn persist_label(app: &AppHandle, label: &str) {
 }
 
 /// 从给定窗口抓取当前几何。
-fn capture(win: &WebviewWindow) -> Option<State> {
+fn capture(win: &WebviewWindow) -> Option<WindowGeom> {
     let pos = win.outer_position().ok()?;
     let size = win.outer_size().ok()?;
     let maximized = win.is_maximized().unwrap_or(false);
-    Some(State {
+    Some(WindowGeom {
         x: pos.x,
         y: pos.y,
         width: size.width,
@@ -78,7 +53,7 @@ fn capture(win: &WebviewWindow) -> Option<State> {
 /// 创建窗口后应用已保存的几何；保存的几何若已失效（上次最大化、尺寸过小、
 /// 或窗口中心落在屏外——显示器被拔掉/分辨率/DPI 变化所致）则**丢弃几何并直接
 /// 最大化**，保证窗口始终可见可用。无保存状态时不做任何事（保留窗口默认尺寸）。
-pub fn apply(win: &WebviewWindow, st: &State) {
+pub fn apply(win: &WebviewWindow, st: &WindowGeom) {
     // 1) 上次是最大化 → 直接最大化，必然铺满且可见。
     if st.maximized {
         let _ = win.maximize();
@@ -112,50 +87,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn state_serde_roundtrip_preserves_all_fields() {
-        let st = State {
+    fn geometry_serde_roundtrip_preserves_all_fields() {
+        let g = WindowGeom {
             x: 100,
             y: 200,
             width: 800,
             height: 600,
             maximized: true,
         };
-        let json = serde_json::to_string(&st).unwrap();
-        let back: State = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.x, 100);
-        assert_eq!(back.y, 200);
-        assert_eq!(back.width, 800);
-        assert_eq!(back.height, 600);
-        assert!(back.maximized);
+        let json = serde_json::to_string(&g).unwrap();
+        let back: WindowGeom = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, g);
     }
 
     #[test]
-    fn state_parse_accepts_missing_maximized_as_false() {
-        // 兼容旧版配置文件（无 maximized 字段时 serde 默认补 false）。
-        let back: State = serde_json::from_str(r#"{"x":1,"y":2,"width":3,"height":4}"#).unwrap();
+    fn geometry_parse_accepts_missing_maximized_as_false() {
+        // 兼容更早的配置文件（无 maximized 字段时 serde 默认补 false）。
+        let back: WindowGeom =
+            serde_json::from_str(r#"{"x":1,"y":2,"width":3,"height":4}"#).unwrap();
         assert!(!back.maximized);
     }
 
-    /// ⚠️ **双壳互通契约**（electron-app/src/main/window-state.ts）。
-    ///
-    /// 字面量 = Electron 壳写出来的字节形态（2 空格缩进、字段顺序一致），
-    /// 且 x/y/width/height 是**物理像素**（Electron 侧用 dipToScreenRect 换算，见那边的注释）。
-    /// 这里解析不了就意味着「两个壳轮流启动时窗口尺寸会互相重置」。
-    #[test]
-    fn state_parse_accepts_electron_written_json() {
-        let json = r#"{
-  "x": 455,
-  "y": 179,
-  "width": 1657,
-  "height": 986,
-  "maximized": false
-}"#;
-        let st: State =
-            serde_json::from_str(json).expect("必须能读 Electron 壳写的 window-state.json");
-        assert_eq!(st.x, 455);
-        assert_eq!(st.y, 179);
-        assert_eq!(st.width, 1657);
-        assert_eq!(st.height, 986);
-        assert!(!st.maximized);
-    }
+    // ⚠️ 几何「写进 / 读出同一个 JSON 文件」的互通契约（含与 Electron 壳的字面量比对）
+    // 已挪到 `crate::store::tests` —— 那边测的是**文档中的 window 段**，
+    // 因为落盘单位已经从「几何独占一个文件」变成「文档里的一段」。
 }

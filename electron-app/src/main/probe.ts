@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WebContentsView, type BrowserWindow } from 'electron'
@@ -40,6 +40,7 @@ import {
   parseWindowState,
   planRestore,
   saveWindowState,
+  type WindowState,
 } from './window-state'
 import type { RegisterResult } from './shortcuts'
 
@@ -532,8 +533,8 @@ function isAlive(pid: number): boolean {
 
 /** M3（系统集成）断言用的真实入口 —— 与设置窗 / 托盘 / 快捷键走的**完全同一批函数**。 */
 export interface M3ProbeHooks {
-  settingsLoc: StoreLocation
-  windowStateLoc: StoreLocation
+  /** 运行期唯一那份配置文件的落点（设置 + `window` 段的窗口几何同住一个文件） */
+  storeLoc: StoreLocation
   getSettings: () => Settings
   /** 走真实保存路径（校验 → 应用副作用 → 持久化），抛错即失败 */
   saveSettings: (next: Settings) => void
@@ -965,7 +966,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     JSON.stringify(fakeLoc.read)
   )
 
-  // 11.4 真实读写 roundtrip（写临时目录，绝不碰用户设置）
+  // 11.4 真实读写 roundtrip（写临时目录，绝不碰用户配置）
   const tmpStore = mkdtempSync(join(tmpdir(), 'w2a-probe-settings-'))
   try {
     const loc: StoreLocation = {
@@ -984,15 +985,49 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
       JSON.stringify(back.settings) === JSON.stringify(want),
       JSON.stringify(back.settings)
     )
+
+    // ⚠️⚠️ 设置与窗口几何**同住这一个 JSON**（2026-09-23 合并，替代原来的 window-state.json）。
+    // 合并后唯一真正的风险就是「两个写入方互相覆盖」：设置窗保存 vs 窗口关闭时记几何。
+    // 所以两个方向各钉一条 —— 少了任何一条，就会出现「挪了下窗口，设置被还原成上一次的」
+    // 或「改了设置，窗口位置丢了」这种只在用户操作顺序恰巧时才现形的故障。
+    const geom: WindowState = { x: 120, y: 80, width: 900, height: 700, maximized: false }
+    saveWindowState(loc, geom)
+    p.check(
+      '窗口几何落盘后可原样读回（同一 JSON 的 window 段）',
+      JSON.stringify(loadWindowState(loc).state) === JSON.stringify(geom),
+      JSON.stringify(loadWindowState(loc).state)
+    )
+    p.check(
+      '写几何不吃掉设置（同一文件读-改-写）',
+      JSON.stringify(loadSettings(loc).settings) === JSON.stringify(want),
+      JSON.stringify(loadSettings(loc).settings)
+    )
+
+    const want2: Settings = { ...want, tray_enabled: false, minimize_on_close: false }
+    saveSettings(loc, want2)
+    p.check(
+      '写设置不吃掉窗口几何（同一文件读-改-写）',
+      JSON.stringify(loadWindowState(loc).state) === JSON.stringify(geom),
+      JSON.stringify(loadWindowState(loc).state)
+    )
+
+    // 键序：设置三键在前、`window` 在后 —— 与 Tauri 侧 serde 的字段序一致，
+    // 否则「同一个文件两版写出来的东西不同」会被当成 bug 排查。
+    const text = readFileSync(loc.write, 'utf8')
+    p.check(
+      '文档键序规范（设置三键 → window，两空格缩进）',
+      text.indexOf('"wake_hotkey"') < text.indexOf('"window"') && text.includes('\n  "window": {'),
+      text.replace(/\s+/g, ' ').slice(0, 140)
+    )
   } finally {
     rmSync(tmpStore, { recursive: true, force: true })
   }
 
   // 11.5 窗口几何解析与恢复策略
   const ws1 = parseWindowState({ x: 100, y: 200, width: 800, height: 600 })
-  p.check('window-state 缺 maximized → false（兼容旧版文件）', ws1 !== null && !ws1.maximized, JSON.stringify(ws1))
-  p.check('window-state 缺坐标 → 视为无效', parseWindowState({ width: 800, height: 600 }) === null)
-  p.check('window-state 非对象 → 无效', parseWindowState('nope') === null)
+  p.check('window 段缺 maximized → false（兼容旧版文件）', ws1 !== null && !ws1.maximized, JSON.stringify(ws1))
+  p.check('window 段缺坐标 → 视为无效', parseWindowState({ width: 800, height: 600 }) === null)
+  p.check('window 段非对象 → 无效', parseWindowState('nope') === null)
 
   p.check(
     '恢复策略：无保存状态 → 用默认尺寸',
@@ -1035,8 +1070,8 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
         Math.abs(live.height - Math.round(phys.height)) <= 2,
       `保存 ${live.width}×${live.height}，实际物理 ${Math.round(phys.width)}×${Math.round(phys.height)}`
     )
-    saveWindowState(ctx.m3.windowStateLoc, live)
-    const reloaded = loadWindowState(ctx.m3.windowStateLoc)
+    saveWindowState(ctx.m3.storeLoc, live)
+    const reloaded = loadWindowState(ctx.m3.storeLoc)
     p.check(
       '窗口几何落盘后可原样读回',
       JSON.stringify(reloaded.state) === JSON.stringify(live),
@@ -1126,7 +1161,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
       JSON.stringify(afterSave)
     )
     p.check('保存后副作用已生效（托盘图标出现）', ctx.m3.hasTray(), 'hasTray() = false')
-    const onDisk = loadSettings(ctx.m3.settingsLoc).settings
+    const onDisk = loadSettings(ctx.m3.storeLoc).settings
     p.check(
       '保存后已持久化到磁盘',
       onDisk.tray_enabled === true && onDisk.wake_hotkey.key === 'Digit9',

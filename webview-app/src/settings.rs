@@ -1,5 +1,3 @@
-use std::fs;
-use std::path::PathBuf;
 #[cfg(desktop)]
 use std::str::FromStr;
 use std::sync::Mutex;
@@ -13,14 +11,11 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
-use crate::config::config_dir;
 // ⚠️ TITLE 只被下方 `#[cfg(desktop)]` 的 open_settings_window 使用（拼设置窗标题）。
-// 若与 config_dir 合并成一条无条件 use，Android 目标下该导入即「未使用」，
-// 在 `-D warnings`（CI 的 check-android → clippy）下直接编译失败。必须按 cfg 拆开。
+// 若写成无条件 use，Android 目标下该导入即「未使用」，在 `-D warnings`
+// （CI 的 check-android → clippy）下直接编译失败。必须按 cfg 拆开。
 #[cfg(desktop)]
 use crate::config::TITLE;
-
-const SETTINGS_FILE: &str = "settings.json";
 
 /// 应用设置（持久化到 JSON）。
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -95,35 +90,25 @@ pub fn settings_open_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SHIFT), Code::F1)
 }
 
-/// `settings.json` 的落点（`pub(crate)`：启动日志会把它打出来 —— 「我明明勾了托盘，
-/// 重启又没了」这类反馈只能靠这一行看出实际读的是哪个文件）。
-pub(crate) fn settings_path(app: &AppHandle) -> Option<PathBuf> {
-    // 目录统一走 config::config_dir：桌面端取 app_config_dir 父目录、Android 用自身 dataDir，
-    // 再拼自定义 app_name（平台差异见该函数注释）。
-    Some(config_dir(app)?.join(SETTINGS_FILE))
-}
-
 /// 读取设置；文件不存在或解析失败时使用默认值。
+///
+/// 整份文件（设置 + 窗口几何）的读写与「读-改-写」都在 [`crate::store`]，这里只取设置那一段。
+/// ⚠️ 诊断：文件**不存在**（首次启动、很常见）是正常态，不打日志、不告警；但**读盘失败**
+/// （权限 / 磁盘错误）与**内容解析失败**（文件损坏 / 被第三方改写）是真实的「配置没生效」
+/// 隐患 —— 用户反馈「我明明勾了托盘、重启又没了」正是这条路径，故那两类失败必须在 `store`
+/// 里经 `dlog!` 现形（`debug` 开启时能定位到具体文件与原因），否则永远查不到根因。
 pub fn load_settings(app: &AppHandle) -> Settings {
-    if let Some(path) = settings_path(app) {
-        if let Ok(s) = fs::read_to_string(&path) {
-            if let Ok(s) = serde_json::from_str::<Settings>(&s) {
-                return s;
-            }
-        }
-    }
-    Settings::default()
+    crate::store::load(app).settings
 }
 
-/// 写入设置到 app config 目录下的 settings.json（纯持久化，不含运行时副作用）。
+/// 写入设置（纯持久化，不含运行时副作用）。
+///
+/// ⚠️⚠️ 必须是**读-改-写**：设置与窗口几何现在同住一个 `settings.json`，
+/// 拿内存里的整份文档直接落盘会把「挪窗口」那一方刚写进去的几何一起抹掉
+/// （原 `window-state.ts` 文件头正是用这个理由论证过不该合并；见 `crate::store` 模块头）。
 pub fn persist_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
-    let path = settings_path(app).ok_or_else(|| "无法获取配置目录".to_string())?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())?;
-    Ok(())
+    let s = s.clone();
+    crate::store::update(app, |doc| doc.settings = s)
 }
 
 /// 打开（或聚焦已存在的）设置窗口。仅桌面端使用。
@@ -278,61 +263,9 @@ mod tests {
         assert!(back.minimize_on_close);
     }
 
-    /// ⚠️⚠️ **双壳互通契约**（electron-app/src/main/settings.ts）。
-    ///
-    /// 下面的字面量就是 Electron 壳 `saveSettings()` 写出来的**字节形态**
-    /// （`JSON.stringify(s, null, 2)`，2 空格缩进）。两个壳共用同一个
-    /// `%APPDATA%\<app_name>\settings.json`，所以这里一旦解析失败，
-    /// 表现是「在 Electron 版里勾了托盘，回到 Tauri 版又变回默认」——
-    /// 悄无声息，极难定位。故用字面量把字段名 / 嵌套结构 / 类型钉死。
-    ///
-    /// 反向（Tauri 写、Electron 读）由 Electron 侧的探针断言
-    /// 「序列化输出为规范 JSON」守着，两边合起来才是完整的互通保证。
-    #[test]
-    fn settings_parse_accepts_electron_written_json() {
-        let json = r#"{
-  "wake_hotkey": {
-    "ctrl": false,
-    "alt": true,
-    "shift": false,
-    "key": "Digit4"
-  },
-  "tray_enabled": true,
-  "minimize_on_close": false
-}"#;
-        let s: Settings =
-            serde_json::from_str(json).expect("必须能读 Electron 壳写的 settings.json");
-        assert_eq!(s.wake_hotkey.key, "Digit4");
-        assert!(s.wake_hotkey.alt);
-        assert!(!s.wake_hotkey.ctrl);
-        assert!(!s.wake_hotkey.shift);
-        assert!(s.tray_enabled);
-        assert!(!s.minimize_on_close);
-    }
-
-    /// 反方向：Tauri 写出来的两空格缩进 JSON，必须能被 Electron 侧的结构解析接受。
-    /// （Electron 侧用的是宽松解析，这里只保证「我们写的是规范 JSON」这个前提成立。）
-    #[test]
-    fn settings_pretty_output_is_canonical_json() {
-        let s = Settings {
-            wake_hotkey: Hotkey {
-                ctrl: false,
-                alt: true,
-                shift: false,
-                key: "Digit4".into(),
-            },
-            tray_enabled: true,
-            minimize_on_close: false,
-        };
-        let json = serde_json::to_string_pretty(&s).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["wake_hotkey"]["key"], "Digit4");
-        assert_eq!(v["tray_enabled"], serde_json::Value::Bool(true));
-        assert_eq!(v["minimize_on_close"], serde_json::Value::Bool(false));
-        // 布尔必须是 JSON 布尔，不能是字符串 —— Electron 侧的宽容解析能接受字符串，
-        // 但反过来若我们写了字符串，就说明序列化路径被改坏了。
-        assert!(v["tray_enabled"].is_boolean());
-    }
+    // ⚠️ 「双壳互通契约」（字段名 / 嵌套 / 字节形态）的断言已随文件合并挪到
+    // `crate::store::tests` —— 那边测的是**整份文档**（设置 + `window` 段），
+    // 这里再留一份 `Settings` 单体的等价断言就会出现两个真源。
 
     #[cfg(desktop)]
     #[test]

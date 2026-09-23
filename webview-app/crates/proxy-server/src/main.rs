@@ -448,3 +448,107 @@ fn handshake_failure(kind: &str, msg: &str) {
     let mut lock = stdout.lock();
     let _ = writeln!(lock, "{v}").and_then(|()| lock.flush());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_args_accepts_url() {
+        let args = parse_args(vec!["--url".into(), "https://h.com".into()])
+            .unwrap()
+            .expect("有有效来源，不应触发 help/version");
+        assert_eq!(args.url.as_deref(), Some("https://h.com"));
+        assert!(!args.url_stdin);
+        assert!(args.domains.is_empty());
+    }
+
+    #[test]
+    fn parse_args_no_source_is_error() {
+        // 三个来源（--url / --url-stdin / --domains）一个都没有 → 报错，绝不静默拿空地址去解析。
+        assert!(parse_args(vec![]).is_err());
+        assert!(parse_args(vec!["--public-key".into(), "k".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_args_missing_value_is_error() {
+        // 缺值时报错而不是静默用空串 —— 否则「配置没写对」会被伪装成「运行时报错」。
+        assert!(parse_args(vec!["--url".into()]).is_err());
+        assert!(parse_args(vec![
+            "--domains".into(),
+            "a.com".into(),
+            "--public-key".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn parse_args_unknown_flag_is_error() {
+        assert!(parse_args(vec!["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_args_help_and_version_are_none() {
+        assert!(matches!(parse_args(vec!["--help".into()]), Ok(None)));
+        assert!(matches!(parse_args(vec!["-h".into()]), Ok(None)));
+        assert!(matches!(parse_args(vec!["--version".into()]), Ok(None)));
+    }
+
+    #[test]
+    fn parse_args_domains_normalize_trim_dedup_empty() {
+        let args = parse_args(vec!["--domains".into(), " A.com , b.com, ".into()])
+            .unwrap()
+            .expect("domains 自成一个来源，不应报缺来源");
+        assert_eq!(args.domains, vec!["a.com", "b.com"]);
+    }
+
+    #[test]
+    fn strip_userinfo_removes_credentials_only() {
+        assert_eq!(
+            strip_userinfo(&Url::parse("https://u:p@h:8080/a?q=1").unwrap()),
+            "https://h:8080/a?q=1"
+        );
+        // 注意：url crate 会把根路径规范化为 "/"（https://h.com → https://h.com/）。
+        assert_eq!(
+            strip_userinfo(&Url::parse("https://h.com").unwrap()),
+            "https://h.com/"
+        );
+        assert_eq!(
+            strip_userinfo(&Url::parse("http://u@[::1]/x").unwrap()),
+            "http://[::1]/x"
+        );
+    }
+
+    #[test]
+    fn success_handshake_is_single_line_json_with_contract_fields() {
+        // 与 run() 组装的字段保持一致，钉死「stdout 只出一行 JSON」的握手契约。
+        // 说明见文件头：宿主按行解析 stdout，多打一行 = 握手失败但进程活着 = 假死。
+        let v = serde_json::json!({
+            "ok": true,
+            "proxyUrl": "http://127.0.0.1:1234/",
+            "resolvedUrl": "https://h.com/",
+            "upstreamHost": "h.com",
+            "hadAuth": false,
+            "authUser": "",
+            "authPass": "",
+            "pid": 0,
+        });
+        let line = v.to_string();
+        assert!(!line.contains('\n'), "握手必须是一行，绝不能内嵌换行");
+        assert!(line.starts_with('{') && line.ends_with('}'));
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
+        assert!(parsed["proxyUrl"].as_str().unwrap().starts_with("http://"));
+    }
+
+    #[test]
+    fn failure_handshake_has_kind_and_error() {
+        let v = serde_json::json!({ "ok": false, "kind": "args", "error": "缺来源" });
+        let line = v.to_string();
+        assert!(!line.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+        assert_eq!(parsed["kind"], "args");
+        assert!(parsed["error"].as_str().unwrap().contains("缺来源"));
+    }
+}

@@ -11,12 +11,12 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 113 条） |
+| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 117 条） |
 | M2 sidecar（本地反向代理 + 加密解析） | ✅ | 复用 Rust `proxy.rs` / `resolve.rs`，零重写 |
 | M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
 | M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（**仅 `debug` 打开时才有**，见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
 | **M4 下载接管** | ⬜ **未实现** | `will-download` 目前只记日志、下载走 Chromium 默认「另存为」；对标 Tauri `save_dialog.rs` 的自绘对话框待做 |
-| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **113/113** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，113 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
+| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **23/23**、单窗口 **117/117** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，117 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
 | **M7 CI 流水线** | ⬜ **未落库** | 本目录没有 CI 配置（仓库根 `.github/workflows/` 那几条只服务 Tauri 版），目前只能本地跑 |
 
 > 除上表三项外，后续「新增/改动会影响哪些验证」见文末「验证清单」——
@@ -35,7 +35,7 @@ pnpm run build       # 只编译到 out/
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe（本地代理 + 加密解析）
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json（pack/dist 会自动调用）
 pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘（内部强制 debug=true），退出码即结论
-pnpm run probe       # 兼容契约探针：113 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
+pnpm run probe       # 兼容契约探针：117 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
 pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 + 截一张 PNG（改标题栏/滚动条/几何后看它）
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
@@ -131,7 +131,7 @@ certutil -hashfile ..\webview-app\src\titlebar.js                        SHA256
 
 :: 2) 最近跑的到底是哪份包：看运行痕迹 mtime（早于修复时刻 ⇒ 就是旧包）
 dir /tc release\win-unpacked\data
-dir /tc "%APPDATA%\Baidu\window-state.json"
+dir /tc "%APPDATA%\Baidu\settings.json"
 ```
 
 对齐办法（**覆盖式**，不用删除）：把源码的注入脚本 + 新包的 `app.asar` copy 覆盖进用户实际在跑的
@@ -227,7 +227,7 @@ Electron 会**以纯 Node 身份启动**：
 |---|---|
 | 解压目录版（`data_dir="data"`，默认） | 「用户放置 exe 的目录」`\data\logs\startup.log` |
 | `data_dir=""`（系统默认目录） | `%APPDATA%\<app_name>\logs\startup.log` |
-| 探针（`--probe`） | `%TEMP%\w2a-probe-store\startup.log` ← **不写真实目录**（与 `settings.json` / `window-state.json` 同一套隔离） |
+| 探针（`--probe`） | `%TEMP%\w2a-probe-store\startup.log` ← **不写真实目录**（与 `settings.json` 同一套隔离） |
 
 ⚠️ 探针那条不是洁癖：在打包产物上跑一次 `--probe` 就会在用户 exe 旁边留下 `data\logs\`，
 污染交付物（`data\session` 已经踩过一次，见「打包」一节）。
@@ -339,18 +339,24 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 ## 设置 / 托盘 / 全局快捷键 / 窗口几何（M3）
 
-### 两个小 JSON 的位置（有意与「数据写同级 `data\`」不同）
+### 运行期只有一个 JSON
 
 | 文件 | 内容 | 写在哪 |
 |---|---|---|
-| `settings.json` | 唤醒快捷键、是否启用托盘、关闭是否最小化到托盘 | 优先 `%APPDATA%\<app_name>\`（**与旧版同路径**），若 `data\` 下已有同名文件则以它为准 |
-| `window-state.json` | 窗口坐标 / 尺寸（**物理像素**）、是否最大化 | 同上 |
+| `settings.json` | 唤醒快捷键、是否启用托盘、关闭是否最小化到托盘，**以及 `window` 段的窗口几何**（坐标 / 尺寸为**物理像素** + 是否最大化） | 优先 `%APPDATA%\<app_name>\`（**与旧版同路径**），若 `data\` 下已有同名文件则以它为准 |
 
-⚠️ 这两个文件放 `%APPDATA%` 而不是 `data\`，是为了满足「**与 Tauri 版可互相读取**」这条契约：
-用户在两个壳之间来回切换时，勾过的托盘开关、设过的快捷键不该丢。
+⚠️ 2026-09-23 起窗口几何不再单独占一个 `window-state.json`，而是并进 `settings.json` 的
+`window` 段（设置字段仍平铺在顶层）—— 用户侧「只需要一个 JSON」。旧的 `window-state.json`
+**不再读也不再写**：升级后窗口会回一次默认尺寸 / 位置，那个文件可以手工删掉。
+⚠️ 因此**两个写入方都必须走读-改-写**（`saveSettings` / `saveWindowState`）：拿内存里的整份
+文档直接落盘，会在「挪了下窗口 + 改了设置」同时发生时静默吃掉其中一方。探针两条断言
+（`写几何不吃掉设置` / `写设置不吃掉窗口几何`）专门钉这件事。
+
+⚠️ 这个文件放 `%APPDATA%` 而不是 `data\`，是为了满足「**与 Tauri 版可互相读取**」这条契约：
+用户在两个壳之间来回切换时，勾过的托盘开关、设过的快捷键、上次的窗口位置不该丢。
 真正体量大的 session / 缓存 / 日志仍然全在 `data\`，绿色性不受影响（详见 `src/main/settings.ts` 文件头）。
 
-> 想让它彻底绿色？把 `settings.json` / `window-state.json` 手工放进 `data\` 即可 ——
+> 想让它彻底绿色？把 `settings.json` 手工放进 `data\` 即可 ——
 > 解析规则是「`data\` 优先，且读哪写哪」。
 
 ### 行为契约（与旧版逐条对齐）
@@ -434,7 +440,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 | `bodyScrollable` | `true` | 页面照常能滚 |
 | `window.scrollTo(0,200)` | `scrollY≈200` **且** scroll 事件触发 | 转发没坏（事件异步，要等一帧再读） |
 
-`pnpm run probe`（113 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
+`pnpm run probe`（117 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
 ⚠️ **不要**再用 `rect.width == innerWidth` 或「滚动条宽度归零」当判据 —— 前者测不出覆盖，
 后者把缺陷锁死成期望值。**改完必须重新打包**：脚本在 `resources/inject/titlebar.js` 里，
 跑旧的 exe 永远看不到修复。
@@ -488,7 +494,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 
 ## 兼容契约探针（`pnpm run probe`）
 
-`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **113 条**契约，
+`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **117 条**契约，
 **退出码即结论**（不通过则非 0，可以直接挂 CI）。夹具全部内联在代码里，不落盘、不进打包产物。
 
 覆盖范围：启动页内联注入、标题栏几何与配色、38px 让位（fixed / sticky / `100vh` / `inset:0` 四种页面形态）、
@@ -503,12 +509,14 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 * `Origin` 被改写为**上游源**（且只有一个）—— 详见下面那条已修的坑；
 * `stop()` 之后 sidecar 进程**真的退出**（`kill(pid, 0)` 探活），不留孤儿。
 
-M3 之后还覆盖**系统集成**（48 条，即第 11–15 节）：
+M3 之后还覆盖**系统集成**（52 条，即第 11–15 节）：
 
 * `Hotkey`（旧版存 JS `event.code`）→ Electron accelerator 的映射，含「不认识的键名返回 null，绝不猜」；
-* `settings.json` 的**序列化字节形态**必须与 `serde_json` 写出来的一致（字段名 / 嵌套 / 布尔类型）——
-  这是「与 Tauri 版可互相读取」的硬保证，反向由 `webview-app` 侧的
-  `settings_parse_accepts_electron_written_json` 盯着；
+* `settings.json` 的**序列化字节形态**必须与 `serde_json` 写出来的一致（字段名 / 嵌套 / 布尔类型 /
+  **键序**）—— 这是「与 Tauri 版可互相读取」的硬保证，反向由 `webview-app` 侧的
+  `store::tests::parse_accepts_electron_written_document` 盯着；
+* **设置与窗口几何同住一个文件**后，两个写入方互不吃掉对方（`写几何不吃掉设置` /
+  `写设置不吃掉窗口几何`）—— 合并的唯一真风险，两条方向都钉住；
 * 存储位置规则：`data\` 无同名文件时写向 `%APPDATA%\<app_name>\`，读取候选同时覆盖两处；
 * 窗口几何的**DIP ↔ 物理像素**换算（跨 DPI 不错位）与四种恢复策略（含「位置在屏外 → 最大化」）；
 * 托盘：启用后图标出现、关闭后图标销毁；
@@ -517,7 +525,7 @@ M3 之后还覆盖**系统集成**（48 条，即第 11–15 节）：
   未授权命令被拒、能关闭；
 * 「关闭到托盘」：关窗后窗口未销毁且被隐藏，再切换能恢复。
 
-> ⚠️ 探针**不碰用户真实设置**：它把 `settings.json` / `window-state.json` 整体重定向到
+> ⚠️ 探针**不碰用户真实配置**：它把 `settings.json`（唯一那份，设置 + 窗口几何）整体重定向到
 > `%TEMP%\w2a-probe-store\`，跑 `pnpm run probe` 不会改掉你机器上的托盘开关和窗口尺寸。
 
 **注入了 `titlebar.js` / `loading.js`、改过 `proxy.rs`、或动过设置/托盘/快捷键链路之后必须跑这个** ——
@@ -580,6 +588,7 @@ M3 之后还覆盖**系统集成**（48 条，即第 11–15 节）：
 
 | 版本 | 日期 | 变更说明 |
 |---|---|---|
+| 0.1.0 | 2026-09-23 | **窗口几何并入 `settings.json`（运行期只剩一个 JSON）**：①`window-state.json` 取消，几何改为 `settings.json` 的 `window` 段（设置字段仍平铺顶层），与 Tauri 版同契约；旧文件**不迁移**、不再读写（升级后窗口回一次默认尺寸/位置）；②合并的唯一风险是「两个写入方互相覆盖」（`window-state.ts` 文件头当初正是用这个理由论证不该合并）⇒ 两个方向都改成**读-改-写**（`saveSettings` / `saveWindowState`，只替换自己那一段），探针新增 4 条断言钉住（含键序 `设置三键 → window`），113 → **117** 条；③Rust 侧新增 `src/store.rs` 承载文档契约（`WindowGeom` + 读-改-写 + 「一段坏掉不拖垮另一段」的独立解析），`settings.rs` / `window_state.rs` 退化为薄封装；单测 65 → 71（新增 9 条含双壳字面量互通） |
 | 0.1.0 | 2026-09-22 | **诊断日志改为 `debug` 开关 + 托盘图标对齐 `icon_url`**：①新增契约字段 `debug`（**bool，默认 `false`**）—— `false` 时**不建 `logs\`、不写文件，控制台三路输出也一并静默**（此前是无条件落盘，会在用户的交付目录里凭空多出 `data\logs\`）；`true` 时写 `<数据目录>\logs\startup.log` 并照常打印；运行期逃生口 `--debug` / `WEB2APP_DEBUG=1`；**探针与冒烟内部强制打开**（结论全靠 stdout，不能自检失声）；②`logStartup()` 增印「诊断日志：已开启 / 未开启」，冒烟断言在 `fileLog === null` 时报「未启用（冒烟模式本应强制打开 debug，出现即 bug）」—— 把「开关接错」与「写盘失败」两类原因分开；③**托盘图标修复**：`electron-build-custom.yml` 下载的 `icon_url` 此前只喂给 `-c.win.icon`（exe / 任务栏图标），托盘取的是 `resources/icons/icon.png`（由 `extraResources` 从 `webview-app/icons/` 拷入的**仓库默认图标**）⇒ 下载后**同时覆盖 `../webview-app/icons/icon.png`**，使托盘与 exe 用同一张 `icon_url`；复用既有单一真源，不改 `tray.ts` |
 | 0.1.0 | 2026-09-17 | M6 出包打通（dir / zip / portable 三形态）；修两个真 bug：`createWindow()` 漏传 `title`、`tsc` 有错也输出导致半成品封进 asar |
 | 0.1.0 | 2026-09-17 | 滚动条越界：从 `width:100vw` → `scrollbar-width:none` → 最终**换滚动根**（`html` 不滚、`body` 滚）；探针判据改成成对的「不侵入 + 仍存在」 |

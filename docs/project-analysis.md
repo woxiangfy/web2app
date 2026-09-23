@@ -15,7 +15,7 @@
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
 | 架构 | cargo workspace 三 crate，职责边界清晰 |
 | 代码规模 | 主 crate `src/` 19 个文件（含 4 个注入脚本）+ 3 个 crate + 5 条 CI/打包工作流 |
-| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 13 + 52 通过，另有 3 + 3 条 ignored）；双壳契约探针 113/113、多页签 23/23 |
+| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 22 + 71 通过，另有 3 + 3 条 ignored）；双壳契约探针 117/117、多页签 23/23 |
 
 ### crate 职责
 
@@ -42,8 +42,9 @@
 | `save_dialog.rs` | 下载时弹 Windows 原生「另存为」对话框（`IFileSaveDialog`） | Windows | 复用系统对话框，自带覆盖确认 / 新建文件夹 / 最近位置记忆 |
 | `tabs.rs` | 多页签（宿主窗口 + shell 标签栏 + tab 窗口） | Windows | owned window 防遮挡；`place_tab` 闭环校准；`destroy()` 防重入；`MAX_TABS` 熔断 |
 | `tray.rs` | 系统托盘 + 窗口切换 | 桌面端 | 显隐同步多页签 |
-| `window_state.rs` | 窗口几何持久化 | 桌面端 | 失效几何自动最大化；物理像素 |
-| `settings.rs` | 设置持久化 + 设置窗口 | 全平台 | 快捷键/托盘副作用锁外执行；Android 不取 parent 目录 |
+| `window_state.rs` | 窗口几何：抓取 / 恢复策略 | 桌面端 | 落盘在 `store` 的 `window` 段；失效几何自动最大化；物理像素 |
+| `store.rs` | 运行期唯一那份 JSON（设置 + `window` 段）的契约与读-改-写 | 全平台 | 两个写入方互不覆盖；一段坏掉不拖垮另一段 |
+| `settings.rs` | 设置结构 + 设置窗口（持久化委托 `store`） | 全平台 | 快捷键/托盘副作用锁外执行；Android 不取 parent 目录 |
 | `dnd_polyfill.js` | WebView2 拖拽 bug polyfill | Windows | 鼠标事件合成完整 HTML5 DnD 序列（**效果待真机验证，见「遗留问题」**） |
 | `tab_title.js` | 多页签真实标题回传 | Windows | MutationObserver + 轮询兜底 |
 

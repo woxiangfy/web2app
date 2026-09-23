@@ -36,7 +36,6 @@ import {
   loadWindowState,
   planRestore,
   saveWindowState,
-  WINDOW_STATE_FILE,
   type RestorePlan,
 } from './window-state'
 import {
@@ -167,26 +166,26 @@ const paths = setupPortablePaths({
   appName: sanitizeDirName(cfg.app_name),
 })
 
-// ---------- 1.1 settings.json / window-state.json 的位置（M3） ----------
-// ⚠️ 这两个文件**不写在 data\ 里**，而是优先复用旧版（Tauri）的 %APPDATA%\<app_name>\ ——
+// ---------- 1.1 settings.json 的位置（M3） ----------
+// ⚠️ 这是**运行期唯一**的一份 JSON：设置的三个开关 + `window` 段的窗口几何同住一个文件
+//    （2026-09-23 起；此前几何单独占一个 window-state.json）。
+//    它**不写在 data\ 里**，而是优先复用旧版（Tauri）的 %APPDATA%\<app_name>\ ——
 //    因为「settings.json 与旧版可互相读取」是硬契约：用户在两个壳之间来回切换时，
-//    勾过的托盘开关、设过的快捷键不该丢。细节与取舍见 src/main/settings.ts 的文件头。
+//    勾过的托盘开关、设过的快捷键、上次的窗口位置不该丢。细节与取舍见 src/main/settings.ts 的文件头。
 //    用户若把同名文件放进 data\，则以它为准（读哪写哪）。
 const storeOpts = {
   dataDir: paths.dataDir,
   appDataDir: app.getPath('appData'),
   appName: cfg.app_name,
 }
-let settingsLoc = storeLocation({ ...storeOpts, file: SETTINGS_FILE })
-let windowStateLoc = storeLocation({ ...storeOpts, file: WINDOW_STATE_FILE })
+let storeLoc = storeLocation({ ...storeOpts, file: SETTINGS_FILE })
 
-// ⚠️⚠️ 探针**绝不能**读写用户的真实设置：它会一路走到「保存设置 / 开托盘 / 抢占快捷键」，
-//    跑一次 `pnpm run probe` 就顺手改掉用户的托盘开关和窗口尺寸是不可接受的。
-//    所以探针模式把这两个文件整体改到 %TEMP% 下的隔离目录，真实文件一个字节都不碰。
+// ⚠️⚠️ 探针**绝不能**读写用户的真实配置：它会一路走到「保存设置 / 开托盘 / 抢占快捷键 /
+//    记窗口几何」，跑一次 `pnpm run probe` 就顺手改掉用户的托盘开关和窗口尺寸是不可接受的。
+//    所以探针模式把这唯一的配置文件整体改到 %TEMP% 下的隔离目录，真实文件一个字节都不碰。
 if (PROBE) {
   const tmpStore = join(app.getPath('temp'), 'w2a-probe-store')
-  settingsLoc = { read: [join(tmpStore, SETTINGS_FILE)], write: join(tmpStore, SETTINGS_FILE) }
-  windowStateLoc = { read: [join(tmpStore, WINDOW_STATE_FILE)], write: join(tmpStore, WINDOW_STATE_FILE) }
+  storeLoc = { read: [join(tmpStore, SETTINGS_FILE)], write: join(tmpStore, SETTINGS_FILE) }
 }
 
 // ---------- 1.2 文件日志（M6）：**只在 debug 打开时才有** ----------
@@ -204,7 +203,7 @@ const logDir = PROBE
   : join(paths.dataDir, 'logs')
 const fileLog: FileLogHandle | null = DEBUG ? startFileLogging(logDir) : null
 
-const loadedSettings = loadSettings(settingsLoc)
+const loadedSettings = loadSettings(storeLoc)
 /** 运行期当前生效的设置（设置窗保存后立即更新） */
 let runtimeSettings: Settings = loadedSettings.settings
 
@@ -663,7 +662,7 @@ const DEFAULT_H = 650
 /** 记下窗口当前几何（在关闭 / 隐藏到托盘前调用）。 */
 function persistGeometry(win: BrowserWindow): void {
   const st = captureWindowState(win)
-  if (st) saveWindowState(windowStateLoc, st)
+  if (st) saveWindowState(storeLoc, st)
 }
 
 function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
@@ -882,7 +881,7 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
 
     // 3) 持久化
     if (opts.persist) {
-      const written = saveSettings(settingsLoc, next)
+      const written = saveSettings(storeLoc, next)
       console.log(`[web2app] 设置已保存：${written}`)
     }
   } catch (e) {
@@ -990,7 +989,7 @@ if (!gotLock) {
     })
 
     // 窗口几何：必须在 ready 之后读（planRestore 要用 screen 模块，它在 ready 前不可用）
-    const ws = loadWindowState(windowStateLoc)
+    const ws = loadWindowState(storeLoc)
     const plan = planRestore(ws.state)
     console.log(
       `[web2app] 窗口几何：${plan.reason}${ws.source ? `  ← ${ws.source}` : ''}`
@@ -1043,8 +1042,7 @@ if (!gotLock) {
         startSidecar: launchSidecar,
         // M3 断言用的真实入口（勾的是与设置窗完全相同的那些函数）
         m3: {
-          settingsLoc,
-          windowStateLoc,
+          storeLoc,
           getSettings: () => runtimeSettings,
           saveSettings: (next) => applySettings(next, { persist: true }),
           openSettingsWindow: () => openSettings(),
@@ -1222,11 +1220,13 @@ function logStartup(): void {
   // 文件日志是用户侧唯一能提供证据的东西，路径必须打在**第一行区域**（用户直接截图给我们）
   console.log(`  日志文件      : ${describeFileLog(fileLog)}`)
   console.log(`  外部代理      : ${proxy.proxyServer ?? '(未启用)'}`)
-  // M3：设置与几何的落点必须写进日志 —— 「我明明勾了托盘，重启又没了」这类反馈，
-  // 只有靠这两行才能一眼看出是写到了哪儿、以及有没有读到旧版的文件。
+  // M3：配置文件的落点必须写进日志 —— 「我明明勾了托盘，重启又没了」这类反馈，
+  // 只有靠这一行才能一眼看出是写到了哪儿、以及有没有读到旧版的文件。
+  // ⚠️ 这一个文件同时装着设置与窗口几何（2026-09-23 合并），所以「窗口尺寸没记住」
+  //    也看这一行 + 上面那条「窗口几何：<原因>」。
   console.log(
-    `  设置文件      : ${loadedSettings.source ?? '(未找到，使用默认值)'}` +
-      `  → 写入 ${settingsLoc.write}`
+    `  配置文件      : ${loadedSettings.source ?? '(未找到，使用默认值)'}` +
+      `  → 写入 ${storeLoc.write}`
   )
   console.log(`  唤醒快捷键    : ${hotkeyLabel(runtimeSettings.wake_hotkey)}`)
   console.log(

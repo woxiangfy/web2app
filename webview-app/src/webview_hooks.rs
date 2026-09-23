@@ -283,8 +283,14 @@ pub(crate) fn attach_webview_hooks(
                 done_in.store(true, Ordering::SeqCst);
             });
 
-            if sent.is_err() {
-                // 窗口已销毁 / 事件循环已退出：再试也没意义。
+            if let Err(e) = sent {
+                // 窗口已销毁 / 事件循环已退出：再试也没意义。但这曾是**静默失败**——
+                // 窗口钩子没挂上 = 鉴权 / 下载 / 右键菜单全部失效，用户侧零证据。
+                // 落一条日志（debug 开启时）便于区分「钩子没触发」与「引擎忙」。
+                dlog!(
+                    "[webview_hooks] with_webview 投递失败（窗口可能已销毁 / 事件循环已退出），\
+                    窗口 {window_label} 的钩子未注册：{e}"
+                );
                 return;
             }
             attempts += 1;

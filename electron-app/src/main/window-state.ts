@@ -1,26 +1,32 @@
 /**
- * 窗口几何持久化（`window-state.json`）—— 与 Tauri 版（`webview-app/src/window_state.rs`）共用契约。
+ * 窗口几何（`settings.json` 的 `window` 段）—— 与 Tauri 版（`webview-app/src/window_state.rs`）共用契约。
  *
- * 文件格式（**物理像素**，与旧版逐字段一致）：
- *   { "x": 100, "y": 200, "width": 800, "height": 600, "maximized": false }
- * 存放位置与 settings.json 同目录（见 settings.ts 的 storeLocation）。
+ * 段形态（**物理像素**，字段与旧版逐字一致）：
+ *   "window": { "x": 100, "y": 200, "width": 800, "height": 600, "maximized": false }
+ *
+ * ⚠️⚠️ **2026-09-23 起几何与设置同住一个 `settings.json`**（此前是独立的 `window-state.json`，
+ *     用户要求「只需要一个 JSON」）。旧的 `window-state.json` **不再读也不再写**，升级后
+ *     窗口会回一次默认尺寸/位置。类型与读写入口都在 settings.ts。
+ *
+ * ⚠️⚠️ 所以写几何**必须走读-改-写**（`readRawDocument` → 改 `window` → `writeDocument`）：
+ *     拿内存里的整份文档整体覆盖，会把用户刚在设置窗里保存的三个开关抹掉。
+ *     反过来 `settings.ts::saveSettings` 同理保留 `window` 段 —— 两侧都靠这个约定活着。
  *
  * ⚠️⚠️ 物理像素不是随便选的：Tauri 版用 `outer_position()` / `outer_size()`，
  *    它们返回**物理像素**。若这边存 DIP，在 125%/150% 缩放的机器上恢复出来的窗口
  *    会比用户上次的位置缩水一截，而且和旧版互相读取会整体错位。
  *    Electron 的 `getBounds()` / `setBounds()` 走的是 DIP，所以要显式换算：
  *    存盘 `dipToScreenRect`、恢复 `screenToDipRect`。
- *
- * ⚠️ 单独一个文件、不与 settings.json 混在一起：窗口尺寸在每次拖动/缩放时都可能变，
- *    写盘频率远高于那 3 个开关；混在一起会让「改了个设置」和「挪了下窗口」互相覆盖。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
 import { screen, type BrowserWindow } from 'electron'
 
-import type { StoreLocation } from './settings'
-
-export const WINDOW_STATE_FILE = 'window-state.json'
+import {
+  loadDocument,
+  parseSettings,
+  readRawDocument,
+  writeDocument,
+  type StoreLocation,
+} from './settings'
 
 /** 物理像素的窗口几何快照。 */
 export interface WindowState {
@@ -61,29 +67,18 @@ export function parseWindowState(v: unknown): WindowState | null {
 }
 
 export function loadWindowState(loc: StoreLocation): { state: WindowState | null; source: string | null } {
-  for (const p of loc.read) {
-    let text: string
-    try {
-      text = readFileSync(p, 'utf8')
-    } catch {
-      continue
-    }
-    // 文件存在但坏了：记一条日志用默认尺寸，继续试下一个候选没有意义（同名文件不该有两份语义）。
-    try {
-      return { state: parseWindowState(JSON.parse(text)), source: p }
-    } catch (e) {
-      console.warn(`[web2app] 窗口几何文件解析失败，改用默认尺寸：${p}（${(e as Error).message}）`)
-      return { state: null, source: p }
-    }
-  }
-  return { state: null, source: null }
+  // 文档层已经把「文件不存在 / 顶层 JSON 坏 / 命中哪个候选」处理掉了，这里只解释 `window` 段。
+  // ⚠️ 段坏了（比如手改成字符串）只是「这次没有几何可恢复」，不会连累三个开关 —— 见 parseWindowState。
+  const doc = loadDocument(loc)
+  return { state: parseWindowState(doc.window), source: doc.source }
 }
 
 /** 写几何（失败只在控制台留痕：为了记个窗口尺寸让用户看到报错不值得）。 */
 export function saveWindowState(loc: StoreLocation, st: WindowState): void {
   try {
-    mkdirSync(dirname(loc.write), { recursive: true })
-    writeFileSync(loc.write, JSON.stringify(st, null, 2), 'utf8')
+    // ⚠️⚠️ 读-改-写，只替换 `window` 段：整体覆盖会把用户刚保存的设置抹掉。
+    const cur = readRawDocument(loc.write)
+    writeDocument(loc, { settings: parseSettings(cur), window: st })
   } catch (e) {
     console.warn(`[web2app] 保存窗口几何失败：${(e as Error).message}`)
   }

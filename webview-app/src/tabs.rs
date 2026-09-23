@@ -819,18 +819,29 @@ pub(crate) fn set_tab_title(app: tauri::AppHandle, label: String, title: String)
 ///    非代理（直连 + URL 带 userinfo，靠 WebView2 原生钩子注入 Authorization）时返回 None，
 ///    维持入口地址，避免把本应用凭据发给外部站点。
 fn resolve_popup_url(app: &tauri::AppHandle, target: Option<&str>) -> Option<String> {
-    let target = target?;
-    let tu = url::Url::parse(target).ok()?;
-    if !matches!(tu.scheme(), "http" | "https") {
-        return None;
-    }
-
     let nav = app
         .state::<TabManager>()
         .navigation
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()?;
+    resolve_popup_url_for(&nav, target)
+}
+
+/// [`resolve_popup_url`] 的**纯逻辑**部分（不依赖 `AppHandle`，因此可单测）。
+///
+/// 规则见 [`resolve_popup_url`] 的文档注释，这里只做计算：
+///   1. 目标与入口主机同源 → 把 path/query/fragment 拼到入口地址上（代理会转发同上游）；
+///   2. 目标与上游真实主机同源 → 同样映射到入口地址；
+///   3. 其它跨域外链：本地反向代理模式直接打开；非代理（直连带 userinfo）返回 None，
+///      避免把本应用凭据发给外部站点。
+fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> Option<String> {
+    let target = target?;
+    let tu = url::Url::parse(target).ok()?;
+    if !matches!(tu.scheme(), "http" | "https") {
+        return None;
+    }
+
     let base = url::Url::parse(&nav.url).ok()?;
 
     let same_as_entry = tu.host_str() == base.host_str();
@@ -863,4 +874,83 @@ pub(crate) fn open_new_tab_from_request(app: &tauri::AppHandle, target_url: Opti
     // 建 tab 时直接带上目标地址做**一次**导航（历史实现是先建窗导航主地址、再二次导航改地址，
     // 既多一次请求，也与首次导航存在竞态）。
     let _ = spawn_tab_with_target(app, start);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个可单测的 Navigation（本地反向代理模式）。
+    /// `entry`：代理入口（形如 http://127.0.0.1:PORT/）；`upstream`：上游真实主机。
+    fn proxy_nav(entry: &str, upstream: Option<&str>) -> Navigation {
+        Navigation {
+            url: entry.to_string(),
+            user: String::new(),
+            pass: String::new(),
+            use_local_proxy: true,
+            proxy_abort: None,
+            upstream_host: upstream.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn popup_same_as_entry_host_joins_path_query_fragment() {
+        let nav = proxy_nav("http://127.0.0.1:4567/", None);
+        let out =
+            resolve_popup_url_for(&nav, Some("http://127.0.0.1:4567/notes?from=popup#x")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/notes?from=popup#x");
+    }
+
+    #[test]
+    fn popup_same_as_entry_replaces_root_path() {
+        let nav = proxy_nav("http://127.0.0.1:4567/app", None);
+        let out = resolve_popup_url_for(&nav, Some("http://127.0.0.1:4567/other")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/other");
+    }
+
+    #[test]
+    fn popup_same_as_upstream_remaps_through_entry() {
+        // 页面里写死的绝对链接（指向上游真实主机）→ 映射到代理入口。
+        let nav = proxy_nav("http://127.0.0.1:4567/", Some("real.example.com"));
+        let out = resolve_popup_url_for(&nav, Some("https://real.example.com/path/a")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/path/a");
+    }
+
+    #[test]
+    fn popup_cross_domain_proxy_mode_opens_external() {
+        // 代理只对固定上游注入凭据，跨域外链直接打开不会泄漏账号。
+        let nav = proxy_nav("http://127.0.0.1:4567/", None);
+        assert_eq!(
+            resolve_popup_url_for(&nav, Some("https://other.com/x")),
+            Some("https://other.com/x".into())
+        );
+    }
+
+    #[test]
+    fn popup_cross_domain_plain_mode_returns_none() {
+        // 非代理（直连 + 原生钩子注入凭据）下，跨域外链不放行，避免把本应用凭据发给外部站点。
+        let mut nav = proxy_nav("https://entry.example.com", None);
+        nav.use_local_proxy = false;
+        assert_eq!(
+            resolve_popup_url_for(&nav, Some("https://other.com/x")),
+            None
+        );
+        // 同源路径照常拼回入口。
+        assert_eq!(
+            resolve_popup_url_for(&nav, Some("https://entry.example.com/notes")),
+            Some("https://entry.example.com/notes".into())
+        );
+    }
+
+    #[test]
+    fn popup_missing_or_unsupported_target_returns_none() {
+        let nav = proxy_nav("http://127.0.0.1:4567/", None);
+        assert_eq!(resolve_popup_url_for(&nav, None), None);
+        assert_eq!(resolve_popup_url_for(&nav, Some("about:blank")), None);
+        assert_eq!(
+            resolve_popup_url_for(&nav, Some("javascript:void(0)")),
+            None
+        );
+        assert_eq!(resolve_popup_url_for(&nav, Some("not a url")), None);
+    }
 }

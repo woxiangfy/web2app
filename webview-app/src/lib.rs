@@ -51,6 +51,10 @@ mod proxy;
 pub mod resolve;
 mod settings;
 
+// 运行期配置文档：`settings.json` —— 设置 + 窗口几何**同住这一个文件**。
+// 读-改-写工具与文件契约（键序 / 兼容性）都在这里，两端（Tauri / Electron）同契约。
+mod store;
+
 // 清除浏览数据（缓存 / Cookie / 本地存储 …）：设置页「清除全部」按钮的后端。
 // ⚠️ 模块与命令都**不按平台 gate**：`invoke_handler` 是跨平台的注册表，Android 上少了这条
 // 命令，设置页的调用会变成「命令不存在」而不是一条能看懂的错误。平台差异收敛在模块内部
@@ -108,31 +112,48 @@ pub fn run() {
         })
         .manage(ProxyTask::default())
         .manage(SettingsState::default())
+        // ⚠️⚠️ **全项目只能有这一次调用** —— `Builder::invoke_handler` 是【替换】语义、**不是追加**：
+        //    tauri-2.11.5 `src/app.rs:1662` 就是 `self.invoke_handler = Box::new(invoke_handler);`，
+        //    而整个 AppManager 只持有这一个 handler（`src/manager/mod.rs`）。
+        //    本文件历史上按模块分成了两次调用（多页签那次写在下面的 `cfg(windows)` 块里），
+        //    后一次把前一次**整体覆盖** ⇒ Windows 上 `get_settings` / `save_settings` /
+        //    `close_settings_window` / `clear_web_data` / `history_nav` 全部消失。
+        //    前端拿到的报错正是「保存失败：Command save_settings not found」：handler 对未知命令
+        //    返回 `false`，tauri `src/webview/mod.rs:1911` 据此 `reject(format!("Command {command} not found"))`。
+        //    注意这条路径**编译期零警告**、CI 也全绿，只在用户点按钮时才现形 —— 所以另配了
+        //    `ipc_command_registry` 静态契约测试（含「前端调用的命令名 ⊆ 这里注册的名字」）。
+        //    ⇒ 平台差异一律用**命令项上的 `#[cfg(...)]` 属性**表达（`generate_handler!` 支持逐项属性），
+        //      **不要**为了分平台再开第二次这个同名调用（本文件的契约测试会直接断言次数）。
         .invoke_handler(tauri::generate_handler![
             settings::get_settings,
             settings::save_settings,
             settings::close_settings_window,
             web_data::clear_web_data,
-            history_nav
+            history_nav,
+            // 多页签（仅 Windows）：命令与 `tabs` 模块同一个 cfg —— 模块不编译时命令也不能注册，
+            // 否则 Android 上会退化成「命令不存在」而不是一条能看懂的错误。
+            #[cfg(windows)]
+            tabs::create_tab,
+            #[cfg(windows)]
+            tabs::switch_tab,
+            #[cfg(windows)]
+            tabs::close_tab,
+            #[cfg(windows)]
+            tabs::get_tabs,
+            #[cfg(windows)]
+            tabs::set_tab_title,
+            #[cfg(windows)]
+            tabs::minimize_host,
+            #[cfg(windows)]
+            tabs::close_host
         ]);
 
-    // 多页签模式（仅 Windows）：注册 shell 标签栏协议 + TabManager 状态 + tab 相关 IPC 命令。
+    // 多页签模式（仅 Windows）：注册 shell 标签栏协议 + TabManager 状态。
+    // ⚠️ IPC 命令已并入上面**唯一一次** `invoke_handler`（见那段注释），别再在这里开第二次。
     #[cfg(windows)]
-    let builder = {
-        let b = builder
-            .register_uri_scheme_protocol(tabs::SHELL_SCHEME, tabs::handle_shell)
-            .manage(tabs::TabManager::default())
-            .invoke_handler(tauri::generate_handler![
-                tabs::create_tab,
-                tabs::switch_tab,
-                tabs::close_tab,
-                tabs::get_tabs,
-                tabs::set_tab_title,
-                tabs::minimize_host,
-                tabs::close_host
-            ]);
-        b
-    };
+    let builder = builder
+        .register_uri_scheme_protocol(tabs::SHELL_SCHEME, tabs::handle_shell)
+        .manage(tabs::TabManager::default());
 
     #[cfg(desktop)]
     let settings_open = settings::settings_open_shortcut();
@@ -462,8 +483,8 @@ fn log_startup(app: &tauri::AppHandle, settings: &settings::Settings) {
         }
     );
     dlog!(
-        "  设置文件      : {}",
-        settings::settings_path(app)
+        "  配置文件      : {}（设置 + 窗口几何）",
+        store::path(app)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(取不到配置目录)".to_string())
     );
@@ -670,4 +691,155 @@ fn history_nav(app: tauri::AppHandle, direction: String) -> Result<(), String> {
     window
         .eval(script)
         .map_err(|e| format!("历史导航失败：{e}"))
+}
+
+/// IPC 命令注册表的静态契约测试。
+///
+/// 存在理由：`Builder::invoke_handler` 是**替换**语义，多调用一次就会静默丢掉前一次的
+/// 全部命令 —— 编译期无警告、CI 全绿，只在用户点下按钮那一刻变成「Command … not found」
+/// （真实事故：Windows 设置页「保存失败：Command save_settings not found」）。
+/// 这里用两条静态断言把它钉死：① 调用点唯一；② 前端调用的命令名 ⊆ 注册表里的名字。
+#[cfg(test)]
+mod ipc_command_registry {
+    /// 注册表的唯一真源：本文件源码。
+    const LIB_RS: &str = include_str!("lib.rs");
+
+    /// 计数用的「针」拆成两段拼接：避免本模块自己的注释 / 断言文案被当成调用点或注册表。
+    const INVOKE_HANDLER: &str = concat!(".invoke", "_handler(");
+    const GENERATE_HANDLER: &str = concat!("tauri::generate", "_handler![");
+
+    /// 从 `invoke("cmd"` / `invoke('cmd'` 里抽出命令名（前端调用点）。
+    fn invoked_commands(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = src;
+        while let Some(pos) = rest.find("invoke(") {
+            // ⚠️ 先推进游标再判断，任何分支都不会造成死循环。
+            rest = &rest[pos + "invoke(".len()..];
+            let t = rest.trim_start();
+            let Some(quote) = t.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let body = &t[1..];
+            let Some(end) = body.find(quote) else {
+                continue;
+            };
+            let name = &body[..end];
+            // 只收合法的命令名字面量：`invoke(cmd, …)`（变量）之类自然被排除。
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '-')
+            {
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
+    /// 从唯一那处 `generate_handler![…]` 里抽出已注册的命令名（取路径末段）。
+    fn registered_commands() -> Vec<String> {
+        let start = LIB_RS
+            .find(GENERATE_HANDLER)
+            .expect("lib.rs 里必须有 generate_handler! 注册表");
+        let body = &LIB_RS[start..];
+        let end = body
+            .find("]);")
+            .expect("注册表必须以 `]);` 收尾（否则本测试扫不到尾）");
+        body[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with("#["))
+            .map(|l| l.trim_end_matches(','))
+            // 只留「就是一个 Rust 路径」的行 —— 排掉 `tauri::generate_handler![` 自身之类的噪声。
+            .filter(|l| {
+                l.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            })
+            .map(|p| p.rsplit("::").next().unwrap_or(p).to_string())
+            .collect()
+    }
+
+    /// ① 调用点唯一：`Builder::invoke_handler` 调第二次就是「命令集体消失」。
+    #[test]
+    fn exactly_one_invoke_handler_call_site() {
+        let n = LIB_RS.matches(INVOKE_HANDLER).count();
+        assert_eq!(
+            n, 1,
+            "lib.rs 里出现了 {n} 次 invoke_handler 调用。它是【替换】不是【追加】——\
+             第二次调用会静默丢掉前一次注册的全部命令（Windows 上表现为设置页保存报\
+             「Command … not found」）。平台差异请写成命令项上的 #[cfg(...)] 属性。"
+        );
+    }
+
+    /// ② 前端真的会调的每个命令，都必须能在注册表里找到；否则运行时就是一条「命令不存在」。
+    #[test]
+    fn every_frontend_invoked_command_is_registered() {
+        let registered = registered_commands();
+
+        // 跨平台页面：设置页在 Windows / Android 上都要能存设置。
+        let mut sources: Vec<(&str, &str)> =
+            vec![("dist/settings.html", include_str!("../dist/settings.html"))];
+        // 多页签（仅 Windows）页面：其命令本身也是 `#[cfg(windows)]` 注册的。
+        #[cfg(windows)]
+        {
+            sources.push(("src/shell.html", include_str!("shell.html")));
+            sources.push(("src/tab_title.js", include_str!("tab_title.js")));
+        }
+
+        let mut missing: Vec<String> = Vec::new();
+        for (file, src) in sources {
+            let found = invoked_commands(src);
+            // ⚠️ 先堵「假绿」：抽不出任何命令时下面的子集断言会无条件通过。
+            assert!(
+                !found.is_empty(),
+                "{file} 里一个 invoke(\"…\") 都没抽到 —— 要么前端改了调用姿势，\
+                 要么提取器坏了；两种情况都必须人工确认，不能让本条断言静默通过"
+            );
+            for cmd in found {
+                if !registered.contains(&cmd) {
+                    missing.push(format!("{file} → {cmd}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "前端调用了未注册的 IPC 命令（运行时报「Command … not found」）：{missing:?}；\
+             已注册：{registered:?}"
+        );
+    }
+
+    /// ③ 注册表本身：基础命令跨平台必须在；多页签命令在 Windows 上必须在。
+    #[test]
+    fn required_commands_are_registered() {
+        let registered = registered_commands();
+        let base = [
+            "get_settings",
+            "save_settings",
+            "close_settings_window",
+            "clear_web_data",
+            "history_nav",
+        ];
+        for name in base {
+            assert!(
+                registered.iter().any(|r| r == name),
+                "IPC 命令 {name} 未注册（已注册：{registered:?}）"
+            );
+        }
+
+        #[cfg(windows)]
+        for name in [
+            "create_tab",
+            "switch_tab",
+            "close_tab",
+            "get_tabs",
+            "set_tab_title",
+            "minimize_host",
+            "close_host",
+        ] {
+            assert!(
+                registered.iter().any(|r| r == name),
+                "多页签 IPC 命令 {name} 未注册（已注册：{registered:?}）"
+            );
+        }
+    }
 }

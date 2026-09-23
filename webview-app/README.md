@@ -72,6 +72,9 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 
 > 设置保存在配置目录下（`%APPDATA%\<app_name>\settings.json`，`app_name` 默认 `Web2App`），为 JSON 文件，下次启动自动读取。
 > ⚠️ 只有上面 1–3 项落在 `settings.json` 里；**第 4 项不落盘** —— 它是一次性动作，不是配置项。
+> ⚠️ **窗口几何（上表「窗口几何记忆」）也在这同一个 `settings.json` 的 `window` 段里**（2026-09-23 起；
+> 此前单独占一个 `window-state.json`，该文件已不再读写，可手工删除）。两个写入方
+> （设置页保存 / 关窗记几何）一律走 `src/store.rs` 的**读-改-写**，互不覆盖。
 
 界面后续可在 `dist/settings.html` 上继续扩展更多能力（Rust 命令通道 `get_settings` / `save_settings` /
 `close_settings_window` / `clear_web_data` 即可复用）。
@@ -115,10 +118,11 @@ webview-app/
 │   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
 │   ├── resolve.rs          # DNS TXT 查询 + 验签解密
 │   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
-│   ├── settings.rs         # 设置结构、持久化(settings.json)、快捷键转换、设置窗口/命令
+│   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写）
+│   ├── settings.rs         # 设置结构、快捷键转换、设置窗口/命令（持久化委托 store）
 │   ├── tabs.rs             # 多页签（宿主窗口 + shell 标签栏 + tab 窗口）
 │   ├── tray.rs             # 系统托盘
-│   ├── window_state.rs     # 窗口几何持久化
+│   ├── window_state.rs     # 窗口几何：抓取 / 恢复策略（落盘在 store 的 window 段）
 │   ├── webview_hooks.rs    # WebView2 原生事件（鉴权 / 新窗口 / 右键 / 下载）
 │   ├── save_dialog.rs      # 下载「另存为」原生对话框（IFileSaveDialog）
 │   ├── splash.html         # 启动页（内联 titlebar.js，解决首文档无初始化脚本）
@@ -293,7 +297,7 @@ cargo tauri android build --target aarch64-linux-android --apk
 WebView2 钩子与配置清洗，以及 `resolve-core` / `resolve-tool` 的加密往返与篡改检测：
 
 ```bash
-cargo test --all                # 全量单元测试（实测 64 条：resolve-core 13 + resolve-tool 7 + 主 crate 44）
+cargo test --all                # 全量单元测试（实测 104 条：resolve-core 13 + resolve-tool 7 + w2a-proxy 22 + 主 crate 62）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
