@@ -1,0 +1,207 @@
+name: CI（Electron 绿色版）
+
+# ---------------------------------------------------------------------------
+# Electron 绿色版的自动化流水线（M7）。
+#
+# 与既有几条 workflow 的分工：
+#   - `ci.yml` —— **只服务 Tauri 版**（`webview-app/`）。它顶部的
+#     `defaults.run.working-directory: webview-app` 决定了它天然不覆盖本目录，
+#     所以 Electron 侧必须另开一个文件，而不是往 `ci.yml` 里加作业；
+#   - `electron-build-custom.yml` —— **手动**打包（贴一份配置 JSON → 出 zip / portable）。
+#     本文件是**自动**的：push / PR 即跑 lint 与端到端探针，主分支另产出包。
+#     两者共用同一个共享解析器与同一份脚本，不重复实现。
+#
+# ⚠️ 三个只在 CI 上才现形的坑（都写进注释，改前先读）：
+#   1. **镜像**：`electron-app/.npmrc` 把 registry 指向 npmmirror —— 那是为本机（国内网络）
+#      准备的，GitHub 托管 runner 直连官方源更快，走镜像反而可能超时。
+#      故 install 一律显式带 `--registry=https://registry.npmjs.org` 覆盖它。
+#      ⚠️ 别再去设 `ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR`：
+#      electron 的 install.js 在 CI 上直连 GitHub Releases 是快的，指镜像才是慢的那条路。
+#   2. **`config.json` 不在仓库里**（被 `electron-app/.gitignore` 忽略，它随绿色版分发）。
+#      故 CI 是**没有** config.json 的 —— 这不是缺陷，而是本流水线刻意验证的场景：
+#      「fresh clone 直接能跑」。`config.ts` 找不到文件时回落 `DEFAULTS`
+#      （见 `src/main/config.ts:336`），而探针**自己起 127.0.0.1 随机端口的夹具站点**
+#      （`src/main/probe.ts:360`），不依赖任何外部站点 ⇒ 无配置也能跑完 130 条断言。
+#      ⚠️ 所以**不要**在这里生成 config.json —— 那样反而掩盖了「缺省能不能跑」这件事。
+#   3. **pnpm 版本**：`electron-app/pnpm-workspace.yaml` 用了 `allowBuilds`（pnpm 11+ 键名）
+#      与 `nodeLinker: hoisted`。版本不对会报 `ERR_PNPM_IGNORED_BUILDS` 或符号链接失败，
+#      故固定 v12（与 `electron-build-custom.yml` 一致）。
+#
+# Node 版本取 22：①与 `electron-build-custom.yml` 一致；②`pnpm run unit` 直接
+#   `node --test "test/**/*.test.ts"`（不带编译步骤），依赖 Node 的类型剥离，
+#   实测 22.22.2 可跑通 15/15。
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'electron-app/**'
+      # 共享单一真源：改注入脚本 / sidecar 会影响本壳，必须一起验
+      - 'webview-app/src/**'
+      - 'webview-app/crates/**'
+      - '.github/workflows/electron-ci.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'electron-app/**'
+      - 'webview-app/src/**'
+      - 'webview-app/crates/**'
+      - '.github/workflows/electron-ci.yml'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: '同时出包（zip / portable）并上传产物'
+        required: false
+        default: true
+        type: boolean
+
+# ⚠️ 与 `electron-build-custom.yml` 同一条纪律：run 步骤在 `electron-app/` 下执行，
+#    但 `uses:` 步骤（upload-artifact 等）的 `path:` 以**仓库根**为基准 ⇒ 那里要带前缀。
+defaults:
+  run:
+    working-directory: electron-app
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 静态检查 + 纯函数单测（Ubuntu，最快最便宜）
+  #    只跑 `typecheck` 与 `unit`，两者都不需要 Electron 二进制、不需要窗口。
+  #    ⚠️ 但 install **不能**加 `--ignore-scripts`：pnpm 12 对「既没允许也没拒绝」的
+  #       包会直接报 `ERR_PNPM_IGNORED_BUILDS` 中断安装（见 pnpm-workspace.yaml 的注释），
+  #       省那 160MB 的代价是踩一个与环境强相关的坑，不划算。
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Unit (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '12'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm run unit
+
+  # ---------------------------------------------------------------------------
+  # 2) 端到端探针（Windows）
+  #    跑的是**真实窗口**：`launch.cjs` 拉起 Electron 后在窗内逐条断言
+  #    （单窗口 130 条 + 多页签 26 条），最后 `smoke` 验证真实启动路径。
+  #
+  #    ⚠️ 三个参数的来历（本机踩出来的，CI 上同样需要）：
+  #      - `--no-sandbox --in-process-gpu`：CI runner 没有可用的 GPU 沙箱，
+  #        不加会表现为 `ERR_FAILED(-2)` / GPU 进程崩溃 —— 报错完全不指向参数；
+  #      - `pnpm run probe` 内部已串好 `sidecar` → `build` → `launch`，
+  #        所以**必须**先装 Rust 工具链（sidecar `w2a-proxy.exe` 是 Rust 编译的）；
+  #      - 探针的起窗模式**只由命令行决定**（`--tabs`），`tabs_enabled` 不参与
+  #        —— 否则单窗口那批断言会往壳页面注入脚本而必失败。
+  #
+  #    ⚠️ 未在本机覆盖的风险：GitHub 的 windows-latest 是否有可用的桌面会话
+  #        （Electron 起 GUI 进程需要）。本项目只能靠**首次实跑**确认；
+  #        若这一步失败，先怀疑显示环境而不是断言本身。
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E Probe (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '12'
+
+      - name: Install Rust toolchain（sidecar）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
+
+      - name: 单窗口探针（130 条）
+        run: pnpm run probe --no-sandbox --in-process-gpu
+
+      - name: 多页签探针（26 条）
+        run: pnpm run probe --tabs --no-sandbox --in-process-gpu
+
+      - name: 启动冒烟
+        run: pnpm run smoke
+
+  # ---------------------------------------------------------------------------
+  # 3) 出包并上传产物
+  #    只在**非 PR** 时跑：PR 上出包既慢又没人下载，上传的还只是一个默认配置的应用。
+  #    `workflow_dispatch` 时由 `package` 开关控制（默认开）。
+  #
+  #    ⚠️ 出包用的是**仓库默认配置**（没有 config.json ⇒ `DEFAULTS`），
+  #       产物只用于验证「打包链路活着」，**不是**给终端用户的发行包 ——
+  #       真正的定制包走 `electron-build-custom.yml`（手动、带配置 JSON）。
+  # ---------------------------------------------------------------------------
+  package:
+    name: Package (Windows)
+    runs-on: windows-latest
+    needs: [lint, e2e]
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.package) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: '12'
+
+      - name: Install Rust toolchain（sidecar）
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
+
+      - name: 出包（zip + portable）
+        # `dist` = sidecar → build → stage → electron-builder。
+        # ⚠️ `stage` 会校验三个布尔字段的真 bool 类型 —— 配置写错在这里失败，而不是等用户双击。
+        run: pnpm run dist
+
+      - name: 校验 config.json 已进 app.asar
+        # 防的是**静默失败**：配置没进包时 electron-builder 照样出包、双击照样打开，
+        # 只是静默退回内置默认地址，构建日志全绿。
+        run: node scripts/check-asar-config.cjs
+
+      - name: Upload 解压目录版（zip）
+        uses: actions/upload-artifact@v7
+        with:
+          name: web2app-electron-win-x64
+          # ⚠️ 以仓库根为基准（upload-artifact 不受 defaults.run.working-directory 影响）
+          path: electron-app/release/*.zip
+          if-no-files-found: error
+
+      - name: Upload 单文件版（portable exe）
+        uses: actions/upload-artifact@v7
+        with:
+          name: web2app-electron-win-x64-portable
+          path: electron-app/release/*-portable.exe
+          if-no-files-found: error
