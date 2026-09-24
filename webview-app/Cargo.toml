@@ -42,6 +42,8 @@ futures-util = "0.3"
 http-body-util = "0.1"
 bytes = "1"
 http = "1"
+# 代理入口门禁令牌的随机源（OS CSPRNG，见 proxy.rs::generate_access_token）。
+getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
 
 # 动态解析真实 URL（app_url 为域名数组时）：DNS TXT 查询 + Ed25519 验签 + AEAD 解密。

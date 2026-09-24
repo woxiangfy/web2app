@@ -140,7 +140,7 @@ export const DEFAULTS: AppConfig = {
 }
 
 /** 布尔字段：只接受真 bool。字符串一律拒绝（见文件头第 1 条）。 */
-function mustBool(v: unknown, key: string, dflt: boolean): boolean {
+export function mustBool(v: unknown, key: string, dflt: boolean): boolean {
   if (v === undefined || v === null) return dflt
   if (typeof v === 'boolean') return v
   throw new ConfigError(
@@ -162,7 +162,7 @@ function toStr(v: unknown, dflt = ''): string {
  * 非字符串一律拒绝：`"data_dir": true` 若经 `toStr` 宽容地转成 `"true"`，会静默建出一个名叫
  * `true` 的目录 —— 「看起来配置生效了、其实完全不是想要的」是最难查的一类。
  */
-function toDataDir(v: unknown): string {
+export function toDataDir(v: unknown): string {
   if (v === undefined || v === null) return DEFAULTS.data_dir
   if (typeof v !== 'string') {
     throw new ConfigError(
@@ -203,7 +203,11 @@ function toExtra(v: unknown, warnings: string[]): Record<string, unknown> {
  * `app_url`：接受 string 或 string[]，统一收敛成真正的 JSON 类型。
  * 数组模式（域名列表）必须提供 public_key —— 没有公钥就解不开 TXT 密文。
  */
-function toAppUrl(v: unknown, publicKey: string, warnings: string[]): string | string[] {
+export function toAppUrl(
+  v: unknown,
+  publicKey: string,
+  warnings: string[]
+): string | string[] {
   if (v === undefined || v === null) return DEFAULTS.app_url
 
   const asDomains = (list: unknown[]): string[] =>
@@ -255,7 +259,7 @@ function toAppUrl(v: unknown, publicKey: string, warnings: string[]): string | s
 }
 
 /** 未知字段 → 硬失败（并在可能时给出近似字段名）。 */
-function rejectUnknownKeys(raw: Record<string, unknown>): void {
+export function rejectUnknownKeys(raw: Record<string, unknown>): void {
   const known = new Set(Object.keys(DEFAULTS))
   for (const key of Object.keys(raw)) {
     if (known.has(key)) continue
@@ -274,7 +278,7 @@ function rejectUnknownKeys(raw: Record<string, unknown>): void {
 }
 
 /** 极简近似名查找（编辑距离 ≤ 2 或前缀包含），只为给出「是不是想写 X」的提示。 */
-function nearestKey(key: string, candidates: string[]): string | null {
+export function nearestKey(key: string, candidates: string[]): string | null {
   let best: string | null = null
   let bestScore = Infinity
   for (const c of candidates) {
@@ -287,7 +291,7 @@ function nearestKey(key: string, candidates: string[]): string | null {
   return best !== null && bestScore <= 2 && bestScore < key.length ? best : null
 }
 
-function editDistance(a: string, b: string): number {
+export function editDistance(a: string, b: string): number {
   const prev = Array.from({ length: b.length + 1 }, (_, i) => i)
   for (let i = 1; i <= a.length; i++) {
     let diag = prev[0]

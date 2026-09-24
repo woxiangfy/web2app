@@ -1,7 +1,7 @@
 /**
  * w2a-proxy sidecar 客户端。
  *
- * 为什么是独立进程而不是塞进主进程（决定见 docs/electron-plan.md §2）：本地反向代理（741 行）与加密解析
+ * 为什么是独立进程而不是塞进主进程（决定见 docs/electron-plan.md §2）：本地反向代理（825 行）与加密解析
  * （DNS TXT + Ed25519 + AES-GCM）都已在 `webview-app` 里写就并测过，用 JS 重写等于把
  * 鉴权注入 / 流式转发 / WS 隧道的验证重开一遍，且加密格式必须与 `resolve-core` 字节级一致。
  * 所以 Electron 侧 spawn 一个复用同一份 Rust 源码的 sidecar，只做「传参进去、读回一行 JSON」。
@@ -154,8 +154,6 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
 
     let settled = false
     let buf = ''
-    /** 握手之后 stdout 还剩的内容（sidecar 目前不打，留个口子便于将来输出进度）。 */
-    let stdoutRest = ''
 
     const finish = (fn: () => void) => {
       if (settled) return
@@ -177,12 +175,10 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
     }, HANDSHAKE_TIMEOUT_MS)
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      // 握手结束（成功或失败）之后 sidecar 不应再往 stdout 打东西（契约：stdout 仅一行
+      // JSON）；再来数据直接丢弃，避免对已 settle 的 Promise 重复处理。
+      if (settled) return
       buf += chunk.toString('utf8')
-      if (settled) {
-        stdoutRest += buf
-        buf = ''
-        return
-      }
       const nl = buf.indexOf('\n')
       if (nl < 0) return
       const line = buf.slice(0, nl).trim()
@@ -201,7 +197,12 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
       }
 
       if (v.ok !== true) {
-        const kind = (typeof v.kind === 'string' ? v.kind : 'protocol') as SidecarError['kind']
+        // 只认 sidecar 契约里的失败分类；任意字符串直接透传会让上层的文案收敛失效。
+        const known = ['missing', 'spawn', 'args', 'resolve', 'proxy', 'protocol', 'timeout'] as const
+        const rawKind = typeof v.kind === 'string' ? v.kind : ''
+        const kind = (known as readonly string[]).includes(rawKind)
+          ? (rawKind as SidecarError['kind'])
+          : 'protocol'
         finish(() => {
           // 失败时 sidecar 自己就退出了，这里兜个底防止异常路径留下孤儿。
           killHard(child)
@@ -210,6 +211,14 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
         return
       }
 
+      // pid 必须是有限数：sidecar 缺字段时回退 spawn 给出的 pid，再缺就是 0，
+      // 绝不能把 NaN 放进句柄（isAlive(NaN) 的行为会让孤儿回收判断静默失真）。
+      const reported = Number(v.pid)
+      const pid = Number.isFinite(reported)
+        ? reported
+        : typeof child.pid === 'number'
+          ? child.pid
+          : 0
       finish(() =>
         resolve({
           proxyUrl: String(v.proxyUrl ?? ''),
@@ -218,7 +227,7 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
           hadAuth: v.hadAuth === true,
           authUser: String(v.authUser ?? ''),
           authPass: String(v.authPass ?? ''),
-          pid: Number(v.pid ?? child.pid ?? 0),
+          pid,
           stop: () => stopSidecar(child),
         }),
       )

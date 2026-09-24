@@ -142,7 +142,9 @@ pub(crate) fn sanitize_dir_name(name: &str) -> String {
 /// 桌面端的 `app_config_dir` 末段是 `tauri.conf.json` 的 identifier，必须取父目录后再拼自定义
 /// app_name，让不同应用的配置互相隔离；Android 的 `app_config_dir` 直接就是应用私有根目录
 /// （`/data/data/<package>`），**绝不能取 parent**（否则跳到 `/data/data`，既不可写又与其他包冲突）。
-/// `settings.json` 与 `window-state.json` 都落在这个目录下（调用方各自再拼文件名）。
+///
+/// ⚠️ 本目录现在**只用来读旧位置的 `settings.json`**（升级兼容，见 [`crate::store`]）：
+/// 2026-09-23 起运行期文档落在 [`store_dir`]（= 数据目录），不再落在这里。
 pub(crate) fn config_dir(app: &AppHandle) -> Option<PathBuf> {
     let base = app.path().app_config_dir().ok()?;
     #[cfg(desktop)]
@@ -150,6 +152,29 @@ pub(crate) fn config_dir(app: &AppHandle) -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     let root = base;
     Some(root.join(sanitize_dir_name(APP_NAME)))
+}
+
+/// 运行期文档（`settings.json`，内含窗口几何）所在目录 —— **与数据目录同一套规则**。
+///
+/// Windows：跟 [`data_dir`] 走，即由打包配置的 `data_dir` 字段决定
+/// （`""` = 系统默认程序目录、相对路径 = exe 同级、绝对路径原样、不可写自动回退；
+/// 见 `docs/packaging-config.md` §4.3）。这样「绿色版把整个文件夹搬走」成立：
+/// 设置、几何、cookie、缓存**一起**跟着程序走，也与 Electron 绿色版
+/// （`electron-app/src/main/settings.ts` 的 `storeLocation`）落在同一个文件上。
+/// ⚠️ 反过来看：`data_dir` 一改，设置文件的位置**必须**跟着改 —— 它是「程序的数据」，
+/// 不是「系统的配置」，这是使用者 2026-09-23 明确指出的行为一致性要求。
+///
+/// 非 Windows（Android）：没有 WebView2 数据目录这个概念，仍用应用私有配置目录
+/// （`/data/data/<pkg>/<app_name>/settings.json`，见 `webview-app/README.md` §移动端）。
+#[cfg(windows)]
+pub(crate) fn store_dir(app: &AppHandle) -> Option<PathBuf> {
+    data_dir(app)
+}
+
+/// 非 Windows：见 Windows 版的说明（Android 用应用私有目录）。
+#[cfg(not(windows))]
+pub(crate) fn store_dir(app: &AppHandle) -> Option<PathBuf> {
+    config_dir(app)
 }
 
 /// WebView2 用户数据目录：`%LOCALAPPDATA%\<app_name>`（仅 Windows）。

@@ -18,6 +18,8 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23"
 bytes = "1"
 futures-util = "0.3"
+# 代理入口门禁令牌的随机源（OS CSPRNG，与 webview-app/Cargo.toml 同版本，见 proxy.rs）。
+getrandom = "0.2"
 hickory-resolver = "0.26"
 http = "1"
 http-body-util = "0.1"

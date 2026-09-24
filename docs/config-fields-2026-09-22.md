@@ -126,6 +126,7 @@ D 层是**运行期另一套**（与打包无关），E/F 是工具与构建参�
 ### 4.1 `settings.json`（用户设置，设置页可改）
 
 存放于 `<配置根>\<app_name>\settings.json`（Tauri）；Electron 写 `%APPDATA%\<app_name>\` 或 `data\`（同名优先）。
+> ⚠️ **2026-09-23 起已改**：落点 = **数据目录**（`<data_dir>\settings.json`，由 `data_dir` 字段决定），旧位置 `%APPDATA%\<app_name>\` 只作读取兜底。现行规则见 `packaging-config.md` §4.3 要点 5。
 
 | 字段 | 类型 | 默认 | 含义 | UI |
 |---|---|---|---|---|

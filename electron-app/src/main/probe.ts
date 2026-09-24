@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WebContentsView, type BrowserWindow } from 'electron'
@@ -30,6 +30,7 @@ import {
   sameHotkey,
   saveSettings,
   storeLocation,
+  writeDocument,
   type Hotkey,
   type Settings,
   type StoreLocation,
@@ -396,7 +397,7 @@ interface Snapshot {
   title: string | null
   buttons: number
   /** 「设置」按钮与最小化按钮的相对位置（null = 有一个没找到） */
-  gear: { minRight: number; gearLeft: number; gap: number } | null
+  gear: { gearRight: number; minLeft: number; gap: number } | null
   shiftAttr: boolean
   shrinkAttr: boolean
   r: { hdr: Rect | null; root: Rect | null; shell: Rect | null; ftr: Rect | null; content: Rect | null }
@@ -458,14 +459,14 @@ const SNAPSHOT_JS = `(() => {
     api: (window.web2app && typeof window.web2app === 'object') ? Object.keys(window.web2app).sort().join(',') : null,
     title: bar ? (bar.querySelector('.w2t-title') || {}).textContent : null,
     buttons: ['w2t-back','w2t-fwd','w2t-min','w2t-settings','w2t-max','w2t-close'].filter((c) => bar && bar.querySelector('.' + c)).length,
-    // 「设置按钮在最小化右侧」的位置判据：只比几何，不看 DOM 顺序 —— 顺序对了但被样式
+    // 「设置按钮在最小化左侧」的位置判据：只比几何，不看 DOM 顺序 —— 顺序对了但被样式
     // 挪到别处（float / order）一样是错的，而使用者提的就是「位置」。
     gear: (() => {
       const mn = bar && bar.querySelector('.w2t-min');
       const st = bar && bar.querySelector('.w2t-settings');
       if (!mn || !st) return null;
       const a = mn.getBoundingClientRect(), b = st.getBoundingClientRect();
-      return { minRight: +a.right.toFixed(1), gearLeft: +b.left.toFixed(1), gap: +(b.left - a.right).toFixed(1) };
+      return { gearRight: +b.right.toFixed(1), minLeft: +a.left.toFixed(1), gap: +(a.left - b.right).toFixed(1) };
     })(),
     shiftAttr: !!document.querySelector('[data-web2app-chrome-shift]'),
     shrinkAttr: !!document.querySelector('[data-web2app-chrome-shrink]'),
@@ -691,12 +692,12 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   p.check('38px 契约标记已写入 DOM', s.chromeH === '38', `实际 ${s.chromeH}`)
   p.check('顶部让位只做一次：html 不再留白（避免 76px 双留白）', s.htmlPadTop === '0px', `实际 ${s.htmlPadTop}`)
   p.check('六个按钮齐全', s.buttons === 6, `实际 ${s.buttons}`)
-  // 「设置」按钮必须在【最小化右侧】（使用者指定的位置）。顺序靠 DOM，位置靠几何 ——
+  // 「设置」按钮必须在【最小化左侧】（使用者指定的位置）。顺序靠 DOM，位置靠几何 ——
   // 两者都断言，免得「DOM 顺序对、CSS 把它挪走了」这种半对状态混过去。
   p.check(
-    '设置按钮紧挨最小化右侧',
-    !!s.gear && s.gear.gearLeft >= s.gear.minRight - 1 && s.gear.gearLeft - s.gear.minRight < 12,
-    s.gear ? `minRight=${s.gear.minRight} gearLeft=${s.gear.gearLeft}` : '未找到设置按钮'
+    '设置按钮紧挨最小化左侧',
+    !!s.gear && s.gear.gearRight <= s.gear.minLeft + 1 && s.gear.minLeft - s.gear.gearRight < 12,
+    s.gear ? `gearRight=${s.gear.gearRight} minLeft=${s.gear.minLeft}` : '未找到设置按钮'
   )
   p.check(
     'window.web2app 白名单 API 就位',
@@ -795,7 +796,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   await sleep(500)
   p.check('最大化按钮可还原', !win.isMaximized(), `isMaximized=${win.isMaximized()}`)
 
-  // ---------- 9.1 标题栏「设置」按钮（最小化右侧）→ 真的打开设置窗 ----------
+  // ---------- 9.1 标题栏「设置」按钮（最小化左侧）→ 真的打开设置窗 ----------
   // 完整链路：注入脚本 → window.web2app.openSettings()（preload 白名单）→ IPC win:open-settings
   //          → 主进程 openSettings() → openSettingsWindow()。
   // 这里必须**真的点按钮**：任何一环断掉，表象都是「按钮点了没反应」，而直接调
@@ -836,9 +837,10 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   let side: SidecarHandle | null = null
   try {
     side = await ctx.startSidecar({ url: authUrl, noProxy: false })
+    // proxyUrl 自带一次性随机门禁密钥（256-bit → 43 字符 URL-safe base64）。
     p.check(
-      'sidecar 启动并完成握手',
-      /^http:\/\/127\.0\.0\.1:\d+\/$/.test(side.proxyUrl),
+      'sidecar 启动并完成握手（入口 URL 带 w2a_key 门禁密钥）',
+      /^http:\/\/127\.0\.0\.1:\d+\/\?w2a_key=[A-Za-z0-9_-]{43}$/.test(side.proxyUrl),
       `proxyUrl=${side.proxyUrl}`
     )
   } catch (e) {
@@ -846,12 +848,26 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   }
 
   if (side) {
+    // 用入口 URL 里的密钥拼出同源下的具体路径（直接字符串拼接会把 path 接进 query）。
+    const gate = (path: string): string => {
+      const u = new URL(side!.proxyUrl)
+      u.pathname = path
+      return u.toString()
+    }
+    const rawRoot = new URL(side.proxyUrl).origin
+
     // 先证明「不带凭据确实会被拒」：否则后面的「代理带上了凭据」是假通过
     //（比如夹具站点压根没在鉴权）。
     const direct = await fetch(`${base}/auth.html`)
     p.check('直连上游（不带凭据）被拒 401', direct.status === 401, `实际 ${direct.status}`)
 
-    const viaProxy = await fetch(`${side.proxyUrl}auth.html`)
+    // 门禁先于转发生效：无密钥 / 错密钥一律 404（不透露代理存在，防本机扫描借道）。
+    const noKey = await fetch(`${rawRoot}/auth.html`)
+    p.check('无门禁密钥访问代理返回 404（隐藏代理身份）', noKey.status === 404, `实际 ${noKey.status}`)
+    const badKey = await fetch(`${rawRoot}/auth.html?w2a_key=wrong`)
+    p.check('错误门禁密钥访问代理返回 404', badKey.status === 404, `实际 ${badKey.status}`)
+
+    const viaProxy = await fetch(gate('/auth.html'))
     p.check('经代理访问上游返回 200', viaProxy.status === 200, `实际 ${viaProxy.status}`)
     const lastAuth = ctx.seen.httpAuth[ctx.seen.httpAuth.length - 1]
     p.check(
@@ -867,7 +883,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     // `Builder::header`（append 语义）下会向上游发出**两个** Origin（逗号拼接），
     // 比不改写更糟 —— 做 Origin 校验的后端会直接拒连。修法是透传时就跳过 origin。
     // 这里显式带一个假的浏览器 Origin，看上游收到什么。
-    await fetch(`${side.proxyUrl}auth.html`, { headers: { Origin: 'http://127.0.0.1:9999' } })
+    await fetch(gate('/auth.html'), { headers: { Origin: 'http://127.0.0.1:9999' } })
     const lastOrigin = ctx.seen.authOrigins[ctx.seen.authOrigins.length - 1]
     p.check(
       '上游收到的 Origin 被改写为上游源（且只有一个）',
@@ -877,7 +893,9 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
 
     // ---- WebSocket：M2 的核心用例 ----
     // WebView2 时代「页面能开但实时联动失效」的根因就是 WS 握手没带凭据。
-    await win.loadURL(side.proxyUrl + 'ws.html')
+    // 文档 URL 带 query 密钥（首访回种 HttpOnly cookie）；页面里的 WS 只连 /ws 不带密钥，
+    // 能通就证明根绝对路径资源/WS 靠 cookie 过门禁这条链路真实成立。
+    await win.loadURL(gate('/ws.html'))
     const wsReady = await waitUntil(async () => {
       const n = (await win.webContents.executeJavaScript(
         'window.__ws && window.__ws.msgs ? window.__ws.msgs.length : 0',
@@ -1006,15 +1024,15 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     file: 'settings.json',
   })
   p.check(
-    'data\\ 无同名文件时写向旧版位置（%APPDATA%\\<app_name>\\settings.json）',
-    fakeLoc.write === join(tmpdir(), 'w2a-no-such-appdata', 'Demo_App', 'settings.json'),
+    '写入一律落在数据目录（与 data_dir 契约一致，绿色版搬目录不会漏掉设置）',
+    fakeLoc.write === join(tmpdir(), 'w2a-no-such-data', 'settings.json'),
     fakeLoc.write
   )
   p.check(
-    '读取候选同时覆盖 data\\ 与旧版目录（先本地后旧版）',
+    '读取候选：数据目录优先、旧位置（%APPDATA%\\<app_name>）兜底（升级兼容）',
     fakeLoc.read.length === 2 &&
-      fakeLoc.read[0] === join(tmpdir(), 'w2a-no-such-data', 'settings.json') &&
-      fakeLoc.read[1] === fakeLoc.write,
+      fakeLoc.read[0] === fakeLoc.write &&
+      fakeLoc.read[1] === join(tmpdir(), 'w2a-no-such-appdata', 'Demo_App', 'settings.json'),
     JSON.stringify(fakeLoc.read)
   )
 
@@ -1068,8 +1086,35 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     const text = readFileSync(loc.write, 'utf8')
     p.check(
       '文档键序规范（设置三键 → window，两空格缩进）',
-      text.indexOf('"wake_hotkey"') < text.indexOf('"window"') && text.includes('\n  "window": {'),
+      text.indexOf('"wake_hotkey"') < text.indexOf('"window"') &&
+        text.includes('\n  "window": {'),
       text.replace(/\s+/g, ' ').slice(0, 140)
+    )
+
+    // ⚠️⚠️ 落点搬家的守卫（2026-09-23）：老位置（`%APPDATA%\<app_name>\`）里还有用户设置时，
+    // 第一次保存必须「读老位置、写新位置（数据目录）」，且**老位置的值（含 window 段）不能丢**。
+    // 只认写入位置那份（还不存在）就会读成空文档 ⇒ 用户升级后看到设置被重置。
+    const dirNew = join(tmpStore, 'data')
+    const dirOld = join(tmpStore, 'appdata')
+    const locNew = join(dirNew, 'settings.json')
+    const locOld = join(dirOld, 'settings.json')
+    const legacyLoc: StoreLocation = { read: [locOld], write: locOld }
+    writeDocument(legacyLoc, { settings: want, window: geom })
+    const oldBefore = readFileSync(locOld, 'utf8')
+    saveSettings({ read: [locNew, locOld], write: locNew }, want2)
+    const moved = loadSettings({ read: [locNew, locOld], write: locNew })
+    p.check(
+      '落点搬家：读旧位置、写数据目录，且 window 段跟着搬过去',
+      existsSync(locNew) &&
+        JSON.stringify(moved.settings) === JSON.stringify(want2) &&
+        JSON.stringify(loadWindowState({ read: [locNew], write: locNew }).state) ===
+          JSON.stringify(geom),
+      `new=${locNew} settings=${JSON.stringify(moved.settings)}`
+    )
+    p.check(
+      '落点搬家：旧位置的文件一个字节都不动（只读兼容，不迁移不删除）',
+      readFileSync(locOld, 'utf8') === oldBefore,
+      locOld
     )
   } finally {
     rmSync(tmpStore, { recursive: true, force: true })
@@ -1189,7 +1234,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     )) as number
     p.check('设置窗未注入主窗的自绘标题栏（它自带面板头部）', barCount === 0, `barCount=${barCount}`)
 
-    // 设置窗是**无边框窗**（frame:false）：版式改成「没有顶部的窗体、面板居中、正文可滚动」，
+    // 设置窗是**无边框窗**（frame:false）：版式是「没有顶部的窗体、面板铺满整窗、正文可滚动」，
     // 标题 / 关闭 / 拖动都由 dist/settings.html 自绘。
     // 判据用「窗口区 == 内容区」：带系统标题栏时两者至少差一条标题栏（~31px），无边框时应为 0
     //（容差 2px 兜住 DWM 取整）。
@@ -1202,7 +1247,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
       `bounds=${JSON.stringify(wb)} content=${JSON.stringify(cb)}`
     )
 
-    // 版式契约逐条钉住：面板四周留底衬 / 水平居中 / 正文是唯一滚动容器 / 头部可拖动。
+    // 版式契约逐条钉住：面板铺满整窗 / 无外框装饰 / 正文是唯一滚动容器 / 头部可拖动。
     // 这些正是使用者这次提的四件事，缺任何一条都会在界面上一眼看出来。
     const uiJson = (await swin.webContents.executeJavaScript(
       `(() => {
@@ -1211,19 +1256,21 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
           return { l:+r.left.toFixed(1), t:+r.top.toFixed(1), r:+r.right.toFixed(1), b:+r.bottom.toFixed(1) }; };
         const bd = document.querySelector('.panel-bd');
         const hd = document.querySelector('.panel-hd');
+        const p = document.querySelector('.panel');
+        const pcs = p ? getComputedStyle(p) : null;
         let drag = null;
         if (hd) { const cs = getComputedStyle(hd);
           try { drag = cs.webkitAppRegion || cs.getPropertyValue('-webkit-app-region'); } catch (e) {} }
         return JSON.stringify({
           panel: g('.panel'), bd: g('.panel-bd'),
+          panelBorder: pcs ? pcs.borderTopWidth : null,
+          panelRadius: pcs ? pcs.borderTopLeftRadius : null,
+          panelShadow: pcs ? pcs.boxShadow : null,
           bdOv: bd ? getComputedStyle(bd).overflowY : null,
           htmlOv: getComputedStyle(document.documentElement).overflowY,
           bodyOv: getComputedStyle(document.body).overflowY,
           drag: drag || null,
           hasX: !!document.getElementById('closeBtn'),
-          sideDiff: (() => { const p = document.querySelector('.panel'); if (!p) return null;
-            const r = p.getBoundingClientRect();
-            return +(r.left - (window.innerWidth - r.right)).toFixed(1); })(),
           iw: window.innerWidth, ih: window.innerHeight
         });
       })()`,
@@ -1232,24 +1279,33 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     const u = JSON.parse(uiJson) as {
       panel: { l: number; t: number; r: number; b: number } | null
       bd: { l: number; t: number; r: number; b: number } | null
+      panelBorder: string | null
+      panelRadius: string | null
+      panelShadow: string | null
       bdOv: string | null
       htmlOv: string | null
       bodyOv: string | null
       drag: string | null
       hasX: boolean
-      sideDiff: number | null
       iw: number
       ih: number
     }
+    // ⚠️ 2026-09-23 使用者指「设置界面有大块空边框」⇒ 版式从「居中面板 + 四周底衬」改成
+    //    「面板铺满整窗」。判据相应反过来：面板四边必须贴住窗口（旧版断言的是「留出底衬」，
+    //    它现在会**故意失败**，这是版本演进的正常代价，不是回归）。
     p.check(
-      '设置页：面板四周留出底衬（无边框窗靠它界定窗口边界）',
-      !!u.panel && u.panel.l > 0 && u.panel.t > 0 && u.panel.r < u.iw && u.panel.b <= u.ih,
+      '设置页：面板铺满整窗（无底衬，四边贴住窗口）',
+      !!u.panel &&
+        u.panel.l <= 0.5 &&
+        u.panel.t <= 0.5 &&
+        Math.abs(u.panel.r - u.iw) <= 0.5 &&
+        u.panel.b >= u.ih - 1,
       uiJson
     )
     p.check(
-      '设置页：面板水平居中（左右留白相等）',
-      u.sideDiff !== null && Math.abs(u.sideDiff) <= 1,
-      `左右留白差 ${u.sideDiff}`
+      '设置页：面板无外框装饰（无 border / 圆角 / 外阴影）',
+      u.panelBorder === '0px' && u.panelRadius === '0px' && u.panelShadow === 'none',
+      `border=${u.panelBorder} radius=${u.panelRadius} shadow=${u.panelShadow}`
     )
     p.check(
       '设置页：正文是唯一的滚动容器（内容多时可滚动）',
@@ -1350,7 +1406,35 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   })
   p.check('关闭托盘开关后图标已销毁（复原）', !ctx.m3.hasTray(), 'hasTray() = true')
 
-  // ---------- 15. 关闭按钮（收尾：会真的销毁窗口） ----------
+  // ---------- 15. M4 页面行为：F12 / 右键菜单 / 下载接管 ----------
+  // 探针在这里只验「挂上了 + F12 真能开」这类**集成**事实；
+  // 「菜单该出哪些项、另存为对话框给什么默认值」属纯规则，由 test/page-behavior.test.ts 钉。
+  //
+  // ⚠️ 三条 listenerCount 断言是防「改了 index.ts 忘了挂」：不挂的话功能静默消失、
+  //    编译照过、探针其它 127 条全绿 —— 正是最难发现的那一类回归。
+  const wc = win.webContents
+  p.check(
+    'F12：已挂 before-input-event（未打包态应启用）',
+    wc.listenerCount('before-input-event') > 0,
+    `listenerCount=${wc.listenerCount('before-input-event')}`
+  )
+  p.check(
+    '右键菜单：已挂 context-menu',
+    wc.listenerCount('context-menu') > 0,
+    `listenerCount=${wc.listenerCount('context-menu')}`
+  )
+  p.check(
+    '下载接管：session 已挂 will-download',
+    wc.session.listenerCount('will-download') > 0,
+    `listenerCount=${wc.session.listenerCount('will-download')}`
+  )
+  // 真按一次 F12（detach 模式，不占页面空间），验证不只是「挂了个空监听器」
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'F12' })
+  const devtoolsOpened = await waitUntil(async () => wc.isDevToolsOpened(), 3000)
+  p.check('F12：按下后开发者工具真的打开了', devtoolsOpened, '3s 内 isDevToolsOpened() 仍为 false')
+  if (devtoolsOpened) wc.closeDevTools()
+
+  // ---------- 16. 关闭按钮（收尾：会真的销毁窗口） ----------
   await clickBtn('w2t-close')
   const closed = await new Promise<boolean>((resolve) => {
     const t = setTimeout(() => resolve(false), 3000)
@@ -1517,7 +1601,7 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   if (tabs.active && tabs.active.label !== label2) tabs.closeTab(tabs.active.label)
   tabs.activate(label2!)
 
-  // ---------- 标签栏「设置」按钮（最小化右侧）→ 打开设置窗 ----------
+  // ---------- 标签栏「设置」按钮（最小化左侧）→ 打开设置窗 ----------
   // 位置 + 链路成对断言。链路上「三处逐字一致」最容易断：shell.html 的
   // invoke("open_settings") ↔ shell-preload 的 ALLOWED 白名单 ↔ 主进程
   // ipcMain.handle('tabs:open_settings')；任一漏改，表象都是「按钮点了没反应」。
@@ -1526,14 +1610,15 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
        const mn = document.getElementById('min'), st = document.getElementById('settings');
        if (!mn || !st) return JSON.stringify({ found: false });
        const a = mn.getBoundingClientRect(), b = st.getBoundingClientRect();
-       return JSON.stringify({ found: true, minRight: +a.right.toFixed(1), gearLeft: +b.left.toFixed(1) });
+       // ⚠️ 顺序判据必须用「几何次序」而不是 DOM 次序：先比横坐标谁在左。
+       return JSON.stringify({ found: true, gearRight: +b.right.toFixed(1), minLeft: +a.left.toFixed(1) });
      })()`,
     true
   )) as string
-  const gear = JSON.parse(gearJson) as { found: boolean; minRight?: number; gearLeft?: number }
+  const gear = JSON.parse(gearJson) as { found: boolean; gearRight?: number; minLeft?: number }
   p.check(
-    '标签栏有「设置」按钮，且在最小化右侧',
-    gear.found && (gear.gearLeft ?? 0) >= (gear.minRight ?? 0) - 1,
+    '标签栏有「设置」按钮，且在最小化左侧',
+    gear.found && (gear.gearRight ?? 0) <= (gear.minLeft ?? 0) + 1,
     gearJson
   )
   await win.webContents.executeJavaScript(`document.getElementById('settings').click(); true`, true)

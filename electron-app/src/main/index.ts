@@ -58,6 +58,12 @@ import {
 } from './settings-window'
 import { TabManager } from './tabs'
 import { rawConsole, silenceConsole, startFileLogging, type FileLogHandle } from './startup-log'
+import {
+  attachContextMenu,
+  attachDevtools,
+  attachDownload,
+  devtoolsEnabled,
+} from './page-behavior'
 import { clearWebData } from './web-data'
 
 /** 自绘标题栏高度（逻辑像素）。与 Tauri 版一致，勿改。 */
@@ -169,10 +175,11 @@ const paths = setupPortablePaths({
 // ---------- 1.1 settings.json 的位置（M3） ----------
 // ⚠️ 这是**运行期唯一**的一份 JSON：设置的三个开关 + `window` 段的窗口几何同住一个文件
 //    （2026-09-23 起；此前几何单独占一个 window-state.json）。
-//    它**不写在 data\ 里**，而是优先复用旧版（Tauri）的 %APPDATA%\<app_name>\ ——
-//    因为「settings.json 与旧版可互相读取」是硬契约：用户在两个壳之间来回切换时，
-//    勾过的托盘开关、设过的快捷键、上次的窗口位置不该丢。细节与取舍见 src/main/settings.ts 的文件头。
-//    用户若把同名文件放进 data\，则以它为准（读哪写哪）。
+//    **落点 = 数据目录**（`<data_dir>\settings.json`，即 `paths.dataDir` 下），与 `data_dir`
+//    字段的语义完全一致（`docs/packaging-config.md` §4.3）：绿色版把 exe 搬走时，设置与
+//    cookie / 缓存 / 日志**一起**跟着走；Tauri 版同规则、同位置（`config.rs::store_dir`）。
+//    旧位置 `%APPDATA%\<app_name>\settings.json` 只作**读取候选**（升级兼容）——
+//    新位置还没写过时读它，第一次写盘即落到新位置。细节与取舍见 src/main/settings.ts 的文件头。
 const storeOpts = {
   dataDir: paths.dataDir,
   appDataDir: app.getPath('appData'),
@@ -322,7 +329,7 @@ let tabManager: TabManager | null = null
  *
  * ⚠️⚠️ **探针模式下必须让「起窗模式」与「断言组」一一对应**，因此 `cfg.tabs_enabled`
  *    **不参与**探针分叉：
- *      - `--probe`         → 强制单窗口模式，跑 126 条单窗口断言（按「主窗口加载
+ *      - `--probe`         → 强制单窗口模式，跑 130 条单窗口断言（按「主窗口加载
  *                            splash:// + 标题栏/滚动条/窗口按钮」设计）；
  *      - `--probe --tabs`  → 强制页签模式，跑 26 条页签断言。
  *    若写成 `cfg.tabs_enabled || TABS_PROBE`，则用户一旦把 config.json 的页签开关打开
@@ -503,7 +510,7 @@ function registerWindowIpc(): void {
     assertPrivileged(e)
     winOf(e)?.close()
   })
-  // 标题栏「设置」按钮（最小化右侧）—— 与托盘菜单 / Shift+F1 共用 openSettings()。
+  // 标题栏「设置」按钮（最小化左侧）—— 与托盘菜单 / Shift+F1 共用 openSettings()。
   ipcMain.handle('win:open-settings', (e) => {
     assertPrivileged(e)
     openSettings()
@@ -565,7 +572,7 @@ function registerTabsIpc(): void {
     assertShell(e).close()
     return null
   })
-  // 标签栏的「设置」按钮：与单窗口模式的最小化右侧那个按钮同一个入口，
+  // 标签栏的「设置」按钮：与单窗口模式的最小化左侧那个按钮同一个入口，
   // 命令名 `open_settings` 与 shell.html / shell-preload 白名单 / 这里三处逐字一致。
   ipcMain.handle('tabs:open_settings', (e) => {
     assertShell(e)
@@ -623,8 +630,23 @@ function registerAuthHandler(): void {
       return
     }
     if (target?.user) {
-      event.preventDefault()
-      callback(target.user, target.pass)
+      // 只向【入口主机】回填凭据。页面里任何第三方子资源（或被注入内容诱导出的外域
+      // 401）都可能触发 login 事件；不校验主机就等于把入口站点的账号密码盲发给任意域。
+      // authInfo.host 含非默认端口（与 URL.host 同形态），直接比对即可。
+      let entryHost: string | null = null
+      try {
+        entryHost = new URL(target.url).host
+      } catch {
+        entryHost = null
+      }
+      if (entryHost && authInfo.host === entryHost) {
+        event.preventDefault()
+        callback(target.user, target.pass)
+        return
+      }
+      console.warn(
+        `[web2app] 鉴权主机 ${authInfo.host} 与入口主机 ${entryHost ?? '(未知)'} 不一致，拒绝回填凭据`
+      )
       return
     }
     // 不留 preventDefault：交给 Chromium 默认行为（取消），并留下可排查的日志
@@ -745,17 +767,12 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
     sendOverlay({ kind: 'fail', title: '加载失败', detail })
   })
 
-  // 下载：M4 接「另存为」对话框（对标 save_dialog.rs）。先记录，保留 Electron 默认行为。
+  // 下载接管（M4）：弹「另存为」让用户定落盘位置，对标 Tauri 的 save_dialog.rs。
   // ⚠️ session 是共享的：主窗口与所有内容视图（WebContentsView）都没设 partition，都挂在
   //   defaultSession 上，所以这里挂一次 `will-download` 即覆盖**所有**视图的下载（§7-9 的
   //   「逐视图挂载」在共享 session 前提下等价于「挂一次全局生效」）。若未来给内容视图设
   //   独立 partition，这条必须改成逐视图挂载。
-  win.webContents.session.on('will-download', (_e, item) => {
-    console.log(
-      `[web2app] 开始下载：${item.getFilename()}（${item.getTotalBytes()} 字节）` +
-        ` ← ${item.getURL()}` + '；M4 会替换为自绘另存为对话框'
-    )
-  })
+  attachDownload(win.webContents.session, () => win)
 
   // 启动页加载完成 → 解析目标地址并导航过去（Tauri 侧同样是「启动页先出，后台准备完再跳」）
   win.webContents.on('did-finish-load', () => {
@@ -811,6 +828,9 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
           console.error(`[web2app] 页签加载失败：${detail}`)
           tabManager?.setTabTitle(_label, '加载失败')
         })
+        // M4 页面行为：F12 / 右键菜单（与单窗口模式同一套实现，逐视图挂）
+        attachDevtools(view.webContents, devtoolsEnabled(app.isPackaged, cfg.debug))
+        attachContextMenu(view.webContents, openSettings)
         await view.webContents.loadURL(t.url).catch((e) => {
           console.warn(`[web2app] 内容页 loadURL 被拒绝：${(e as Error).message}`)
         })
@@ -819,6 +839,15 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
 
     // 窗口 resize → 重排全部视图 bounds
     win.on('resize', () => tabManager?.relayout())
+  }
+
+  // ---------- M4 页面行为：F12 / 右键菜单 ----------
+  // 多页签模式下主窗口的 webContents 只是壳页面（shell.html + 标签栏），用户并不跟它交互，
+  // 给它挂右键菜单会在标签栏上弹出「返回 / 前进」这类**错位**的项 ⇒ 只给内容视图挂
+  // （见上面 onSpawn）。单窗口模式下页面就在这个 webContents 里，挂它。
+  if (!TABS_MODE) {
+    attachDevtools(win.webContents, devtoolsEnabled(app.isPackaged, cfg.debug))
+    attachContextMenu(win.webContents, openSettings)
   }
 
   return win
@@ -843,10 +872,40 @@ function openSettings(): void {
   })
 }
 
+/**
+ * 唤起主窗口（托盘点击/菜单「显示」/第二实例），并在多页签空壳时自愈补建。
+ *
+ * 死局场景：关掉最后一个页签会调 host.close()，而启用「关闭最小化到托盘」时 close
+ * 被拦成 hide —— 恢复后窗口是没有任何内容视图的空壳（shell.html 无「+」按钮，
+ * spawnTab 也没有 IPC 入口）。与 Tauri tabs.rs 的 set_tabs_visible 自愈语义对齐：
+ * 窗口重新可见且页签数为 0 时自动补建一个默认页签。
+ */
+function presentMainWindow(): void {
+  showMainWindow(mainWindow)
+  // 窗口已销毁（无托盘驻留时关窗即退出）就别再往废 host 上挂视图。
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
+  if (TABS_MODE && tabManager && tabManager.count === 0) {
+    void tabManager
+      .spawnTab()
+      .then((label) => {
+        if (!label) console.warn('[web2app] 恢复窗口补建页签被拒（可能已达上限）')
+      })
+      .catch((e) => console.error('[web2app] 恢复窗口时补建页签失败：', e))
+  }
+}
+
 function trayActions() {
   return {
-    toggle: () => toggleMainWindow(mainWindow),
-    onShow: () => showMainWindow(mainWindow),
+    toggle: () => {
+      // 可见 → 收进托盘；不可见 → 走带页签自愈的唤起路径（不能直接 toggle，
+      // 否则最后一个页签关掉后的空壳无法恢复）。
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        toggleMainWindow(mainWindow)
+      } else {
+        presentMainWindow()
+      }
+    },
+    onShow: () => presentMainWindow(),
     onHide: () => hideMainWindow(mainWindow),
     onSettings: () => openSettings(),
     // ⚠️ 必须先置 quitting：否则 app.quit() 触发的 close 事件会被「关闭到托盘」分支拦下，
@@ -919,7 +978,7 @@ if (!gotLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    showMainWindow(mainWindow)
+    presentMainWindow()
   })
 
   app.whenReady().then(async () => {
@@ -1011,9 +1070,10 @@ if (!gotLock) {
     logStartup()
 
     // ---------- M3：托盘 / 全局快捷键 ----------
-    // ⚠️ 探针模式**不**应用真实设置：探针会创建托盘图标、抢占全局快捷键，
-    //    跑在用户机器上时「测试顺手改了我的桌面环境」是不可接受的副作用。
-    //    探针改用 ctx.m3 的钩子按需触发同样的路径（见 probe.ts M3 段落）。
+    // ⚠️ 启动期在探针模式下**不**自动应用真实设置：否则探针一跑就创建托盘图标、抢占全局
+    //    快捷键，在用户机器上留下「测试顺手改了桌面环境」的副作用。
+    //    探针改用 ctx.m3 的钩子**按需**触发同一条 applySettings 路径（m3 断言的就是这些
+    //    真实副作用，见 probe.ts M3 段落；断言语境下的创建/抢占是被显式验证并收尾的）。
     if (!PROBE) {
       try {
         applySettings(loadedSettings.settings, { persist: false })

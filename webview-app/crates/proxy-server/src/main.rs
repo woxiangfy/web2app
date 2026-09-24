@@ -4,8 +4,9 @@
 //!
 //! Electron 侧有两块能力没法（也不该）用 JS 重写：
 //!
-//! * **本地反向代理**：给【每一个】请求（含 WebSocket 握手）统一注入 `Authorization: Basic`。
-//!   这是 741 行已经过测试的 Rust（流式转发、Cookie Domain 重写、WS 双向隧道）。
+//! * **本地反向代理**：给【每一个】请求（含 WebSocket 握手）统一注入 `Authorization: Basic`，
+//!   并对监听端口做一次性随机密钥门禁（无密钥一律 404，防本机扫描借道）。
+//!   这是 825 行已经过测试的 Rust（流式转发、Cookie Domain 重写、WS 双向隧道、入口门禁）。
 //! * **动态域名解析**：DNS TXT → Ed25519 验签 → AES-GCM 解密。在 Node 侧要引 Ed25519 + HKDF +
 //!   AES-GCM 一整套实现，且必须与 `resolve-core` 的字节级格式严丝合缝 —— 风险极高、收益为零。
 //!
@@ -15,7 +16,8 @@
 //! ## 与宿主的契约
 //!
 //! 1. 宿主 spawn 本进程，用命令行参数把上游地址交进来（见 `--help`）；
-//! 2. 就绪后向 **stdout 打且仅打一行 JSON**，宿主按行解析拿到 `proxyUrl` 并导航过去；
+//! 2. 就绪后向 **stdout 打且仅打一行 JSON**，宿主按行解析拿到 `proxyUrl` 并导航过去
+//!    （`proxyUrl` 自带一次性门禁密钥 `?w2a_key=...`，无密钥访问代理一律 404）；
 //!    失败同样打一行 JSON（`ok:false` + `kind`），随后以退出码 1 结束；
 //! 3. 之后本进程常驻转发流量。**stdin 关闭（EOF）= 宿主已退出 ⇒ 自己退出** ——
 //!    这是防僵尸进程的兜底：宿主被强杀（或被任务管理器结束）时来不及调 `kill`。
@@ -103,7 +105,7 @@ const USAGE: &str = r#"w2a-proxy — web2app 本地反向代理 / 动态域名�
   -V, --version            显示版本
 
 输出契约（stdout 仅一行 JSON）：
-  成功 {"ok":true,"proxyUrl":"http://127.0.0.1:PORT/","resolvedUrl":...,"authUser":...}
+  成功 {"ok":true,"proxyUrl":"http://127.0.0.1:PORT/?w2a_key=<随机密钥>","resolvedUrl":...,"authUser":...}
   失败 {"ok":false,"kind":"args|resolve|proxy","error":"..."}  并退出码 1
 
 为什么有 --url-stdin：

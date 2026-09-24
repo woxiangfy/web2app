@@ -1,4 +1,4 @@
-//! 运行期配置文档：`<配置目录>/settings.json` —— **全应用唯一的一份持久化 JSON**。
+//! 运行期配置文档：`<数据目录>/settings.json` —— **全应用唯一的一份持久化 JSON**。
 //!
 //! 形态：设置字段**平铺在顶层**（与旧 `settings.json` 逐字节兼容，老文件直接可读），
 //! 窗口几何整体放在 `window` 段：
@@ -18,6 +18,16 @@
 //! ⚠️ 旧 `window-state.json` **不再读也不再写**（已确认不做迁移）：升级后窗口会回一次
 //!    默认尺寸/位置，那个文件就此成为死文件，可手工删除。
 //!
+//! **2026-09-23 落点改为数据目录**：此前落 `%APPDATA%\<app_name>`（"配置根"），
+//! 与 `data_dir` 字段无关 —— 用户选择绿色版（`data_dir = "data"`）时，
+//! cookie / 缓存 / 日志都跟着 exe 走，唯独这个 JSON 死活留在 `%APPDATA%`，是同一套
+//! 「程序的数据」里唯一不听话的一项。现在**由 [`crate::config::store_dir`] 统一决定**：
+//! 它就是 `data_dir`（Windows）/ 应用私有目录（Android），与 WebView2 用户数据目录**同一个**。
+//! ⚠️ 旧位置（`%APPDATA%\<app_name>\settings.json`）只作**读取候选**（升级兼容，不迁移、
+//!    不删除）：新位置还没写过时读它，第一次写盘就落到新位置，此后旧文件是死文件。
+//!    读取候选由 [`candidates`] 统一给出，**读也用它、写只用主位置** —— 否则
+//!    「用旧文件的值算出来的新文档」会写到新位置、而旧文件被绕过，用户看到的是设置被重置。
+//!
 //! ⚠️⚠️ 合并后的唯一真风险是**两段互相覆盖**：写入方有两个（设置页保存 vs 窗口关闭时记几何），
 //! 从前各写各的文件天然隔离，现在共用一个文件。所以本模块对外**只提供 [`update`]**
 //! （以及配套的 [`load`]）：读盘 → 只替换自己那一段 → 写回。任何「拿内存里的整份文档
@@ -30,6 +40,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
@@ -68,18 +79,41 @@ struct DocOut<'a> {
     window: Option<&'a WindowGeom>,
 }
 
-/// 文档落点：目录统一走 `crate::config::config_dir`（桌面端取 app_config_dir 父目录、
-/// Android 用自身 dataDir，再拼自定义 app_name），与设置、窗口几何**同一个文件**。
+/// 文档落点：目录统一走 `crate::config::store_dir`（Windows = 数据目录，即 `data_dir`
+/// 字段解析出来的那个目录，与 WebView2 用户数据目录**同一个**；Android = 应用私有配置目录）。
 pub fn path(app: &AppHandle) -> Option<PathBuf> {
+    Some(crate::config::store_dir(app)?.join(FILE))
+}
+
+/// 旧位置（2026-09-23 之前）：`%APPDATA%\<app_name>\settings.json`，**只读候选**。
+///
+/// Android 上新旧位置是同一个目录（`config_dir == store_dir`），[`candidates`] 会去重。
+pub fn legacy_path(app: &AppHandle) -> Option<PathBuf> {
     Some(crate::config::config_dir(app)?.join(FILE))
 }
 
-/// 读取整份文档；文件不存在或顶层 JSON 损坏时返回默认值（不抛错）。
-pub fn load(app: &AppHandle) -> Document {
-    match path(app) {
-        Some(p) => load_at(&p),
-        None => Document::default(),
+/// 读取候选：**新位置在前、旧位置在后**（去重后返回）。
+///
+/// ⚠️ [`load`] 与 [`update`] 都走这一份候选 —— 读的位置与写的位置分开是有意的：
+/// 读要能兼容升级前留下的文件，写必须只落在新位置（否则「读旧文件算出来的文档」
+/// 会写到新位置，而旧文件被绕过 ⇒ 用户看到设置被重置）。
+pub fn candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(p) = path(app) {
+        out.push(p);
     }
+    if let Some(p) = legacy_path(app) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// 读取整份文档：按 [`candidates`] 顺序取第一份**存在**的文件；都不存在（首次启动）
+/// 或顶层 JSON 损坏时给默认值（不抛错）。
+pub fn load(app: &AppHandle) -> Document {
+    read_doc(&candidates(app))
 }
 
 /// 写入整份文档。⚠️ 调用方几乎总是想要 [`update`] 而不是这个 —— 直接用它会整体覆盖另一段。
@@ -88,15 +122,33 @@ pub fn save(app: &AppHandle, doc: &Document) -> Result<(), String> {
     save_at(&p, doc)
 }
 
-/// **读-改-写**：读盘 → 交给 `f` 改（只该动自己那一段）→ 写回。
+/// **读-改-写**：按 [`candidates`] 读盘 → 交给 `f` 改（只该动自己那一段）→ 写回新位置。
 ///
 /// 设置页保存与窗口几何记录**都必须**走这里，这样「挪窗口」和「改设置」互不覆盖。
+/// 升级兼容也在这里：新位置还没有文件时读到的是旧位置那份，第一次写盘即落到新位置。
 pub fn update(app: &AppHandle, f: impl FnOnce(&mut Document)) -> Result<(), String> {
     let p = path(app).ok_or_else(|| "无法获取配置目录".to_string())?;
-    update_at(&p, f)
+    let cands = candidates(app);
+    update_with(&p, &cands, f)
 }
 
 // ---------- 纯路径版本（单测直接打真文件，不必构造 AppHandle） ----------
+
+/// 按顺序读第一份**存在**的文件；都没有时默认值。
+fn read_doc(cands: &[PathBuf]) -> Document {
+    for (i, p) in cands.iter().enumerate() {
+        if p.exists() {
+            if i > 0 {
+                dlog!(
+                    "[store] 新位置没有 settings.json，改用旧位置（只读兼容）：{}",
+                    p.display()
+                );
+            }
+            return load_at(p);
+        }
+    }
+    Document::default()
+}
 
 fn load_at(p: &Path) -> Document {
     let text = match fs::read_to_string(p) {
@@ -122,14 +174,51 @@ fn save_at(p: &Path, doc: &Document) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serialize_document(doc)?;
-    fs::write(p, json).map_err(|e| e.to_string())
+    // ⚠️⚠️ **原子替换**：直接覆盖写（`fs::write`）时，写一半进程被杀 / 断电会留下**截断的 JSON**
+    // —— 下次启动整份解析失败 ⇒ 设置与窗口几何一起被回默认值（用户视角「设置全丢」，且**不报错**）。
+    // 做法与 Electron 侧 `settings.ts::writeDocument` 一致：同目录临时文件 → flush → rename。
+    // ⚠️ 临时文件必须与目标**同目录**：跨卷 rename 会退化成非原子的「复制 + 删除」。
+    let tmp = atomic_tmp_path(p);
+    let r = match write_tmp_and_sync(&tmp, &json) {
+        Ok(()) => fs::rename(&tmp, p).map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+    if r.is_err() {
+        // 失败就别把临时文件留在数据目录里（「目录里多了个怪文件」会变成新的排查入口）。
+        let _ = fs::remove_file(&tmp);
+    }
+    r
+}
+
+/// 目标文件**同目录**下的临时文件名：`<目标>.tmp-<pid>`。
+fn atomic_tmp_path(target: &Path) -> PathBuf {
+    let mut s = target.as_os_str().to_owned();
+    s.push(format!(".tmp-{}", std::process::id()));
+    PathBuf::from(s)
+}
+
+/// 写临时文件并 `sync_all` 落盘：rename 之前内容必须真的在磁盘上，
+/// 否则「rename 成功但数据在页缓存里」时断电照样丢。
+fn write_tmp_and_sync(p: &Path, json: &str) -> Result<(), String> {
+    let mut f = fs::File::create(p).map_err(|e| e.to_string())?;
+    f.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
+}
+
+/// 读-改-写的共用实现：`cands` = 读取候选（主位置在前），`write_to` = 落盘位置。
+fn update_with(
+    write_to: &Path,
+    cands: &[PathBuf],
+    f: impl FnOnce(&mut Document),
+) -> Result<(), String> {
+    // 必须是「先读再改」：读到的是磁盘上别人的最新改动，`f` 只替换自己那一段。
+    let mut doc = read_doc(cands);
+    f(&mut doc);
+    save_at(write_to, &doc)
 }
 
 fn update_at(p: &Path, f: impl FnOnce(&mut Document)) -> Result<(), String> {
-    // 必须是「先读再改」：读到的是磁盘上别人的最新改动，`f` 只替换自己那一段。
-    let mut doc = load_at(p);
-    f(&mut doc);
-    save_at(p, &doc)
+    update_with(p, &[p.to_path_buf()], f)
 }
 
 /// 解析文档。`Err` = 顶层 JSON 坏了（整份不可用，调用方回退默认值）；
@@ -330,8 +419,9 @@ mod tests {
     /// ⚠️⚠️ **双壳互通契约**（electron-app/src/main/settings.ts）。
     ///
     /// 下面的字面量就是 Electron 壳 `writeDocument()` 写出来的**字节形态**
-    /// （`JSON.stringify(doc, null, 2)`：设置三键在前、`window` 在后）。两个壳共用
-    /// 同一个 `%APPDATA%\<app_name>\settings.json`，这里解析不了就意味着
+    /// （`JSON.stringify(doc, null, 2)`：设置三键在前、`window` 在后）。两个壳读写
+    /// 同一份 `settings.json`（写入落点为各自 data_dir；读取时仍把旧位置
+    /// `%APPDATA%\<app_name>\settings.json` 作为候选），这里解析不了就意味着
     /// 「在 Electron 版里改了设置/挪了窗口，回到 Tauri 版变回默认」——悄无声息。
     #[test]
     fn parse_accepts_electron_written_document() {
@@ -430,5 +520,162 @@ mod tests {
             assert!(!doc.settings.tray_enabled);
             assert_eq!(doc.window, None);
         });
+    }
+
+    /// **原子写**（2026-09-24，对齐 Electron 侧）：写盘后①内容完整可解析回同一份文档、
+    /// ②数据目录里**不留临时文件**。
+    ///
+    /// 守卫的是一条静默故障链：覆盖写被中途打断 ⇒ 留下截断 JSON ⇒ 下次启动整份解析失败
+    /// ⇒ 设置与窗口几何一起回默认，全程不报错。
+    #[test]
+    fn save_at_writes_complete_json_without_leaving_temp_file() {
+        with_temp("atomic", |p| {
+            save_at(
+                p,
+                &Document {
+                    settings: settings_a(),
+                    window: Some(geom()),
+                },
+            )
+            .expect("写盘应成功");
+
+            // ① 落盘的是完整文档（读回来与原值一致）
+            let back = load_at(p);
+            assert!(back.settings.tray_enabled, "写盘内容不完整或不一致");
+            assert_eq!(back.window, Some(geom()));
+
+            // ② 同目录下没有残留的临时文件
+            let dir = p.parent().expect("临时文件必有父目录");
+            let leftovers: Vec<String> = fs::read_dir(dir)
+                .expect("目录应存在")
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n != FILE)
+                .collect();
+            assert!(leftovers.is_empty(), "原子写留下了临时文件：{leftovers:?}");
+
+            // ③ 临时文件必须与目标**同目录**：跨卷 rename 会退化成非原子的「复制 + 删除」，
+            //    那还不如不绕这一圈。
+            let tmp = atomic_tmp_path(p);
+            assert_eq!(tmp.parent(), p.parent(), "临时文件必须与目标同目录");
+            assert_ne!(tmp, p.to_path_buf(), "临时文件名不能等于目标文件");
+        });
+    }
+
+    // ---------- 落点 = 数据目录（2026-09-23）：新旧位置的读取顺序与「写只落新位置」 ----------
+    // 这一组守卫的是「落点搬家」这个动作本身：搬错了/搬丢了的表象都是
+    // 「用户的设置莫名其妙回到默认」，而它不会报任何错。
+
+    /// 用后即删：把一组临时文件的**父目录**清掉。
+    fn cleanup(paths: &[&Path]) {
+        for p in paths {
+            if let Some(d) = p.parent() {
+                let _ = fs::remove_dir_all(d);
+            }
+        }
+    }
+
+    /// 新位置没有文件时，读旧位置（升级兼容）—— 不然用户升级后设置全丢。
+    #[test]
+    fn legacy_file_is_read_when_new_location_is_missing() {
+        let primary = temp_file("new-empty");
+        let legacy = temp_file("legacy-only");
+        cleanup(&[&primary, &legacy]);
+        save_at(
+            &legacy,
+            &Document {
+                settings: settings_a(),
+                window: Some(geom()),
+            },
+        )
+        .unwrap();
+
+        let doc = read_doc(&[primary.clone(), legacy.clone()]);
+        assert_eq!(
+            doc.settings.wake_hotkey.key, "Digit4",
+            "新位置没有文件时必须读旧位置那份（升级兼容）"
+        );
+        assert_eq!(doc.window, Some(geom()));
+        cleanup(&[&primary, &legacy]);
+    }
+
+    /// 两边都有时**新位置优先**：旧文件是死文件，不再参与。
+    #[test]
+    fn new_location_wins_over_legacy() {
+        let primary = temp_file("both-new");
+        let legacy = temp_file("both-old");
+        cleanup(&[&primary, &legacy]);
+        save_at(
+            &legacy,
+            &Document {
+                settings: settings_a(),
+                window: None,
+            },
+        )
+        .unwrap();
+        save_at(
+            &primary,
+            &Document {
+                settings: settings_b(),
+                window: None,
+            },
+        )
+        .unwrap();
+
+        let doc = read_doc(&[primary.clone(), legacy.clone()]);
+        assert_eq!(doc.settings.wake_hotkey.key, "F9", "新位置必须优先于旧位置");
+        cleanup(&[&primary, &legacy]);
+    }
+
+    /// ⚠️⚠️ 落点搬家的**核心回归守卫**：读旧位置、写新位置，且旧位置的值（含 `window` 段）
+    /// 在搬过去的文档里必须还在 —— 只改一个字段不该把另一段丢掉。
+    #[test]
+    fn update_reads_legacy_but_writes_new_location() {
+        let primary = temp_file("migrate-new");
+        let legacy = temp_file("migrate-old");
+        cleanup(&[&primary, &legacy]);
+        save_at(
+            &legacy,
+            &Document {
+                settings: settings_a(),
+                window: Some(geom()),
+            },
+        )
+        .unwrap();
+        let legacy_before = fs::read_to_string(&legacy).unwrap();
+
+        update_with(&primary, &[primary.clone(), legacy.clone()], |d| {
+            d.settings = settings_b()
+        })
+        .unwrap();
+
+        assert!(primary.exists(), "改动必须落到新位置（数据目录）");
+        let back = load_at(&primary);
+        assert_eq!(back.settings.wake_hotkey.key, "F9", "新设置没写进去");
+        assert_eq!(
+            back.window,
+            Some(geom()),
+            "从旧位置搬过来的 window 段丢了（读-改-写的「读」没走候选）"
+        );
+        assert_eq!(
+            fs::read_to_string(&legacy).unwrap(),
+            legacy_before,
+            "旧位置的文件不该被改写（只读兼容，不迁移不删除）"
+        );
+        cleanup(&[&primary, &legacy]);
+    }
+
+    /// 候选全都不存在 = 首次启动：默认值，绝不 panic、也不建任何文件。
+    #[test]
+    fn no_candidate_exists_yields_defaults_without_touching_disk() {
+        let primary = temp_file("none-new");
+        let legacy = temp_file("none-old");
+        cleanup(&[&primary, &legacy]);
+
+        let doc = read_doc(&[primary.clone(), legacy.clone()]);
+        assert!(!doc.settings.tray_enabled);
+        assert_eq!(doc.window, None);
+        assert!(!primary.exists() && !legacy.exists(), "读盘不该顺手建文件");
+        cleanup(&[&primary, &legacy]);
     }
 }

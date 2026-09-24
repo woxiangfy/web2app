@@ -12,13 +12,16 @@
  * }
  * ```
  *
- * 契约四要素（改动任何一项都等于破坏双壳兼容，见 docs/electron-plan.md §4）：
+ * 契约四要素（改动任何一项都等于破坏双壳兼容，见 docs/electron-plan.md §3）：
  *   1. **字段名与嵌套结构**：`{ wake_hotkey: { ctrl, alt, shift, key }, tray_enabled, minimize_on_close }`；
  *      `key` 是 JS `KeyboardEvent.code`（`"Digit4"` / `"F1"` / `"KeyA"`）。
- *   2. **文件路径**：`%APPDATA%\<sanitize(app_name)>\settings.json`。
- *      ⚠️ Tauri 侧用的是 `app_config_dir()` 的 **父目录** 再拼自定义 app_name ——
- *      `app_config_dir()` 末段是 bundle identifier（`com.example.web2app`），
- *      父目录才是 `%APPDATA%`。所以最终路径**不含** identifier。
+ *   2. **文件路径**：`<data_dir>\settings.json` —— **与 Tauri 版同一个规则、同一个位置**
+ *      （`portable.ts` 已按 `config.json` 的 `data_dir` 解析出 `dataDir`，这里只拼文件名；
+ *      Tauri 侧对应 `webview-app/src/config.rs::store_dir`）。默认 `data_dir = "data"`
+ *      ⇒ `<exe 同级>\data\settings.json`：设置与 cookie / 缓存 / 日志**一起**跟着程序走。
+ *      ⚠️ `data_dir = ""`（系统默认目录）时两壳的「系统默认」不是同一个磁盘位置
+ *      （Tauri `%LOCALAPPDATA%` / Electron `%APPDATA%`，见 `docs/packaging-config.md` §4.3 要点 4）
+ *      ⇒ 该模式下这个文件各自落在自己那份数据目录里，属数据目录既有的、已文档化的差异。
  *   3. **默认值全关**：不设唤醒快捷键、不启用托盘、关闭即退出。
  *   4. **键序**：设置三键在前、`window` 在后（与 serde 的字段序一致），
  *      两壳写出来的字节形态必须一样（`writeDocument()` 统一规范化）。
@@ -34,14 +37,17 @@
  * 静默吃掉其中一方。（`window-state.ts` 的文件头正是用这个理由论证过「不该合并」；
  * 既然合并了，就用读-改-写把风险挡掉，并由探针钉住。）
  *
- * ⚠️⚠️ 既然要「与旧版可互相读取」，写入位置就必须落在旧版读得到的那个路径上，
- *    因此这个小 JSON **不在 `data\` 里**（这点与「绿色版数据写 exe 同级」的
- *    总体原则不一致，是有意为之的取舍）。但文档极小（< 1 KB），
- *    真正体量大的 session / 缓存 / 日志仍然全在 `data\`，绿色性不受影响。
- *    —— 若 `data\` 下已经有同名文件（用户手工放的，或早期 Electron 版留下的），
- *       则以它为准并在原地写回：**用户显式放在绿色目录里的东西优先级最高**。
+ * ⚠️⚠️ **落点 = 数据目录**（2026-09-23 使用者指出）：此前这个小 JSON 刻意留在
+ * `%APPDATA%\<app_name>\`（「与旧版同路径」），结果是选了绿色版（`data_dir = "data"`）后
+ * cookie / 缓存 / 日志都跟着 exe 走，**唯独设置文件留在系统盘** —— 同一套「程序的数据」里
+ * 唯一不听话的一项。现在写入位置一律是 `<dataDir>\settings.json`，与 `data_dir` 字段
+ * （`docs/packaging-config.md` §4.3）完全一致。
+ * ⚠️ 旧位置（`%APPDATA%\<app_name>\settings.json`）保留为**读取候选**（升级兼容）：新位置还没有
+ *    文件时读它、第一次写盘就落到新位置，此后旧文件是死文件。读取顺序由 [`storeLocation`]
+ *    统一给出，**读也用它、写只用主位置** —— 否则「用旧文件的值算出来的新文档」会写到新位置、
+ *    而旧文件被绕过，用户看到的是设置被重置。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { sanitizeDirName } from './config'
@@ -91,9 +97,9 @@ export interface StoreLocation {
 }
 
 export interface StoreLocationOptions {
-  /** 绿色数据目录（exe 同级 `data\`，或 `%APPDATA%\<app_name>`） */
+  /** 数据目录（`data_dir` 解析结果：exe 同级 `data\`、绝对路径、或系统默认程序目录） */
   dataDir: string
-  /** `app.getPath('appData')`，即 `%APPDATA%` */
+  /** `app.getPath('appData')`，即 `%APPDATA%` —— **只用来拼旧位置**（读取候选） */
   appDataDir: string
   /** config.json 的 app_name（会做 Windows 目录名清洗） */
   appName: string
@@ -104,20 +110,23 @@ export interface StoreLocationOptions {
 /**
  * 解析存储位置。
  *
- * 优先级：`<dataDir>\<file>`（绿色目录，用户显式放置的东西）→
- *         `%APPDATA%\<app_name>\<file>`（旧版 Tauri 的位置）。
- * 写入：跟读取的**同一个**位置 —— 保证「读哪写哪」，不会出现两个副本各自漂移。
+ * 写入：**一律** `<dataDir>\<file>`（= `data_dir` 字段解析出来的数据目录，与 Tauri 版同位置）。
+ * 读取：`<dataDir>\<file>` → `%APPDATA%\<app_name>\<file>`（旧位置，升级兼容），先命中者生效。
+ *
+ * ⚠️⚠️ 写位置只有一个，读位置有两个 —— 这是有意的：写要「搬家搬到位」（数据跟着程序走），
+ * 读要「别把老用户的设置弄丢」。⚠️ 但**读-改-写的「读」必须走同一份候选**
+ * （[`readRawForUpdate`]），否则升级后第一次保存会用「新位置（空）算出来的文档」
+ * 覆盖掉旧位置里的设置与几何。
  */
 export function storeLocation(opts: StoreLocationOptions): StoreLocation {
   const legacy = join(opts.appDataDir, sanitizeDirName(opts.appName), opts.file)
-  const local = join(opts.dataDir, opts.file)
+  const main = join(opts.dataDir, opts.file)
 
-  if (local === legacy) return { read: [legacy], write: legacy }
+  // 系统默认模式下两者可能是同一个目录（Android 之外，Electron 的 dataDir 恒为具体目录，
+  // 这里只是防御性地去重，避免 read 列表里出现同一个路径两次）。
+  if (main === legacy) return { read: [main], write: main }
 
-  return {
-    read: [local, legacy],
-    write: existsSync(local) ? local : legacy,
-  }
+  return { read: [main, legacy], write: main }
 }
 
 /** 空串 / 非字符串按默认值处理；宽容解析（上游模板里布尔值是字符串）。 */
@@ -217,13 +226,25 @@ export function loadSettings(loc: StoreLocation): LoadedSettings {
 }
 
 /**
- * 读**写入位置**那份文档的原文（读-改-写的「读」必须认准写入位置，不能顺着读取候选列表走
- * —— 否则会拿着 `data\` 里那份的内容去覆盖 `%APPDATA%` 里的文件）。
+ * 读**写入用**的那份文档原文：按 `loc.read` 的顺序取第一份**存在**的文件。
+ *
+ * ⚠️⚠️ 必须是「第一份存在的候选」而不是「写入位置」，也不能只认写入位置：
+ * 升级到「落点 = 数据目录」之后，用户的老设置还在 `%APPDATA%\<app_name>\` 里，
+ * 写入位置此时**还不存在**。若这里读的是写入位置，第一次保存就会拿着空文档去算新内容
+ * ⇒ 用户勾过的托盘开关、`window` 段几何一并归零（表现为「升级后设置被重置」）。
  * 文件不存在 / 坏 JSON 一律给空对象：坏的那份马上就会被整份覆盖成规范形态。
  */
-export function readRawDocument(writePath: string): Record<string, unknown> {
+export function readRawForUpdate(loc: StoreLocation): Record<string, unknown> {
+  for (const p of loc.read) {
+    if (existsSync(p)) return readRawDocument(p)
+  }
+  return {}
+}
+
+/** 读某一份文件的原文（不存在 / 坏 JSON → 空对象，绝不抛错）。 */
+export function readRawDocument(path: string): Record<string, unknown> {
   try {
-    const v: unknown = JSON.parse(readFileSync(writePath, 'utf8'))
+    const v: unknown = JSON.parse(readFileSync(path, 'utf8'))
     return v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
   } catch {
     return {}
@@ -246,7 +267,18 @@ export function writeDocument(
   const out: Record<string, unknown> = { ...parseSettings(doc.settings) }
   if (doc.window !== undefined && doc.window !== null) out[WINDOW_KEY] = doc.window
   mkdirSync(dirname(loc.write), { recursive: true })
-  writeFileSync(loc.write, JSON.stringify(out, null, 2), 'utf8')
+  // **原子替换**：先写同目录临时文件（flush 落盘）再 rename（Windows 上
+  // libuv 用 MOVEFILE_REPLACE_EXISTING，目标存在也能整体替换）。直接覆盖写的风险是
+  // 写一半进程被杀 / 断电，留下截断的 settings.json —— 下次启动整份解析失败，设置全丢。
+  // 临时文件必须与目标同目录：跨卷 rename 会退化成非原子的复制+删除。
+  const tmp = `${loc.write}.tmp-${process.pid}`
+  try {
+    writeFileSync(tmp, JSON.stringify(out, null, 2), { encoding: 'utf8', flush: true })
+    renameSync(tmp, loc.write)
+  } catch (e) {
+    rmSync(tmp, { force: true })
+    throw e
+  }
   return loc.write
 }
 
@@ -256,9 +288,11 @@ export function writeDocument(
  * ⚠️⚠️ **读-改-写**：设置与窗口几何同住一个 `settings.json`，整体覆盖会把「挪窗口」
  * 那一方刚写进去的几何抹掉（这正是当初分成两个文件的理由；既然合并了，
  * 就必须在这里把风险挡掉）。`window-state.ts` 的 `saveWindowState` 同理。
+ * ⚠️ 「读」走 [`readRawForUpdate`]（候选顺序，主位置优先）而不是写入位置：
+ * 落点刚搬到数据目录时，写入位置还没有文件，老设置还在旧位置 —— 见那里的说明。
  */
 export function saveSettings(loc: StoreLocation, s: Settings): string {
-  const cur = readRawDocument(loc.write)
+  const cur = readRawForUpdate(loc)
   return writeDocument(loc, { settings: s, window: cur[WINDOW_KEY] })
 }
 
@@ -321,11 +355,6 @@ const CODE_TO_KEY: Record<string, string> = {
   Period: '.',
   Slash: '/',
   Backquote: '`',
-}
-
-/** accelerator 主键名 → `KeyboardEvent.code`（设置页的「下拉选择」用不着，但反向断言用得上）。 */
-export function isSupportedHotkeyKey(code: string): boolean {
-  return Object.prototype.hasOwnProperty.call(CODE_TO_KEY, code)
 }
 
 /**

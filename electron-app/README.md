@@ -11,13 +11,13 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 126 条） |
+| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 134 条） |
 | M2 sidecar（本地反向代理 + 加密解析） | ✅ | 复用 Rust `proxy.rs` / `resolve.rs`，零重写 |
 | M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
 | M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（**仅 `debug` 打开时才有**，见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
-| **M4 下载接管** | ⬜ **未实现** | `will-download` 目前只记日志、下载走 Chromium 默认「另存为」；对标 Tauri `save_dialog.rs` 的自绘对话框待做 |
-| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **26/26**、单窗口 **126/126** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，126 条单窗口断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
-| **M7 CI 流水线** | ⬜ **未落库** | 本目录没有 CI 配置（仓库根 `.github/workflows/` 那几条只服务 Tauri 版），目前只能本地跑 |
+| **M4 页面行为（下载接管 / 右键菜单 / F12）** | ✅ **已完成** | 实现落在 `src/main/page-behavior.ts`：①**下载接管** `will-download` → `pause` → 系统「另存为」（`dialog.showSaveDialog`，默认落点=系统下载目录、按后缀收敛过滤器、开覆盖确认）→ `setSavePath` + `resume`；用户取消走 `cancel()`，**绝不**静默存到别处（对标 `save_dialog.rs`）；②**右键菜单**自建（Electron 不暴露 Chromium 原生菜单），取舍与 Tauri 一致——不给打印 / 另存为 / 更多工具，**带「设置」项**（与 Shift+F1 / 托盘同一入口）；③**F12** `before-input-event` → `openDevTools({ mode: 'detach' })`，开关为 `devtoolsEnabled()` = `!isPackaged \|\| debug`（对齐 Tauri 的 `DEVTOOLS_ENABLED`；打包版可用配置 `debug: true` 打开，这是本壳与 Tauri 的**有意**差异——绿色版没有 debug 构建分发）。⚠️ 两个坑：①`item.pause()` 不可省，否则 `showSaveDialog` 异步返回后 Electron 会再弹**它自己**的保存对话框（两个抢注意力）；②多页签模式只给内容视图挂右键菜单（挂到壳窗口会在标签栏上弹出「返回 / 前进」这类错位项） |
+| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **26/26**、单窗口 **134/134** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，单窗口那批断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
+| **M7 CI 流水线** | ✅ **已落库** | `.github/workflows/electron-ci.yml`（push / PR 到主分支自动触发，path 过滤 `electron-app/**` + 共享真源 `webview-app/src/**`）：①`lint`（Ubuntu）typecheck + 单测；②`e2e`（Windows）单窗口探针 + 多页签探针 + 启动冒烟；③`package`（非 PR）出 zip / portable 并上传产物。⚠️ 三个 CI 特有的坑已写进文件头注释：`.npmrc` 的国内镜像必须用 `--registry` 覆盖掉、`config.json` 本就不在仓库里（探针自起 127.0.0.1 夹具站点，无配置也能跑完）、pnpm 固定 v12 |
 
 > 除上表三项外，后续「新增/改动会影响哪些验证」见文末「验证清单」——
 > 这是本壳唯一能防「改了一个壳、把另一个壳带坏」的手段。
@@ -31,11 +31,12 @@ pnpm install         # 装依赖；装完必须确认 node_modules/electron/dist
 pnpm start           # 编译 + 启动（开发态）
 pnpm run typecheck   # 只做类型检查（不能代替 build，见「打包」表）
 pnpm run build       # 只编译到 out/
+pnpm run unit        # 纯函数单测（node:test，毫秒级）：改 config.ts 等零 Electron 依赖模块必跑
 
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe（本地代理 + 加密解析）
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json（pack/dist 会自动调用）
 pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘（内部强制 debug=true），退出码即结论
-pnpm run probe       # 兼容契约探针：126 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
+pnpm run probe       # 兼容契约探针：134 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
 pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 + 截一张 PNG（改标题栏/滚动条/几何后看它）
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
@@ -131,7 +132,7 @@ certutil -hashfile ..\webview-app\src\titlebar.js                        SHA256
 
 :: 2) 最近跑的到底是哪份包：看运行痕迹 mtime（早于修复时刻 ⇒ 就是旧包）
 dir /tc release\win-unpacked\data
-dir /tc "%APPDATA%\Baidu\settings.json"
+dir /tc release\win-unpacked\data\settings.json
 ```
 
 对齐办法（**覆盖式**，不用删除）：把源码的注入脚本 + 新包的 `app.asar` copy 覆盖进用户实际在跑的
@@ -327,7 +328,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 | 字段 | 作用 | 本壳取值 |
 |---|---|---|
-| `app_name` | 安装名 / 数据目录名（Android 侧为应用名） | 数据目录与 `settings.json` 所在的 `%APPDATA%\<app_name>\` |
+| `app_name` | 安装名 / 数据目录名（Android 侧为应用名） | `data_dir=""` 时系统默认目录的末段（`%APPDATA%\<app_name>\`）；`settings.json` 随数据目录走，不再固定在这里 |
 | `title` | **显示名**：窗口标题、托盘提示 | 缺省回落 `app_name` |
 
 ⚠️ 窗口标题在创建 `BrowserWindow` 时就固定为 `cfg.title`，并拦截 `page-title-updated`
@@ -343,7 +344,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 | 文件 | 内容 | 写在哪 |
 |---|---|---|
-| `settings.json` | 唤醒快捷键、是否启用托盘、关闭是否最小化到托盘，**以及 `window` 段的窗口几何**（坐标 / 尺寸为**物理像素** + 是否最大化） | 优先 `%APPDATA%\<app_name>\`（**与旧版同路径**），若 `data\` 下已有同名文件则以它为准 |
+| `settings.json` | 唤醒快捷键、是否启用托盘、关闭是否最小化到托盘，**以及 `window` 段的窗口几何**（坐标 / 尺寸为**物理像素** + 是否最大化） | **与数据目录同位置**：`<data_dir>\settings.json`（默认 `data\settings.json`，跟着 exe 走）；旧位置 `%APPDATA%\<app_name>\` 仅作**读取兜底**（升级兼容，不迁移不删除） |
 
 ⚠️ 2026-09-23 起窗口几何不再单独占一个 `window-state.json`，而是并进 `settings.json` 的
 `window` 段（设置字段仍平铺在顶层）—— 用户侧「只需要一个 JSON」。旧的 `window-state.json`
@@ -352,12 +353,14 @@ Get-Content .\data\logs\startup.log -Tail 40
 文档直接落盘，会在「挪了下窗口 + 改了设置」同时发生时静默吃掉其中一方。探针两条断言
 （`写几何不吃掉设置` / `写设置不吃掉窗口几何`）专门钉这件事。
 
-⚠️ 这个文件放 `%APPDATA%` 而不是 `data\`，是为了满足「**与 Tauri 版可互相读取**」这条契约：
-用户在两个壳之间来回切换时，勾过的托盘开关、设过的快捷键、上次的窗口位置不该丢。
-真正体量大的 session / 缓存 / 日志仍然全在 `data\`，绿色性不受影响（详见 `src/main/settings.ts` 文件头）。
+⚠️ **落点 = 数据目录**（2026-09-23 使用者指出）：此前它固定放 `%APPDATA%\<app_name>\`，于是选了绿色版
+（`data_dir = "data"`）之后 cookie / 缓存 / 日志都跟着 exe 走，**唯独设置文件留在系统盘** ——
+同一套「程序的数据」里唯一不听话的一项。现在写入位置一律是 `<data_dir>\settings.json`，与
+`data_dir` 字段的语义完全一致（`docs/packaging-config.md` §4.3），Tauri 版同规则同位置。
 
-> 想让它彻底绿色？把 `settings.json` 手工放进 `data\` 即可 ——
-> 解析规则是「`data\` 优先，且读哪写哪」。
+> 升级兼容：新位置还没有文件时会读旧位置那份（`%APPDATA%\<app_name>\`），第一次写盘即落到数据目录；
+> 此后旧文件是死文件，可以手工删掉。⚠️ 读-改-写走的是**同一份读取候选**，否则升级后第一次保存
+> 会用「新位置（空）算出来的文档」把老设置清零。
 
 ### 行为契约（与旧版逐条对齐）
 
@@ -374,11 +377,12 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 设置窗是 `settings://localhost/` 协议提供的**无边框窗**（620×600，可缩放，最小 460×400，居中，
 `frame:false`），内容直接取自 `../webview-app/dist/settings.html` —— 也就是 Tauri 版的那一份，
-**一行都不改**。版式是「面板居中 + 正文滚动」：标题 / 关闭 / 拖动都由设置页自绘在面板头部
-（`-webkit-app-region:drag` 负责拖动），窗口本体只作为面板四周的底衬。
+**一行都不改**。版式是「面板铺满整窗 + 正文滚动」：标题 / 关闭 / 拖动都由设置页自绘在面板头部
+（`-webkit-app-region:drag` 负责拖动）；面板直接贴住窗口四边 —— 不再有「居中面板 + 四周底衬」，
+那圈底衬正是使用者指出的「大块空边框」。
 
 打开方式有三条，走的是**同一个** `openSettings()`：托盘菜单「设置」、全局快捷键 **Shift+F1**、
-以及标题栏「设置」按钮（位置在最小化右侧；单窗口模式经 `win:open-settings`，
+以及标题栏「设置」按钮（位置在**最小化左侧**；单窗口模式经 `win:open-settings`，
 多页签模式经标签栏的 `tabs:open_settings`）。
 
 它靠 `src/renderer/settings-preload.ts` 提供的 `window.__TAURI_INTERNALS__.invoke` 垫片工作，
@@ -446,7 +450,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 | `bodyScrollable` | `true` | 页面照常能滚 |
 | `window.scrollTo(0,200)` | `scrollY≈200` **且** scroll 事件触发 | 转发没坏（事件异步，要等一帧再读） |
 
-`pnpm run probe`（126 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
+`pnpm run probe`（134 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
 ⚠️ **不要**再用 `rect.width == innerWidth` 或「滚动条宽度归零」当判据 —— 前者测不出覆盖，
 后者把缺陷锁死成期望值。**改完必须重新打包**：脚本在 `resources/inject/titlebar.js` 里，
 跑旧的 exe 永远看不到修复。
@@ -461,7 +465,7 @@ Electron 侧有两块能力**不复用就会重开一遍验证**：
 
 | 能力 | 为什么不能（也不该）用 JS 重写 |
 |---|---|
-| 本地反向代理 | 给**每一个**请求（含 WebSocket 握手）注入 `Authorization: Basic`。741 行已测 Rust：流式转发、Cookie Domain 重写、WS 双向隧道 |
+| 本地反向代理 | 给**每一个**请求（含 WebSocket 握手）注入 `Authorization: Basic`。825 行已测 Rust：流式转发、Cookie Domain 重写、WS 双向隧道、一次性随机密钥门禁（无密钥一律 404） |
 | 动态域名解析 | DNS TXT → Ed25519 验签 → AES-GCM 解密。Node 侧要引 Ed25519 + HKDF + AES-GCM 一整套，且必须与 `resolve-core` **字节级**一致 |
 
 所以 `crates/proxy-server` 用 `#[path]` **直接引用** `webview-app/src/proxy.rs` 与 `src/resolve.rs`
@@ -489,6 +493,9 @@ Electron 侧有两块能力**不复用就会重开一遍验证**：
 * **`--no-proxy`**（域名解析 + 直连）时 sidecar 只解析地址、不起代理，并在握手后立即退出；
   此时它会把凭据放在 `authUser` / `authPass` 字段里交给宿主（宿主用 Chromium 的 `login` 事件注入）。
   ⚠️ 这两个字段是**明文凭据**，任何地方都不得写日志。
+* **握手成功行的 `proxyUrl` 自带一次性随机门禁密钥**（`http://127.0.0.1:端口/?w2a_key=<43 字符>`）：
+  宿主只把该入口 URL 交给窗口；无密钥 / 错密钥访问代理一律 **404**（防同机进程扫描借道），
+  首访回种的 HttpOnly cookie 让页面根绝对路径资源与 WS 自动通过，密钥不会转发给上游。
 
 手动调试：
 
@@ -500,7 +507,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 
 ## 兼容契约探针（`pnpm run probe`）
 
-`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **126 条**契约，
+`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **134 条**契约，
 **退出码即结论**（不通过则非 0，可以直接挂 CI）。夹具全部内联在代码里，不落盘、不进打包产物。
 
 覆盖范围：启动页内联注入、标题栏几何与配色、38px 让位（fixed / sticky / `100vh` / `inset:0` 四种页面形态）、
@@ -508,6 +515,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 最小化 / 最大化 / 关闭三个按钮真的驱动了原生窗口，以及 **sidecar 的代理契约**：
 
 * 直连夹具（不带凭据）必须 **401** —— 先证明夹具真在鉴权，否则后面的断言是假通过；
+* **门禁**：无密钥、错密钥访问代理都必须 **404**（不透露代理存在），带入口 query 密钥才放行；
 * 经代理必须 200，且**上游**收到的 `Authorization` 与 `proxy.rs::build_basic_auth` 的格式逐字节一致；
 * **WebSocket 握手也带上了 `Authorization`** —— 这是本地代理当初存在的全部理由
   （WebView2 的原生鉴权事件对 WS 不生效），也是「Electron 复用同一份 Rust 代理」值不值的唯一依据；
@@ -523,7 +531,8 @@ M3 之后还覆盖**系统集成**（60 条，即第 11–15 节）：
   `store::tests::parse_accepts_electron_written_document` 盯着；
 * **设置与窗口几何同住一个文件**后，两个写入方互不吃掉对方（`写几何不吃掉设置` /
   `写设置不吃掉窗口几何`）—— 合并的唯一真风险，两条方向都钉住；
-* 存储位置规则：`data\` 无同名文件时写向 `%APPDATA%\<app_name>\`，读取候选同时覆盖两处；
+* 存储位置规则：写入一律 `<data_dir>\settings.json`（= 数据目录，与 `data_dir` 字段一致），
+  读取候选为「数据目录 → `%APPDATA%\<app_name>\`」（后者的 `window` 段也会被一并搬到新位置）；
 * 窗口几何的**DIP ↔ 物理像素**换算（跨 DPI 不错位）与四种恢复策略（含「位置在屏外 → 最大化」）；
 * 托盘：启用后图标出现、关闭后图标销毁；
 * 全局快捷键：注册 / 不支持的键名明确报错 / 清空注销 三条路径；
@@ -594,6 +603,9 @@ M3 之后还覆盖**系统集成**（60 条，即第 11–15 节）：
 
 | 版本 | 日期 | 变更说明 |
 |---|---|---|
+| 0.1.0 | 2026-09-24 | **与 Tauri 侧对齐 + 测试资产纳管**：①`settings.json` 的**原子写补齐到 Tauri 侧**（`store.rs::save_at` 由 `fs::write` 直接覆盖改为「同目录临时文件 + flush + rename」，失败清理临时文件）——此前只 Electron 侧做了，Tauri 侧「写一半被杀 ⇒ 截断 JSON ⇒ 下次启动解析失败、设置与几何一起回默认且不报错」的链条仍然成立；两壳写盘策略自此一致；②`test/`（纯函数单测，`pnpm run unit`）此前未纳入版本控制，已入库 |
+| 0.1.0 | 2026-09-24 | **安全审计与健壮性收口**：①本地代理入口加**一次性随机密钥门禁**（入口 URL 带 `?w2a_key=`，query 或 `HttpOnly; SameSite=Lax` cookie 必须带对，无/错一律 **404** 而非 401/502 —— 不透露代理存在），**WS 握手同样受门禁**，转发上游前剥除 query 与 cookie 中的密钥；②`login` 事件回填凭据**绑定入口主机:端口**（外域 401 子资源骗不到入口账号密码）；③多页签托盘恢复自愈（零页签时自动补建，此前恢复后是空壳）；④直连 userinfo 非法百分号编码兜底（不再 unhandled rejection、splash 不再永久转圈）；⑤新增 `test/config.test.ts`（node:test 15 条）；⑥`settings.json` 写盘改原子写；⑦sidecar 握手 `kind` 白名单收敛、`pid` 必须有限数、清理死代码与过期注释；探针 128 → **130** |
+| 0.1.0 | 2026-09-23 | **设置面板铺满整窗 + 「设置」按钮移到最小化左侧 + `settings.json` 落点改为数据目录**：①`settings.html` 去掉「居中面板 + 四周底衬」（`body` 的 12px padding 与 `.panel` 的 `max-width:560px` 在 620 宽的窗里各留下 30px 空档，使用者指为「大块空边框」）⇒ 面板铺满整窗、无 border / 圆角 / 外阴影，头部加一条分隔线补回边界感；②两壳共用的 `titlebar.js` 与多页签标签栏 `shell.html` 把 ⚙ 从「最小化右侧」移到**最小化左侧**（`[←][→] 标题 [⚙][—][▢][✕]`），探针的位置判据同步反过来（比几何、不看 DOM 顺序）；③**`settings.json` 落点 = `data_dir`**（此前固定 `%APPDATA%\<app_name>\`）：写入一律 `<data_dir>\settings.json`（与 WebView2 数据目录、`logs\` 同一个，绿色版搬目录不再漏掉设置），旧位置保留为**读取候选**（升级兼容，不迁移不删除），读-改-写与 load 走同一份候选，避免「升级后第一次保存把老设置清零」；④探针 126 → **128** 条（新增「落点搬家：读旧位置写数据目录且 `window` 段跟着搬」「旧位置一个字节不动」），单窗口 128/128、多页签 26/26、冒烟自检通过全绿 |
 | 0.1.0 | 2026-09-23 | **设置界面改为「无边框窗 + 居中面板 + 正文滚动」+ 标题栏新增「设置」按钮**：①`settings.html` 重做版式 —— 窗口无系统标题栏，整页只有一块居中的圆角面板（四周留底衬），标题 / 关闭 / 拖动由面板头部自绘；`html/body` 都不滚，**唯一滚动容器是 `.panel-bd`**（否则滚动条会横穿面板圆角），底部操作区固定（内容再多「保存」也不会被滚出视野）；元素 id 与脚本逻辑一字未改；②设置窗参数 480×470 / 带系统标题栏 / 不可缩放 → **620×600 / `frame:false` / 可缩放（最小 460×400）/ 居中**，Tauri 侧同步改 `decorations(false)` + `.center()`；③标题栏在**最小化右侧**新增「设置」按钮，两壳两模式都接上：单窗口走 `window.web2app.openSettings` → IPC `win:open-settings`，多页签走标签栏 `invoke("open_settings")` → `tabs:open_settings`（`shell.html` 字面量 ↔ `shell-preload` 白名单 ↔ 主进程三处逐字一致）；④探针 117 → **126** 条（新增「按钮位置」「点按钮真能开设置窗且页面已渲染」「设置窗无边框」「面板四周留底衬」「面板居中」「正文是唯一滚动容器」「头部可拖动」等），多页签 23 → **26** 条。⚠️ 反例教训：第一版「点按钮开设置窗」只断言了窗口对象存在 —— 页面加载失败时它也成立（假绿），且探针抢在加载完成前 `close()` 会中止导航、在日志里留下 `ERR_FAILED(-2)` 噪声；改成等 `document.querySelector('.panel')` 出现后两条一起消失 |
 | 0.1.0 | 2026-09-23 | **窗口几何并入 `settings.json`（运行期只剩一个 JSON）**：①`window-state.json` 取消，几何改为 `settings.json` 的 `window` 段（设置字段仍平铺顶层），与 Tauri 版同契约；旧文件**不迁移**、不再读写（升级后窗口回一次默认尺寸/位置）；②合并的唯一风险是「两个写入方互相覆盖」（`window-state.ts` 文件头当初正是用这个理由论证不该合并）⇒ 两个方向都改成**读-改-写**（`saveSettings` / `saveWindowState`，只替换自己那一段），探针新增 4 条断言钉住（含键序 `设置三键 → window`），113 → **117** 条；③Rust 侧新增 `src/store.rs` 承载文档契约（`WindowGeom` + 读-改-写 + 「一段坏掉不拖垮另一段」的独立解析），`settings.rs` / `window_state.rs` 退化为薄封装；单测 65 → 71（新增 9 条含双壳字面量互通） |
 | 0.1.0 | 2026-09-22 | **诊断日志改为 `debug` 开关 + 托盘图标对齐 `icon_url`**：①新增契约字段 `debug`（**bool，默认 `false`**）—— `false` 时**不建 `logs\`、不写文件，控制台三路输出也一并静默**（此前是无条件落盘，会在用户的交付目录里凭空多出 `data\logs\`）；`true` 时写 `<数据目录>\logs\startup.log` 并照常打印；运行期逃生口 `--debug` / `WEB2APP_DEBUG=1`；**探针与冒烟内部强制打开**（结论全靠 stdout，不能自检失声）；②`logStartup()` 增印「诊断日志：已开启 / 未开启」，冒烟断言在 `fileLog === null` 时报「未启用（冒烟模式本应强制打开 debug，出现即 bug）」—— 把「开关接错」与「写盘失败」两类原因分开；③**托盘图标修复**：`electron-build-custom.yml` 下载的 `icon_url` 此前只喂给 `-c.win.icon`（exe / 任务栏图标），托盘取的是 `resources/icons/icon.png`（由 `extraResources` 从 `webview-app/icons/` 拷入的**仓库默认图标**）⇒ 下载后**同时覆盖 `../webview-app/icons/icon.png`**，使托盘与 exe 用同一张 `icon_url`；复用既有单一真源，不改 `tray.ts` |
@@ -607,3 +619,5 @@ M3 之后还覆盖**系统集成**（60 条，即第 11–15 节）：
 | 0.1.0 | 2026-09-22 | **配置契约统一 + 手动打包 workflow**：①`config.json` 从「exe 同级（`extraFiles`）」改为**随 `app.asar` 进包**，杜绝拿到包就能改地址；`configRoot()` 读 `app.getAppPath()/out`，新增 `scripts/check-asar-config.cjs` 断言配置确在 asar 内（防静默退回 `example.com`）；②`config.ts` 重写为与 `.github/scripts/parse-packaging-config.py` 逐条对齐的严格解析：布尔只认真 `bool`（字符串报错并给改法）、未知字段硬失败、`app_url` 接受真 `string \| string[]`、`window_title` 报错；③`DEFAULTS.proxy_bypass` 与 Tauri/解析器三处对齐；④新增手动打包 workflow `自定义打包（Electron 绿色版）`，与 Tauri 版共用同一解析器，并在 `RESOLVE_SECRET` 环境下编译 sidecar |
 | 0.1.0 | 2026-09-20 | 文档与仓库卫生审计：①源码/构建配置里 10 处失效引用 `PLAN.md` → `docs/electron-plan.md`（该文件 2026-09-17 已归位）；②注释里 `npm run *` 统一为 `pnpm run *`（包管理器已迁移，`electron-builder.yml` 同步）；③`.gitignore` 补 `tests/*.log`、`tests/*.exe`、`tests/*.zip` —— 原 `tests/*/` 只忽略目录，`tests/` 下一份 ~96MB 便携版副本与 10 个探针日志会被随仓库提交（M7 纳入版本控制前的必要前置）；④README 补 `docs/electron-size-reduction.md` 与根 `README.md` 的交叉引用，并声明「里程碑状态以本 README 为准」 |
 
+| 0.1.0 | 2026-09-24 | **M4 页面行为交付（下载接管 / 右键菜单 / F12）**：新增 `src/main/page-behavior.ts`，「纯规则函数 + Electron 挂载」分层——纯规则（`devtoolsEnabled` / `isDevtoolsKey` / `contextMenuTemplate` / `saveDialogOptions`）由 `test/page-behavior.test.ts` 14 条毫秒级单测钉住，挂载点由探针 4 条断言验（探针 130 → **134**）。下载：暂停 → 系统另存为 → 落盘 / 取消，取消**不**静默另存；右键菜单取舍对齐 Tauri（不给打印/另存为/更多工具，带「设置」项）；F12 对齐 `DEVTOOLS_ENABLED`（未打包恒开、打包版由 `debug` 决定）。⚠️ 实现时踩到：Node 按 **ESM** 解析 `.ts`，`import { Menu } from 'electron'`（CJS）直接抛 `Named export not found` ⇒ 必须默认导入再解构 |
+| 0.1.0 | 2026-09-24 | **M7 CI 流水线落库**：新增 `.github/workflows/electron-ci.yml`（lint / e2e / package 三作业）。取证三件事：①`pnpm install` 必须显式 `--registry=https://registry.npmjs.org` 覆盖 `.npmrc` 的国内镜像；②**不生成** `config.json` —— 它本就不在仓库里，实测「无配置」场景下探针仍 130/130（探针自起 127.0.0.1 夹具站点），这样 CI 验的正是「fresh clone 能跑」；③Node 22 可直接 `node --test` 跑 `.ts`（实测 15/15），故与既有 workflow 同取 22 |

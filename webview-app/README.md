@@ -31,7 +31,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
-| 自绘标题栏 | 无系统装饰：前进 / 后退 / 最小化 / **设置** / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」在最小化右侧） | Windows |
+| 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**） | Windows |
 | 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
@@ -52,11 +52,12 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 ## 设置界面（Shift+F1）
 
 在 Windows 下按 **Shift + F1** 随时打开设置窗口（该快捷键固定，不可在界面内修改）；
-标题栏的**「设置」按钮**（位置在最小化右侧，单窗口与多页签两种模式都有）和托盘菜单的「设置」
+标题栏的**「设置」按钮**（位置在最小化左侧，单窗口与多页签两种模式都有）和托盘菜单的「设置」
 打开的是同一个窗口。
 
-窗口本身**没有系统标题栏**：整页只有一块居中的圆角面板，标题 / 关闭 / 拖动都由
-`dist/settings.html` 自绘在面板头部，**正文是唯一可滚动的区域**（内容多了只滚中间，
+窗口本身**没有系统标题栏**：整页就是一块面板，**铺满整个窗口**（无底衬 / 无圆角 / 无外边框 ——
+旧版「居中面板 + 四周底衬」在 620 宽的窗里各留下 30px 空档，看着像「大块空边框」，已去掉），
+标题 / 关闭 / 拖动都由 `dist/settings.html` 自绘在面板头部，**正文是唯一可滚动的区域**（内容多了只滚中间，
 底部「保存」按钮始终可见）。窗口可缩放（最小 460×400）、打开时居中于屏幕。
 
 > ⚠️ 无边框 ⇒ 拖动靠 `data-tauri-drag-region`，它需要 capability 里的
@@ -85,11 +86,15 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
    ②清除刚结束时该 WebView 的**导航会被静默丢弃、甚至直接阻塞** ⇒ 重载前刻意留 1.2s 落定
    （`RELOAD_SETTLE`）。⚠️ 「清完重载一定生效」这条**本机未取证**，待真机目视。
 
-> 设置保存在配置目录下（`%APPDATA%\<app_name>\settings.json`，`app_name` 默认 `Web2App`），为 JSON 文件，下次启动自动读取。
+> 设置保存在**数据目录**下（`<data_dir>\settings.json` —— `data_dir` 默认 `"data"` ⇒ `<exe 同级>\data\settings.json`，与 cookie / 缓存 / 日志同一个目录；`app_name` 默认 `Web2App`），为 JSON 文件，下次启动自动读取。
+> ⚠️ 2026-09-23 前它固定在 `%APPDATA%\<app_name>\`；那个旧位置现在只作**读取兜底**（升级兼容，不迁移不删除）。
 > ⚠️ 只有上面 1–3 项落在 `settings.json` 里；**第 4 项不落盘** —— 它是一次性动作，不是配置项。
 > ⚠️ **窗口几何（上表「窗口几何记忆」）也在这同一个 `settings.json` 的 `window` 段里**（2026-09-23 起；
 > 此前单独占一个 `window-state.json`，该文件已不再读写，可手工删除）。两个写入方
 > （设置页保存 / 关窗记几何）一律走 `src/store.rs` 的**读-改-写**，互不覆盖。
+> 写盘是**原子的**（同目录临时文件 → `sync_all` → rename，与 Electron 侧 `writeDocument` 同策略）：
+> 写一半被杀 / 断电不会留下截断的 `settings.json` —— 否则下次启动整份解析失败，
+> 三个开关与窗口几何会一起被回默认值，**且不报错**。
 
 界面后续可在 `dist/settings.html` 上继续扩展更多能力（Rust 命令通道 `get_settings` / `save_settings` /
 `close_settings_window` / `clear_web_data` 即可复用）。
@@ -107,9 +112,13 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 Web2App 的解法是内置一个**本地反向代理**（`src/proxy.rs`）：
 
 1. 程序启动时监听 `127.0.0.1:随机端口`；
-2. WebView 只访问这个本地代理地址；
+2. WebView 只访问这个本地代理地址（入口 URL 自带一次性随机密钥 `?w2a_key=...`）；
 3. 代理对**每一个 HTTP 请求和 WebSocket 握手**统一注入 `Authorization: Basic ...` 头，再转发到真实服务器；
-4. 代理对 `Host` / `X-Forwarded-*` 头做透传，让上游收到的请求与「浏览器直连」时一致。
+4. 代理对 `Host` / `X-Forwarded-*` 头做透传，让上游收到的请求与「浏览器直连」时一致；
+5. **入口门禁**：每个请求（含 WS 握手）必须在 query 或 `w2a_key` HttpOnly cookie 带上本次启动的
+   256-bit 随机密钥，否则一律回 **404**（不透露代理存在，防同机进程扫描借道带凭据访问目标站）。
+   首次带 query 访问时代理回种 cookie，页面里的根绝对路径资源与 WS 即靠 cookie 通过；
+   转发上游前密钥会从 query 与 Cookie 中剥除，密钥不离开本机。
 
 该代理是纯 Rust、零平台依赖，因此 **Windows 与 Android 共用同一份代码**。
 
@@ -134,7 +143,7 @@ webview-app/
 │   ├── resolve.rs          # DNS TXT 查询 + 验签解密
 │   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
 │   ├── debug_log.rs        # 诊断日志（dlog! 宏 / 落盘 / 1 MiB 轮转 / mask_url 去凭据）
-│   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写）
+│   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写；落点 = 数据目录）
 │   ├── settings.rs         # 设置结构、快捷键转换、设置窗口/命令（持久化委托 store）
 │   ├── tabs.rs             # 多页签（宿主窗口 + shell 标签栏 + tab 窗口）
 │   ├── tray.rs             # 系统托盘
@@ -313,11 +322,11 @@ cargo tauri android build --target aarch64-linux-android --apk
 项目内置 Rust 单元测试，覆盖代理（Basic 头生成、hop-by-hop 头识别、Set-Cookie 重写、WS Origin 重写）、
 WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返与篡改检测，
 以及 2026-09-23 新增的两类**静态契约守卫**（都是「错了也静默」的那类缺陷）：
-运行期文档层 `src/store.rs`（读-改-写 / 双壳字面量互通）、`src/lib.rs` 的 IPC 注册表与
+运行期文档层 `src/store.rs`（读-改-写 / 落点 = 数据目录 / 双壳字面量互通）、`src/lib.rs` 的 IPC 注册表与
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（实测 116 条：resolve-core 13 + resolve-tool 7 + w2a-proxy 22 + 主 crate 74；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（实测 133 条：resolve-core 13 + resolve-tool 7 + w2a-proxy 28 + 主 crate 85；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -328,9 +337,11 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 ## 自动构建（GitHub Actions）
 
-5 条 workflow 统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移；命令经
-`defaults.run.working-directory: webview-app` 落到本工程目录，产物路径则显式带 `webview-app/` 前缀）：
-2 条**自动**（`ci.yml` / `release.yml`）+ 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，在 Actions 页手动 Run workflow）。
+6 条 workflow 统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移）：其中 **5 条服务本工程**
+（命令经 `defaults.run.working-directory: webview-app` 落到本工程目录，产物路径则显式带 `webview-app/` 前缀）——
+2 条**自动**（`ci.yml` / `release.yml`）+ 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，
+在 Actions 页手动 Run workflow）；另有 1 条 `electron-build-custom.yml` **只服务 Electron 绿色版壳**
+（工作目录是 `electron-app/`，用法见 `electron-app/README.md` 的「手动打包」）。
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 

@@ -57,8 +57,8 @@ mod proxy;
 pub mod resolve;
 mod settings;
 
-// 运行期配置文档：`settings.json` —— 设置 + 窗口几何**同住这一个文件**。
-// 读-改-写工具与文件契约（键序 / 兼容性）都在这里，两端（Tauri / Electron）同契约。
+// 运行期配置文档：`<数据目录>/settings.json` —— 设置 + 窗口几何**同住这一个文件**。
+// 读-改-写工具与文件契约（键序 / 兼容性 / 落点）都在这里，两端（Tauri / Electron）同契约。
 mod store;
 
 // 清除浏览数据（缓存 / Cookie / 本地存储 …）：设置页「清除全部」按钮的后端。

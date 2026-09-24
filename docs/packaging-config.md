@@ -24,6 +24,9 @@
 >
 > 另有一条**不打 workflow** 的路径：`release.yml`（打 tag 时触发），配置来自**仓库变量 / Secrets**，
 > 字段名不同（`TITLE` / `PROXY_ENABLED` …）。见 §7。
+>
+> 还有一条**本机**路径：`scripts/pack-local.py`（不用 Actions，直接在本机出包），
+> 它调的是**同一个解析器**，所以与 CI 产物同契约。见 §7.3。
 
 ---
 
@@ -42,7 +45,7 @@
 | `proxy_http` | string | `""` | 仅 Windows | 外部 HTTP 代理地址 |
 | `proxy_https` | string | `""` | 仅 Windows | 外部 HTTPS 代理地址（留空 = 复用 `proxy_http`） |
 | `proxy_bypass` | string | `"localhost;127.0.0.1;<-loopback>"` | 仅 Windows | 不走代理的地址，**分号分隔** |
-| `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。见 §4.3 |
+| `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。运行期文件（`settings.json` / `logs\`）都落在这个目录下。见 §4.3 |
 | `tabs_enabled` | **`bool`** | `false` | 仅 Windows | 多页签模式（Electron 亦可）；Android 忽略 |
 | `debug` | **`bool`** | `false` | 全平台 | 诊断日志开关：`true` = 写 `<数据目录>\logs\startup.log` 并同时打印；`false` = **不建目录、不写文件，控制台输出也一并静默**。见 §3.5 |
 | `public_key` | string | `""` | 全平台 | Ed25519 公钥（裸 base64 或 SPKI PEM）。**`app_url` 为数组时必填** |
@@ -280,6 +283,16 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
    `%APPDATA%`），这是各自框架的惯例位置；但**语义完全相同**：由 `app_name` 命名、
    与程序位置无关。⚠️ **两壳的日志目录 `<dataDir>\logs` 都随之移动** —— 这不再是 Electron 独有
    （见 §3.5）：`data_dir` 一改，两边的日志位置**一起**改。Android 不走这套规则，用应用私有目录。
+5. **运行期的 `settings.json`（设置 + 窗口几何）也在这个目录里**（2026-09-23 起）：
+   `<data_dir>\settings.json` —— 由 `config::store_dir`（Tauri）/ `storeLocation`（Electron）
+   统一决定，与 WebView2 用户数据目录、日志目录**同一个**。此前它固定放在
+   `%APPDATA%\<app_name>\`，于是选了绿色版（`data_dir = "data"`）之后，cookie / 缓存 / 日志
+   都跟着 exe 走，**唯独设置文件留在系统盘** —— 同一套「程序的数据」里唯一不听话的一项。
+   ⚠️ 旧位置保留为**读取候选**（升级兼容）：新位置还没有文件时读它、第一次写盘即落到新位置，
+   此后旧文件是死文件（不迁移、不删除，可手工删）。
+   ⚠️ `data_dir = ""` 时两壳的系统默认目录不同（见上一条）⇒ 那种模式下这个 JSON 各自落在
+   自己那份数据目录里，属数据目录既有差异的自然结果。
+   ⚠️ Android 不适用：它是应用私有目录，文件在 `/data/data/<pkg>/<app_name>/settings.json`。
 
 > **与旧字段的对照**：旧的 `data_dir_default`（布尔）两壳**同名反义** —— Tauri `false` =
 > `%LOCALAPPDATA%`、Electron `false` = exe 同级 `data\`，仅凭 JSON 看不出来。
@@ -361,7 +374,7 @@ python3 .github/scripts/check-workflows.py                                # work
 
 ---
 
-## 7. 两条打包入口怎么选
+## 7. 打包入口怎么选
 
 ### 7.1 手动打包（推荐为每个应用出一份包）
 
@@ -380,6 +393,59 @@ python3 .github/scripts/check-workflows.py                                # work
   「想一键生成某个固定应用」就把 `config_url` 固定指向仓库里那份 `.json`。
 
 > `config_json` 与 `config_url` 都填时，**以 `config_json` 为准**。
+
+### 7.3 本地打包（`scripts/pack-local.py`）
+
+不经过 GitHub Actions，在本机按同一份 JSON 出包。**它调的是同一个解析器**
+（`.github/scripts/parse-packaging-config.py`，importlib 按路径加载），所以本地产物与 CI 产物
+吃的是同一份契约，而不是各写一遍。
+
+```bash
+# 先看将执行什么命令（不动任何文件）
+python scripts/pack-local.py --config test1.json --target electron-all --dry-run
+
+# Electron 绿色版（zip + single-file portable exe）
+python scripts/pack-local.py --config test1.json --target electron-all
+
+# Tauri Windows 安装版 / 单文件版（需先 cargo install tauri-cli --version "^2"）
+python scripts/pack-local.py --config test1.json --target tauri-msi
+python scripts/pack-local.py --config test1.json --target tauri-portable
+```
+
+`--config` / `--json` / `--url` 三选一；`--target` ∈
+`electron-{zip,portable,all}` / `tauri-{msi,portable,all}`。
+
+**为什么两壳的本地步骤不一样**——配置在哪一刻被读，决定本地要做什么：
+
+| 壳 | 配置被读的时刻 | 本地要做的 | 对应本地命令 |
+|---|---|---|---|
+| Tauri | **编译期**（`option_env!` → 二进制常量） | 在 `cargo tauri build` **之前**把环境变量设好 | `cargo tauri build` |
+| Electron | **打包期**（读 `config.json` → 进 `app.asar`） | 先落一份**规范化**的 `config.json` | `pnpm run dist`（sidecar → tsc → stage → electron-builder） |
+
+**⚠️ 本地特有的三个坑（脚本已绕开，手工做时会踩）**：
+
+1. **不要 `source` 解析器写出的 env 文件。** Windows 上 `--env-out` 落盘是 **CRLF**
+   （解析器里 `open(path, "a", encoding="utf-8")` 按 `os.linesep` 把 `\n` 翻成 `\r\n`）⇒
+   `source` 后每个值尾部粘一个 `\r`，`APP_URL` 直接变成带 `\r` 的地址；
+   `PROXY_BYPASS=localhost;127.0.0.1;<-loopback>` 含 `;`（bash 当命令分隔符拆断）；
+   `public_key` 是多行 PEM 时写的是 **GitHub heredoc**（`KEY<<EOF…EOF`，bash 不认）。
+   ⇒ 脚本**不落也不读 env 文件**，直接把 `os.environ` 传给子进程。
+2. **`--env-out` 不传时解析器静默跳过**（`main()` 里是 `if args.env_out:`）——
+   本地忘传就「解析成功但一个变量都没设」。
+3. **`--env-out` 是 append 模式**（`open(path, "a")`）⇒ 反复跑会累积、新值盖不住旧值。
+
+**⚠️ 本地打包会改写文件，脚本一律备份 + `finally` 还原**（`--keep-config` 可保留）：
+
+| 文件 | 为什么被改写 | 是否纳管 |
+|---|---|---|
+| `webview-app/tauri.conf.json` | `app_name` → `productName`（安装包/快捷方式/安装目录名）+ 固定 `mainBinaryName` | **tracked** |
+| `webview-app/icons/*` | 给了 `--icon` 时 `cargo tauri icon` 重新生成整套图标 | **tracked** |
+| `electron-app/config.json` | 落规范化配置 | 未纳管，但通常是开发者本地调试那一份 ⇒ **同样还原** |
+
+> CI 不还原是因为工作区一次性；本地会脏工作区 / 覆盖本地调试配置。
+
+**本地做不了 Android**：`ring` 的 build script 需要 `aarch64-linux-android-clang`（NDK），
+脚本会明确拒绝而不是产半成品 ⇒ Android 只能走 CI。
 
 ### 7.2 `release.yml`（打 tag 自动发布）
 

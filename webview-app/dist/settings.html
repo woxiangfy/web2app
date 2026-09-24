@@ -7,11 +7,15 @@
 <!--
   设置页（Tauri 版与 Electron 绿色版**共用这一份**，经 settings://localhost/ 提供）。
 
-  版式契约（2026-09-23 重做：无边框窗 + 居中面板 + 正文滚动）：
+  版式契约（2026-09-23 重做：无边框窗 + 面板铺满整窗 + 正文滚动）：
     · 设置窗是**无边框窗**（Tauri `decorations(false)` / Electron `frame:false`），
       所以窗口顶部【没有】系统标题栏 —— 标题与关闭按钮由本页面板头部自绘。
-    · 整页只有一块「面板」：`body` 是底衬（backdrop），面板居中、四周留出底衬；
-      `html/body` 都不滚，**唯一的滚动容器是 .panel-bd**（否则滚动条会横穿面板圆角）。
+    · 整页只有一块「面板」，而且它**铺满整个窗口**：设置窗本来就是为这个面板而存在的，
+      面板四周再留一圈底衬（旧版 12px padding + `max-width:560px` 的 30px 余量）只会
+      让人觉得「窗口里套了个空框」、「大块空边框」（使用者 2026-09-23 原话）。
+      所以这里【没有】底衬、没有圆角、没有外阴影 —— 面板边界 = 窗口边界。
+    · `html/body` 都不滚，**唯一的滚动容器是 .panel-bd**（否则滚动条会横穿面板圆角）；
+      面板头部与底部各有一条分隔线，作为「窗口边界」的视觉替代（旧版靠面板外框充当）。
     · 面板头部可拖动窗口（`-webkit-app-region:drag` 给 Electron；
       `data-tauri-drag-region` 给 Tauri —— 后者要 capability 里的 `core:window:allow-start-dragging`，
       见 webview-app/capabilities/settings-window.json）。
@@ -22,8 +26,6 @@
 <style>
   :root {
     color-scheme: light dark;
-    /* 底衬：窗口本体露在面板四周的那一圈（面板本身是 --surface） */
-    --backdrop: #eceef1;
     --surface: #ffffff;
     --surface-hover: #ebedf0;
     --border: #d8dce2;
@@ -33,12 +35,9 @@
     --primary-hover: #1d4ed8;
     --danger: #dc2626;
     --success: #16a34a;
-    --radius: 12px;
-    --shadow: 0 12px 32px rgba(15, 23, 42, 0.18), 0 1px 2px rgba(15, 23, 42, 0.08);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --backdrop: #0f1115;
       --surface: #18181b;
       --surface-hover: #3f3f46;
       --border: #3f3f46;
@@ -48,7 +47,6 @@
       --primary-hover: #2563eb;
       --danger: #f87171;
       --success: #4ade80;
-      --shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.35);
     }
   }
   * { box-sizing: border-box; }
@@ -58,28 +56,23 @@
     font-family: system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
     font-size: 13px;
     line-height: 1.5;
-    background: var(--backdrop);
+    /* ⚠️ 底色与面板同色：窗口里没有「底衬」这层概念了，整窗就是面板（旧版的
+       --backdrop 底衬 + 居中面板正是被使用者指为「大块空边框」的那圈）。 */
+    background: var(--surface);
     color: var(--text);
-    /* 面板居中：四周留出的这一圈就是可拖动区域之外的底衬 */
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 12px;
   }
 
-  /* ---------- 面板：整页唯一的一块实体 ---------- */
+  /* ---------- 面板：整页唯一的一块实体，且铺满整窗 ---------- */
   .panel {
     width: 100%;
-    max-width: 560px;
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    overflow: hidden; /* 让头部 / 正文 / 底部三段的边角跟着圆角裁掉 */
+    /* 无 border / 无 border-radius / 无 box-shadow：面板边界即窗口边界，
+       多画一层就又把「空边框」还回来了（旧版正是那圈 1px 描边 + 外阴影）。 */
+    overflow: hidden; /* 正文的滚动条不会溢出到头部 / 底部 */
   }
   .panel-hd {
     flex: none;
@@ -87,6 +80,8 @@
     align-items: center;
     gap: 8px;
     padding: 10px 10px 10px 18px;
+    /* 头部与正文之间的分隔线：旧版靠面板自身的外框提供这条边界感，现在由它顶上。 */
+    border-bottom: 1px solid var(--border);
     -webkit-app-region: drag; /* Electron：无边框窗靠它拖动 */
   }
   .panel-hd .title {

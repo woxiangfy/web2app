@@ -14,6 +14,22 @@
 //! - 代理对鉴权拥有【最终决定权】：只要 `APP_URL` 带了 userinfo，就【强制写入】 `Authorization: Basic ...`
 //!   头（覆盖请求里任何已有值），确保上游收到的一定是合法凭据；避免「WebView2 原生事件是否注入了头」
 //!   的竞态导致偶发 401。转发请求时不会造成重复头（见下方 header 透传跳过 authorization）。
+//!
+//! ## 入口门禁（防本机扫描 / 防 CSRF 借道）
+//!
+//! 代理监听 127.0.0.1 随机端口，但「随机端口」挡不住同机其它进程逐个扫端口：谁能连上这个端口，
+//! 谁就能借本代理**携带着入口站点的账号凭据**访问上游。因此入口 URL 带一次性随机密钥
+//! （`http://127.0.0.1:PORT/?w2a_key=<43 字符随机串>`，每次启动重新生成）：
+//! - 每个请求（含 WS 握手）必须在 **query (`w2a_key`) 或同源 Cookie (`w2a_key`)** 里带上正确密钥，
+//!   否则一律 **404** —— 不返回 401/403、不带任何代理特征，对扫描者表现为「这个端口上什么都没有」；
+//! - 首次访问带 query 密钥时，响应回种 `HttpOnly; SameSite=Lax; Path=/` 的 cookie，
+//!   之后页面里的根绝对路径资源（`/assets/...`）、相对链接、WS 握手都靠 cookie 自动通过
+//!   （根绝对路径不会自带 query，这是必须上 cookie 的原因。形态对齐 Jupyter 的 token 鉴权）；
+//! - 转发给上游前，`w2a_key` 的 query 与 cookie 都会被**剥掉**，密钥不离开本机；
+//! - 诊断日志里的路径同样经过脱敏，密钥不落日志。
+//!
+//! 副作用：入口站点的首个文档必须有至少一次响应回种 cookie（401/3xx 响应也会带 Set-Cookie，
+//! 浏览器照常收）。这对正常 Web 应用恒成立。
 
 use axum::{
     body::Body,
@@ -33,6 +49,9 @@ use url::Url;
 /// WebView 实际连接的本地代理主机（用于 Cookie Domain 重写）。
 const PROXY_HOST: &str = "127.0.0.1";
 
+/// 入口门禁令牌的参数名（query 与 Cookie 同名；见模块文档「入口门禁」）。
+const ACCESS_KEY: &str = "w2a_key";
+
 #[derive(Clone)]
 pub struct ProxyState {
     client: reqwest::Client,
@@ -43,6 +62,8 @@ pub struct ProxyState {
     /// 上游 authority（host[:port]），作为转发请求的 `Host` 头值，
     /// 让上游收到的 Host 与“浏览器直连上游”时完全一致，避免内容/链接因 Host 不同而差异。
     upstream_authority: String,
+    /// 入口门禁随机密钥（每次启动重新生成；query / Cookie 二选一携带，见模块文档）。
+    access_token: String,
 }
 
 /// 从 URL 的 userinfo 生成 `Authorization: Basic ...` 头值；无账号则返回 None。
@@ -63,6 +84,100 @@ pub fn build_basic_auth(upstream: &Url) -> Option<String> {
     ))
 }
 
+/// 生成一次代理生命周期内的入口门禁密钥：256-bit 随机数 → URL 安全 base64（43 字符，无填充）。
+///
+/// 用 OS CSPRNG（`getrandom`）：密钥是「谁能借代理访问入口账号」的唯一凭据，
+/// 可预测性（时间戳 / 自增）等于没有门禁。
+fn generate_access_token() -> String {
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("OS 随机源不可用，无法生成代理入口密钥");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// 判断请求是否通过入口门禁：query 或 Cookie 中任一带上正确密钥即可。
+///
+/// 纯函数（只看 headers/uri/token），HTTP 转发与 WS 握手共用，便于单测。
+fn request_is_authorized(headers: &HeaderMap, uri: &Uri, token: &str) -> bool {
+    if let Some(query) = uri.query() {
+        for pair in query.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            if k == ACCESS_KEY && v == token {
+                return true;
+            }
+        }
+    }
+    if let Some(cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        for pair in cookie.split(';').map(str::trim) {
+            if let Some((_, v)) = pair
+                .split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case(ACCESS_KEY))
+            {
+                if v == token {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 判断 Cookie 头里是否已携带【正确的】门禁 cookie（决定本次响应要不要回种）。
+fn has_access_cookie(headers: &HeaderMap, token: &str) -> bool {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|cookie| {
+            cookie.split(';').map(str::trim).any(|pair| {
+                pair.split_once('=')
+                    .is_some_and(|(k, v)| k.eq_ignore_ascii_case(ACCESS_KEY) && v == token)
+            })
+        })
+}
+
+/// 剥掉 query 里的门禁令牌，返回要转发给上游的 path（含剩余 query）。
+///
+/// 必须按**原始字节**保留其余参数（不做 percent-decode/re-encode，避免改变语义）；
+/// 密钥参数是唯一被删除的部分。
+fn strip_secret_query(uri: &Uri) -> String {
+    let path = uri.path();
+    match uri.query() {
+        Some(query) => {
+            let kept: Vec<&str> = query
+                .split('&')
+                .filter(|p| p.split('=').next().unwrap_or("") != ACCESS_KEY)
+                .collect();
+            if kept.is_empty() {
+                path.to_string()
+            } else {
+                format!("{path}?{}", kept.join("&"))
+            }
+        }
+        None => path.to_string(),
+    }
+}
+
+/// 从转发给上游的 Cookie 头里摘掉门禁 cookie，避免把本机密钥泄漏给上游。
+///
+/// 返回 `None` 表示摘完为空（该 Cookie 头整个不转发）；其余 cookie 原样保留、顺序不变。
+fn strip_access_cookie(header_value: &str) -> Option<String> {
+    let kept: Vec<String> = header_value
+        .split(';')
+        .map(str::trim)
+        .filter(|p| {
+            !p.split_once('=')
+                .is_some_and(|(k, _)| k.eq_ignore_ascii_case(ACCESS_KEY))
+        })
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join("; "))
+    }
+}
+
 /// 启动本地反向代理，返回 `(WebView 应加载的本地入口 URL, 代理任务 AbortHandle)`。
 /// AbortHandle 供应用退出时优雅终止代理任务、释放 127.0.0.1 监听端口。
 pub async fn start_proxy(
@@ -80,7 +195,12 @@ pub async fn start_proxy(
     // 绑定随机端口（127.0.0.1:0），避免多实例冲突。
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let local_addr = listener.local_addr()?;
-    let local_url = format!("http://127.0.0.1:{}/", local_addr.port());
+    // 入口 URL 自带一次性门禁密钥（见模块文档「入口门禁」）。
+    let access_token = generate_access_token();
+    let local_url = format!(
+        "http://127.0.0.1:{}/?{ACCESS_KEY}={access_token}",
+        local_addr.port()
+    );
 
     let client = reqwest::Client::builder()
         // 不做全局超时：上游可能有长连接 / 流式响应（SSE、长轮询、大文件下载），超时会被误杀。
@@ -96,6 +216,7 @@ pub async fn start_proxy(
         upstream: upstream.clone(),
         auth_header: auth_header.clone(),
         upstream_authority,
+        access_token,
     };
 
     let app = Router::new().fallback(proxy_handler).with_state(state);
@@ -134,34 +255,45 @@ async fn proxy_handler(
 
     if is_ws {
         let (mut parts, _body) = req.into_parts();
-        let uri = parts.uri.clone();
+        // WS 握手同样要过入口门禁（密钥可在 query 或 Cookie 里）：不先校验就 on_upgrade，
+        // 等于给扫描者留了一条能直达上游（且携带凭据）的隧道。
+        if !request_is_authorized(&parts.headers, &parts.uri, &state.access_token) {
+            return Err(StatusCode::NOT_FOUND);
+        }
         let headers = parts.headers.clone();
+        let forward_path = strip_secret_query(&parts.uri);
         let ws = WebSocketUpgrade::from_request_parts(&mut parts, &())
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        return Ok(ws.on_upgrade(move |socket| handle_websocket(socket, state, uri, headers)));
+        return Ok(
+            ws.on_upgrade(move |socket| handle_websocket(socket, state, headers, forward_path))
+        );
     }
 
     // ---------- 普通 HTTP 转发（流式，避免大文件全量缓冲到内存）----------
     let (parts, body) = req.into_parts();
 
+    // 入口门禁：query / Cookie 密钥不对一律 404（不透露代理的存在，见模块文档）。
+    if !request_is_authorized(&parts.headers, &parts.uri, &state.access_token) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // 剥掉密钥后的转发路径（诊断日志也只打它，密钥不落盘）。
+    let forward_path = strip_secret_query(&parts.uri);
+    // 本次是否已带正确的门禁 cookie：带了就不用回种 Set-Cookie。
+    let cookie_authed = has_access_cookie(&parts.headers, &state.access_token);
+
     let target = state
         .upstream
-        .join(
-            parts
-                .uri
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/"),
-        )
+        .join(&forward_path)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let method = parts.method.clone();
     let mut rb = state.client.request(method.clone(), target.as_str());
 
     // 透传请求头（去掉 hop-by-hop，并跳过我们会重新设置的 Host / Origin / X-Forwarded-* /
-    // Authorization，以及 Content-Length——由 reqwest 按实际收集到的 body 重新计算，
-    // 避免与原始值冲突/重复）。
+    // Authorization / Cookie / Content-Length——
+    // Cookie 在循环外单独处理（要摘掉门禁 cookie）；
+    // Content-Length 由 reqwest 按实际收集到的 body 重新计算，避免与原始值冲突/重复）。
     //
     // ⚠️⚠️ `origin` 必须在**这里**跳过，不能靠「后面再设一次来覆盖」：
     // `http::request::Builder::header()`（以及 reqwest 的同名方法）是 **HeaderMap::append**
@@ -175,6 +307,7 @@ async fn proxy_handler(
             || name_str.eq_ignore_ascii_case("host")
             || name_str.eq_ignore_ascii_case("origin")
             || name_str.eq_ignore_ascii_case("authorization")
+            || name_str.eq_ignore_ascii_case("cookie")
             || name_str.eq_ignore_ascii_case("x-forwarded-proto")
             || name_str.eq_ignore_ascii_case("x-forwarded-host")
             || name_str.eq_ignore_ascii_case("x-forwarded-for")
@@ -183,6 +316,17 @@ async fn proxy_handler(
             continue;
         }
         rb = rb.header(name.clone(), value.clone());
+    }
+
+    // 转发给上游的 Cookie 要摘掉门禁 cookie（本机密钥不离开本机，见 strip_access_cookie）。
+    if let Some(cookie) = parts
+        .headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(kept) = strip_access_cookie(cookie) {
+            rb = rb.header("Cookie", kept);
+        }
     }
 
     // 上游收到的 Host 与“浏览器直连上游”时一致（例如直连时 Host=真实域名），
@@ -238,12 +382,8 @@ async fn proxy_handler(
         || ct_lower.contains("pdf")
         || ct_lower.contains("octet-stream");
     if is_interesting {
-        let dbg_path = parts
-            .uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/")
-            .to_string();
+        // 只用剥掉密钥后的路径，密钥不进诊断日志。
+        let dbg_path = forward_path.clone();
         let dbg_cd = proxied_resp
             .headers()
             .get(header::CONTENT_DISPOSITION)
@@ -256,6 +396,18 @@ async fn proxy_handler(
     }
 
     let mut response_builder = Response::builder().status(proxied_resp.status());
+    // 回种门禁 cookie：靠 query 密钥通过的请求（每个新会话的首次入口访问必然在此列）
+    // 都种一次，幂等无害；之后根绝对路径资源（`/assets/...`）与 WS 握手不带 query 也能通过。
+    // Path=/ 覆盖整个代理源；http://127.0.0.1 不能写 Secure；HttpOnly 让页面脚本读不到密钥。
+    if !cookie_authed {
+        response_builder = response_builder.header(
+            header::SET_COOKIE,
+            format!(
+                "{ACCESS_KEY}={}; Path=/; HttpOnly; SameSite=Lax",
+                state.access_token
+            ),
+        );
+    }
     for (name, value) in proxied_resp.headers() {
         // 仅跳过逐跳头。Content-Length 与 Content-Encoding 都必须【原样转发】：本代理的 reqwest
         // 未开启 gzip/brotli/deflate 解压特性（见 Cargo.toml），响应体会按上游原样流式透传——
@@ -287,12 +439,13 @@ async fn proxy_handler(
         .unwrap())
 }
 
-async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, headers: HeaderMap) {
-    let dbg_path = uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
-        .to_string();
+async fn handle_websocket(
+    socket: WebSocket,
+    state: ProxyState,
+    headers: HeaderMap,
+    forward_path: String,
+) {
+    let dbg_path = forward_path.clone();
     let host = state.upstream.host_str().unwrap_or("localhost");
     let port = state.upstream.port_or_known_default().unwrap_or_else(|| {
         if state.upstream.scheme() == "https" {
@@ -306,7 +459,7 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
     } else {
         "ws"
     };
-    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path_and_query = forward_path;
     let upstream_url = format!("{}://{}:{}{}", ws_scheme, host, port, path_and_query);
 
     let mut builder = http::Request::builder().uri(&upstream_url).method("GET");
@@ -328,6 +481,7 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
             || name_str.eq_ignore_ascii_case("host")
             || name_str.eq_ignore_ascii_case("origin")
             || name_str.eq_ignore_ascii_case("authorization")
+            || name_str.eq_ignore_ascii_case("cookie")
             || name_str.eq_ignore_ascii_case("x-forwarded-proto")
             || name_str.eq_ignore_ascii_case("x-forwarded-host")
             || name_str.eq_ignore_ascii_case("x-forwarded-for")
@@ -335,6 +489,13 @@ async fn handle_websocket(socket: WebSocket, state: ProxyState, uri: Uri, header
             continue;
         }
         builder = builder.header(name.clone(), value.clone());
+    }
+
+    // WS 握手的 Cookie 同样摘掉门禁 cookie 再转发（密钥不离开本机）。
+    if let Some(cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        if let Some(kept) = strip_access_cookie(cookie) {
+            builder = builder.header("Cookie", kept);
+        }
     }
 
     builder = builder.header("Host", state.upstream_authority.as_str());
@@ -704,8 +865,27 @@ mod tests {
         let client = reqwest::Client::new();
 
         // ① GET 大文件：验证鉴权注入 + cookie 重写 + 流式响应无截断
-        let resp = client.get(&proxy_url).send().await.unwrap();
+        let resp = client
+            .get(authed_url(&proxy_url, "/"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // 门禁 cookie 已随响应回种（浏览器靠它放行后续根绝对路径资源 / WS 握手）。
+        let mut gate_cookie_seen = false;
+        for c in resp.headers().get_all("set-cookie") {
+            if let Ok(s) = c.to_str() {
+                if s.contains(&format!("{ACCESS_KEY}=")) && s.contains("Path=/") {
+                    gate_cookie_seen = true;
+                }
+            }
+        }
+        assert!(
+            gate_cookie_seen,
+            "响应应回种门禁 cookie：{:?}",
+            resp.headers()
+        );
 
         // 回归断言：Content-Length 必须被原样转发（此前流式化改造把它跳过了，
         // 导致响应退化为无长度 chunked，WebView2 内嵌 PDF 查看器因此渲染空白）。
@@ -751,7 +931,7 @@ mod tests {
         // ② POST chunked 上传：请求体经代理流式转发后原样到达
         let payload: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
         let echo = client
-            .post(format!("{proxy_url}echo"))
+            .post(authed_url(&proxy_url, "/echo"))
             .body(payload.clone())
             .send()
             .await
@@ -805,7 +985,7 @@ mod tests {
             .no_proxy()
             .build()
             .unwrap()
-            .get(&proxy_url)
+            .get(authed_url(&proxy_url, "/"))
             .header("Origin", "http://127.0.0.1:9999")
             .send()
             .await
@@ -820,6 +1000,248 @@ mod tests {
             "Origin 应被改写为上游自身源"
         );
 
+        abort.abort();
+    }
+
+    // ---------- 入口门禁（见模块文档「入口门禁」）----------
+
+    /// 用入口 URL（query 里带密钥）拼出同源下的具体路径，密钥 query 原样保留。
+    fn authed_url(entry: &str, path: &str) -> String {
+        let mut u = Url::parse(entry).unwrap();
+        u.set_path(path);
+        u.to_string()
+    }
+
+    /// 从入口 URL 取出密钥，组装成浏览器会发的 Cookie 头值（`w2a_key=<token>`）。
+    fn auth_cookie_header(entry: &str) -> String {
+        let u = Url::parse(entry).unwrap();
+        let token = u
+            .query_pairs()
+            .find(|(k, _)| k == ACCESS_KEY)
+            .map(|(_, v)| v.into_owned())
+            .expect("入口 URL 应带 w2a_key");
+        format!("{ACCESS_KEY}={token}")
+    }
+
+    #[test]
+    fn access_token_is_random_and_url_safe() {
+        let a = generate_access_token();
+        let b = generate_access_token();
+        // 256-bit → URL_SAFE_NO_PAD base64 = 43 字符
+        assert_eq!(a.len(), 43);
+        assert_eq!(b.len(), 43);
+        assert_ne!(a, b, "两次生成的密钥必须不同（CSPRNG）");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "密钥必须只含 URL 安全字符，实际：{a}"
+        );
+    }
+
+    #[test]
+    fn gate_accepts_query_or_cookie_and_rejects_rest() {
+        let uri: Uri = "/?x=1&w2a_key=good".parse().unwrap();
+        let mut h = HeaderMap::new();
+        assert!(request_is_authorized(&h, &uri, "good"));
+        assert!(!request_is_authorized(&h, &uri, "bad"), "错误密钥应拒绝");
+        assert!(
+            !request_is_authorized(&h, &"/?x=1".parse::<Uri>().unwrap(), "good"),
+            "无密钥应拒绝"
+        );
+
+        // Cookie 形态：带其它 cookie + 正确/错误门禁 cookie
+        h.insert(header::COOKIE, "sid=abc; w2a_key=good".parse().unwrap());
+        assert!(request_is_authorized(
+            &h,
+            &"/assets/x.js".parse::<Uri>().unwrap(),
+            "good"
+        ));
+        assert!(!request_is_authorized(
+            &h,
+            &"/assets/x.js".parse::<Uri>().unwrap(),
+            "bad"
+        ));
+        // has_access_cookie 只在值正确时为 true
+        let mut good = HeaderMap::new();
+        good.insert(header::COOKIE, "w2a_key=good".parse().unwrap());
+        assert!(has_access_cookie(&good, "good"));
+        let mut wrong = HeaderMap::new();
+        wrong.insert(header::COOKIE, "w2a_key=wrong".parse().unwrap());
+        assert!(!has_access_cookie(&wrong, "good"));
+    }
+
+    #[test]
+    fn secret_query_stripped_without_touching_others() {
+        let f = |s: &str| strip_secret_query(&s.parse::<Uri>().unwrap());
+        assert_eq!(f("/?w2a_key=tok"), "/");
+        assert_eq!(f("/a?b=1&w2a_key=tok&c=2"), "/a?b=1&c=2");
+        assert_eq!(f("/a?w2a_key=tok&b=1"), "/a?b=1");
+        assert_eq!(f("/a?b=1&w2a_key=tok"), "/a?b=1");
+        assert_eq!(f("/no-query"), "/no-query");
+        // 只删同名参数，相似名不动
+        assert_eq!(f("/a?w2a_key_extra=1"), "/a?w2a_key_extra=1");
+    }
+
+    #[test]
+    fn access_cookie_stripped_without_losing_other_cookies() {
+        assert_eq!(
+            strip_access_cookie("sid=9; w2a_key=tok; ui=dark").as_deref(),
+            Some("sid=9; ui=dark")
+        );
+        assert_eq!(
+            strip_access_cookie("W2A_KEY=tok").as_deref(),
+            None,
+            "大小写无关；摘空后整个 Cookie 头不转发"
+        );
+        assert_eq!(
+            strip_access_cookie("sid=9; other=w2a_key=notme").as_deref(),
+            Some("sid=9; other=w2a_key=notme"),
+            "只有属性名完全相等才摘"
+        );
+    }
+
+    /// 门禁端到端：无/错密钥一律 404；query 通过后回种 cookie、密钥不转发给上游；
+    /// 仅带 cookie 的后续根绝对路径请求通过；query 里的密钥在上游侧被剥掉。
+    #[tokio::test]
+    async fn proxy_gate_404_query_and_cookie_flow() {
+        use std::sync::{Arc, Mutex};
+
+        // 记录上游最后收到的 Cookie 与路径。
+        let last_cookie: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let last_cookie2 = last_cookie.clone();
+        let last_uri: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let last_uri2 = last_uri.clone();
+
+        // axum 0.8：catch-all `/{*path}` 不匹配根路径 "/"，两个路由共用同一个 handler。
+        let inspect = move |headers: axum::http::HeaderMap, uri: axum::http::Uri| {
+            *last_cookie2.lock().unwrap() = headers
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            *last_uri2.lock().unwrap() = Some(uri.to_string());
+            async { "ok" }
+        };
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(inspect.clone()))
+            .route("/{*path}", axum::routing::get(inspect));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let app_url = url::Url::parse(&format!("http://alice:secret@{}", addr)).unwrap();
+        let (entry, abort) = super::start_proxy(&app_url).await.unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let root: Url = Url::parse(&entry).unwrap();
+        let root_no_token = format!("{}://{}/", root.scheme(), root.authority());
+
+        // ① 无密钥 / 错误密钥（query 与 cookie 各试一遍）→ 一律 404，不透露代理身份。
+        assert_eq!(
+            client.get(&root_no_token).send().await.unwrap().status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            client
+                .get(format!("{root_no_token}?{ACCESS_KEY}=wrong"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            client
+                .get(&root_no_token)
+                .header("Cookie", format!("{ACCESS_KEY}=wrong; sid=z"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        // 被 404 挡下时上游根本没被碰到（路径仍为初始 None）。
+        assert!(last_cookie.lock().unwrap().is_none());
+
+        // ② 正确 query 密钥 → 200，响应回种门禁 cookie；上游收不到 w2a_key（Cookie 与 query 都剥掉）。
+        let resp = client
+            .get(authed_url(&entry, "/"))
+            .header("Cookie", "sid=keep-me; w2a_key=good-but-replaced")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(
+            resp.headers().get_all("set-cookie").iter().any(|v| v
+                .to_str()
+                .is_ok_and(|s| s.starts_with(&format!("{ACCESS_KEY}=")))),
+            "应回种门禁 cookie"
+        );
+        assert_eq!(
+            last_cookie.lock().unwrap().as_deref(),
+            Some("sid=keep-me"),
+            "门禁 cookie 不应转发给上游，其它 cookie 保留"
+        );
+        assert_eq!(
+            last_uri.lock().unwrap().as_deref(),
+            Some("/"),
+            "密钥 query 不应转发给上游"
+        );
+
+        // ③ 不带 query、只带正确 cookie 的根绝对路径请求 → 通过；带业务 query 时密钥不混入。
+        let resp = client
+            .get(format!("{root_no_token}assets/app.js"))
+            .header("Cookie", auth_cookie_header(&entry))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let resp = client
+            .get(format!("{root_no_token}seen?a=1"))
+            .header("Cookie", format!("{}; q=2", auth_cookie_header(&entry)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            last_uri.lock().unwrap().as_deref(),
+            Some("/seen?a=1"),
+            "业务 query 原样转发，且没有 w2a_key 残留"
+        );
+        assert_eq!(
+            last_cookie.lock().unwrap().as_deref(),
+            Some("q=2"),
+            "门禁 cookie 不转发"
+        );
+
+        abort.abort();
+    }
+
+    /// 无密钥的 WebSocket 握手必须被 404 挡在代理层（不能借隧道直达上游）。
+    #[tokio::test]
+    async fn ws_without_token_rejected_with_404() {
+        // 门禁在连接上游之前生效，所以上游地址故意给一个不可达地址：能拒绝就证明没连上游。
+        let app_url = url::Url::parse("http://127.0.0.1:1/").unwrap();
+        let (entry, abort) = super::start_proxy(&app_url).await.unwrap();
+        let mut u = Url::parse(&entry).unwrap();
+        u.set_scheme("ws").unwrap();
+        u.set_path("/ws");
+        u.set_query(None);
+
+        let err = tokio_tungstenite::connect_async(u.as_str())
+            .await
+            .expect_err("无密钥的 WS 握手应失败");
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(
+                    resp.status(),
+                    axum::http::StatusCode::NOT_FOUND,
+                    "WS 无密钥应回 404（隐藏代理身份）"
+                );
+            }
+            other => panic!("期望 HTTP 404 响应，实际错误：{other:?}"),
+        }
         abort.abort();
     }
 }

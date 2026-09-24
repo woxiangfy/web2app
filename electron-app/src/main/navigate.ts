@@ -136,11 +136,26 @@ export async function resolveTarget(
   if (!dns && !useProxy) {
     const p = parseAppUrl(raw)
     if (!p.ok) return p
+    // 注意：`new URL('http://u:%ZZbad@h')` 本身能解析成功，但对 userinfo 再做
+    // decodeURIComponent 会抛 URIError。这里没有外层 try（try 只包 sidecar 分支），
+    // 一旦抛出会变成 bootstrap 的 unhandled rejection，表现为 splash 永久转圈。
+    let user: string
+    let pass: string
+    try {
+      user = decodeURIComponent(p.parsed.username || '')
+      pass = decodeURIComponent(p.parsed.password || '')
+    } catch (e) {
+      return {
+        ok: false,
+        title: '加载失败',
+        detail: `应用配置网址的用户名或密码含非法百分号编码（${(e as Error).message}）：${raw}`,
+      }
+    }
     return {
       ok: true,
       url: stripUserinfo(p.parsed),
-      user: decodeURIComponent(p.parsed.username || ''),
-      pass: decodeURIComponent(p.parsed.password || ''),
+      user,
+      pass,
       how: 'direct',
     }
   }

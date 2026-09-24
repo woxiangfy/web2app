@@ -5,7 +5,11 @@
  * （electron-app，Windows）。差异全部收在下面两处能力探测里，其余逻辑一字不分叉。
  *
  * 提供的标题栏（高 38px，与多页签宿主 shell.html 的标签栏一致）：
- *      [← 后退] [→ 前进]        标题        [— 最小化] [⚙ 设置] [▢ 最大化] [✕ 关闭]
+ *      [← 后退] [→ 前进]        标题        [⚙ 设置] [— 最小化] [▢ 最大化] [✕ 关闭]
+ *   ⚠️ 「设置」在**最小化左侧**（2026-09-23 使用者指定：设置不属于窗口控制，但要紧挨着
+ *     那一簇按钮）。位置由 Electron 探针按几何钉住（只比 left/right，不看 DOM 顺序），
+ *      改动这里必须同步改 `electron-app/src/main/probe.ts` 的两条断言
+ *      （标题栏 + 多页签标签栏），以及 shell.html 里的同名按钮。
  *   - 拖动 / 双击最大化：
  *       · Tauri（Windows）：交给 drag region（`data-tauri-drag-region` 属性，由 tauri 注入的
  *         drag.js 处理）。WebView2 上 `-webkit-app-region` 不可靠，故以属性为准。
@@ -246,8 +250,8 @@
     '<button type="button" class="w2t-btn w2t-back" title="后退">←</button>',
     '<button type="button" class="w2t-btn w2t-fwd" title="前进">→</button>',
     '<div class="w2t-title" data-tauri-drag-region> </div>',
-    '<button type="button" class="w2t-btn w2t-min" title="最小化">—</button>',
     '<button type="button" class="w2t-btn w2t-settings" title="设置">' + GEAR + '</button>',
+    '<button type="button" class="w2t-btn w2t-min" title="最小化">—</button>',
     '<button type="button" class="w2t-btn w2t-max" title="最大化/还原">▢</button>',
     '<button type="button" class="w2t-btn w2t-close" title="关闭">✕</button>'
   ].join('');
@@ -868,7 +872,7 @@
     bar.querySelector('.w2t-back').addEventListener('click', function () { onNav('back'); });
     bar.querySelector('.w2t-fwd').addEventListener('click', function () { onNav('forward'); });
     bar.querySelector('.w2t-min').addEventListener('click', function () { callWindow('minimize'); });
-    // 设置按钮：紧挨最小化按钮右侧（与多页签标签栏 shell.html 的同名按钮位置一致）。
+    // 设置按钮：紧挨最小化按钮**左侧**（与多页签标签栏 shell.html 的同名按钮位置一致）。
     bar.querySelector('.w2t-settings').addEventListener('click', function () { openSettings(); });
     bar.querySelector('.w2t-max').addEventListener('click', function () { callWindow('toggleMaximize'); });
     bar.querySelector('.w2t-close').addEventListener('click', function () { callWindow('close'); });

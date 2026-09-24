@@ -13,9 +13,9 @@
 |---|---|
 | 定位 | Rust + Tauri 2 的跨平台 WebView 壳：嵌网址 + 托盘最小化 + 全局快捷键 + 代理/Basic 鉴权 |
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
-| 架构 | cargo workspace 三 crate，职责边界清晰 |
-| 代码规模 | 主 crate `src/` 19 个文件（含 4 个注入脚本）+ 3 个 crate + 5 条 CI/打包工作流 |
-| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 22 + 71 通过，另有 3 + 3 条 ignored）；双壳契约探针 126/126、多页签 26/26 |
+| 架构 | cargo workspace 四 crate，职责边界清晰 |
+| 代码规模 | 主 crate `src/` 22 个文件（16 个 `.rs` + 6 个前端资源：4 个注入脚本 + 2 个页面）+ 4 个 crate + 6 条 CI/打包工作流（含 1 条只服务 Electron 壳的 `electron-build-custom.yml`） |
+| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 28 + 85 = 133 通过，另有 3 + 3 条 ignored）；Electron 纯函数单测 29 条、双壳契约探针 134/134、多页签 26/26（2026-09-24） |
 
 ### crate 职责
 
@@ -43,7 +43,7 @@
 | `tabs.rs` | 多页签（宿主窗口 + shell 标签栏 + tab 窗口） | Windows | owned window 防遮挡；`place_tab` 闭环校准；`destroy()` 防重入；`MAX_TABS` 熔断 |
 | `tray.rs` | 系统托盘 + 窗口切换 | 桌面端 | 显隐同步多页签 |
 | `window_state.rs` | 窗口几何：抓取 / 恢复策略 | 桌面端 | 落盘在 `store` 的 `window` 段；失效几何自动最大化；物理像素 |
-| `store.rs` | 运行期唯一那份 JSON（设置 + `window` 段）的契约与读-改-写 | 全平台 | 两个写入方互不覆盖；一段坏掉不拖垮另一段 |
+| `store.rs` | 运行期唯一那份 JSON（设置 + `window` 段）的契约、落点（= 数据目录）与读-改-写 | 全平台 | 两个写入方互不覆盖；一段坏掉不拖垮另一段；旧位置只读兼容 |
 | `settings.rs` | 设置结构 + 设置窗口（持久化委托 `store`） | 全平台 | 快捷键/托盘副作用锁外执行；Android 不取 parent 目录 |
 | `dnd_polyfill.js` | WebView2 拖拽 bug polyfill | Windows | 鼠标事件合成完整 HTML5 DnD 序列（**效果待真机验证，见「遗留问题」**） |
 | `tab_title.js` | 多页签真实标题回传 | Windows | MutationObserver + 轮询兜底 |
