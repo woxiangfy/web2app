@@ -179,9 +179,19 @@ jobs:
   #      a) 解析器自测 —— 契约唯一真源（字段/默认值/废弃字段报错）不漂移；
   #      b) 所有 workflow 的 YAML 与**内联 python/bash 语法** —— 这类错只在 CI 上才炸，
   #         而且要等 checkout / 装工具链之后；见 .github/scripts/check-workflows.py 的说明；
-  #      c) 仓库内每个配置样例都能被解析器接受 —— 曾经 `test1.json` / `test2.json`
-  #         停留在字符串布尔（`"proxy_enabled": "false"`），新契约已硬拒，靠这一步
-  #         在提交时就现形，而不是等用户跑手动打包才失败。
+  #      c) 仓库内每个配置样例都能被解析器接受 —— 曾经样例配置停留在字符串布尔
+  #         （`"proxy_enabled": "false"`），新契约已硬拒，靠这一步在提交时就现形，
+  #         而不是等用户跑手动打包才失败。
+  #         ⚠️ 手工打包用的 test1.json / test2.json 已移入**本地专属**的 tests/
+  #            （整目录被 .gitignore 忽略、不入库），CI 看不到它们；入库的样例只剩
+  #            两壳各自的 config.example.json，本步就守这两份。
+  #      d) 本地打包入口 `scripts/pack-local.mjs` 的自测 + 与 Python 解析器的**对等性比对**
+  #         —— 它是解析器语义的第二份实现（存在理由：Python 不是「拿着这个仓库就一定有」的
+  #         依赖，而打 Electron 包必然已有 node）。第二份实现的最大风险就是**两侧悄悄漂移**，
+  #         `--parity` 是把两侧对同一批 payload 的输出逐项比对（退出码 / `::warning::` 序列 /
+  #         错误文案 / `config.json` 字节），是唯一能自动发现漂移的手段。
+  #         ⚠️ 必须在 Linux 上跑：本机 Windows 的 Python 会把换行翻成 CRLF，`--parity` 只能
+  #            把这种差异降级为「仅行尾不同」的提示；Linux 上两侧都是 LF，比对是逐字节的。
   #
   #    ⚠️⚠️ 本作业**必须在仓库根执行**：契约脚本与 workflow 都在仓库根的 `.github/` 下。
   #        而本文件顶部的 `defaults.run.working-directory: webview-app` 会把每个 `run:`
@@ -200,6 +210,12 @@ jobs:
       - name: 解析器契约自测（唯一真源不漂移）
         run: python3 .github/scripts/parse-packaging-config.py --selftest
 
+      - name: 本地打包入口（Node 版）自测 + 与解析器对等性比对
+        # ubuntu-latest 自带 node（≥18 即可，脚本零第三方依赖）；python3 也在 ⇒ --parity 能真跑。
+        run: |
+          node scripts/pack-local.mjs --selftest
+          node scripts/pack-local.mjs --parity
+
       - name: 静态检查所有 workflow（YAML + 内联 python/bash）
         run: python3 .github/scripts/check-workflows.py
 
@@ -211,10 +227,9 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
+          # test1.json / test2.json 是本地手工打包工作文件，已移入 tests/（.gitignore 忽略、不入库）。
           for f in webview-app/config.example.json \
-                   electron-app/config.example.json \
-                   test1.json \
-                   test2.json; do
+                   electron-app/config.example.json; do
             if CONFIG_JSON="$(cat "$f")" python3 .github/scripts/parse-packaging-config.py > /dev/null; then
               echo "OK   $f"
             else

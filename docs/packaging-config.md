@@ -25,8 +25,9 @@
 > 另有一条**不打 workflow** 的路径：`release.yml`（打 tag 时触发），配置来自**仓库变量 / Secrets**，
 > 字段名不同（`TITLE` / `PROXY_ENABLED` …）。见 §7。
 >
-> 还有一条**本机**路径：`scripts/pack-local.py`（不用 Actions，直接在本机出包），
-> 它调的是**同一个解析器**，所以与 CI 产物同契约。见 §7.3。
+> 还有一条**本机**路径：`scripts/pack-local.mjs`（不用 Actions，直接在本机出包，只依赖 Node）。
+> ⚠️ 它是本解析器的 **Node 复刻**而不是复用（Python 不是必然存在的依赖）⇒ 两侧靠
+> `--parity` 逐项比对钉住等价。见 §7.3。
 
 ---
 
@@ -394,26 +395,76 @@ python3 .github/scripts/check-workflows.py                                # work
 
 > `config_json` 与 `config_url` 都填时，**以 `config_json` 为准**。
 
-### 7.3 本地打包（`scripts/pack-local.py`）
+### 7.3 本地打包（`scripts/pack-local.mjs`）
 
-不经过 GitHub Actions，在本机按同一份 JSON 出包。**它调的是同一个解析器**
-（`.github/scripts/parse-packaging-config.py`，importlib 按路径加载），所以本地产物与 CI 产物
-吃的是同一份契约，而不是各写一遍。
+不经过 GitHub Actions，在本机按同一份 JSON 出包。
+
+⚠️ 这里有一个**刻意的取舍**：本脚本是 `.github/scripts/parse-packaging-config.py` 的 **Node 复刻**，
+而**不是复用**它。理由是 Python **不是**「拿着这个仓库就一定有」的依赖 —— 2026-09-24 实测：
+Windows 上 PATH 里的 `python` 来自会话注入（`~/.workbuddy/binaries/python/…`），系统里既没有
+`py.exe` launcher 也没有任何 Python 安装 ⇒ 出了那个会话就 `command not found`。
+而打 Electron 包**必然已有 node**（`electron-builder` 本身就是 node 程序，
+`pnpm run sidecar/build/stage` 也全是 node 脚本）。
+
+⇒ 代价是解析逻辑**有两份实现**，因此配了**两条护栏**（都已接进 `.github/workflows/ci.yml`
+的 `config-contract` 作业）：
+
+| 命令 | 作用 | 需要 Python |
+|---|---|---|
+| `node scripts/pack-local.mjs --selftest` | 契约自测（字段/默认值/废弃字段报错/类型拒绝/近似名建议） | 否 |
+| `node scripts/pack-local.mjs --parity` | 与 Python 解析器**逐项比对**：退出码 / `::warning::` 序列 / 错误文案 / `config.json` 字节 | **是**（缺失时明确报「跳过」，不假装通过） |
+
+**⚠️ 改任何一侧的解析语义，都必须同步另一侧，并跑 `--parity`。** 它比对的是 39 个 payload
+（含全部错误分支与边界），任一项不同即失败。
 
 ```bash
 # 先看将执行什么命令（不动任何文件）
-python scripts/pack-local.py --config test1.json --target electron-all --dry-run
+node scripts/pack-local.mjs --config tests/test1.json --target electron-all --dry-run
 
 # Electron 绿色版（zip + single-file portable exe）
-python scripts/pack-local.py --config test1.json --target electron-all
+node scripts/pack-local.mjs --config tests/test1.json --target electron-all
 
 # Tauri Windows 安装版 / 单文件版（需先 cargo install tauri-cli --version "^2"）
-python scripts/pack-local.py --config test1.json --target tauri-msi
-python scripts/pack-local.py --config test1.json --target tauri-portable
+node scripts/pack-local.mjs --config tests/test1.json --target tauri-msi
+node scripts/pack-local.mjs --config tests/test1.json --target tauri-portable
+
+# 两条护栏
+node scripts/pack-local.mjs --selftest
+node scripts/pack-local.mjs --parity
 ```
+
+要求 **Node ≥ 18**（用到内置 `fetch`），**零第三方依赖**。
 
 `--config` / `--json` / `--url` 三选一；`--target` ∈
 `electron-{zip,portable,all}` / `tauri-{msi,portable,all}`。
+
+**⚠️⚠️ 本地行为一律由 JSON 决定 —— 不允许有「JSON 之外还得有人再做一步」的隐式前提。**
+这条踩过两次，都已修（本地判据与 CI 逐字同源）：
+
+| 事项 | 判据（**只看 JSON**） | CI 里的同一条 | 曾经的错法 |
+|---|---|---|---|
+| 自定义图标 | `icon_url` **非空** | `if [ -z "$ICON_URL" ] … exit 0`，否则下载 + 应用 | 本地额外要求 `--icon` 开关 ⇒ 同一份 JSON 在 CI 带图标、在本地不带 |
+| 产物输出目录 | 不需要人参与 | CI 工作区是一次性的，`electron-app/release/` 由 electron-builder.yml 指定 | 让人**手工删掉**输出目录 |
+
+- `icon_url` 非空时会下载 PNG 并应用：Electron 侧**同时**覆盖 `webview-app/icons/icon.png`
+  （托盘图标走 `extraResources`，只设 `-c.win.icon` 对托盘无效），Tauri 侧跑 `cargo tauri icon`
+  重新生成整套图标。要**刻意**跳过用 `--no-icon`（逃逸口，不是默认路径）。
+- 输出目录：本地打包的**交付产物一律落到仓库根 `tests/` 下** —— 那是 README §3.2 约定的本地测试
+  产物目录，根 `.gitignore` 的 `/tests/` 整目录忽略，**不会进版本库**；CI 不受影响（工作区一次性，
+  仍走各自默认路径）。两壳默认**分子目录**（绿色版都叫 `<app_name>.exe`，混放会互相覆盖）：
+  - **Electron → `tests/pack/`**：win-unpacked/ 整树与 zip/portable（单次约 150MB）由 electron-builder
+    直接输出到这里；CI 里仍走 `electron-builder.yml` 指定的 `electron-app/release/`。
+    脚本**不自己清空**输出目录，先让 electron-builder 按常规流程清；**只有它因「删不掉」而失败时**，
+    脚本才自动换 `tests/pack-local-<时间戳>/` 重试一次（全新目录没东西可清 ⇒ 必然能出包）。
+    ⚠️ 不要改成「脚本先自己清一遍」：本机的删除有配额，清一次上千个文件会把配额烧光，害得
+    electron-builder 连自己的中间产物都删不掉 ⇒「产物已出、构建却报失败」（2026-09-24 实测）。
+  - **Tauri → `tests/pack/tauri/`**：Tauri 无法配置 cargo 的输出目录，脚本在构建成功后**归集**：
+    单文件绿色版由 `target/release/web2app.exe`（cargo 增量编译产物，**复制不搬走**）复制为
+    `<app_name>.exe`；`bundle/msi/*.msi` 与 `bundle/nsis/*` 安装包（`tauri.conf.json` 的
+    `bundle.targets` 同时含两种）**移动**到该目录。默认目录每次构建整目录重建（清掉升版前的旧安装包）；
+    自定义 `--out` 目录则只覆盖同名文件、不清空。
+  - 可用 `--out <DIR>` 覆盖；相对路径以**各自壳工程目录**为基准（Electron 锚定 `electron-app/`、
+    Tauri 锚定 `webview-app/`），在根 tests/ 下换目录写 `--out ../tests/<名字>`，绝对路径原样使用。
 
 **为什么两壳的本地步骤不一样**——配置在哪一刻被读，决定本地要做什么：
 
@@ -422,14 +473,15 @@ python scripts/pack-local.py --config test1.json --target tauri-portable
 | Tauri | **编译期**（`option_env!` → 二进制常量） | 在 `cargo tauri build` **之前**把环境变量设好 | `cargo tauri build` |
 | Electron | **打包期**（读 `config.json` → 进 `app.asar`） | 先落一份**规范化**的 `config.json` | `pnpm run dist`（sidecar → tsc → stage → electron-builder） |
 
-**⚠️ 本地特有的三个坑（脚本已绕开，手工做时会踩）**：
+**⚠️ 「写 env 文件」那条路的三个坑**（Node 版完全不走这条路 ⇒ 天然不存在；手工用解析器的
+`--env-out` 或读 CI 的 `$GITHUB_ENV` 时会踩）：
 
 1. **不要 `source` 解析器写出的 env 文件。** Windows 上 `--env-out` 落盘是 **CRLF**
    （解析器里 `open(path, "a", encoding="utf-8")` 按 `os.linesep` 把 `\n` 翻成 `\r\n`）⇒
    `source` 后每个值尾部粘一个 `\r`，`APP_URL` 直接变成带 `\r` 的地址；
    `PROXY_BYPASS=localhost;127.0.0.1;<-loopback>` 含 `;`（bash 当命令分隔符拆断）；
    `public_key` 是多行 PEM 时写的是 **GitHub heredoc**（`KEY<<EOF…EOF`，bash 不认）。
-   ⇒ 脚本**不落也不读 env 文件**，直接把 `os.environ` 传给子进程。
+   ⇒ Node 版把 `env` 对象**直接传给子进程**，既不落也不读 env 文件。
 2. **`--env-out` 不传时解析器静默跳过**（`main()` 里是 `if args.env_out:`）——
    本地忘传就「解析成功但一个变量都没设」。
 3. **`--env-out` 是 append 模式**（`open(path, "a")`）⇒ 反复跑会累积、新值盖不住旧值。
@@ -439,7 +491,7 @@ python scripts/pack-local.py --config test1.json --target tauri-portable
 | 文件 | 为什么被改写 | 是否纳管 |
 |---|---|---|
 | `webview-app/tauri.conf.json` | `app_name` → `productName`（安装包/快捷方式/安装目录名）+ 固定 `mainBinaryName` | **tracked** |
-| `webview-app/icons/*` | 给了 `--icon` 时 `cargo tauri icon` 重新生成整套图标 | **tracked** |
+| `webview-app/icons/*` | `icon_url` 非空时 `cargo tauri icon` 重新生成整套图标（Electron 侧同步覆盖其中 `icon.png` 供托盘用） | **tracked** |
 | `electron-app/config.json` | 落规范化配置 | 未纳管，但通常是开发者本地调试那一份 ⇒ **同样还原** |
 
 > CI 不还原是因为工作区一次性；本地会脏工作区 / 覆盖本地调试配置。

@@ -49,4 +49,6 @@ node_modules/
 # tests 目录内」，即该目录**不是**交付物。此处刻意**锚定**为 `/tests/`：不锚定会连带
 # 忽略将来任何层级的 tests/ 目录（如 src/tests/）。子项目自己的 tests/ 由各自的
 # .gitignore 覆盖（`electron-app/.gitignore` 的 `tests/*/`）。
+# ⚠️ `scripts/pack-local.mjs` 的 Electron 本地打包产物**默认就落在这里**（tests/pack/：
+#    win-unpacked/ 整树 + zip/portable，单次约 150MB / 上千文件），靠本条规则保证不入库。
 /tests/
