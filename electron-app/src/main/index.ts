@@ -8,7 +8,7 @@
  *   4. requestSingleInstanceLock() —— 单实例锁文件落在 userData 下，故在第 1 步之后
  */
 import { app, BrowserWindow, ipcMain, protocol } from 'electron'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { setupPortablePaths } from './portable'
@@ -109,11 +109,16 @@ if (PROBE || process.env.WEB2APP_NO_GPU === '1' || hasFlag('--disable-gpu')) {
 }
 
 // ---------- 0. 注入脚本单一真源：优先打包副本，其次 webview-app/src ----------
-// 打包后 resources/inject/ 由 electron-builder 从 webview-app/src 拷贝；
+// 打包后 resources/inject/ 已**不再存在**（2026-09-26 改造）：注入脚本 / 壳页面
+// （titlebar.js / loading.js / splash.html / shell.html）由 stage-assets.cjs 拷贝到
+// `out/inject/`，随 asar 封进包内（app.asar/out/inject/），与 config.json 同等待遇 ——
+// 明文放在 asar 外等于注入逻辑形同虚设，任何人都能改掉标题栏 / 加载层 / 多页签壳，
+// 再原样分发出去而使用者看不出区别。现在想改必须重新打包（与 Tauri 版一致）。
 // 开发时（electron .）直接读 webview-app/src，避免复制出第二份会分叉的脚本。
+// ⚠️ 用 `app.isPackaged` 区分而非 `existsSync`：stage 也会在开发目录生成 out/inject/，
+//    若按「存在即打包副本」判，开发态会误读 stage 副本、失去单一真源。
 function injectDir(): string {
-  const packed = join(process.resourcesPath, 'inject')
-  if (existsSync(packed)) return packed
+  if (app.isPackaged) return join(app.getAppPath(), 'out', 'inject')
   return join(__dirname, '..', '..', '..', 'webview-app', 'src')
 }
 
@@ -861,7 +866,7 @@ function settingsPreloadPath(): string {
 }
 
 function readSettingsPageHtml(): string | null {
-  return readSettingsHtml(app.getAppPath(), process.resourcesPath)
+  return readSettingsHtml(app.getAppPath())
 }
 
 /** 打开设置窗（托盘菜单 / Shift+F1 / 页面右键菜单共用的唯一入口，对齐旧版） */

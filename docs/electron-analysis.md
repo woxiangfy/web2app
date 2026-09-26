@@ -10,25 +10,27 @@
 
 ## 1. 功能对等矩阵（以 `webview-app/src/` 实际代码为基准）
 
-| webview-app 模块                                            | 规模        | Electron 对应                                                                                                        | 迁移难度           | 关键说明                                                                                                                                              |
+| webview-app 模块                                            | 规模（2026-09-25 实测） | Electron 对应                                                                                                        | 迁移难度           | 关键说明                                                                                                                                              |
 | --------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------ | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `proxy.rs` 本地反向代理（HTTP+WS 注入 Basic、Cookie Domain 重写、流式转发） | 741 行     | **原样复用（sidecar）**                                                                                                | ★ 极低           | 纯 Rust、零平台依赖。编成独立 sidecar exe，主进程 spawn、从 stdout 取端口。Chromium 同样有 localhost cookie 问题，代理不可省                              |
-| `crates/resolve-core`（Ed25519 + AES-GCM + HKDF）           | 573 行     | **原样复用（sidecar）**                                                                                                | ★ 极低           | 随 sidecar 编译，无需 Node 侧重写                                                                                                                 |
-| `resolve.rs` DNS TXT 查询                                   | 208 行     | 侧车承担                                                                                                             | ★ 低            | 挪进 sidecar 最省事（实际实现）                                                                                                                          |
+| `proxy.rs` 本地反向代理（HTTP+WS 注入 Basic、Cookie Domain 重写、流式转发） | 1247 行    | **原样复用（sidecar）**                                                                                                | ★ 极低           | 纯 Rust、零平台依赖。编成独立 sidecar exe，主进程 spawn、从 stdout 取端口。Chromium 同样有 localhost cookie 问题，代理不可省                              |
+| `crates/resolve-core`（Ed25519 + AES-GCM + HKDF）           | 582 行     | **原样复用（sidecar）**                                                                                                | ★ 极低           | 随 sidecar 编译，无需 Node 侧重写                                                                                                                 |
+| `resolve.rs` DNS TXT 查询                                   | 227 行     | 侧车承担                                                                                                             | ★ 低            | 挪进 sidecar 最省事（实际实现）                                                                                                                          |
 | 注入脚本 `titlebar.js` / `loading.js` / `dnd_polyfill.js`     | ~70 KB    | preload + `executeJavaScript`（主世界）                                                                                | ★★ 低，**可直接复用** | `whenHostReady` 兜底可留可删；不存在 ACL/capability 概念；`dnd_polyfill.js` 是 WebView2 专属 bug，**不引入** |
 | 无边框窗口 + 自绘标题栏                                             | —         | `frame:false` + 38px 契约 + `applyChromeFit()` 全套保留                                                                | ★ 低            | 不重写 CSS 契约，逐像素对齐 Tauri 版                                                                                                                    |
 | 窗口按钮 IPC                                                  | —         | `ipcMain` / `ipcRenderer`                                                                                          | ★ 低            | **「remote.urls 必须写 `:*`」的 ACL 坑整条消失**                                                                                                          |
-| 多页签 `tabs.rs`                                             | 872 行     | `WebContentsView`（`BrowserWindow` 当壳 + 子视图）                                                                       | ★★ 中           | 几何自动跟随窗口，无需 owned window 校准；落地选型 A′（见 `electron-tabs-design.md`）                                                        |
-| `webview_hooks.rs`（新窗口/右键/下载/鉴权）                          | 757 行     | `setWindowOpenHandler` / `context-menu` / `will-download` / `app.on('login')`                                      | ★★ 低          | 全是一等 API，无 COM、无后台线程轮询                                                                                                                  |
+| 多页签 `tabs.rs`                                             | 956 行     | `WebContentsView`（`BrowserWindow` 当壳 + 子视图）                                                                       | ★★ 中           | 几何自动跟随窗口，无需 owned window 校准；落地选型 A′（见 `electron-tabs-design.md`）                                                        |
+| `webview_hooks.rs`（新窗口/右键/下载/鉴权）                          | 763 行     | `setWindowOpenHandler` / `context-menu` / `will-download` / `app.on('login')`                                      | ★★ 低          | 全是一等 API，无 COM、无后台线程轮询                                                                                                                  |
 | 下载 + 另存为 `save_dialog.rs`                                 | 127 行     | `session.on('will-download')` + `dialog.showSaveDialog`                                                            | ★ 低            | 不用碰 `IFileSaveDialog` / STA / COM（**M4 已于 2026-09-24 实现**：本壳直接用 `dialog.showSaveDialog`，同样不碰 COM）                                                                                       |
 | `tray.rs` / 全局快捷键 / 单实例                                   | 115 行     | `Tray` / `globalShortcut` / `requestSingleInstanceLock`                                                            | ★ 低            | 标准 API                                                                                                                                            |
 | `settings.rs` + `dist/settings.html`                      | 328 行     | BrowserWindow + JSON（设置页 HTML **一行不改**，用 `__TAURI_INTERNALS__` 垫片）                                          | ★ 低            | 设置页单一真源，改一次两壳同时生效                                                                                                                        |
-| `window_state.rs`                                         | 143 行     | 手写（物理像素存盘 / DIP 恢复）                                                                                         | ★ 低            | 与 Tauri 版可互相读取（探针逐字节比对）                                                                                                                   |
+| `window_state.rs`                                         | 114 行     | 手写（物理像素存盘 / DIP 恢复）                                                                                         | ★ 低            | 与 Tauri 版可互相读取（探针逐字节比对）。几何已并入 `store.rs` 的 `window` 段（`store.rs` 681 行）                                                 |
 | `bootstrap.rs` / `loading.rs` / `lib.rs` 编排               | ~1000 行   | 主进程重写（`index.ts` / `navigate.ts`）                                                                              | ★★ 中           | 逻辑本身不复杂，但要重新组织启动时序                                                                                                                                |
 | `.github/workflows/build-custom.yml`                      | **62 KB** | electron-builder 打包链重做                                                                                          | ★★★★ **高**     | 最大的隐藏成本：config JSON 注入、多形态产物、签名取密钥；Electron 侧已由 `stage-assets.cjs` + `electron-builder.yml` 承担，**Android 那半没有对应物** |
 
 **净账（决策时估算）**：约 3000 行 Rust 重写为 TS，约 1500 行 Rust + 注入脚本 + HTML 直接复用，外加一条打包流水线。
 实际落地：sidecar（`crates/proxy-server`）以 `#[path]` 零重写复用 `proxy.rs` / `resolve.rs`，见 `electron-app/README.md`「本地代理 sidecar」。
+
+> ⚠️「规模」列是 2026-09-25 `wc -l` 实测值，仅供量级参考，会随版本演进；不要拿它当契约。
 
 ---
 
@@ -51,9 +53,9 @@
 
 ## 3. 兼容性设计要点（让两个壳对外表现一致）
 
-1. **配置契约单一真源**：沿用现有 17 个字段（`app_url` / `app_name` / `title` / `extra` / `proxy_*` / `tabs_enabled` / `public_key` / `resolve_secret` / …），Electron 侧解析宽容（布尔接受字符串）。
+1. **配置契约单一真源**：沿用现有 **18 个字段**（`app_url` / `app_name` / `title` / `extra` / `icon_url` / `proxy_*` / `data_dir` / `tabs_enabled` / `debug` / `public_key` / `resolve_secret` / `android_*`×4，见 `packaging-config.md`）。⚠️ 布尔**只认真 `bool`**，字符串写法已拒绝（旧文「Electron 侧宽容接受字符串」已失效）。
 2. **注入脚本物理复用**：`titlebar.js` / `loading.js` / `shell.html` / `settings.html` 从 `webview-app/` 引用（构建期拷贝），避免两份分叉。
-3. **行为契约写成断言测试**：38px 顶部留白、标题栏按钮、Basic 鉴权覆盖 HTTP+WS、`Set-Cookie` Domain 重写、`target="_blank"` 策略、快捷键、托盘语义、单实例、绿色版免安装 —— 全部收敛进 `pnpm run probe`（112 条）。
+3. **行为契约写成断言测试**：38px 顶部留白、标题栏按钮、Basic 鉴权覆盖 HTTP+WS、`Set-Cookie` Domain 重写、`target="_blank"` 策略、快捷键、托盘语义、单实例、绿色版免安装 —— 全部收敛进 `pnpm run probe`（**134 条**，2026-09-25 实测；多页签另 26 条）。
 4. **产物命名对齐**：与 `build-custom.yml` 既有约定一致，让部署脚本不感知壳的差异。
 5. **两处已知语义落差**（必须显式处理）：
    - 外部 HTTP/HTTPS 代理：Electron 侧用 Chromium `--proxy-server` switch（已接好）；

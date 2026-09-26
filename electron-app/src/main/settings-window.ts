@@ -19,7 +19,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { BrowserWindow, ipcMain, type BrowserWindow as BW } from 'electron'
+import { app, BrowserWindow, ipcMain, type BrowserWindow as BW } from 'electron'
 
 import type { Settings } from './settings'
 
@@ -35,23 +35,24 @@ const SETTINGS_BG = '#eceef1'
 /**
  * 定位设置页 HTML。
  *
- * 顺序：打包副本（resources/inject/settings.html）→ 开发态的 `webview-app/dist/`。
- * 与 `index.ts::injectDir()` 同思路：打包后是拷贝，开发时直接引用原文件，绝不复制第二份。
+ * 顺序：打包副本（app.asar/out/inject/settings.html，2026-09-26 起注入资源随 asar 分发，
+ *   不再放 resources/inject/）→ 开发态的 `webview-app/dist/`。
+ * 与 `index.ts::injectDir()` 同思路：打包后是 asar 内拷贝，开发时直接引用原文件，绝不复制第二份。
+ * ⚠️ 用 `app.isPackaged` 区分而非 `existsSync`：stage 会在开发目录生成 out/inject/，若按
+ *    「存在即打包副本」判，开发态会误读 stage 副本、失去单一真源（与 injectDir 同理）。
  */
-export function locateSettingsHtml(appPath: string, resourcesPath: string): string | null {
-  const candidates = [
-    join(resourcesPath, 'inject', 'settings.html'),
-    join(appPath, '..', 'webview-app', 'dist', 'settings.html'),
-    join(appPath, 'dist', 'settings.html'),
-  ]
+export function locateSettingsHtml(appPath: string): string | null {
+  const candidates = app.isPackaged
+    ? [join(appPath, 'out', 'inject', 'settings.html')]
+    : [join(appPath, '..', 'webview-app', 'dist', 'settings.html'), join(appPath, 'dist', 'settings.html')]
   for (const c of candidates) {
     if (existsSync(c)) return c
   }
   return null
 }
 
-export function readSettingsHtml(appPath: string, resourcesPath: string): string | null {
-  const p = locateSettingsHtml(appPath, resourcesPath)
+export function readSettingsHtml(appPath: string): string | null {
+  const p = locateSettingsHtml(appPath)
   if (!p) return null
   try {
     return readFileSync(p, 'utf8')

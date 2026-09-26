@@ -170,9 +170,36 @@
     'min-width:34px!important;height:28px!important;padding:0 8px!important;',
     'border:0!important;border-radius:6px!important;background:transparent!important;',
     'color:inherit!important;font:13px/1 "Segoe UI","Microsoft YaHei",sans-serif!important;',
-    'cursor:default!important;outline:none!important;',
+    'cursor:pointer!important;outline:none!important;',
+    'position:relative!important;',
     '}',
     '#__web2app_titlebar__ .w2t-btn:hover{background:rgba(120,133,153,.16)!important;}',
+    /* 悬停提示：用 CSS 伪元素自绘 tooltip，替代原生 title（原生 title 有 1~2 秒延迟、
+     * 样式随系统、暗色下常看不清，且无法跟着主题走）。文案走 data-tip，纯 CSS 实现：
+     * 不新增任何 JS、不触达 CSP（伪元素内容属于样式表，已由 adoptedStyleSheets 承载）。
+     * ⚠️ 必须带 transition-delay，避免鼠标扫过一串按钮时 tooltip 疯狂闪现。 */
+    '#__web2app_titlebar__ .w2t-btn[data-tip]::after{',
+    'content:attr(data-tip)!important;',
+    'position:absolute!important;top:calc(100% + 6px)!important;left:50%!important;',
+    'transform:translate(-50%,-2px)!important;',
+    'white-space:nowrap!important;',
+    'padding:3px 8px!important;',
+    'border-radius:4px!important;',
+    'background:rgba(30,35,44,.94)!important;color:#fff!important;',
+    'font:12px/1.4 "Segoe UI","Microsoft YaHei",sans-serif!important;',
+    'pointer-events:none!important;',
+    'opacity:0!important;visibility:hidden!important;',
+    'transition:opacity .12s ease,transform .12s ease,visibility 0s linear .18s!important;',
+    'transition-delay:0s,0s,.35s!important;',
+    'z-index:2147483647!important;',
+    '}',
+    '#__web2app_titlebar__ .w2t-btn[data-tip]:hover::after{',
+    'opacity:1!important;visibility:visible!important;',
+    'transform:translate(-50%,0)!important;',
+    'transition-delay:0s,0s,0s!important;',
+    '}',
+    '@media (prefers-color-scheme:dark){#__web2app_titlebar__ .w2t-btn[data-tip]::after{',
+    'background:rgba(238,241,246,.96)!important;color:#1f2530!important;}}',
     /* 中央标题 */
     '#__web2app_titlebar__ .w2t-title{',
     'flex:1!important;min-width:0!important;padding:0 8px!important;',
@@ -247,13 +274,13 @@
   // `-webkit-app-region` 不可靠）。空值语义是「只有直接点在本元素上才拖动」，
   // 所以按钮不加（避免点不动），标题与整条空白区各自带上。
   var HTML = [
-    '<button type="button" class="w2t-btn w2t-back" title="后退">←</button>',
-    '<button type="button" class="w2t-btn w2t-fwd" title="前进">→</button>',
+    '<button type="button" class="w2t-btn w2t-back" data-tip="后退">←</button>',
+    '<button type="button" class="w2t-btn w2t-fwd" data-tip="前进">→</button>',
     '<div class="w2t-title" data-tauri-drag-region> </div>',
-    '<button type="button" class="w2t-btn w2t-settings" title="设置">' + GEAR + '</button>',
-    '<button type="button" class="w2t-btn w2t-min" title="最小化">—</button>',
-    '<button type="button" class="w2t-btn w2t-max" title="最大化/还原">▢</button>',
-    '<button type="button" class="w2t-btn w2t-close" title="关闭">✕</button>'
+    '<button type="button" class="w2t-btn w2t-settings" data-tip="设置">' + GEAR + '</button>',
+    '<button type="button" class="w2t-btn w2t-min" data-tip="最小化">—</button>',
+    '<button type="button" class="w2t-btn w2t-max" data-tip="最大化/还原">▢</button>',
+    '<button type="button" class="w2t-btn w2t-close" data-tip="关闭">✕</button>'
   ].join('');
 
   // ---------------------------------------------------------------------

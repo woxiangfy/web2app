@@ -140,6 +140,9 @@ IPC 命令 `get_settings` / `save_settings` / `close_settings_window`）。
 
 ### 4.2 `window-state.json`（窗口几何，程序自动维护）
 
+> ⚠️ **已失效（2026-09-23 起）**：几何已并入 `settings.json` 的 `window` 段，本文件**不再读写、不迁移**。
+> 运行期只剩 `settings.json` 一个 JSON。现行规则见 `packaging-config.md` §4.3 要点 5。
+
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | `x` / `y` | i32 | 窗口位置（**物理像素存盘**，恢复时换算成 DIP） |
@@ -152,6 +155,11 @@ IPC 命令 `get_settings` / `save_settings` / `close_settings_window`）。
 
 `loadConfigAny([installRoot(), 包内])`（`electron-app/src/main/config.ts:133-147`）⇒ 改完重启即生效，无需重打包。
 字段集 = A 层的前 13 个（忽略 4 个 `android_*`，并有提示）；**但 `window_title` 未实现回落**（见 §5）。
+
+> ⚠️ **已失效（2026-09-22 起）**：「改完重启即生效」不再成立。配置改为**随 `app.asar` 进包**
+> （`stage-assets.cjs` 写 `out/config.json`，运行期读 `app.getAppPath()/out/config.json`），
+> `extraFiles` 放 exe 同级的做法已废弃 ⇒ **改配置必须重新打包**。理由与护栏见
+> `packaging-config.md` §6。
 
 ---
 
@@ -183,7 +191,7 @@ IPC 命令 `get_settings` / `save_settings` / `close_settings_window`）。
 |---|---|---|---|
 | `tauri.conf.json` | `productName` | `Web2App` | 安装名（CI 会用 `app_name` 覆盖） |
 | | `version` | `0.1.0` | 产物版本号 |
-| | `identifier` | `com.example.web2app` | **Android 包名由此派生**（无 `bundle.android.package` 覆盖，README:496 记为上游限制） |
+| | `identifier` | `com.example.web2app` | **Android 包名由此派生**（无 `bundle.android.package` 覆盖，README:496 记为上游限制）。⚠️ **已变更（2026-09-22）**：CI 在 `android init` **之前**改写为 `com.web2app.<清洗后的 app_name>` ⇒ 不同 `app_name` 得到不同包名，不再互相覆盖安装 |
 | | `mainBinaryName` | CI 写死 `web2app` | 主程序 exe 名，保证产物路径稳定 |
 | | `build.frontendDist` / `devUrl` / `beforeBuildCommand` | `dist` / example / 空 | 前端资源目录（仅 `dist/settings.html` 等） |
 | | `app.security.csp` | `null` | **未设 CSP**（远程站点由站点自身控制） |
@@ -193,8 +201,8 @@ IPC 命令 `get_settings` / `save_settings` / `close_settings_window`）。
 | | `artifactName` | `${productName}-${version}-win-${arch}.${ext}` | zip 产物名；`portable.artifactName` 单独覆盖加 `-portable` |
 | | `asar` / `files` / `win.target` / `win.icon` | `true` / `out/**` / dir+zip+portable / build/icon.ico | 打包形态与文件集 |
 | | `portable.requestExecutionLevel` | `user` | **绿色版绝不要 UAC** |
-| | `extraFiles` | `build/config.json → config.json` | 把运行期配置放到 exe 同级 |
-| | `extraResources` | `inject/{splash,titlebar,loading,shell}.html(.js)`、`inject/settings.html`、`icons/icon.png`、`sidecar/w2a-proxy.exe` | 注入脚本/设置页/图标/sidecar（**sidecar 必须走 resources，asar 内无法 spawn**） |
+| | ~~`extraFiles`~~ | ~~`build/config.json → config.json`~~ | **已废弃（2026-09-22）**：配置改随 `app.asar` 进包；放 exe 同级等于谁都能改地址。现行见 `packaging-config.md` §6 |
+| | `extraResources` | `icons/icon.png`、`sidecar/w2a-proxy.exe` | 图标/sidecar（**sidecar 必须走 resources，asar 内无法 spawn**）。注入脚本与设置页自 2026-09-26 起改随 asar 分发（`out/inject/*`，由 `stage-assets.cjs` 拷贝），不再走 extraResources |
 | `Cargo.toml` | `[workspace] members` | resolve-core / resolve-tool / proxy-server | 三 crate 边界 |
 | | `[profile.release]` | `lto = true`、`strip = true` | 体积与符号 |
 | `capabilities/default.json` | `identifier` / `windows` / `remote.urls` / `permissions` | `main-window-chrome` / `["main"]` / `["http://*:*","https://*:*"]` / 5 个 window 权限 | **远程 origin 的 IPC 必须命中 ACL**；`remote.urls` 缺端口通配会让标题栏按钮静默失效 |

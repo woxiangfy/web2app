@@ -86,8 +86,8 @@
 
 | # | 契约项 | 要求 |
 |---|---|---|
-| 1 | **`config.json` 字段** | 沿用现有 18 字段（2026-09-22 起），不增不改名；`android_*` 四个字段**静默忽略**；布尔值接受字符串形式 |
-| 2 | **顶部留白 38px** | 自绘标题栏 + `html { padding-top: 38px }` + `applyChromeFit()` 三件事全保留，与 Tauri 版逐像素一致（**最新结论：`html` 不滚、`body` 滚**，见 README「自绘标题栏与页面滚动条」） |
+| 1 | **`config.json` 字段** | 沿用现有 18 字段（2026-09-22 起），不增不改名；`android_*` 四个字段**静默忽略**；⚠️ 布尔**只认真 `bool`**（字符串写法已硬失败，"接受字符串形式"是 2026-09-22 之前的旧行为） |
+| 2 | **顶部留白 38px** | 自绘标题栏 + 顶部让位 38px + `applyChromeFit()` 三件事全保留，与 Tauri 版逐像素一致。⚠️ 让位的**现行写法**是「**`html` 不滚、`body` 滚**」：`html{height:100%;overflow:hidden}` + `body{margin-top:38px;height:calc(100vh - 38px);overflow-y:auto}` —— 旧的 `html,body{padding-top:38px}` 会让滚动条越过标题栏，已废弃（见 README「自绘标题栏与页面滚动条」） |
 | 3 | **标题栏按钮** | 后退 / 前进 / **设置** / 最小化 / 最大化（双击标题栏最大化）/ 关闭，行为与位置一致（2026-09-23 起「设置」紧挨最小化**左侧**，探针按几何钉住） |
 | 4 | **Basic 鉴权** | 覆盖 HTTP **与 WebSocket**；`Set-Cookie` 的 `Domain=真实host` → `127.0.0.1` 重写；`X-Forwarded-Proto` 透传上游 scheme |
 | 5 | **新窗口策略** | `target="_blank"` / `window.open()` → 单窗口模式原地导航、多页签模式新开 tab |
@@ -113,7 +113,7 @@
 | **M2 代理接入** | `w2a-proxy` sidecar、spawn+握手、鉴权端到端 | ✅ 完成 |
 | **M3 系统集成** | 托盘、全局快捷键、单实例、设置窗（Shift+F1）、窗口几何持久化 | ✅ 完成 |
 | **M4 页面行为** | 新窗口策略、下载另存为、右键菜单、F12、加载层、外链不泄漏凭据 | ✅ **已交付（2026-09-24）**：下载接管 / 右键菜单 / F12 三项补齐（实现在 `electron-app/src/main/page-behavior.ts`）；新窗口策略与加载层随 M1 已交付 |
-| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针 23/23，单窗口 112/112；2026-09-18 真机目视 V1–V4 关闭） |
+| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针**多页签 26/26、单窗口 134/134**，2026-09-25 实测；2026-09-18 真机目视 V1–V4 关闭） |
 | **M6 打包** | 三形态出包、版本信息、config 注入、日志目录、SmartScreen 文案 | ✅ 完成 |
 | **M7 CI** | Windows workflow：build → lint → E2E → 产物上传 | ✅ **已落库（2026-09-24）**：`.github/workflows/electron-ci.yml`，lint（Ubuntu）+ e2e（Windows）+ package（非 PR，上传 zip / portable）三作业 |
 

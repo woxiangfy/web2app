@@ -24,8 +24,9 @@ directories:
   buildResources: build
 
 files:
-  # `out/**/*` 已包含运行期配置 `out/config.json`（由 scripts/stage-assets.cjs 生成），
-  # 所以它随 asar 一起封进包内 —— 这是**刻意**的，见下方 extraFiles 的说明。
+  # `out/**/*` 已包含运行期配置 `out/config.json` 与注入资源 `out/inject/*`
+  # （均由 scripts/stage-assets.cjs 生成），所以它们随 asar 一起封进包内 ——
+  #   这是**刻意**的，见下方 extraResources 与 scripts/stage-assets.cjs 的说明。
   - out/**/*
   - package.json
 
@@ -61,24 +62,6 @@ portable:
 #    `!<buildResources>{,/**/*}`），放那儿会**静默**不打包、应用退回内置默认配置。
 
 extraResources:
-  # 注入脚本：从 webview-app/src 拷贝，保持「单一真源」，禁止复制出第二份会分叉的副本。
-  # dnd_polyfill.js 是 WebView2 专属的拖拽 bug 补丁，Electron/Chromium 无此问题，不打包。
-  # shell.html：多页签（M5）壳页面，`tabs_enabled=true` 时经 shell:// 协议加载；
-  # 单窗口模式用不到它，但打包统一带上（M5 已实现，不再是死资源）。
-  - from: ../webview-app/src
-    to: inject
-    filter:
-      - splash.html
-      - titlebar.js
-      - loading.js
-      - shell.html
-  # 设置页：Tauri 侧的构建产物（`webview-app/dist/settings.html`）。
-  # ⚠️ 与注入脚本同理，**不复制进本仓库**：Electron 侧靠 preload 垫片提供
-  #    `window.__TAURI_INTERNALS__.invoke`，让这份 HTML 一行不改地在两个壳里通用
-  #   （见 src/renderer/settings-preload.ts）。放 resources/inject/ 下与启动页资源同处，
-  #    运行时由 `settings-window.ts::locateSettingsHtml()` 查找。
-  - from: ../webview-app/dist/settings.html
-    to: inject/settings.html
   # 窗口 / 托盘图标：复用 Tauri 版的图标资源（Tray 用 256px PNG 再缩到 16px）。
   - from: ../webview-app/icons/icon.png
     to: icons/icon.png

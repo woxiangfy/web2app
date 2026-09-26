@@ -1,6 +1,6 @@
 # web2app 项目全盘分析与优化建议
 
-> 分析日期：2026-09-14 ｜ 现状核对：2026-09-17 ｜ 精简：2026-09-22
+> 分析日期：2026-09-14 ｜ 现状核对：2026-09-17 ｜ 精简：2026-09-22 ｜ 计数复测：2026-09-25
 > 范围：`webview-app/`（含 3 个 crate、注入脚本、CI/打包工作流）。
 > 后续新增的 `electron-app/`（Windows 绿色版壳）另见 `docs/electron-plan.md` / `docs/electron-analysis.md`。
 > 约束：所有优化建议**不改变现有功能点**，仅做质量/性能/安全/可维护性层面的改进。
@@ -14,8 +14,8 @@
 | 定位 | Rust + Tauri 2 的跨平台 WebView 壳：嵌网址 + 托盘最小化 + 全局快捷键 + 代理/Basic 鉴权 |
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
 | 架构 | cargo workspace 四 crate，职责边界清晰 |
-| 代码规模 | 主 crate `src/` 22 个文件（16 个 `.rs` + 6 个前端资源：4 个注入脚本 + 2 个页面）+ 4 个 crate + 6 条 CI/打包工作流（含 1 条只服务 Electron 壳的 `electron-build-custom.yml`） |
-| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 28 + 85 = 133 通过，另有 3 + 3 条 ignored）；Electron 纯函数单测 29 条、双壳契约探针 134/134、多页签 26/26（2026-09-24） |
+| 代码规模 | 主 crate `src/` 22 个文件（16 个 `.rs` + 6 个前端资源：4 个注入脚本 + 2 个页面）+ 4 个 crate + 7 条 CI/打包工作流（其中 2 条只服务 Electron 壳：`electron-build-custom.yml` / `electron-ci.yml`） |
+| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 28 + 85 = 133 通过，另有 3 + 3 条 ignored）；Electron 纯函数单测 29 条、双壳契约探针 134/134、多页签 26/26（**2026-09-25 实跑**）。⚠️ 计数随版本演进，以实跑输出为准 |
 
 ### crate 职责
 
@@ -54,20 +54,21 @@
 
 > 优先级：P0=建议尽快 / P1=值得做 / P2=可选。风险：低/中/高。所有项均不改变对外行为。
 > 状态为 2026-09-17 逐条核对结果（✅ 已落地 / ⬜ 未落地 / ➖ 有意不采纳）。
+> ⚠️ 行号会随版本漂移（2026-09-25 复核过一轮），定位请以**符号名**为准。
 
 ### 3.1 性能 / 可维护性 / 安全 / CI（全部已核对）
 
 | # | 位置 | 建议 | 状态 |
 |---|---|---|---|
-| 1 | `proxy.rs` WS 二进制帧 | `Bytes::from(b.to_vec())` 多余堆拷贝 → 直接 `A::Binary(b)` | ✅ 已落地（`proxy.rs:438`）+ 单测 |
-| 2 | `proxy.rs` 诊断日志 | `status==200` 且非 PDF 时短路，避免每次构造 `dbg_ct` | ✅ 已落地（`proxy.rs:236-256`） |
+| 1 | `proxy.rs` WS 二进制帧 | `Bytes::from(b.to_vec())` 多余堆拷贝 → 直接 `A::Binary(b)` | ✅ 已落地（`proxy.rs` 的帧转换 `tungstenite_to_axum`，`A::Binary(b)` 在 `:599`）+ 单测 |
+| 2 | `proxy.rs` 诊断日志 | `status==200` 且非 PDF 时短路，避免每次构造 `dbg_ct` | ✅ 已落地（`proxy.rs` 的 `dbg_ct`，实测 `:373`） |
 | 3 | `bootstrap.rs` `strip_userinfo` | clone 代价很小 | ➖ 有意不采纳（收益低于改动风险） |
-| 4 | `sanitize_dir_name` vs `sanitize_filename` | 提取共享 `sanitize_windows_name(name, collapse_ws)` | ✅ 已落地（`config.rs:88`，`webview_hooks.rs:158` 调用） |
+| 4 | `sanitize_dir_name` vs `sanitize_filename` | 提取共享 `sanitize_windows_name(name, collapse_ws)` | ✅ 已落地（`config.rs` 定义 `:101`；`config.rs:131` 与 `webview_hooks.rs:158` 两处调用） |
 | 5 | `loading.js` / `titlebar.js` 的 `whenHostReady` 重复 ~70 行 | 构建期拼接或 CI 断言一致性 | ⬜ 未落地（仍两份各自维护；等待逻辑已重构为轮询重试） |
-| 6 | `resolve-tool` 手写 args 解析重复 3 份 | 归并统一 `parse_args` | ✅ 已落地（`main.rs:65`） |
-| 7 | 公钥解析重复 | 下沉到 `resolve-core::parse_signing_key_pem`，两端复用 | ✅ 已落地（`lib.rs:232`） |
+| 6 | `resolve-tool` 手写 args 解析重复 3 份 | 归并统一 `parse_args` | ✅ 已落地（`crates/resolve-tool/src/main.rs:69`） |
+| 7 | 公钥解析重复 | 下沉到 `resolve-core::parse_signing_key_pem`，两端复用 | ✅ 已落地（`crates/resolve-core/src/lib.rs:241`） |
 | 8 | `resolve-core` `SECRET` 缺省回落公开默认值 | 打包阶段强制校验非空非默认，否则 fail-fast | ✅ 已落地（`build-custom.yml`） |
-| 9 | `EXTRA` 原样内联 | 注入前 `serde_json::from_str::<Value>` 校验，非法回落 `"{}"` | ✅ 已落地（`config.rs:154`） |
+| 9 | `EXTRA` 原样内联 | 注入前 `serde_json::from_str::<Value>` 校验，非法回落 `"{}"` | ✅ 已落地（`config.rs` 的 `extra_json()`，实测 `:327`） |
 | 10 | `ci.yml` fmt 用 `continue-on-error` | 改为阻断（显式 pin rustfmt 组件版本） | ✅ 已落地 |
 | 11 | Android 作业不跑 clippy | 增加 `cargo clippy --target aarch64-linux-android` 并阻断 | ✅ 已落地 |
 | 12 | 一次性 3s 重试未存 handle | 改为轮询 `tick` + `POLL_MS` | ✅ 已落地 |
@@ -78,7 +79,7 @@
 | 优先级 | 建议 | 状态 |
 |---|---|---|
 | ~~P1~~ | 标签栏恢复「新建页签」入口 | 已确认有意移除（新 tab 改由页面内 `target="_blank"` / `window.open()` 触发），不再排期 |
-| P1 | 窗口标题同步页面 title | 单窗口模式自绘标题栏已跟随 `document.title`；**原生窗口标题**仍固定编译期常量 `TITLE`（`lib.rs:208`，2026-09-22 由 `WINDOW_TITLE` 改名）。**复核：仍未落地** |
+| P1 | 窗口标题同步页面 title | 单窗口模式自绘标题栏已跟随 `document.title`；**原生窗口标题**仍固定编译期常量 `TITLE`（定义在 `config.rs:315`，2026-09-22 由 `WINDOW_TITLE` 改名；建窗处消费在 `lib.rs:288`）。**复核：仍未落地** |
 | P2 | 标签页右键菜单 | 关闭其他 / 关闭右侧 / 刷新 / 复制链接 |
 | P2 | 标签页会话持久化 | 重启恢复上次打开的 tabs（`window_state` 已有持久化基建） |
 | P2 | 下载进度 / 取消 | 下载已走原生「另存为」对话框且可取消；**进度 UI 仍未做** |
@@ -94,7 +95,8 @@
 
 ## 四、遗留问题（需真机复验，未自动化覆盖）
 
-1. **Trilium note-tree 拖拽（Windows）仍异常**：`dnd_polyfill.js` 合成 HTML5 DnD 序列对 fancytree 无效（多轮方案无变化，尚未根因，见 `.workbuddy/memory/project_memory.md`）。
+1. **Trilium note-tree 拖拽（Windows）仍异常**：`dnd_polyfill.js` 合成 HTML5 DnD 序列对 fancytree 无效（多轮方案无变化，尚未根因）。
+   （原记录指向 `.workbuddy/memory/project_memory.md`，该文件现已不存在 —— 详细过程归属**待确认**。）
 2. **「代理 / 域名解析」真机项**：sidecar 链路的打包态真机验证留待后续（探针 M2 断言已在源码态与打包态跑通）。
 
 ---

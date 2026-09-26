@@ -452,8 +452,8 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 `pnpm run probe`（134 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
 ⚠️ **不要**再用 `rect.width == innerWidth` 或「滚动条宽度归零」当判据 —— 前者测不出覆盖，
-后者把缺陷锁死成期望值。**改完必须重新打包**：脚本在 `resources/inject/titlebar.js` 里，
-跑旧的 exe 永远看不到修复。
+后者把缺陷锁死成期望值。**改完必须重新打包**：脚本随 asar 分发在 `out/inject/titlebar.js` 里
+（2026-09-26 起不再放 `resources/inject/`），跑旧的 exe 永远看不到修复。
 
 > 排查这类「断言过、人眼不对」的问题请用 `scripts/scrollbar-lab.cjs`（多模式对照，几种做法一次跑完）
 > 与 `scripts/png-inspect.cjs`（把 PNG 读成结构图 + 逐像素扫描）。两者都零依赖，

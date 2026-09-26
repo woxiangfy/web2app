@@ -1,5 +1,5 @@
 /**
- * 出包后护栏：`app.asar` 里**必须**有 `out/config.json`。
+ * 出包后护栏：`app.asar` 里**必须**有 `out/config.json` 与 `out/inject/*`。
  *
  * ## 为什么值得单独写一个脚本
  *
@@ -7,6 +7,10 @@
  * 只是读不到 config.json，于是静默退回内置默认配置（`https://www.example.com`）——
  * 用户看到的是「打包打了个空壳」，而构建日志全绿。这正是本项目反复强调的那类
  * 「错了也静默」的缺陷，必须用一条会亮红灯的判据盯住。
+ *
+ * 注入资源（titlebar.js / loading.js / splash.html / shell.html / settings.html）同理：
+ * 它们若漏进包，标题栏 / 加载层 / 多页签壳 / 设置页至少一样会静默退化（白屏 / 兜底页 /
+ * 按钮点了没反应），比 config.json 缺失更难从表象反推。所以一起纳入护栏。
  *
  * 最容易踩的坑：把待打包的 config.json 放进 `build/`（`directories.buildResources`）。
  * electron-builder 会把 buildResources 目录**整个排除**在包外，见
@@ -21,6 +25,9 @@ const { join, resolve } = require('node:path')
 
 const appDir = resolve(__dirname, '..')
 const releaseDir = join(appDir, 'release')
+
+/** 必须随 asar 分发的注入资源（stage-assets.cjs 拷贝到 out/inject/ 的文件名）。 */
+const REQUIRED_INJECT = ['titlebar.js', 'loading.js', 'splash.html', 'shell.html', 'settings.html']
 
 /** 在 release/ 下找任意一份 app.asar（zip/portable/dir 三种目标的中间产物路径可能不同）。 */
 function findAsar() {
@@ -87,5 +94,20 @@ if (hit.length === 0) {
   )
   process.exit(1)
 }
+
+// 注入资源护栏：out/inject/ 下的 5 个文件缺一不可（否则标题栏 / 加载层 / 壳 / 设置页静默退化）。
+const missingInject = REQUIRED_INJECT.filter(
+  (name) => !entries.includes(`/out/inject/${name}`)
+)
+if (missingInject.length > 0) {
+  console.error(
+    `::error::app.asar 内缺少注入资源：${missingInject.join(', ')}\n` +
+      '  排查顺序：① stage-assets.cjs 是否已跑（pnpm run stage）；\n' +
+      '            ② 源文件是否存在于 webview-app/src 与 webview-app/dist；\n' +
+      '            ③ electron-builder.yml 的 files 是否仍包含 out/ 下的文件。',
+  )
+  process.exit(1)
+}
+console.log(`注入资源: ${REQUIRED_INJECT.length} 项齐全 ✓`)
 
 console.log('asar 配置护栏通过 ✓')

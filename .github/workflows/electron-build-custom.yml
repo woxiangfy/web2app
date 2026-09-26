@@ -174,9 +174,10 @@ jobs:
         # ⚠️ `pnpm exec` 而不是 `npx`：包管理器已统一到 pnpm，且 pnpm 不会像 npm 那样
         #    因 `--` 被字面透传而踩到参数解析的坑。
 
-      - name: 校验 config.json 已进 app.asar
-        # 这条护栏防的是**静默失败**：配置没进包时 electron-builder 照样出包、双击照样打开，
-        # 只是静默退回内置默认地址（example.com），构建日志全绿。
+      - name: 校验 config.json 与注入资源已进 app.asar
+        # 这条护栏防的是**静默失败**：配置或注入资源（titlebar.js / loading.js / shell.html /
+        # settings.html 等）没进包时 electron-builder 照样出包、双击照样打开，只是静默退回
+        # 内置默认地址或白屏，构建日志全绿。
         run: node scripts/check-asar-config.cjs
 
       - name: Upload 解压目录版（zip）

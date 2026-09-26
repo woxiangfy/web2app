@@ -1,8 +1,9 @@
 # 打包配置 JSON 评审（2026-09-22）
 
 > ⚠️ **历史快照（重构前）**：本文是**契约统一之前**的评审记录，请**不要**当现行规范阅读。
-> 文中的 P0/P1 问题（含 `data_dir_default` 同名反义、字符串布尔、模板缺键、Android 包名冲突）
-> **均已解决**，现行唯一真源是 [`packaging-config.md`](./packaging-config.md)。
+> 文中的 P0/P1 问题（`resolve_secret` 无通道、`data_dir_default` 同名反义、字符串布尔、模板缺键、
+> Android 包名冲突、未知字段静默忽略等）**均已解决或已按既有约束编排**，
+> 现行唯一真源是 [`packaging-config.md`](./packaging-config.md)。
 > 保留本文仅为「问题从哪来」的溯源。
 
 **对象**：手动打包工作流消费的那份配置 JSON —— 即 `build-custom.yml` 的 `config_json` / `config_url`

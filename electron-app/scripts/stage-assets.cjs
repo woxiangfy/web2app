@@ -110,3 +110,34 @@ if (existsSync(userConfig)) {
   writeFileSync(staged, JSON.stringify(tpl, null, 2) + '\n', 'utf8')
   console.log('[stage] 配置文件  : 未找到 config.json，已生成全字段默认模板 → out/config.json')
 }
+
+// ---------- 3. 注入脚本 / 壳页面 / 设置页（随 asar 分发，运行期不可改） ----------
+// ⚠️ 这些文件原本经 electron-builder 的 extraResources 放到 resources/inject/（asar 外），
+//    是明文、可读、可改的 —— 用户可以直接改掉 titlebar.js / loading.js / shell.html，
+//    等价于把注入逻辑、甚至多页签壳页面整段替换，而使用者看不出任何区别。
+//    现在与 config.json 同等待遇：拷贝进 out/inject/，随 asar 封进包内，想改必须重新打包。
+//    运行时读取见 src/main/index.ts::injectDir() 与 settings-window.ts::locateSettingsHtml()。
+const injectSrcs = [
+  // [源（相对 webview-app），目标文件名]
+  ['webview-app/src/splash.html', 'splash.html'],
+  ['webview-app/src/titlebar.js', 'titlebar.js'],
+  ['webview-app/src/loading.js', 'loading.js'],
+  ['webview-app/src/shell.html', 'shell.html'],
+  ['webview-app/dist/settings.html', 'settings.html'],
+]
+const injectOutDir = join(outDir, 'inject')
+mkdirSync(injectOutDir, { recursive: true })
+let injectMissing = false
+for (const [src, name] of injectSrcs) {
+  const from = join(appDir, '..', src)
+  if (existsSync(from)) {
+    copyFileSync(from, join(injectOutDir, name))
+    console.log(`[stage] 注入资源  : ${src} → out/inject/${name}`)
+  } else {
+    // 不静默跳过：少了注入脚本，标题栏 / 加载层 / 多页签壳 / 设置页至少一样会静默退化，
+    //   表象是「打开没反应 / 白屏 / 设置窗是兜底页」，都是最不好定位的一类。
+    console.warn(`[stage] ⚠️ 未找到注入资源 ${from}，打包产物将缺少 out/inject/${name}`)
+    injectMissing = true
+  }
+}
+if (injectMissing) process.exit(1)

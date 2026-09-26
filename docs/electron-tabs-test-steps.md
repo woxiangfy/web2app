@@ -20,10 +20,12 @@
 
 ### 待办：代理 / 域名解析的真机验证（下次补测）
 
-`config.json` 两种触发方式任选其一后双击 exe，确认目标站正常加载（而不是白屏 / 直连降级）：
+在**打包前**的配置 JSON 里任选其一，重新打包后双击 exe，确认目标站正常加载（而不是白屏 / 直连降级）：
 
 - **本地反向代理**：`"proxy_enabled": true` + 填 `proxy_http` / `proxy_https`（可留 `proxy_bypass`）；
 - **加密域名解析**：填 `public_key` + `resolve_secret`（两端需同步，见 `resolve-tool`）。
+  ⚠️ `resolve_secret` 是**编译期**注入 sidecar 的常量 ⇒ 必须在**编译 `w2a-proxy.exe` 之前**就设好环境，
+  顺序错了会静默用公开默认 Secret（见 `packaging-config.md` §3.4）。
 
 失败时排除项：`resources/sidecar/w2a-proxy.exe` 是否随包、日志里有没有「未找到 w2a-proxy」
 （该错误**绝不**静默降级为直连）。
@@ -35,7 +37,8 @@
 - Windows 10/11 x64，**有 GPU 的实体机或远程桌面**（沙箱无 GPU，正是要绕开的限制）。
 - 目标包：`electron-app/release/` 下 `Web2App-0.1.0-win-x64.zip`（解压即用，推荐）、
   `Web2App-0.1.0-win-x64-portable.exe`（单文件自解压）、`Web2App-0.1.0-win-x64/`（解压目录）。
-- 包内 `config.json`（exe 同级）已置 `"tabs_enabled": true`，双击即多页签模式。
+- 包内 `config.json` 已置 `"tabs_enabled": true`，双击即多页签模式。⚠️ 该 `config.json` **随 `app.asar` 进包**
+  （`out/config.json`，2026-09-22 起**不再**放 exe 同级）⇒ 真机上**改不到**它，切模式必须**重新打包**。
 - 真机**不加** `--no-sandbox --in-process-gpu`（那两个参数是沙箱专用）。
 
 ---
@@ -49,12 +52,12 @@
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue   # ⚠️ 必做，否则退出码 9
 $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 
-(Start-Process $exe -ArgumentList '--probe'        -Wait -PassThru).ExitCode   # 期望 0（130 条单窗口断言，2026-09-24 起）
+(Start-Process $exe -ArgumentList '--probe'        -Wait -PassThru).ExitCode   # 期望 0（134 条单窗口断言，2026-09-25 实测）
 (Start-Process $exe -ArgumentList '--probe','--tabs' -Wait -PassThru).ExitCode   # 期望 0（26 条页签断言）
 (Start-Process $exe -ArgumentList '--smoke'        -Wait -PassThru).ExitCode   # 期望 0
 ```
 
-> ⚠️ 若 `--probe` 退 **1**，先怀疑「跑的是旧包」（`resources/inject/*.js` 与源码 sha256 比对、
+> ⚠️ 若 `--probe` 退 **1**，先怀疑「跑的是旧包」（`out/inject/*.js` 与源码 sha256 比对、
 > 看 `data\` 的 mtime），而不是急着改代码——v1.6 修过一类同症状缺陷（探针起窗模式被 `tabs_enabled`
 > 劫持，断言往壳页面注入脚本必抛 `Script failed to execute`）。
 
@@ -77,7 +80,7 @@ $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 | :-- | :--- | :--- |
 | 1 | 标签栏出现 | 顶部一条标签栏，首个页签标题 = 目标页 `<title>` |
 | 2 | 内容区 | 目标页在标签栏**下方**渲染（内容不被壳页面盖住 = V4，沙箱已程序化验证） |
-| 3 | 新建页签 | 点「+」新增页签，`window.open` / `target="_blank"` 一次只开 **1** 个页签，且保留目标 path |
+| 3 | 新建页签 | **没有「+」入口**（已确认有意移除，见 `project-analysis.md` §3.2）；改由页面内 `window.open` / `target="_blank"` 触发，一次只开 **1** 个页签，且保留目标 path |
 | 4 | 切换页签 | 切换后内容随之切换；隐藏页签不再可见（不是被盖住） |
 | 5 | 关闭页签 | 关闭后标签栏条目减少、激活态落到相邻页签（不悬空） |
 | 6 | **V1 拖标签栏空白处** | 窗口跟随移动（标签栏的 `drag` 区生效） |
@@ -101,7 +104,7 @@ V2 =「最大化/还原/跨 DPI 拖动后标签栏与内容不错位、无 1px �
 
 ## 4. 单窗口模式回归（人工，15 分钟）
 
-把 exe 同级 `config.json` 的 `"tabs_enabled"` 改为 `false` 后重启，确认单窗口模式逐条不变：
+把打包前的配置 JSON 的 `"tabs_enabled"` 改为 `false` 并**重新打包**（配置在 `app.asar` 内，真机改不到），确认单窗口模式逐条不变：
 
 | # | 检查项 | 期望 |
 | :-- | :--- | :--- |
@@ -114,9 +117,8 @@ V2 =「最大化/还原/跨 DPI 拖动后标签栏与内容不错位、无 1px �
 | 7 | 设置页（若有入口） | 打开正常、命令齐全、保存生效 |
 | 8 | 代理/域名解析 | 目标站能正常加载（sidecar 工作）——**本轮未测，待办见上文** |
 
-> ⚠️ `release/` 下的 `win-unpacked/` 是 electron-builder 的**中间产物**，因一次失败的覆盖打包被
-> 删成残缺目录（只剩 `resources/`），**已作废、不要使用**；解压目录版请用 `Web2App-0.1.0-win-x64/`
-> 或直接解压 zip。
+> ⚠️ `win-unpacked/` 是 electron-builder 的**中间产物**，不是交付物 —— 解压目录版请用
+> `Web2App-<ver>-win-x64/` 或直接解压 zip。（原注称它「被删成只剩 `resources/` 的残缺目录」属当时环境状态，**待确认**。）
 
 ---
 
