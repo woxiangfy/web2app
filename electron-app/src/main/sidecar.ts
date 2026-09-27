@@ -1,7 +1,7 @@
 /**
  * w2a-proxy sidecar 客户端。
  *
- * 为什么是独立进程而不是塞进主进程（决定见 docs/electron-plan.md §2）：本地反向代理（825 行）与加密解析
+ * 为什么是独立进程而不是塞进主进程（决定见 docs/electron-plan.md §2）：本地反向代理与加密解析
  * （DNS TXT + Ed25519 + AES-GCM）都已在 `webview-app` 里写就并测过，用 JS 重写等于把
  * 鉴权注入 / 流式转发 / WS 隧道的验证重开一遍，且加密格式必须与 `resolve-core` 字节级一致。
  * 所以 Electron 侧 spawn 一个复用同一份 Rust 源码的 sidecar，只做「传参进去、读回一行 JSON」。
@@ -40,8 +40,6 @@ export interface SidecarHandle {
   proxyUrl: string
   /** 解析后的上游地址（**已剥掉 userinfo**，可安全写日志） */
   resolvedUrl: string
-  upstreamHost: string
-  hadAuth: boolean
   /**
    * ⚠️⚠️ 明文凭据，**仅 `noProxy` 模式（DNS 解析 + 直连）有值**。
    * 用途只有一个：喂给 Chromium 的 `login` 事件（对应 Tauri 侧 WebView2 的原生鉴权事件）。
@@ -211,6 +209,29 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
         return
       }
 
+      // 成功行契约校验：proxyUrl 是宿主马上要 loadURL 的地址，缺失 / 空串 / 非 http(s)
+      // 都会变成 navigate.ts 的 loadURL('')，抛出来的错完全不指向「握手畸形」这个根因。
+      // 失败行有 kind 白名单，成功行不能反而零校验。
+      const proxyUrl = String(v.proxyUrl ?? '')
+      let parsedUrl: URL | null = null
+      try {
+        parsedUrl = new URL(proxyUrl)
+      } catch {
+        parsedUrl = null
+      }
+      if (!parsedUrl || (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:')) {
+        finish(() => {
+          killHard(child)
+          reject(
+            new SidecarError(
+              `sidecar 握手成功行缺少合法 proxyUrl（收到：${proxyUrl.slice(0, 200)}）`,
+              'protocol',
+            ),
+          )
+        })
+        return
+      }
+
       // pid 必须是有限数：sidecar 缺字段时回退 spawn 给出的 pid，再缺就是 0，
       // 绝不能把 NaN 放进句柄（isAlive(NaN) 的行为会让孤儿回收判断静默失真）。
       const reported = Number(v.pid)
@@ -221,10 +242,8 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
           : 0
       finish(() =>
         resolve({
-          proxyUrl: String(v.proxyUrl ?? ''),
+          proxyUrl,
           resolvedUrl: String(v.resolvedUrl ?? ''),
-          upstreamHost: String(v.upstreamHost ?? ''),
-          hadAuth: v.hadAuth === true,
           authUser: String(v.authUser ?? ''),
           authPass: String(v.authPass ?? ''),
           pid,
@@ -257,6 +276,11 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
         ),
       )
     })
+
+    // stdin 的异步 'error' 必须有人监听：sidecar 在握手前极速退出时 write 只在同步层
+    // 抛一次，Socket 随后还会异步抛 EPIPE；没有监听器它会升级成未处理异常把主进程带走。
+    // 进程退出这个事实由上面的 exit 事件统一兜底（reject / 回收），这里吞掉流错误即可。
+    child.stdin?.on('error', () => {})
 
     // 凭据经 stdin 传入（见 buildSidecarArgs）。**只写一行、绝不 end()**：
     // sidecar 靠这根 stdin 的 EOF 判断宿主是否还活着，提前关掉它会让代理刚起来就自杀。

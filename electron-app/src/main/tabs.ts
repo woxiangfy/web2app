@@ -19,6 +19,8 @@
  * （onSpawn 回调），避免在这里反向依赖主进程的 bootstrap 链路。
  */
 import { WebContentsView, type BrowserWindow } from 'electron'
+// 页签关闭后的邻接选择是纯顺序规则，抽在无 Electron 依赖的 tab-order.ts 里（可直接 node:test）。
+import { nextActiveLabelAfterClose } from './tab-order'
 
 /** 标签栏高度（逻辑像素）。与 shell.html 的 `--bar-h`、Tauri 的 `TAB_BAR_HEIGHT` 一致，勿改。 */
 export const TAB_BAR_HEIGHT = 38
@@ -163,6 +165,11 @@ export class TabManager {
     if (!tab) return false
     const wasActive = this.activeLabel === label
 
+    // ⚠️ 必须在【删除前】快照 label 列表与下标：删除后再 findIndex(label) 恒为 -1，
+    // 邻接选择会退化成「永远激活第一个幸存页签」（见 nextActiveLabelAfterClose 注释）。
+    const labelsBefore = [...this.tabs.keys()]
+    const removedIndex = labelsBefore.indexOf(label)
+
     this.tabs.delete(label)
     try {
       // ⚠️ 必须显式 removeChildView：只调 webContents.close() 时，视图对象仍挂在
@@ -183,11 +190,10 @@ export class TabManager {
     }
 
     if (wasActive) {
-      // 激活态落到相邻页签：优先右侧，没有则左侧（对齐 Tauri close_tab_inner 语义）
-      const labels = [...this.tabs.keys()]
-      const idx = labels.findIndex((l) => l === label)
-      const next = labels[Math.min(idx + 1, labels.length - 1)]
-      this.activate(next)
+      // 激活态落到相邻页签：优先右邻，末位则左邻（对齐 Tauri close_tab_inner 语义）。
+      // 走到这里至少还有一个幸存页签（size===0 的分支上面已 return），next 必非 null。
+      const next = nextActiveLabelAfterClose(labelsBefore, removedIndex)
+      if (next) this.activate(next)
     }
     return true
   }

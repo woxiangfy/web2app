@@ -25,7 +25,7 @@
 | `settings.rs` + `dist/settings.html`                      | 328 行     | BrowserWindow + JSON（设置页 HTML **一行不改**，用 `__TAURI_INTERNALS__` 垫片）                                          | ★ 低            | 设置页单一真源，改一次两壳同时生效                                                                                                                        |
 | `window_state.rs`                                         | 114 行     | 手写（物理像素存盘 / DIP 恢复）                                                                                         | ★ 低            | 与 Tauri 版可互相读取（探针逐字节比对）。几何已并入 `store.rs` 的 `window` 段（`store.rs` 681 行）                                                 |
 | `bootstrap.rs` / `loading.rs` / `lib.rs` 编排               | ~1000 行   | 主进程重写（`index.ts` / `navigate.ts`）                                                                              | ★★ 中           | 逻辑本身不复杂，但要重新组织启动时序                                                                                                                                |
-| `.github/workflows/build-custom.yml`                      | **62 KB** | electron-builder 打包链重做                                                                                          | ★★★★ **高**     | 最大的隐藏成本：config JSON 注入、多形态产物、签名取密钥；Electron 侧已由 `stage-assets.cjs` + `electron-builder.yml` 承担，**Android 那半没有对应物** |
+| `.github/workflows/build-custom.yml`                      | **约 53 KB**（2026-09-26 实测 52.9 KB；决策时为 62 KB，随迭代变小） | electron-builder 打包链重做                                                                                          | ★★★★ **高**     | 最大的隐藏成本：config JSON 注入、多形态产物、签名取密钥；Electron 侧已由 `stage-assets.cjs` + `electron-build-custom.yml` 承担，**Android 那半没有对应物** |
 
 **净账（决策时估算）**：约 3000 行 Rust 重写为 TS，约 1500 行 Rust + 注入脚本 + HTML 直接复用，外加一条打包流水线。
 实际落地：sidecar（`crates/proxy-server`）以 `#[path]` 零重写复用 `proxy.rs` / `resolve.rs`，见 `electron-app/README.md`「本地代理 sidecar」。
@@ -55,7 +55,7 @@
 
 1. **配置契约单一真源**：沿用现有 **18 个字段**（`app_url` / `app_name` / `title` / `extra` / `icon_url` / `proxy_*` / `data_dir` / `tabs_enabled` / `debug` / `public_key` / `resolve_secret` / `android_*`×4，见 `packaging-config.md`）。⚠️ 布尔**只认真 `bool`**，字符串写法已拒绝（旧文「Electron 侧宽容接受字符串」已失效）。
 2. **注入脚本物理复用**：`titlebar.js` / `loading.js` / `shell.html` / `settings.html` 从 `webview-app/` 引用（构建期拷贝），避免两份分叉。
-3. **行为契约写成断言测试**：38px 顶部留白、标题栏按钮、Basic 鉴权覆盖 HTTP+WS、`Set-Cookie` Domain 重写、`target="_blank"` 策略、快捷键、托盘语义、单实例、绿色版免安装 —— 全部收敛进 `pnpm run probe`（**134 条**，2026-09-25 实测；多页签另 26 条）。
+3. **行为契约写成断言测试**：38px 顶部留白、标题栏按钮、Basic 鉴权覆盖 HTTP+WS、`Set-Cookie` Domain 重写、`target="_blank"` 策略、快捷键、托盘语义、单实例、绿色版免安装 —— 全部收敛进 `pnpm run probe`：**单窗口 134 条（2026-09-26 实测）；多页签另 31 条**。
 4. **产物命名对齐**：与 `build-custom.yml` 既有约定一致，让部署脚本不感知壳的差异。
 5. **两处已知语义落差**（必须显式处理）：
    - 外部 HTTP/HTTPS 代理：Electron 侧用 Chromium `--proxy-server` switch（已接好）；

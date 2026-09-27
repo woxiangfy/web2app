@@ -56,7 +56,7 @@ import {
   readSettingsHtml,
   registerSettingsIpc,
 } from './settings-window'
-import { TabManager } from './tabs'
+import { MAX_TABS, TAB_BAR_HEIGHT, TabManager } from './tabs'
 import { rawConsole, silenceConsole, startFileLogging, type FileLogHandle } from './startup-log'
 import {
   attachContextMenu,
@@ -334,9 +334,9 @@ let tabManager: TabManager | null = null
  *
  * ⚠️⚠️ **探针模式下必须让「起窗模式」与「断言组」一一对应**，因此 `cfg.tabs_enabled`
  *    **不参与**探针分叉：
- *      - `--probe`         → 强制单窗口模式，跑 130 条单窗口断言（按「主窗口加载
+ *      - `--probe`         → 强制单窗口模式，跑 134 条单窗口断言（按「主窗口加载
  *                            splash:// + 标题栏/滚动条/窗口按钮」设计）；
- *      - `--probe --tabs`  → 强制页签模式，跑 26 条页签断言。
+ *      - `--probe --tabs`  → 强制页签模式，跑 31 条页签断言（含 3 页签邻接选择）。
  *    若写成 `cfg.tabs_enabled || TABS_PROBE`，则用户一旦把 config.json 的页签开关打开
  *    （正是多页签版交付形态），同一条 `--probe` 会以**页签模式**起窗：单窗口断言往壳页面
  *    （`shell://`）注入脚本会直接抛 `Error: Script failed to execute`，回归门禁退化成
@@ -593,6 +593,13 @@ function registerTabsIpc(): void {
     // webContents.goBack() 在 Electron 44 已 Deprecated，用 navigationHistory.goBack()
     if (dir === 'back') nav.goBack()
     else if (dir === 'forward') nav.goForward()
+    return null
+  })
+  // 壳页面失败遮罩上的「重试」按钮（仅主进程在首签失败时注入该遮罩，页面自身不调用）。
+  // 复用启动期同一条 spawnFirstTab 路径：成功撤遮罩、失败重新挂遮罩。
+  ipcMain.handle('tabs:retry_first_tab', (e) => {
+    assertShell(e)
+    void spawnFirstTab()
     return null
   })
 }
@@ -878,24 +885,115 @@ function openSettings(): void {
 }
 
 /**
+ * 多页签模式下首个页签创建失败时，向壳页面注入的**可见**失败遮罩 id。
+ *
+ * 为什么必须有它：内容视图不注入 loading.js（见 createWindow 的 onSpawn 注释），
+ * 首个页签 spawn 失败（sidecar 缺失 / DNS 解析失败 / 代理启动失败）时视图已被
+ * spawnTab 回收，壳上只剩标签栏下面一片空白；而默认 `debug=false` 时 console 三路
+ * 又被静默 —— 用户侧零证据、零入口，正是本项目最忌的失败形态（单窗口模式有
+ * splash 的 pendingFail + 重试按钮，这里必须有等价物）。
+ */
+const SHELL_FAIL_ID = '__w2a_shell_fail'
+
+/** 在壳页面注入失败遮罩（错误文案 + 「重试」按钮）。幂等：重复调用先撤旧遮罩。 */
+function showShellStartupError(win: BrowserWindow, detail: string): void {
+  if (win.isDestroyed()) return
+  // 文案经 JSON.stringify 嵌入（天然 JS 字符串转义，杜绝引号/换行注入断脚本）；
+  // 按钮经 shell-preload 白名单里的 retry_first_tab 重试，主进程侧还有 assertShell 校验。
+  // 遮罩的 top 与标签栏高度同源（TAB_BAR_HEIGHT 插值）：写死 38 会在改栏高时盖住标签栏。
+  const js = `(function () {
+    var OLD = document.getElementById(${JSON.stringify(SHELL_FAIL_ID)});
+    if (OLD) OLD.parentNode.removeChild(OLD);
+    var box = document.createElement('div');
+    box.id = ${JSON.stringify(SHELL_FAIL_ID)};
+    box.style.cssText =
+      'position:fixed;top:${TAB_BAR_HEIGHT}px;left:0;right:0;bottom:0;display:flex;flex-direction:column;' +
+      'gap:14px;align-items:center;justify-content:center;padding:24px;' +
+      'background:#f7f8fa;color:#1f2530;font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;' +
+      'z-index:2147483646;user-select:none';
+    var msg = document.createElement('div');
+    msg.style.cssText = 'max-width:560px;text-align:center;word-break:break-word';
+    msg.textContent = ${JSON.stringify(detail)};
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '重试';
+    btn.style.cssText =
+      'padding:7px 22px;border:1px solid #c3cbd8;border-radius:6px;background:#fff;' +
+      'color:#1f2530;font:14px "Segoe UI","Microsoft YaHei",sans-serif;cursor:pointer';
+    btn.onclick = function () {
+      btn.disabled = true;
+      btn.textContent = '重试中…';
+      window.__TAURI_INTERNALS__.invoke('retry_first_tab').catch(function (e) {
+        btn.disabled = false;
+        btn.textContent = '重试';
+        alert('重试失败：' + (e && e.message ? e.message : String(e)));
+      });
+    };
+    box.appendChild(msg);
+    box.appendChild(btn);
+    document.body.appendChild(box);
+  })();`
+  win.webContents.executeJavaScript(js, true).catch(() => {
+    /* 壳页面尚未就绪：首签失败只可能发生在壳加载完成之后，此处静默即可 */
+  })
+}
+
+/** 撤掉壳页面的失败遮罩（重试成功 / 正常启动路径）。幂等。 */
+function hideShellStartupError(win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  win.webContents
+    .executeJavaScript(
+      `try{var e=document.getElementById(${JSON.stringify(SHELL_FAIL_ID)});if(e)e.parentNode.removeChild(e);true}catch(e){false}`,
+      true,
+    )
+    .catch(() => {
+      /* 同上 */
+    })
+}
+
+/**
+ * 创建多页签模式的首个页签（启动 / 失败重试 / 空壳自愈共用）。
+ *
+ * 失败与「达上限」都在壳页面上给出可见状态：绝不允许空白壳 + 静默日志。
+ * 成功时撤掉失败遮罩（新内容视图本身也会盖住壳页面，显式撤一次更干净）。
+ *
+ * ⚠️ **不要在开头撤遮罩**：重试是异步的（sidecar 解析可能几秒），开局就撤会让用户
+ *    对着空白壳干等 —— 正是本函数要消灭的失败形态。遮罩里的按钮此时已切成
+ *    「重试中…」并置灰，保留遮罩才有持续反馈；成功才撤（见下方 then 的成功分支）。
+ */
+function spawnFirstTab(): Promise<void> {
+  const win = mainWindow
+  if (!win || win.isDestroyed() || !tabManager) return Promise.resolve()
+  return tabManager.spawnTab().then(
+    (label) => {
+      if (label === null) {
+        showShellStartupError(win, `首个页签创建被拒（页签数已达 ${MAX_TABS} 个上限？）`)
+        console.error('[web2app] 首个页签创建失败：已达页签上限')
+      } else {
+        hideShellStartupError(win)
+      }
+    },
+    (e: Error) => {
+      console.error(`[web2app] 首个页签创建失败：${e.message}`)
+      showShellStartupError(win, `首个页签加载失败：${e.message}`)
+    },
+  )
+}
+
+/**
  * 唤起主窗口（托盘点击/菜单「显示」/第二实例），并在多页签空壳时自愈补建。
  *
  * 死局场景：关掉最后一个页签会调 host.close()，而启用「关闭最小化到托盘」时 close
  * 被拦成 hide —— 恢复后窗口是没有任何内容视图的空壳（shell.html 无「+」按钮，
- * spawnTab 也没有 IPC 入口）。与 Tauri tabs.rs 的 set_tabs_visible 自愈语义对齐：
- * 窗口重新可见且页签数为 0 时自动补建一个默认页签。
+ * spawnTab 也没有页面侧入口）。与 Tauri tabs.rs 的 set_tabs_visible 自愈语义对齐：
+ * 窗口重新可见且页签数为 0 时自动补建一个默认页签（失败时同样挂可见错误遮罩）。
  */
 function presentMainWindow(): void {
   showMainWindow(mainWindow)
   // 窗口已销毁（无托盘驻留时关窗即退出）就别再往废 host 上挂视图。
   if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return
   if (TABS_MODE && tabManager && tabManager.count === 0) {
-    void tabManager
-      .spawnTab()
-      .then((label) => {
-        if (!label) console.warn('[web2app] 恢复窗口补建页签被拒（可能已达上限）')
-      })
-      .catch((e) => console.error('[web2app] 恢复窗口时补建页签失败：', e))
+    void spawnFirstTab()
   }
 }
 
@@ -940,6 +1038,10 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
   const r = applyWakeHotkey(next.wake_hotkey, () => toggleMainWindow(mainWindow))
   if (!r.ok) throw new Error(r.error ?? '快捷键注册失败')
 
+  // 记录本调用是否【新建】了托盘：持久化失败时要把它一起回滚，否则界面提示
+  // 「保存失败」、文件没写成，但托盘图标已在本次会话驻留 —— 进程级副作用有两个
+  //（快捷键 / 托盘），只回滚一个就不叫「任一步失败都不写内存态」。
+  let trayCreatedThisCall = false
   try {
     // 2) 托盘开关变化 → 创建 / 销毁（与旧版一样是「变化才动」，避免每次保存都重建图标）
     if (next.tray_enabled !== runtimeSettings.tray_enabled) {
@@ -950,6 +1052,7 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
           actions: trayActions(),
         })
         if (!ok) throw new Error('托盘创建失败（未找到 icons/icon.png）')
+        trayCreatedThisCall = true
       } else {
         destroyTray()
       }
@@ -961,11 +1064,15 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
       console.log(`[web2app] 设置已保存：${written}`)
     }
   } catch (e) {
-    // ⚠️ 回滚快捷键。第 1 步是**已经生效的副作用**（全局快捷键是进程级资源），
-    //    后两步失败时如果不回滚，就会留下这种自相矛盾的状态：
-    //    界面上提示「保存失败」、settings.json 没写（下次启动仍是旧键），
-    //    但**本次会话里新键已经生效**。文件注释里承诺的「任一步失败都不写内存态」
+    // ⚠️ 回滚本次已生效的进程级副作用。第 1 步是全局快捷键（进程级资源），
+    //    第 2 步可能已经新建托盘 —— 后两步失败时如果不回滚，就会留下这种自相矛盾的状态：
+    //    界面上提示「保存失败」、settings.json 没写（下次启动仍是旧值），
+    //    但**本次会话里新键 / 新托盘已经生效**。承诺的「任一步失败都不写内存态」
     //    只有在把副作用也一并回滚之后才成立。
+    if (trayCreatedThisCall) {
+      destroyTray()
+      console.warn('[web2app] 保存失败，本次新建的托盘已回滚')
+    }
     if (!sameHotkey(prev.wake_hotkey, next.wake_hotkey)) {
       const rb = applyWakeHotkey(prev.wake_hotkey, () => toggleMainWindow(mainWindow))
       console.warn(
@@ -1144,17 +1251,16 @@ if (!gotLock) {
 
     if (TABS_MODE) {
       // 多页签：壳页面先出，首个内容视图由 tabManager.spawnTab 建立（复用 target 解析）。
-      void mainWindow.loadURL('shell://localhost/').catch((e: Error) => {
-        console.error(`[web2app] 壳页面加载失败：${e.message}`)
-      })
-      tabManager
-        ?.spawnTab()
-        .then((label) => {
-          if (label === null) console.error('[web2app] 首个页签创建失败（已达上限？）')
-        })
+      // 等壳页面加载完再建首个内容视图：①失败遮罩要注入壳 DOM，壳没就绪注入会被吞；
+      //   ②shell:// 是零网络本地协议，等待成本只有几十毫秒（标签栏先出也更像 Tauri 时序）。
+      // 失败（解析/sidecar/达上限）时壳页面上会出现可见错误遮罩 + 重试入口，
+      // 不再只是 console.error（默认 debug=false 时用户什么都看不到）。
+      void mainWindow
+        .loadURL('shell://localhost/')
         .catch((e: Error) => {
-          console.error(`[web2app] 首个页签创建失败：${e.message}`)
+          console.error(`[web2app] 壳页面加载失败：${e.message}`)
         })
+        .then(() => spawnFirstTab())
     } else {
       void mainWindow.loadURL('splash://localhost/').catch((e: Error) => {
         console.error(`[web2app] 启动页加载失败：${e.message}`)

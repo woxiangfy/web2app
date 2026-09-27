@@ -1,7 +1,7 @@
 # web2app 项目全盘分析与优化建议
 
 > 分析日期：2026-09-14 ｜ 现状核对：2026-09-17 ｜ 精简：2026-09-22 ｜ 计数复测：2026-09-25
-> 范围：`webview-app/`（含 3 个 crate、注入脚本、CI/打包工作流）。
+> 范围：`webview-app/`（含 4 个 crate：根包 `web2app` + `resolve-core` / `resolve-tool` / `proxy-server` 三个成员 crate、注入脚本、CI/打包工作流）。
 > 后续新增的 `electron-app/`（Windows 绿色版壳）另见 `docs/electron-plan.md` / `docs/electron-analysis.md`。
 > 约束：所有优化建议**不改变现有功能点**，仅做质量/性能/安全/可维护性层面的改进。
 
@@ -15,7 +15,7 @@
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
 | 架构 | cargo workspace 四 crate，职责边界清晰 |
 | 代码规模 | 主 crate `src/` 22 个文件（16 个 `.rs` + 6 个前端资源：4 个注入脚本 + 2 个页面）+ 4 个 crate + 7 条 CI/打包工作流（其中 2 条只服务 Electron 壳：`electron-build-custom.yml` / `electron-ci.yml`） |
-| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 28 + 85 = 133 通过，另有 3 + 3 条 ignored）；Electron 纯函数单测 29 条、双壳契约探针 134/134、多页签 26/26（**2026-09-25 实跑**）。⚠️ 计数随版本演进，以实跑输出为准 |
+| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 28 + 85 = 133 通过，另有 3 + 3 条 ignored）；Electron 纯函数单测 35 条、双壳契约探针 134/134、多页签 31/31（**2026-09-26 实跑**）。⚠️ 计数随版本演进，以实跑输出为准 |
 
 ### crate 职责
 

@@ -21,7 +21,7 @@ name: CI（Electron 绿色版）
 #      故 CI 是**没有** config.json 的 —— 这不是缺陷，而是本流水线刻意验证的场景：
 #      「fresh clone 直接能跑」。`config.ts` 找不到文件时回落 `DEFAULTS`
 #      （见 `src/main/config.ts:336`），而探针**自己起 127.0.0.1 随机端口的夹具站点**
-#      （`src/main/probe.ts:360`），不依赖任何外部站点 ⇒ 无配置也能跑完 130 条断言。
+#      （`src/main/probe.ts:360`），不依赖任何外部站点 ⇒ 无配置也能跑完 134 条断言。
 #      ⚠️ 所以**不要**在这里生成 config.json —— 那样反而掩盖了「缺省能不能跑」这件事。
 #   3. **pnpm 版本**：`electron-app/pnpm-workspace.yaml` 用了 `allowBuilds`（pnpm 11+ 键名）
 #      与 `nodeLinker: hoisted`。版本不对会报 `ERR_PNPM_IGNORED_BUILDS` 或符号链接失败，
@@ -29,7 +29,7 @@ name: CI（Electron 绿色版）
 #
 # Node 版本取 22：①与 `electron-build-custom.yml` 一致；②`pnpm run unit` 直接
 #   `node --test "test/**/*.test.ts"`（不带编译步骤），依赖 Node 的类型剥离，
-#   实测 22.22.2 可跑通 15/15。
+#   当前 35/35（数量随用例增长，失败信息以 pnpm run unit 实际输出为准）。
 # ---------------------------------------------------------------------------
 on:
   push:
@@ -97,7 +97,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # 2) 端到端探针（Windows）
   #    跑的是**真实窗口**：`launch.cjs` 拉起 Electron 后在窗内逐条断言
-  #    （单窗口 130 条 + 多页签 26 条），最后 `smoke` 验证真实启动路径。
+  #    （单窗口 134 条 + 多页签 31 条），最后 `smoke` 验证真实启动路径。
   #
   #    ⚠️ 三个参数的来历（本机踩出来的，CI 上同样需要）：
   #      - `--no-sandbox --in-process-gpu`：CI runner 没有可用的 GPU 沙箱，
@@ -136,10 +136,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
 
-      - name: 单窗口探针（130 条）
+      - name: 单窗口探针（134 条）
         run: pnpm run probe --no-sandbox --in-process-gpu
 
-      - name: 多页签探针（26 条）
+      - name: 多页签探针（31 条）
         run: pnpm run probe --tabs --no-sandbox --in-process-gpu
 
       - name: 启动冒烟

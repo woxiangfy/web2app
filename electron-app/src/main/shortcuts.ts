@@ -127,11 +127,6 @@ export function applyWakeHotkey(h: Hotkey, handler: () => void): RegisterResult 
   return { ok: true, accelerator: accel }
 }
 
-/** 当前生效的 accelerator（探针 / 日志用）。 */
-export function currentWakeAccelerator(): string | null {
-  return currentWakeAccel
-}
-
 /** 退出前释放全部快捷键。不释放的话，进程退出后系统里可能残留占用（Windows 上一般随进程释放，但不保证）。 */
 export function releaseShortcuts(): void {
   try {

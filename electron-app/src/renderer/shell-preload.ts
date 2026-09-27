@@ -27,6 +27,9 @@ const ALLOWED = new Set([
   // 「设置」按钮（位置在最小化左侧）—— shell.html 是双壳共用的单一真源，
   // 那边写的是 invoke("open_settings")，这边必须逐字放行，否则按钮点了没反应。
   'open_settings',
+  // 首个页签创建失败时，注入到壳页面的失败遮罩用它发起重试（页面本身不调用，
+  // 仅主进程 executeJavaScript 注入的错误态用）；主进程侧同样有 assertShell 校验。
+  'retry_first_tab',
 ])
 
 contextBridge.exposeInMainWorld('__TAURI_INTERNALS__', {

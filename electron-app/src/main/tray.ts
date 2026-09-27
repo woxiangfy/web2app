@@ -28,9 +28,9 @@ export function locateTrayIcon(appPath: string, resourcesPath: string): string |
   const candidates = [
     // 打包态：electron-builder 的 extraResources（见 electron-builder.yml）
     join(resourcesPath, 'icons', 'icon.png'),
-    // 开发态：直接复用 Tauri 版的图标资源，不复制出第二份
+    // 开发态：直接复用 Tauri 版的图标资源，不复制出第二份。
+    // （appPath 是 electron-app/，其下没有 icons 目录，不要再加 appPath/icons 候选 —— 恒不命中）
     join(appPath, '..', 'webview-app', 'icons', 'icon.png'),
-    join(appPath, 'icons', 'icon.png'),
   ]
   for (const c of candidates) {
     if (existsSync(c)) return c

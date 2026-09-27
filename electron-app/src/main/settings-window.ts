@@ -2,11 +2,12 @@
  * 设置窗口 —— 对齐 Tauri 版（`webview-app/src/settings.rs`）。
  *
  * 窗口参数逐项照抄 `open_settings_window()`：620×600 内容区、可缩放（最小 460×400）、
- * 居中、标题 `设置 - <APP_NAME>`。
+ * 居中、**无边框**（系统不画标题栏；任务栏 / 无障碍的窗口名取系统默认，标题文案由
+ * settings.html 自己画在面板头部）。
  *
  * ⚠️⚠️ 设置页 HTML **不重写**，直接用 `webview-app/dist/settings.html`（单一真源）。
  *    那份 HTML 是写给 Tauri 的，调用的是 `window.__TAURI_INTERNALS__.invoke(...)`。
- *    这边的做法是在设置窗的 preload 里**提供一个同名垫片**，把三个命令映射到 IPC ——
+ *    这边的做法是在设置窗的 preload 里**提供一个同名垫片**，把四个命令映射到 IPC ——
  *    而不是去改 HTML 让两个壳各认一套 API。理由和注入脚本一样：
  *    界面一旦分叉，两个壳的设置页就会各修各的 bug，这正是不想看到的。
  *    见 `src/renderer/settings-preload.ts`。

@@ -26,7 +26,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
 | 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效） | Windows |
 | 新窗口拦截 | `target="_blank"` / `window.open()` 强制在当前窗口打开 | Windows |
-| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一数据目录（同账号），可随时新建/切换/关闭；`target="_blank"` 直接新开 tab | Windows |
+| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除） | Windows |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
@@ -337,11 +337,13 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 ## 自动构建（GitHub Actions）
 
-6 条 workflow 统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移）：其中 **5 条服务本工程**
-（命令经 `defaults.run.working-directory: webview-app` 落到本工程目录，产物路径则显式带 `webview-app/` 前缀）——
-2 条**自动**（`ci.yml` / `release.yml`）+ 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，
-在 Actions 页手动 Run workflow）；另有 1 条 `electron-build-custom.yml` **只服务 Electron 绿色版壳**
-（工作目录是 `electron-app/`，用法见 `electron-app/README.md` 的「手动打包」）。
+共 **7 条** workflow，统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移）：
+其中 **5 条服务本工程**（命令经 `defaults.run.working-directory: webview-app` 落到本工程目录，
+产物路径则显式带 `webview-app/` 前缀）——2 条**自动**（`ci.yml` / `release.yml`）+
+3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，
+在 Actions 页手动 Run workflow）；另外 2 条服务 **Electron 绿色版壳**（工作目录是 `electron-app/`，
+用法见 `electron-app/README.md`）：自动的 `electron-ci.yml`（lint / 探针 e2e / 出包）与
+手动的 `electron-build-custom.yml`（自定义打包）。
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 
@@ -354,6 +356,10 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 - **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译，并跑 `clippy` / `test`。
 - **Check (Android)**：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，并跑 **Android 目标 clippy**
   （**阻断**，不产出 APK）。
+- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、校验全仓库 workflow YAML
+  （`check-workflows.py`）、逐个校验两份 `config.example.json` 与 `scripts/pack-local.mjs`
+  的 `--parity`（Node 复刻与 Python 解析器的 39 组用例必须逐条一致）。详见
+  `docs/packaging-config.md` §5。
 
 ### 2. 发版即编译 — `.github/workflows/release.yml`
 
@@ -422,15 +428,16 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
 
-`tabs_enabled`（可选，**字符串布尔**，默认 `"false"`）—— 多页签（tab）模式开关，**仅 Windows 生效**：
+`tabs_enabled`（可选，**真布尔**，默认 `false`，不带引号）—— 多页签（tab）模式开关，**仅 Windows 生效**：
 
-- 设为 `"true"` 后，应用不再是一个单一窗口，而是「一个宿主窗口 + 顶部标签栏」，每个 tab 是独立的 WebView、**共享同一份数据目录**（同账号，cookie / localStorage 天然互通）。
-- tab 可随时新建（标签栏「+」按钮）、切换、关闭；网页里的 `target="_blank"` / `window.open()` 会**直接新开一个 tab**（而非在当前窗口跳转）。
+- 设为 `true` 后，应用不再是一个单一窗口，而是「一个宿主窗口 + 顶部标签栏」，每个 tab 是独立的 WebView、**共享同一份数据目录**（同账号，cookie / localStorage 天然互通）。
+- tab 可切换、可关闭；新 tab 由网页里的 `target="_blank"` / `window.open()` **直接新开**（标签栏的「+」按钮已有意移除，见 `src/shell.html` 注释；程序化建窗仍可走 `create_tab` 命令）。
 - Android 端忽略此字段（移动端无多页签能力）。
 - 该开关等价于编译期环境变量 `TABS_ENABLED`；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。
+- ⚠️ 字符串形式（`"true"`）会被打包解析器直接拒绝（布尔字段只认真 `bool`，见 `docs/packaging-config.md`）。
 
 ```json
-{ "app_url": "https://u:p@host", "tabs_enabled": "true" }
+{ "app_url": "https://u:p@host", "tabs_enabled": true }
 ```
 
 #### 动态解析真实 URL（`app_url` 数组 + `public_key` 公钥解密）

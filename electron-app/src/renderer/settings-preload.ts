@@ -11,7 +11,8 @@
  *    多暴露的每一寸都是交给页面的攻击面。
  *
  * ⚠️ 与主窗口的 preload 是**两个文件**：主窗口那份要注入标题栏/加载层脚本，
- *    而设置窗是带系统标题栏的普通窗口，注入了会多出 38px 留白与一条浮空标题栏。
+ *    而设置窗是**无边框窗**（`frame:false`，标题栏由 settings.html 自绘），
+ *    注入那套 38px 标题栏会多出一条浮空条与留白。
  */
 import { contextBridge, ipcRenderer } from 'electron'
 

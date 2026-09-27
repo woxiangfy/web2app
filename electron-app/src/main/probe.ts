@@ -1411,7 +1411,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   // 「菜单该出哪些项、另存为对话框给什么默认值」属纯规则，由 test/page-behavior.test.ts 钉。
   //
   // ⚠️ 三条 listenerCount 断言是防「改了 index.ts 忘了挂」：不挂的话功能静默消失、
-  //    编译照过、探针其它 127 条全绿 —— 正是最难发现的那一类回归。
+  //    编译照过、探针其它断言全绿 —— 正是最难发现的那一类回归。
   const wc = win.webContents
   p.check(
     'F12：已挂 before-input-event（未打包态应启用）',
@@ -1456,7 +1456,8 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// 多页签模式断言组（M5 T2）—— 对应 docs/electron-tabs-design.md §8 的 P1/P2/P4/P6/P7/P8/P12
+// 多页签模式断言组（M5 T2）—— 对应 docs/electron-tabs-design.md §8 的
+// P1/P2/P4/P6/P7/P7b/P8/P9/P10/P11/P12（P7b = 3 页签邻接选择，2 页签验不出）
 // ---------------------------------------------------------------------------
 
 export interface TabsProbeContext {
@@ -1569,10 +1570,46 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P7 关闭后 children 数同步减少（位置 + 存在性）',
     children().length === tabs.count, `children=${children().length} count=${tabs.count}`)
 
+  // ---------- P7b：三页签邻接选择（2 页签验不出的回归） ----------
+  // 旧实现在【删除之后】的列表里 findIndex(被删 label)，恒为 -1 → Math.min(0,len-1)=0
+  // ⇒ 无论关中间还是关末尾都跳回第一个幸存页签；而上面的 P7 只有 2 个页签，左右邻恰好
+  // 是同一个，探针因此假绿。规则本体由 test/tabs.test.ts（nextActiveLabelAfterClose）毫秒级
+  // 钉住，这里补真实 TabManager 的端到端链路。当前 [label2]，再开 3 个：[label2,x1,x2,x3]。
+  const x1 = await tabs.spawnTab('about:blank')
+  const x2 = await tabs.spawnTab('about:blank')
+  const x3 = await tabs.spawnTab('about:blank')
+  p.check('P7b 三个附加页签创建成功（顺序 [label2,x1,x2,x3]）',
+    x1 !== null && x2 !== null && x3 !== null && tabs.count === 4,
+    `x1=${x1} x2=${x2} x3=${x3} count=${tabs.count}`)
+  // 关中间：激活 x2 后关闭 → 必须落到右邻 x3（旧实现错误落 label2）
+  tabs.activate(x2!)
+  tabs.closeTab(x2!)
+  p.check('P7b 关中间页签 → 激活右邻', tabs.active?.label === x3,
+    `active=${tabs.active?.label} 期望=${x3}`)
+  // 关末尾：[label2,x1,x3] 里 x3 是末位 → 必须落到左邻 x1
+  tabs.closeTab(x3!)
+  p.check('P7b 关末尾页签 → 激活左邻', tabs.active?.label === x1,
+    `active=${tabs.active?.label} 期望=${x1}`)
+  // 关首位：激活 label2 后关闭 → 必须落到右邻 x1
+  tabs.activate(label2!)
+  tabs.closeTab(label2!)
+  p.check('P7b 关首位页签 → 激活右邻', tabs.active?.label === x1,
+    `active=${tabs.active?.label} 期望=${x1}`)
+  views = children()
+  visible = views.filter((v) => v.getVisible())
+  p.check('P7b 邻接切换后仅新激活页签可见（不靠 z-order 蒙混）',
+    visible.length === 1 && visible[0] === tabs.active?.view,
+    `可见视图数=${visible.length}`)
+  // 此后只剩 [x1]（激活）。它建在 about:blank 上，而 P9 的 window.open('/opened.html')
+  // 依赖真实 http 源来解析相对 URL（about:blank 没有 base，Chromium 无法解析相对地址），
+  // 故先把幸存页签导航到夹具页，再作为 P9 的 opener（不再硬编码 label2）。
+  await tabs.active!.view.webContents.loadURL(`${base}/tabs-b.html`)
+  await sleep(200)
+  const opener = x1!
+
   // ---------- P9 / P10：window.open 只新增 1 页签 + target path 保留 ----------
-  // 当前只剩 label2（激活，加载 /tabs-b.html）。从它发起 window.open('/opened.html')，
-  // 走 index.ts 的 setWindowOpenHandler → spawnTab(opened)，验证「一次点击只开 1 个」且
-  // 「目标 path 未被降级成入口地址（/plain.html）」。入口 = cfg.app_url = /plain.html。
+  // 从当前激活页签发起 window.open('/opened.html')，走 index.ts 的 setWindowOpenHandler
+  // → spawnTab(opened)，验证「一次点击只开 1 个」且「目标 path 未被降级成入口地址」。
   const countBeforeOpen = tabs.count
   await tabs.active!.view.webContents.executeJavaScript(
     `window.open('/opened.html', '_blank'); true`, true)
@@ -1582,7 +1619,7 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   const openedReady = await waitUntil(async () => {
     if (tabs.count !== countBeforeOpen + 1) return false
     const a = tabs.active
-    if (!a || a.label === label2) return false
+    if (!a || a.label === opener) return false
     try {
       return new URL(a.view.webContents.getURL()).pathname === '/opened.html'
     } catch {
@@ -1597,9 +1634,9 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P10 target path 保留（未被降级成入口地址 /plain.html）',
     newPath === '/opened.html',
     `新页签 URL=${newUrl}（path=${newPath}）`)
-  // 收掉 window.open 新开的页签，恢复单一页签稳态，再进后续断言
-  if (tabs.active && tabs.active.label !== label2) tabs.closeTab(tabs.active.label)
-  tabs.activate(label2!)
+  // 收掉 window.open 新开的页签，恢复单一页签稳态（opener），再进后续断言
+  if (tabs.active && tabs.active.label !== opener) tabs.closeTab(tabs.active.label)
+  tabs.activate(opener)
 
   // ---------- 标签栏「设置」按钮（最小化左侧）→ 打开设置窗 ----------
   // 位置 + 链路成对断言。链路上「三处逐字一致」最容易断：shell.html 的
@@ -1693,7 +1730,8 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
 
   // ---------- P8：熔断（连开至上限，第 N+1 次拒绝且 children 不增长） ----------
   // 用 about:blank 快速填充（不解析 target、不渲染），避免 32 个真实页拖慢探针。
-  const labels: string[] = [label2!]
+  // 此时幸存的首个页签是 opener（P7b 后 label2 已关）。
+  const labels: string[] = [opener]
   while (tabs.count < MAX_TABS) {
     const l = await tabs.spawnTab('about:blank')
     if (l === null) break
@@ -1708,7 +1746,7 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
 
   // ---------- 清理：关掉所有页签，验证「关最后一个 → 关闭宿主」的语义不在这里触发 ----------
   // ⚠️ 不能真的关到最后一个（那会 host.close()，探针还没汇总）。留一个，其余 close。
-  const rest = labels.slice(1) // 去掉第一个（label2）
+  const rest = labels.slice(1) // 去掉第一个（opener）
   for (const l of rest) tabs.closeTab(l)
   p.check('清理：关闭到只剩一个页签', tabs.count === 1, `count=${tabs.count}`)
 

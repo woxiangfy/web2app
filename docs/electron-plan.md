@@ -28,9 +28,10 @@
 
 ### 1.1 分发形态
 
-- `portable` 目标：自解压单文件 exe，每次启动解压到 `%TEMP%`，数据默认仍写 `%APPDATA%`。
-  曾因「首次启动慢 / 杀软误报 / 多份 TEMP 残留」犹豫是否使用，**最终决定三种形态都出**
-  （`dir` + `zip` + `portable`，M6 已实测）。
+- `portable` 目标：自解压单文件 exe，每次启动解压到 `%TEMP%`，数据默认写 **exe 同级
+  `data\`**（`data_dir="data"`，2026-09-22 起的默认值；下句「数据默认仍写 `%APPDATA%`」
+  是早期方案的历史描述，已失效）。曾因「首次启动慢 / 杀软误报 / 多份 TEMP 残留」犹豫是否
+  使用，**最终决定三种形态都出**（`dir` + `zip` + `portable`，M6 已实测）。
 - 真绿色的关键：**在 `app.whenReady()` 之前**重定向全部数据路径
   （`userData` / `sessionData` / `logs` / `crashDumps` 四项一起，缺一不可），
   先写文件探测可写性，不可写则回退 `%APPDATA%`（实现：`src/main/portable.ts`，用 `installRoot()` 统一定位）。
@@ -48,10 +49,13 @@
 
 ## 2. 目标架构
 
-> 设计期草案文件名与实际不符；**实际 `src/main/` 为**：`config.ts` / `index.ts` / `navigate.ts` /
-> `portable.ts` / `probe.ts` / `settings-window.ts` / `settings.ts` / `shortcuts.ts` / `sidecar.ts` /
-> `startup-log.ts` / `tabs.ts` / `tray.ts` / `window-state.ts`；`src/renderer/` 为 `preload.ts` / `settings-preload.ts` /
-> `tabs-probe-preload.ts`。
+> 设计期草案文件名与实际不符；**实际 `src/main/` 为 16 个文件（2026-09-26 实测）**：
+> `config.ts` / `index.ts` / `navigate.ts` / `page-behavior.ts`（M4）/ `portable.ts` / `probe.ts` /
+> `settings-window.ts` / `settings.ts` / `shortcuts.ts` / `sidecar.ts` / `startup-log.ts` /
+> `tab-order.ts`（页签邻接纯规则）/ `tabs.ts` / `tray.ts` / `web-data.ts`（清缓存）/
+> `window-state.ts` —— 以目录实际文件为准（启动参数装配在 `scripts/launch.cjs`，不在 src 下）；
+> `src/renderer/` 为 `preload.ts` / `settings-preload.ts` / `shell-preload.ts` /
+> `tabs-probe-preload.ts`（4 个）。
 
 - **进程模型**：main（Node，全权）＋ 每个窗口一个 sandboxed renderer ＋ 1 个 Rust sidecar（代理+加密）。
 - **技术选型**：TypeScript + `tsc`（TS 7，`module: node16`），设置页/标签栏用原生 HTML（不引框架），与「低依赖」风格一致。
@@ -96,7 +100,7 @@
 | 8 | **单实例** | 第二实例聚焦已有窗口；数据目录在同级 `data\`，锁也跟随 |
 | 9 | **数据目录** | 见 §1.1 语义映射；文档需明示两版差异 |
 | 10 | **产物命名** | 与 `build-custom.yml` 既有约定一致，让部署脚本不感知壳 |
-| 11 | **注入脚本单一真源** | `titlebar.js` / `loading.js` / `shell.html` 从 `webview-app/src` 引用（构建期拷贝），禁止复制两份 |
+| 11 | **注入脚本单一真源** | `titlebar.js` / `loading.js` / `shell.html` 从 `webview-app/src`、`splash.html` 同目录、`settings.html` 从 `webview-app/dist` 引用（构建期由 `stage-assets.cjs` 铺到 `out/inject/` 随 asar 分发，2026-09-26 起不再放 asar 外），禁止复制两份 |
 | 12 | **页面全局变量** | `window.web2appExtra = <JSON>` 保持同名，供站点脚本读取 |
 
 **必须显式记录的差异**：Electron 原生窗口标题默认跟随 `document.title`（Tauri 版固定编译期常量 `TITLE`，2026-09-22 由 `WINDOW_TITLE` 改名）——
@@ -113,7 +117,7 @@
 | **M2 代理接入** | `w2a-proxy` sidecar、spawn+握手、鉴权端到端 | ✅ 完成 |
 | **M3 系统集成** | 托盘、全局快捷键、单实例、设置窗（Shift+F1）、窗口几何持久化 | ✅ 完成 |
 | **M4 页面行为** | 新窗口策略、下载另存为、右键菜单、F12、加载层、外链不泄漏凭据 | ✅ **已交付（2026-09-24）**：下载接管 / 右键菜单 / F12 三项补齐（实现在 `electron-app/src/main/page-behavior.ts`）；新窗口策略与加载层随 M1 已交付 |
-| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针**多页签 26/26、单窗口 134/134**，2026-09-25 实测；2026-09-18 真机目视 V1–V4 关闭） |
+| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针**多页签 31/31、单窗口 134/134**，2026-09-26 实测；2026-09-18 真机目视 V1–V4 关闭） |
 | **M6 打包** | 三形态出包、版本信息、config 注入、日志目录、SmartScreen 文案 | ✅ 完成 |
 | **M7 CI** | Windows workflow：build → lint → E2E → 产物上传 | ✅ **已落库（2026-09-24）**：`.github/workflows/electron-ci.yml`，lint（Ubuntu）+ e2e（Windows）+ package（非 PR，上传 zip / portable）三作业 |
 

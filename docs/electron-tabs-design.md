@@ -222,7 +222,7 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 ```bash
 # 无 GPU 沙箱必须带这两个参数（历史教训：只靠 disableHardwareAcceleration 不够）
 pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口 134 条（2026-09-25 实测）
-pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 26 条
+pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 31 条（2026-09-26 实测）
 pnpm run tabs-v4 / tabs-v4-negative                          # V4 绘制顺序 正/负向对照（退出码即结论）
 
 # 打包产物自证（必须 Start-Process -Wait 取 ExitCode；直接 & 调用 GUI exe 是假绿）

@@ -61,10 +61,12 @@
 | 字段 | 状态 | 改用 |
 |---|---|---|
 | `window_title` | **已移除**，配置里出现即**报错** | `title`（语义完全相同） |
+| `data_dir_default` | **已移除**（旧为布尔），配置里出现即**报错** | `data_dir`（字符串）：`false` → `"data"`、`true` → `""`（详见 §3.3 / §4.3 / §8） |
 
 移除原因：同一个「显示名」概念曾有三套名字（JSON 的 `title` / `window_title`、仓库变量的
 `APP_TITLE` / `WINDOW_TITLE`）。名字越多，越容易出现「同一份配置在两个壳里标题不同」这种
-不报错的缺陷。
+不报错的缺陷。`data_dir_default` 是布尔，表达不了「相对路径 / 绝对路径 / 系统目录」三种取值，
+改成字符串 `data_dir` 后两壳同名同义（§3.3 / §4.3）。
 
 ### 类型约定（三条硬规则）
 
@@ -342,8 +344,9 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 
 **自测与门禁**：解析器内置契约自测，CI 的 **`config-contract` 作业**（`ci.yml`）里会跑，防止契约悄悄漂移。
 该作业同时做另外两件同样只能靠 CI 兜住的事 —— 静态检查所有 workflow 的 YAML 与内联 `python`/`bash` 语法
-（这类错「只在 CI 上才炸」，本地不跑就等于没有护栏），以及**逐个校验仓库内的配置样例**是否符合契约
-（`test1.json` / `test2.json` 曾停留在字符串布尔，靠这一步在提交时就现形）。
+（这类错「只在 CI 上才炸」，本地不跑就等于没有护栏），以及**逐个校验仓库内仍纳管的配置样例**
+（`webview-app/config.example.json` 与 `electron-app/config.example.json` 是否符合契约，
+曾停留在字符串布尔，靠这一步在提交时就现形）。
 
 ```bash
 python3 .github/scripts/parse-packaging-config.py --selftest
@@ -571,5 +574,5 @@ node scripts/pack-local.mjs --parity
 | 打包入口（Tauri / Android） | `.github/workflows/build-custom.yml` |
 | 打包入口（Electron 绿色版） | `.github/workflows/electron-build-custom.yml` |
 | 打 tag 自动发布 | `.github/workflows/release.yml` |
-| asar 配置护栏 | `.github/scripts/check-asar-config.cjs` |
+| asar 配置护栏 | `electron-app/scripts/check-asar-config.cjs` |
 | 静态检查所有 workflow | `.github/scripts/check-workflows.py` |
