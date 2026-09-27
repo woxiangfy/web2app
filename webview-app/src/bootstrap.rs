@@ -31,9 +31,12 @@ pub(crate) struct Navigation {
     pub(crate) use_local_proxy: bool,
     /// 本地反向代理任务的终止句柄，存入 ProxyTask 以便退出或重试时优雅关闭。
     pub(crate) proxy_abort: Option<tokio::task::AbortHandle>,
-    /// 上游真实主机（host[:port]，来自解析出的 APP_URL），供多页签判断
-    /// `NewWindowRequested` 的目标 URL 是否与上游同源（决定是否路由到该路径）。
-    pub(crate) upstream_host: Option<String>,
+    /// 入口上游的**源（origin）**：`scheme://host[:非默认端口]`，默认端口归一化
+    ///（https://h 与 https://h:443 视为同源）。供两类主机白名单使用：
+    /// ①WebView2 直连钩子只给上游请求注入 Authorization / 应答 401
+    ///（见 `webview_hooks`，Electron 侧 login 事件是同一条规则）；
+    /// ②多页签 `resolve_popup_url_for` 判断弹窗是否与上游同源（端口也参与比对）。
+    pub(crate) upstream_origin: Option<String>,
 }
 
 /// 托管本地反向代理任务的 AbortHandle，便于应用退出时优雅终止它（释放 127.0.0.1 监听端口）。
@@ -67,6 +70,38 @@ fn strip_userinfo(url: &Url) -> String {
     let _ = u.set_username("");
     let _ = u.set_password(None);
     u.to_string()
+}
+
+/// 计算源（origin）：`scheme://host[:端口]`，端口做默认值归一化。
+///
+/// - 省略端口的 https/http 与显式 443/80 **同源**（`https://h` == `https://h:443`）；
+/// - 非默认端口保留（`https://h:8443` ≠ `https://h`）——旧实现只比 host 会把它们误判同源；
+/// - 无 host（非法 / 非层次化 URL）返回 None。
+pub(crate) fn origin_of(u: &Url) -> Option<String> {
+    let host = u.host_str()?;
+    let effective = match (u.scheme(), u.port()) {
+        ("https", Some(443)) | ("http", Some(80)) => None,
+        (_, p) => p,
+    };
+    Some(match effective {
+        Some(p) => format!("{}://{host}:{p}", u.scheme()),
+        None => format!("{}://{host}", u.scheme()),
+    })
+}
+
+/// 白名单判定：请求 URL 是否属于入口上游源。
+///
+/// 直连模式（不走本地代理）下，Authorization 注入与 401 自动应答都必须先过这道闸 ——
+/// 页面里的第三方子资源 / 被注入内容诱导出的外域请求一律不发凭据。`upstream` 为 None
+/// （解析不出源）时**失败关闭**：拒绝注入，而不是盲发。
+pub(crate) fn is_upstream_request(upstream: Option<&str>, request_url: &str) -> bool {
+    let Some(upstream) = upstream else {
+        return false;
+    };
+    match Url::parse(request_url) {
+        Ok(u) => origin_of(&u).as_deref() == Some(upstream),
+        Err(_) => false,
+    }
 }
 
 /// 启动流程入口：后台准备 → 主线程导航 / 报错。
@@ -114,7 +149,28 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
             abort.abort();
         }
 
-        match prepare_navigation(use_local_proxy) {
+        // catch_unwind：prepare_navigation 里仍有极少数 expect（如 CSPRNG 取密钥失败），
+        // panic 在这个 detached 线程里只会让线程静默死亡——启动页永远转圈、用户零入口，
+        // 比显式报错更糟（项目约定：环境级故障也要可见）。AssertUnwindSafe：这里没有
+        // 跨 catch 的借用不变量需要维护。
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prepare_navigation(use_local_proxy)
+        }));
+        let outcome = match prepared {
+            Ok(r) => r,
+            Err(pa) => {
+                let msg = if let Some(s) = pa.downcast_ref::<&str>() {
+                    format!("启动过程发生内部错误：{s}")
+                } else if let Some(s) = pa.downcast_ref::<String>() {
+                    format!("启动过程发生内部错误：{s}")
+                } else {
+                    "启动过程发生内部错误（未知 panic）".to_string()
+                };
+                Err(msg)
+            }
+        };
+
+        match outcome {
             Ok(nav) => {
                 // 解析成功：缓存导航信息供后续新 tab 复用（仅 Windows 多页签模式有 TabManager）。
                 // 重试场景覆盖旧缓存也是正确的——重试后端口/地址可能已变，缓存必须跟着更新。
@@ -165,6 +221,18 @@ fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
     let parsed = Url::parse(&resolved_url)
         .map_err(|e| format!("应用配置的网址不合法（{e}）：{resolved_url}"))?;
 
+    // scheme 白名单：与 sidecar（proxy-server/main.rs）同一语义。非 http(s) 配置
+    // （或 DNS 解出异常 scheme）下继续启动只会让代理每条请求 502、启动页既不报错也无法
+    // 定位，直接在这里给出可看懂的失败。
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "只支持 http / https 上游，当前是 {other}：{resolved_url}"
+            ))
+        }
+    }
+
     let (url, proxy_abort) = if use_local_proxy {
         // 自身实现的本地反向代理：给每个请求（含 WebSocket 握手）注入 Authorization。
         let (u, abort) = tauri::async_runtime::block_on(crate::proxy::start_proxy(&parsed))
@@ -181,7 +249,7 @@ fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
         pass: parsed.password().unwrap_or("").to_string(),
         use_local_proxy,
         proxy_abort,
-        upstream_host: parsed.host_str().map(str::to_string),
+        upstream_origin: origin_of(&parsed),
     })
 }
 
@@ -218,6 +286,7 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
             nav.user,
             nav.pass,
             nav.use_local_proxy,
+            nav.upstream_origin,
         );
         if let Ok(url) = Url::parse(&nav.url) {
             let _ = window.navigate(url);
@@ -261,6 +330,7 @@ pub(crate) fn navigate_window(
         nav.user,
         nav.pass,
         nav.use_local_proxy,
+        nav.upstream_origin,
     );
     // 2) 用 Tauri 的 `WebviewWindow::navigate` 真正导航——wry 内部会等 CoreWebView2
     // controller 就绪再触发 WebView2 的 Navigation。
@@ -293,5 +363,55 @@ mod tests {
     fn strip_userinfo_keeps_ipv6_authority() {
         let u = Url::parse("http://user:pw@[::1]:8080/x").unwrap();
         assert_eq!(strip_userinfo(&u), "http://[::1]:8080/x");
+    }
+
+    #[test]
+    fn origin_normalizes_default_ports_and_keeps_others() {
+        let o = |s| origin_of(&Url::parse(s).unwrap());
+        assert_eq!(o("https://h.example/a"), Some("https://h.example".into()));
+        assert_eq!(
+            o("https://h.example:443/"),
+            Some("https://h.example".into())
+        );
+        assert_eq!(o("http://h.example:80/"), Some("http://h.example".into()));
+        assert_eq!(
+            o("https://h.example:8443/"),
+            Some("https://h.example:8443".into())
+        );
+        assert_eq!(
+            o("http://127.0.0.1:5123/"),
+            Some("http://127.0.0.1:5123".into())
+        );
+        assert_eq!(o("ftp://h/x"), Some("ftp://h".into()));
+    }
+
+    #[test]
+    fn is_upstream_request_host_whitelist() {
+        let up = Some("https://h.example");
+        assert!(is_upstream_request(up, "https://h.example/a?b=1"));
+        assert!(is_upstream_request(up, "https://h.example:443/a"));
+        assert!(
+            !is_upstream_request(up, "https://h.example:8443/a"),
+            "非默认端口不混同"
+        );
+        assert!(
+            !is_upstream_request(up, "http://h.example/a"),
+            "scheme 不同不混同"
+        );
+        assert!(!is_upstream_request(up, "https://evil.example/a"));
+        assert!(!is_upstream_request(up, "https://example/a"));
+        assert!(!is_upstream_request(up, "not a url"));
+        assert!(
+            !is_upstream_request(None, "https://h.example/a"),
+            "无上游源时失败关闭"
+        );
+    }
+
+    #[test]
+    fn non_http_scheme_prepared_navigation_rejected() {
+        // prepare_navigation 同时依赖编译期常量与 DNS 解析，难在此直接驱动；
+        // scheme 判定与 sidecar 同源（match http|https）——这里钉住 origin/白名单对
+        // 非 http(s) 输入的行为，真正的端到端报错由 sidecar 的 --help 探针覆盖。
+        assert_eq!(origin_of(&Url::parse("file:///c:/x").unwrap()), None);
     }
 }

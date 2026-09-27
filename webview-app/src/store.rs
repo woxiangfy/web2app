@@ -116,11 +116,8 @@ pub fn load(app: &AppHandle) -> Document {
     read_doc(&candidates(app))
 }
 
-/// 写入整份文档。⚠️ 调用方几乎总是想要 [`update`] 而不是这个 —— 直接用它会整体覆盖另一段。
-pub fn save(app: &AppHandle, doc: &Document) -> Result<(), String> {
-    let p = path(app).ok_or_else(|| "无法获取配置目录".to_string())?;
-    save_at(&p, doc)
-}
+// 注：曾经这里有一个 pub save（整份覆盖写），全仓无调用方且语义危险（会抹掉另一段），
+// 已删除；写盘一律走 [`update`] 的读-改-写（save_at 仍由 update_with 复用）。
 
 /// **读-改-写**：按 [`candidates`] 读盘 → 交给 `f` 改（只该动自己那一段）→ 写回新位置。
 ///

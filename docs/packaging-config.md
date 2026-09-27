@@ -22,12 +22,13 @@
 > ⚠️ **两个壳都是「改配置必须重新打包」**，区别只是 Tauri 侧需要重新**编译**、Electron 侧只需重新**打包**。
 > 两者都**不支持**交付后改配置——这正是配置被放进程序本体的原因（见 §6）。
 >
-> 另有一条**不打 workflow** 的路径：`release.yml`（打 tag 时触发），配置来自**仓库变量 / Secrets**，
-> 字段名不同（`TITLE` / `PROXY_ENABLED` …）。见 §7。
+> 另有一条**不打自定义包**的发版路径：`release.yml`（在 Release 页 **Publish 一个 Release**
+> 时触发；光 push tag 不触发），配置来自**仓库变量 / Secrets**，字段名不同
+>（`TITLE` / `PROXY_ENABLED` …）。见 §7.3。
 >
 > 还有一条**本机**路径：`scripts/pack-local.mjs`（不用 Actions，直接在本机出包，只依赖 Node）。
 > ⚠️ 它是本解析器的 **Node 复刻**而不是复用（Python 不是必然存在的依赖）⇒ 两侧靠
-> `--parity` 逐项比对钉住等价。见 §7.3。
+> `--parity` 逐项比对钉住等价。见 §7.2。
 
 ---
 
@@ -398,7 +399,7 @@ python3 .github/scripts/check-workflows.py                                # work
 
 > `config_json` 与 `config_url` 都填时，**以 `config_json` 为准**。
 
-### 7.3 本地打包（`scripts/pack-local.mjs`）
+### 7.2 本地打包（`scripts/pack-local.mjs`）
 
 不经过 GitHub Actions，在本机按同一份 JSON 出包。
 
@@ -502,7 +503,10 @@ node scripts/pack-local.mjs --parity
 **本地做不了 Android**：`ring` 的 build script 需要 `aarch64-linux-android-clang`（NDK），
 脚本会明确拒绝而不是产半成品 ⇒ Android 只能走 CI。
 
-### 7.2 `release.yml`（打 tag 自动发布）
+### 7.3 `release.yml`（Publish Release 触发，打 tag 不触发）
+
+> 触发条件（2026-09-27 订正）：workflow 监听 `release.types:[published]` —— 必须在
+> GitHub 的 Release 页**发布一个 Release**；只 `git push tag` 不会触发。
 
 配置来自**仓库变量 / Secrets**，字段名与 JSON 不同：
 

@@ -62,12 +62,17 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &settings_i, &hide_i, &quit_i])?;
 
+    // 图标缺失返回 Err 而不是 expect：本函数在「设置里勾选启用托盘」的运行期路径上也会被
+    // 调用（settings.rs），expect 会让进程因配置问题直接 panic；交给上层弹可读错误。
+    let icon = app.default_window_icon().cloned().ok_or_else(|| {
+        tauri::Error::InvalidIcon(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "缺少默认图标，请检查 bundle.icon 配置",
+        ))
+    })?;
+
     TrayIconBuilder::with_id("main-tray")
-        .icon(
-            app.default_window_icon()
-                .cloned()
-                .expect("缺少默认图标，请检查 bundle.icon 配置"),
-        )
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         // 悬停提示文本用"显示名"title（即 TITLE，CI 里由配置 JSON 的 title 导出），

@@ -219,6 +219,7 @@ pub(crate) fn attach_webview_hooks(
     auth_user: String,
     auth_pass: String,
     use_local_proxy: bool,
+    upstream_origin: Option<String>,
 ) {
     // label 拷出来用于错误日志；window 需要 clone 进后台线程（闭包要 'static）。
     let window_label = window.label().to_string();
@@ -265,6 +266,7 @@ pub(crate) fn attach_webview_hooks(
             let user_in = auth_user.clone();
             let pass_in = auth_pass.clone();
             let label_in = window_label.clone();
+            let upstream_in = upstream_origin.clone();
 
             let sent = window.with_webview(move |wv| {
                 // controller 未就绪：不注册也不标记 done，交给外层下一轮重试。
@@ -279,6 +281,7 @@ pub(crate) fn attach_webview_hooks(
                     &pass_in,
                     use_local_proxy,
                     &label_in,
+                    upstream_in.as_deref(),
                 );
                 done_in.store(true, Ordering::SeqCst);
             });
@@ -316,6 +319,7 @@ fn register_webview_hooks(
     pass: &str,
     use_local_proxy: bool,
     window_label: &str,
+    upstream_origin: Option<&str>,
 ) {
     // --- 去重闸门：同一窗口只允许注册一次 ---
     // ⚠️ 别删。没有它，`attach_webview_hooks` 的异步重试会让同一个窗口挂上多个
@@ -332,6 +336,8 @@ fn register_webview_hooks(
     // （下面所有逻辑与拿到 owned String 时完全一致，`user.as_str()` 仍然可用。）
     let user = user.to_string();
     let pass = pass.to_string();
+    // 入口上游源（直连模式主机白名单）：None 时两个鉴权处理器一律失败关闭（见下方注释）。
+    let upstream = upstream_origin.map(str::to_string);
 
     // --- 0) 开发者工具（F12）---
     if DEVTOOLS_ENABLED {
@@ -616,16 +622,37 @@ fn register_webview_hooks(
                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
             );
         }
+        // 主机白名单：只给【入口上游源】的请求注入 Authorization（与 Electron 侧 login
+        // 事件的 host 校验同一规则）。第三方子资源 / 外域请求一律不发凭据；URI 读不出来时
+        // 失败关闭（不注入），绝不盲发给所有 origin。
+        let wr_upstream = upstream.clone();
         let wr_handler =
             WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
                 if let Some(args) = args {
                     unsafe {
                         if let Ok(req) = args.Request() {
-                            if let Ok(headers) = req.Headers() {
-                                let _ = headers.SetHeader(
-                                    &HSTRING::from("Authorization"),
-                                    &HSTRING::from(header_val.as_str()),
-                                );
+                            let mut uri_pw = PWSTR::null();
+                            let same_origin = req
+                                .Uri(&mut uri_pw)
+                                .ok()
+                                .and_then(|_| uri_pw.to_string().ok())
+                                .map(|uri| {
+                                    crate::bootstrap::is_upstream_request(
+                                        wr_upstream.as_deref(),
+                                        &uri,
+                                    )
+                                })
+                                .unwrap_or(false);
+                            if !uri_pw.is_null() {
+                                CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
+                            }
+                            if same_origin {
+                                if let Ok(headers) = req.Headers() {
+                                    let _ = headers.SetHeader(
+                                        &HSTRING::from("Authorization"),
+                                        &HSTRING::from(header_val.as_str()),
+                                    );
+                                }
                             }
                         }
                     }
@@ -643,16 +670,40 @@ fn register_webview_hooks(
         // 判断注册是否成功，提前 return 会被误判成“没注册”并重试，导致上面已挂的
         // WebResourceRequested 等处理器被重复挂载。这里只跳过这一段即可。
         if let Ok(core13) = core.cast::<ICoreWebView2_13>() {
+            // 主机白名单：只应答【入口上游源】的 401（与 WR 过滤器 / Electron login 同规则），
+            // 外站质询交还默认处理（不填账号密码），避免凭据盲发给任意外部主机。
+            let basic_upstream = upstream.clone();
             let handler =
                 BasicAuthenticationRequestedEventHandler::create(Box::new(move |_sender, args| {
                     if let Some(args) = args {
                         unsafe {
                             let deferral: Option<ICoreWebView2Deferral> = args.GetDeferral().ok();
-                            if let Ok(response) = args.Response() {
-                                let _ = response.SetUserName(&HSTRING::from(user.as_str()));
-                                let _ = response.SetPassword(&HSTRING::from(pass.as_str()));
+
+                            let mut uri_pw = PWSTR::null();
+                            let same_origin = args
+                                .Uri(&mut uri_pw)
+                                .ok()
+                                .and_then(|_| uri_pw.to_string().ok())
+                                .map(|uri| {
+                                    crate::bootstrap::is_upstream_request(
+                                        basic_upstream.as_deref(),
+                                        &uri,
+                                    )
+                                })
+                                .unwrap_or(false);
+                            if !uri_pw.is_null() {
+                                CoTaskMemFree(Some(uri_pw.0 as *const core::ffi::c_void));
                             }
-                            let _ = args.SetCancel(false);
+
+                            // 不调 SetCancel(false) 即保持 WebView2 默认行为（外站弹原生登录框/取消），
+                            // 入口凭据不会离开上游主机。
+                            if same_origin {
+                                if let Ok(response) = args.Response() {
+                                    let _ = response.SetUserName(&HSTRING::from(user.as_str()));
+                                    let _ = response.SetPassword(&HSTRING::from(pass.as_str()));
+                                }
+                                let _ = args.SetCancel(false);
+                            }
                             if let Some(d) = deferral {
                                 let _ = d.Complete();
                             }

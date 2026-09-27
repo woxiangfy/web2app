@@ -16,11 +16,13 @@ import {
   buildProxySwitches,
   ConfigError,
   DEFAULTS,
+  debugFlagTruthy,
   editDistance,
   extraJson,
   loadConfig,
   mustBool,
   nearestKey,
+  normalizePublicKey,
   rejectUnknownKeys,
   sanitizeDirName,
   toAppUrl,
@@ -125,6 +127,59 @@ test('sanitizeDirName：非法字符替换、trim、空名回落 Web2App', () =>
   assert.equal(sanitizeDirName('///'), '___', '斜杠被替换成下划线，结果非空就不回落')
   assert.equal(sanitizeDirName('   '), 'Web2App', '纯空白 trim 后为空才回落')
   assert.equal(sanitizeDirName('正常名字'), '正常名字', '非 ASCII 合法字符不动')
+})
+
+test('sanitizeDirName：连续空白压缩、首尾句点剥离（对齐 Rust，2026-09-27 补齐）', () => {
+  assert.equal(sanitizeDirName('My  App'), 'My App', '连续两个空格压成一个')
+  assert.equal(sanitizeDirName('My    App'), 'My App', '多个空格压成一个')
+  assert.equal(sanitizeDirName('  My  App  '), 'My App')
+  assert.equal(sanitizeDirName('MyApp.'), 'MyApp', '尾句点必须剥离')
+  assert.equal(sanitizeDirName('.MyApp'), 'MyApp', '首句点必须剥离')
+  assert.equal(sanitizeDirName('My\tApp'), 'My_App',
+    'Tab 是 <0x20 控制字符，在 Rust 匹配里先被映射成下划线（早于空白压缩）')
+  assert.equal(sanitizeDirName('...'), 'Web2App', '全句点剥离后为空 → 回落')
+})
+
+test('sanitizeDirName whitespace matches Rust White_Space on NEL/BOM edges', () => {
+  // U+0085 NEL：Rust is_whitespace 算空白（压成空格），裸 JS \s 不算
+  assert.equal(sanitizeDirName('a\u0085b'), 'a b')
+  // U+FEFF BOM：Rust 不算空白也不非法 → 原样保留；裸 JS \s 会把它压成空格
+  assert.equal(sanitizeDirName('a\uFEFFb'), 'a\uFEFFb')
+})
+
+// ---------- normalizePublicKey：与打包解析器 normalize_public_key 同规则 ----------
+
+test('normalizePublicKey：空值恒为空串；裸 base64 trim 后原样', () => {
+  assert.equal(normalizePublicKey(undefined), '')
+  assert.equal(normalizePublicKey(null), '')
+  assert.equal(normalizePublicKey(''), '')
+  assert.equal(normalizePublicKey('  abc=  '), 'abc=')
+  assert.equal(normalizePublicKey(123 as unknown), '123', '非字符串按 String() 宽容收敛')
+})
+
+test('normalizePublicKey：PEM 手写的字面量 \\n 还原成真换行，\\r 剥离', () => {
+  const pemLiteral =
+    '-----BEGIN PUBLIC KEY-----\\n\\rAAAABBBBCCCC\\n-----END PUBLIC KEY-----\\n'
+  const out = normalizePublicKey(pemLiteral)
+  assert.ok(!out.includes('\\n'), '字面量反斜杠 n 必须被还原：' + JSON.stringify(out))
+  assert.ok(!out.includes('\r'), '不得残留 CR')
+  assert.equal(
+    out,
+    '-----BEGIN PUBLIC KEY-----\nAAAABBBBCCCC\n-----END PUBLIC KEY-----'
+  )
+  // 真换行 PEM 与首尾空白：trim
+  assert.equal(normalizePublicKey('\n  pk-body  \n'), 'pk-body')
+})
+
+// ---------- debugFlagTruthy：WEB2APP_DEBUG 真值集合两壳逐字一致 ----------
+
+test('debugFlagTruthy：只认 trim+小写后的 1/true/yes；on 刻意不认', () => {
+  for (const v of ['1', 'true', 'yes', 'TRUE', ' Yes ', '\t1\t']) {
+    assert.equal(debugFlagTruthy(v), true, v)
+  }
+  for (const v of [undefined, '', '0', 'false', 'no', 'on', '2', 'enable']) {
+    assert.equal(debugFlagTruthy(v), false, String(v))
+  }
 })
 
 // ---------- buildProxySwitches：开关、单边复用、bypass ----------

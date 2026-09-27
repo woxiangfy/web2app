@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window-chrome",
-  "description": "单窗口模式：主窗加载的是【远程页面】（直连上游域名，或本地反向代理的 http://127.0.0.1:<port>），自绘标题栏 titlebar.js 依赖 IPC 调用窗口控制命令。Tauri 2 规定远程 origin 的 IPC 必须先命中 ACL 才会放行（见 tauri::Webview::on_message：`plugin_command.is_some() || has_app_acl_manifest || !is_local` 时强制校验），因此这里显式声明所需权限；没有它，标题栏的最小化/最大化/关闭/拖动会被静默拒绝（前端 catch 掉，表现为“按钮点了没反应”）。⚠️ remote.urls 必须带【端口通配 `:*`】：tauri 用 URLPattern 匹配（tauri-utils::acl::RemoteUrlPattern），而 URLPattern 里“不写端口”＝只匹配该 scheme 的【默认端口】—— `http://*` 匹配不了 http://127.0.0.1:51234/，于是本地反向代理模式（端口随机）下标题栏按钮全部失效，而直连 https://域名（443 是默认端口）却是好的。见 src/titlebar.js 顶部说明与 memory 记录。⚠️ `core:event:allow-emit` 是「设置」按钮用的：主窗是远程页面，**应用自定义命令**（如 open_settings）无法在 capability 里授权给远程 origin（需要 build.rs 的 app_manifest），所以那边只发核心插件的 event 命令，由 lib.rs 的 `web2app:open-settings` 监听落地。",
+  "description": "单窗口模式：主窗加载的是【远程页面】（直连上游域名，或本地反向代理的 http://127.0.0.1:<port>），自绘标题栏 titlebar.js 依赖 IPC 调用窗口控制命令。Tauri 2 规定远程 origin 的 IPC 必须先命中 ACL 才会放行（见 tauri::Webview::on_message：`plugin_command.is_some() || has_app_acl_manifest || !is_local` 时强制校验），因此这里显式声明所需权限；没有它，标题栏的最小化/最大化/关闭/拖动会被静默拒绝（前端 catch 掉，表现为“按钮点了没反应”）。⚠️ remote.urls 显式带【端口段】写成 `http://*:*`、`https://*:*`：代理模式入口是随机端口的 http://127.0.0.1:<port>，直连是可能带端口的 https 上游（2026-09-27 复核框架源码：底层 WHATWG URLPattern 对缺省端口段按通配处理，并非旧注所说「只匹配默认端口」；保留显式 `:*` 是让「随机端口与默认端口都确定命中」的意图不依赖框架默认行为，也防被误精简）。见 src/titlebar.js 顶部说明与 memory 记录。⚠️ `core:event:allow-emit` 是「设置」按钮用的：主窗是远程页面，**应用自定义命令**（如 open_settings）无法在 capability 里授权给远程 origin（需要 build.rs 的 app_manifest），所以那边只发核心插件的 event 命令，由 lib.rs 的 `web2app:open-settings` 监听落地。",
   "windows": ["main"],
   "remote": {
     "urls": ["http://*:*", "https://*:*"]

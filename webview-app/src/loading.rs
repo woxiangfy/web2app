@@ -77,12 +77,17 @@ pub fn splash_html(title: &str) -> String {
 /// `/retry` 会在返回新页面之前触发一次完整的重新启动（重新解析地址 / 重启本地代理 /
 /// 重新导航），这样"重试"才真的能重试，而不是只刷新一张永远停在原地的启动页。
 /// 其余路径一律返回启动页 HTML（每次都重新生成，便于 `/retry` 拿到干净状态）。
+///
+/// ⚠️ 重试目标取**发起请求的 webview label**：单窗口是 `"main"`（与历史硬编码一致）；
+/// 参数化后同一个处理器在多页签窗口里被命中时也能把 bootstrap 导航回正确的 tab。
 pub fn handle_splash(
     ctx: UriSchemeContext<'_, tauri::Wry>,
     req: Request<Vec<u8>>,
 ) -> Response<Cow<'static, [u8]>> {
     if req.uri().path().trim_end_matches('/') == RETRY_PATH {
-        crate::bootstrap::bootstrap(ctx.app_handle().clone());
+        let app = ctx.app_handle().clone();
+        let label = ctx.webview_label().to_string();
+        crate::bootstrap::bootstrap_for_label(app, label);
     }
 
     let html = splash_html(crate::config::TITLE);

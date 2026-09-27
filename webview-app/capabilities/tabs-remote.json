@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tabs-remote-content",
+  "description": "多页签模式：tab 窗口（label 形如 tab-N）加载的是【远程页面】（本地代理 http://127.0.0.1:<port> 或直连上游），标题回传脚本 tab_title.js 需要发核心事件 web2app:tab-title。应用自定义命令对远程 origin 不可授权（Tauri 2 框架级规则），故这里只给最小权限 core:event:allow-emit，且只匹配 tab-* 窗口与 http/https 远程 URL；窗口按钮类权限一律不给（tab 无自绘标题栏）。发送者伪造由事件 payload 的一次性 token 兜底（见 tabs::report_tab_title）。",
+  "windows": ["tab-*"],
+  "remote": {
+    "urls": ["http://*:*", "https://*:*"]
+  },
+  "permissions": [
+    "core:event:allow-emit"
+  ]
+}

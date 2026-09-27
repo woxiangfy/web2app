@@ -38,6 +38,11 @@
   var DCL_DELAY = 240; // DOMContentLoaded 后给浏览器留出首帧绘制时间
 
   var RETRY_URL = 'splash://localhost/retry';
+  // tab 首屏占位文档（本地资产页，被 tabs.rs 的模式标记强制为 splash 语义）上的
+  // 重试事件。该页不是 splash: 协议页，不能导航 RETRY_URL；改由 Rust 监听此事件
+  // 为对应 tab 重走 bootstrap（见 tabs::retry_tab_bootstrap）。
+  // ⚠️ 事件名必须与 tabs.rs 的 TAB_RETRY_EVENT 逐字一致（lib.rs 有静态守卫）。
+  var TAB_RETRY_EVENT = 'web2app:retry-bootstrap';
 
   var state = 'loading'; // loading | slow | failed | done
   var t0 = Date.now();
@@ -326,12 +331,53 @@
     elDetail.textContent = detail || '请检查网络连接后重试。';
   }
 
+  function emitTauriEvent(evt, payload) {
+    // 与 titlebar.js / tab_title.js 同一条通路：withGlobalTauri 的 __TAURI__.event
+    // 优先，__TAURI_INTERNALS__ 兜底。只在 Tauri 环境存在；Electron 侧两者皆无。
+    try {
+      var T = window.__TAURI__;
+      if (T && T.event && typeof T.event.emit === 'function') {
+        var r = T.event.emit(evt, payload);
+        if (r && r.then) r.then(null, function () {});
+        return true;
+      }
+      var I = window.__TAURI_INTERNALS__;
+      if (I && typeof I.invoke === 'function') {
+        I.invoke('plugin:event|emit', { event: evt, payload: payload });
+        return true;
+      }
+    } catch (e) { /* 忽略 */ }
+    return false;
+  }
+
+  // 是否 Tauri【本地资产页】（tab 首屏占位文档；区别于远程目标页与 splash: 协议启动页）。
+  function isTauriLocalAssetDoc() {
+    try {
+      return location.hostname === 'tauri.localhost' ||
+        location.protocol === 'tauri:' ||
+        location.protocol === 'asset:';
+    } catch (e) { return false; }
+  }
+
   function onRetry() {
     try {
-      // splash 阶段：回到启动页的 /retry，由 Rust 重新走一遍完整的启动流程
-      // （重新解析地址、重启本地代理、再导航），而不是简单刷新当前页。
-      // overlay 阶段：已经在目标页上，直接刷新当前地址即可重试。
-      window.location.href = IS_SPLASH ? RETRY_URL : window.location.href;
+      if (IS_SPLASH && location.protocol === 'splash:') {
+        // 单窗口启动页：回到 /retry，由 Rust 重新走完整启动流程
+        //（重新解析地址、重启本地代理、再导航）。
+        window.location.href = RETRY_URL;
+      } else if (IS_SPLASH && isTauriLocalAssetDoc()) {
+        // 多页签 tab 的本地占位页：不导航（没有 tab 版 splash 协议页），发事件让壳
+        // 针对当前 tab 重走 bootstrap；label/token 由建窗时的初始化脚本注入。
+        if (!emitTauriEvent(TAB_RETRY_EVENT, {
+          label: window.__web2appTabLabel,
+          token: window.__web2appTabToken
+        })) {
+          try { console.error('[web2app] 重试事件发送失败：Tauri 事件通道不可用'); } catch (e2) {}
+        }
+      } else {
+        // overlay 阶段（真实目标页加载失败）：直接刷新当前地址即可重试。
+        window.location.reload();
+      }
     } catch (e) {
       try { window.location.reload(); } catch (e2) { /* noop */ }
     }

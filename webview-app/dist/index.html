@@ -2,9 +2,14 @@
 <html lang="zh">
   <head>
     <meta charset="utf-8" />
+    <!--
+      多页签模式下 tab 窗口的【首文档】（WebviewUrl::App("index.html")）。
+      ⚠️ body 必须保持空白：注入的 loading.js 以 bodyEmpty() 判断内容是否就绪，
+      这里放任何可见节点都会让加载层在 ~240ms 后误判「页面已渲染」而淡出，露出占位页，
+      并吞掉随后到达的启动失败 fail()（状态已变 done）。真实内容由 bootstrap 完成后
+      导航到远程地址提供；本文件只是导航前的零网络空白载体。
+    -->
     <title>webview-app</title>
   </head>
-  <body style="font-family: sans-serif; padding: 2rem">
-    <p>这是一个占位页面。应用启动后会打开你在 <code>tauri.conf.json</code> 中配置的远程网址（默认 <code>https://www.example.com</code>）。</p>
-  </body>
+  <body></body>
 </html>

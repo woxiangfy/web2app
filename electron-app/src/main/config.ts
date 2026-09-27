@@ -174,10 +174,59 @@ export function toDataDir(v: unknown): string {
   return v.trim()
 }
 
-/** 清洗成 Windows 合法目录名（与 webview-app 的 `sanitize_dir_name` 同规则）。 */
+/**
+ * 清洗成 Windows 合法目录名（与 webview-app 的 `sanitize_dir_name` 同规则）。
+ *
+ * ⚠️ 三条规则一条都不能少（2026-09-27 对齐，旧实现漏了后两条 → 两壳算出不同目录名，
+ * data_dir="" 模式下 settings.json 读取候选会分叉）：
+ *   1. 非法字符 < > : " / \\ | ? * 与控制字符 → 下划线；
+ *   2. 压缩连续空白为一个空格、去首尾空白；
+ *   3. 去首尾句点（Windows 下以点结尾的目录名会被规范化掉）；
+ * 清洗后为空（含全空白 / 全是句点）→ 回落 "Web2App"。
+ *
+ * ⚠️ 空白集合不用裸 `\s`：Rust `char::is_whitespace`（Unicode White_Space）与 JS `\s`
+ * 差两个冷门码点——U+0085 NEL（Rust 算空白、JS 不算）、U+FEFF BOM（JS 算、Rust 不算）。
+ * `[^\S﻿]` 即「JS 空白但剔除 BOM」，再并上 NEL，与 Rust 逐字同源。
+ */
+// Rust White_Space 口径的连续空白（= JS \s − U+FEFF + U+0085）。
+const RUST_WHITESPACE_RUN = new RegExp('(?:[^\\S\\uFEFF]|\\u0085)+', 'g')
+
 export function sanitizeDirName(name: string): string {
-  const cleaned = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim()
+  const replaced = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  // 压缩连续空白（Rust White_Space 口径：JS \s − U+FEFF + U+0085，见函数头注释）
+  const collapsed = replaced.replace(RUST_WHITESPACE_RUN, ' ').trim()
+  const cleaned = collapsed.replace(/^\.+|\.+$/g, '')
   return cleaned.length > 0 ? cleaned : 'Web2App'
+}
+
+/**
+ * public_key 归一化（与打包解析器 `normalize_public_key` 逐字同规则，
+ * 见 .github/scripts/parse-packaging-config.py）：
+ *   - JSON 里手写的字面量 `\\n` 还原成真换行（PEM 多行常见写法）；
+ *   - 去掉 `\\r`（Windows 手工粘贴的 PEM 常带）；
+ *   - trim 首尾空白；空串保持空串。
+ *
+ * 缺了它，同一份 config.json 在 Tauri 打包路径可用（解析器已归一化），在 Electron
+ * 运行路径用「域名数组 + PEM 公钥」时必败：resolve-core 按真换行 `.lines()` 取
+ * base64 体，单行内含字面量 \n 时整行被 ----- 过滤掉。裸 base64 单行公钥不受影响。
+ */
+export function normalizePublicKey(value: unknown): string {
+  const text = typeof value === 'string' ? value : value == null ? '' : String(value)
+  if (!text) return ''
+  return text.replace(/\\n/g, '\n').replace(/\\r/g, '').trim()
+}
+
+/**
+ * `WEB2APP_DEBUG` 环境变量真值判断（与 Rust 侧 `debug_log::flag_truthy` /
+ * `config::env_bool!` **逐字一致**）：trim + 小写后只认 `1` / `true` / `yes`。
+ *
+ * ⚠️ 刻意不认 `on`（两壳曾对它判定相反）；旧实现只认字符串 `'1'`，导致同一台机器上
+ * `WEB2APP_DEBUG=true` 对 Tauri 壳生效、对 Electron 壳静默无效（逃生口形同虚设）。
+ */
+export function debugFlagTruthy(v: string | undefined): boolean {
+  if (!v) return false
+  const t = v.trim().toLowerCase()
+  return t === '1' || t === 'true' || t === 'yes'
 }
 
 /** extra 必须是 JSON 对象；非法时回落 {}，避免注入非法 JSON 破坏页面脚本。 */
@@ -366,7 +415,9 @@ export function loadConfig(root: string): LoadedConfig {
   }
 
   const appName = toStr(raw.app_name, DEFAULTS.app_name)
-  const publicKey = toStr(raw.public_key)
+  // 与打包解析器同规则归一化（PEM 字面量 \n → 真换行）；toAppUrl 的「数组必须带公钥」
+  // 校验与传给 sidecar 的值都用归一化后的结果。
+  const publicKey = normalizePublicKey(raw.public_key)
   const config = withTitleFallback({
     app_url: toAppUrl(raw.app_url, publicKey, warnings),
     app_name: appName,

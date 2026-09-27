@@ -24,9 +24,9 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 全局快捷键 | 一键切换窗口显示 / 隐藏；按键与修饰符在设置里配置（**默认不启用**） | Windows |
 | Basic 鉴权 | 支持 `https://user:pass@host`，自动注入 `Authorization` 头 | Windows / Android |
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
-| 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效） | Windows |
+| 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效；2026-09-27 起多页签的宿主与 tab 窗口同样挂载，避免整组页签绕过代理） | Windows |
 | 新窗口拦截 | `target="_blank"` / `window.open()` 强制在当前窗口打开 | Windows |
-| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除） | Windows |
+| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`） | Windows |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
@@ -123,6 +123,10 @@ Web2App 的解法是内置一个**本地反向代理**（`src/proxy.rs`）：
 该代理是纯 Rust、零平台依赖，因此 **Windows 与 Android 共用同一份代码**。
 
 > 当 `PROXY_ENABLED = false` 或「启用了外部 HTTP 代理」时，WebView 直连上游，由 WebView2 原生事件兜底鉴权。
+> **凭据主机白名单（2026-09-27）**：直连模式下，Authorization 注入与 401 自动应答都只对
+> **入口上游源**（scheme + host + 默认端口归一化，`bootstrap::is_upstream_request`）生效；
+> 页面里的第三方子资源 / 外站 401 质询拿不到入口账号密码（与 Electron 壳 `login` 事件的
+> host 校验是同一条规则）。URI 不可解析或源未知时失败关闭（不注入）。
 
 ---
 
@@ -162,11 +166,11 @@ webview-app/
 │   ├── resolve-tool/       # 服务端 CLI：生成密钥对 / 生成 DNS TXT 密文
 │   └── proxy-server/       # Electron 侧 sidecar（bin 名 w2a-proxy），#[path] 复用 src/proxy.rs
 ├── dist/
-│   ├── index.html          # 占位前端（纯 Rust 工程，实际内容来自远程 URL）
+│   ├── index.html          # 多页签 tab 窗口的首文档（body 必须空白：loading.js 靠它判定加载中；真实内容由 bootstrap 导航到远程地址）
 │   └── settings.html       # 设置界面 UI 源码（编译期被 include_str! 内嵌，经 settings:// 自定义协议加载）
 ├── tools/                  # 服务端辅助脚本（encrypt_url.py / loading_test.js）
 ├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs / probe_clear_data.rs）
-├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗）
+├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗；tabs-remote.json=多页签 tab-* 远程页，仅授事件发送）
 ├── icons/                  # 应用图标（icon.ico / icon.png 等）
 ├── txttest_keys/           # 验签测试密钥对（见 docs/txttest-verify-materials.md）
 └── （CI 与打包工作流已上移至仓库根 `.github/workflows/`，见下文「自动构建」）
@@ -326,7 +330,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（实测 133 条：resolve-core 13 + resolve-tool 7 + w2a-proxy 28 + 主 crate 85；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-09-27 实测 144 条通过：resolve-core 13 + resolve-tool 7 + w2a-proxy 29 + 主 crate 95；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 

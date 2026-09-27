@@ -151,8 +151,6 @@ pub fn run() {
             #[cfg(windows)]
             tabs::get_tabs,
             #[cfg(windows)]
-            tabs::set_tab_title,
-            #[cfg(windows)]
             tabs::minimize_host,
             #[cfg(windows)]
             tabs::close_host
@@ -243,6 +241,45 @@ pub fn run() {
             let handle = app.handle().clone();
             app.listen("web2app:open-settings", move |_event| {
                 settings::open_settings_window(&handle);
+            });
+        }
+
+        // ---------- 多页签：tab 真实标题回传事件（仅 Windows） ----------
+        // tab 页面是远程 origin，应用命令调不了（见 tabs::report_tab_title 的注释），
+        // tab_title.js 改发核心事件；事件名 / payload 形状由静态契约测试钉着。
+        // ⚠️ 监听不带发送者标识，伪造防护在 payload 的一次性 token（见 report_tab_title）。
+        #[cfg(windows)]
+        {
+            let handle = app.handle().clone();
+            let title_handle = handle.clone();
+            app.listen(tabs::TAB_TITLE_EVENT, move |event| {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct TabTitlePayload {
+                    label: String,
+                    token: String,
+                    title: String,
+                }
+                match serde_json::from_str::<TabTitlePayload>(event.payload()) {
+                    Ok(p) => tabs::report_tab_title(&title_handle, p.label, p.token, p.title),
+                    Err(e) => dlog!("[tabs] 标题回传事件 payload 无法解析：{e}"),
+                }
+            });
+
+            // tab 首屏「重试」：本地占位页上的加载层按钮发出（loading.js），重走该 tab
+            // 的 bootstrap。payload 形状与标题事件相同（label + 一次性 token）。
+            let retry_handle = handle.clone();
+            app.listen(tabs::TAB_RETRY_EVENT, move |event| {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct TabRetryPayload {
+                    label: String,
+                    token: String,
+                }
+                match serde_json::from_str::<TabRetryPayload>(event.payload()) {
+                    Ok(p) => tabs::retry_tab_bootstrap(&retry_handle, p.label, p.token),
+                    Err(e) => dlog!("[tabs] 首屏重试事件 payload 无法解析：{e}"),
+                }
             });
         }
 
@@ -788,6 +825,10 @@ mod ipc_command_registry {
 
     /// 平台专属的前端页面：多页签标签栏 —— 它们调用的命令本身也是 `#[cfg(windows)]` 注册的。
     ///
+    /// ⚠️ `tab_title.js` **不在**这里：它注入在远程 tab 页面里，2026-09-27 起只发核心
+    /// 事件（`plugin:event|emit`）、不调任何应用命令（远程 origin 调应用命令必被 ACL 拒）。
+    /// 它的契约在 `capability_contract` 模块里按「事件名 + capability + token」另立守卫。
+    ///
     /// ⚠️⚠️ 平台差异只允许落在**数据**上，绝不能落在**可变性**上。早先这里写的是
     /// `let mut sources = vec![跨平台页面];` + `#[cfg(windows)] { sources.push(页签页面) }`，
     /// 而那句 `push` 在**非 Windows 目标**（CI 的 Ubuntu `lint-and-test` / Android 作业）
@@ -795,10 +836,7 @@ mod ipc_command_registry {
     /// （2026-09-23 CI 报 `error: variable does not need to be mutable`）。
     /// 改写成「cfg 分叉只决定数组内容」后，任何目标上都不可能再出现 unused_mut。
     #[cfg(windows)]
-    const PLATFORM_SOURCES: &[(&str, &str)] = &[
-        ("src/shell.html", include_str!("shell.html")),
-        ("src/tab_title.js", include_str!("tab_title.js")),
-    ];
+    const PLATFORM_SOURCES: &[(&str, &str)] = &[("src/shell.html", include_str!("shell.html"))];
     /// 非 Windows 目标没有页签页面（命令未注册，验了必然假失败）⇒ 空表。
     #[cfg(not(windows))]
     const PLATFORM_SOURCES: &[(&str, &str)] = &[];
@@ -885,7 +923,6 @@ mod ipc_command_registry {
             "switch_tab",
             "close_tab",
             "get_tabs",
-            "set_tab_title",
             "minimize_host",
             "close_host",
         ] {
@@ -923,12 +960,32 @@ mod capability_contract {
     const MAIN_CAP: &str = include_str!("../capabilities/default.json");
     /// 设置窗（无边框）能力声明 —— 权限刻意与主窗分开。
     const SETTINGS_CAP: &str = include_str!("../capabilities/settings-window.json");
+    /// 多页签 tab 窗口（远程内容）能力声明 —— include_str! 同样把「文件缺失」变成编译失败。
+    #[cfg(windows)]
+    const TABS_CAP: &str = include_str!("../capabilities/tabs-remote.json");
+    /// 多页签模块：事件名常量与标题回传落地函数在这里。
+    #[cfg(windows)]
+    const TABS_RS: &str = include_str!("tabs.rs");
+    /// 注入到每个 tab 远程页面的标题回传脚本。
+    #[cfg(windows)]
+    const TAB_TITLE_JS: &str = include_str!("tab_title.js");
+    /// 注入到每次导航的加载层脚本（tab 首屏重试事件也由它发出）。
+    #[cfg(windows)]
+    const LOADING_JS: &str = include_str!("loading.js");
 
     /// 「打开设置」事件名两侧的字面量写法。
     /// ⚠️ 必须**拆成两段拼接**：本文件就是被测对象之一，直接写完整字面量会让断言
     /// **自我满足**（`ipc_command_registry` 首轮踩过同一个坑）。
     const EVENT_IN_LIB: &str = concat!("app.listen(\"", "web2app:open-settings", "\"");
     const EVENT_IN_TITLEBAR: &str = concat!("'", "web2app:open-settings", "'");
+
+    /// tab 标题回传事件：tabs.rs 常量定义、tab_title.js 事件名、lib.rs 监听点三处逐字一致。
+    #[cfg(windows)]
+    const TAB_EVENT_IN_RUST: &str = concat!("\"", "web2app:tab-title", "\"");
+    #[cfg(windows)]
+    const TAB_EVENT_LIB_LISTEN: &str = "app.listen(tabs::TAB_TITLE_EVENT";
+    #[cfg(windows)]
+    const TAB_EVENT_IN_JS: &str = concat!("'", "web2app:tab-title", "'");
 
     /// 读 capability 的某个字符串数组字段，顺带把「字段缺失 / 非字符串项」变成可读失败。
     fn str_list(v: &serde_json::Value, key: &str, file: &str) -> Vec<String> {
@@ -1025,6 +1082,107 @@ mod capability_contract {
             TITLEBAR_JS.contains(EVENT_IN_TITLEBAR),
             "src/titlebar.js 里找不到同名的单引号事件字面量（找的是 {EVENT_IN_TITLEBAR}）\
              —— 两侧必须逐字一致，否则按钮点了没反应"
+        );
+    }
+
+    /// ④ tab 远程页 capability：只给 tab-* 窗口 + 远程 http(s) URL + 最小权限 event:emit。
+    #[cfg(windows)]
+    #[test]
+    fn tabs_capability_grants_only_remote_event_emit() {
+        let v: serde_json::Value =
+            serde_json::from_str(TABS_CAP).expect("capabilities/tabs-remote.json 不是合法 JSON");
+        let windows = str_list(&v, "windows", "capabilities/tabs-remote.json");
+        assert_eq!(
+            windows,
+            ["tab-*"],
+            "tab capability 必须且只能用 glob 命中 tab-N 窗口（实际：{windows:?}）"
+        );
+        // remote.urls：代理入口是随机端口的 http://127.0.0.1:<port>，直连是 https 上游，
+        // 两个带端口通配的模式缺一不可（default.json 顶部注释解释过「不写端口=只匹配默认端口」）。
+        let remote_urls = v["remote"]["urls"]
+            .as_array()
+            .expect("tabs-remote.json 缺 remote.urls 数组");
+        for want in ["http://*:*", "https://*:*"] {
+            assert!(
+                remote_urls.iter().any(|u| u.as_str() == Some(want)),
+                "tabs-remote.json 的 remote.urls 必须包含 {want}（实际：{remote_urls:?}）"
+            );
+        }
+        let (_, perms) = cap(TABS_CAP, "capabilities/tabs-remote.json");
+        assert_grants(
+            "capabilities/tabs-remote.json",
+            &perms,
+            "core:event:allow-emit",
+        );
+        // 最小权限：tab 无自绘标题栏，窗口控制类权限一律不得出现。
+        for forbidden in [
+            "core:window:allow-minimize",
+            "core:window:allow-close",
+            "core:window:allow-start-dragging",
+        ] {
+            assert!(
+                !perms.iter().any(|p| p == forbidden),
+                "tab capability 不应授予 {forbidden}（tab 内容页没有窗口按钮，最小权限）"
+            );
+        }
+    }
+
+    /// tab 标题回传事件：tabs.rs 常量 ↔ lib.rs 监听 ↔ tab_title.js 字面量三处逐字一致；
+    ///    且脚本必须走事件 + 令牌，而不是（对远程 origin 必死的）应用命令。
+    #[cfg(windows)]
+    #[test]
+    fn tab_title_event_contract_between_lib_tabs_and_script() {
+        assert!(
+            TABS_RS.contains(TAB_EVENT_IN_RUST),
+            "tabs.rs 必须定义事件名字面量 {TAB_EVENT_IN_RUST}（TAB_TITLE_EVENT）"
+        );
+        assert!(
+            LIB_RS.contains(TAB_EVENT_LIB_LISTEN),
+            "lib.rs 必须用 app.listen(tabs::TAB_TITLE_EVENT, …) 监听标题回传"
+        );
+        assert!(
+            TAB_TITLE_JS.contains(TAB_EVENT_IN_JS),
+            "tab_title.js 必须包含事件名 {TAB_EVENT_IN_JS}"
+        );
+        assert!(
+            TAB_TITLE_JS.contains("plugin:event|emit"),
+            "tab_title.js 必须走核心事件通路（__TAURI_INTERNALS__ 兜底）"
+        );
+        assert!(
+            TAB_TITLE_JS.contains("__web2appTabToken"),
+            "tab_title.js 必须回传建窗时注入的一次性令牌（防伪造就靠它）"
+        );
+        assert!(
+            !TAB_TITLE_JS.contains("set_tab_title"),
+            "tab_title.js 不得再 invoke set_tab_title：远程 origin 的应用命令必被 ACL 拒"
+        );
+    }
+
+    /// ⑥ tab 首屏重试事件：tabs.rs 常量 ↔ lib.rs 监听 ↔ loading.js 字面量逐字一致；
+    ///    loading.js 必须带 label/token（占位文档是本地源，令牌仍是唯一防伪手段）。
+    #[cfg(windows)]
+    #[test]
+    fn tab_retry_event_contract_between_lib_tabs_and_loading() {
+        const RETRY_IN_RUST: &str = concat!("\"", "web2app:retry-bootstrap", "\"");
+        assert!(
+            TABS_RS.contains(RETRY_IN_RUST),
+            "tabs.rs 必须定义 TAB_RETRY_EVENT 字面量 {RETRY_IN_RUST}"
+        );
+        assert!(
+            LIB_RS.contains("app.listen(tabs::TAB_RETRY_EVENT"),
+            "lib.rs 必须监听 tabs::TAB_RETRY_EVENT"
+        );
+        assert!(
+            LOADING_JS.contains("'web2app:retry-bootstrap'"),
+            "loading.js 必须包含重试事件名 'web2app:retry-bootstrap'"
+        );
+        assert!(
+            LOADING_JS.contains("__web2appTabLabel") && LOADING_JS.contains("__web2appTabToken"),
+            "loading.js 重试事件必须携带注入的 label 与 token"
+        );
+        assert!(
+            LOADING_JS.contains("plugin:event|emit"),
+            "loading.js 重试必须走核心事件通路"
         );
     }
 }

@@ -20,7 +20,13 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, type BrowserWindow as BW } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  type BrowserWindow as BW,
+  type WebContents,
+} from 'electron'
 
 import type { Settings } from './settings'
 
@@ -120,18 +126,37 @@ let settingsWin: BW | null = null
  *    表现都是「按钮点了没反应 / 报未授权命令」，而页面本身看不出任何异常。
  */
 export function registerSettingsIpc(deps: SettingsWindowDeps): void {
-  ipcMain.handle('tauri:get_settings', () => deps.getSettings())
+  // 纵深防御：设置命令是高破坏面通道（save_settings 写盘、clear_web_data 清数据）。
+  // 当前只有设置窗自己的 preload 能发出这些命令（内容视图的 preload 只暴露白名单窗口
+  // 动作），但仍显式校验 sender —— 与 index.ts 里 tabs IPC 的 assertShell 同一条纪律：
+  // 将来若误给内容视图挂上带 invoke 的 preload，这里是最后一道闸。
+  const assertSettingsSender = (sender: WebContents): void => {
+    const expected = settingsWin && !settingsWin.isDestroyed() ? settingsWin.webContents.id : null
+    if (expected === null || sender.id !== expected) {
+      throw new Error(`拒绝非设置窗口调用设置命令（sender.id=${sender.id}，期望=${expected}）`)
+    }
+  }
 
-  ipcMain.handle('tauri:save_settings', (_e, args: { newSettings?: unknown } | undefined) => {
+  ipcMain.handle('tauri:get_settings', (e) => {
+    assertSettingsSender(e.sender)
+    return deps.getSettings()
+  })
+
+  ipcMain.handle('tauri:save_settings', (e, args: { newSettings?: unknown } | undefined) => {
+    assertSettingsSender(e.sender)
     const raw = args?.newSettings
     if (!raw || typeof raw !== 'object') throw new Error('参数错误：缺少 newSettings')
     deps.saveSettings(normalizeIncoming(raw as Record<string, unknown>))
     return null
   })
 
-  ipcMain.handle('tauri:clear_web_data', () => deps.clearWebData())
+  ipcMain.handle('tauri:clear_web_data', (e) => {
+    assertSettingsSender(e.sender)
+    return deps.clearWebData()
+  })
 
-  ipcMain.handle('tauri:close_settings_window', () => {
+  ipcMain.handle('tauri:close_settings_window', (e) => {
+    assertSettingsSender(e.sender)
     closeSettingsWindow()
     return null
   })

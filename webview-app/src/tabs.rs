@@ -61,7 +61,18 @@ pub(crate) struct TabInfo {
     pub label: String,
     /// 展示标题（优先取网页真实 title，缺省用应用显示名）。
     pub title: String,
+    /// 标题回传事件的一次性防伪令牌（见 [`report_tab_title`]）。建窗时生成并注入该 tab
+    /// 的初始化脚本；远程页面回传标题时必须原样带回，否则拒绝。
+    pub token: String,
 }
+
+/// 标题回传事件名（tab 远程页面 → Rust）。与 `src/tab_title.js` 里的字面量逐字一致，
+/// 受 `ipc_command_registry` / `capability_contract` 静态守卫钉着。
+pub(crate) const TAB_TITLE_EVENT: &str = "web2app:tab-title";
+
+/// tab 首屏（本地占位文档）上「重试」按钮触发的事件 → Rust 为该 tab 重走 bootstrap。
+/// 与 `src/loading.js` 字面量逐字一致（静态守卫）。payload 同样带一次性 token 防伪。
+pub(crate) const TAB_RETRY_EVENT: &str = "web2app:retry-bootstrap";
 
 /// 多页签的托管状态。
 ///
@@ -77,7 +88,8 @@ pub(crate) struct TabManager {
     pub counter: Mutex<usize>,
     /// 首次启动解析好的导航信息缓存（新 tab 复用）。`Option` 表示「尚未就绪」。
     pub navigation: Mutex<Option<Navigation>>,
-    /// 每 tab 的实际网页标题缓存：label -> title（由 `get_tab_title` 命令回传）。
+    /// 每 tab 的实际网页标题缓存：label -> title（由 tab 页面的 `web2app:tab-title`
+    /// 核心事件回传，落地见 [`report_tab_title`]）。
     pub titles: Mutex<HashMap<String, String>>,
 }
 
@@ -93,6 +105,16 @@ fn next_tab_label(app: &tauri::AppHandle) -> String {
     let n = *counter;
     *counter += 1;
     format!("{TAB_PREFIX}{n}")
+}
+
+/// 生成 128-bit 标题回传令牌（32 字符小写 hex）。
+///
+/// CSPRNG 取随机数失败属于环境级故障：返回 None，调用方据此**拒绝建 tab**
+///（宁可开不出来，也不接受「任何页面都能回传标题」的降级 —— 那等于没有令牌）。
+fn new_tab_token() -> Option<String> {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).ok()?;
+    Some(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// 宿主窗口的标签栏页地址。
@@ -255,8 +277,40 @@ fn navigate_tab(app: &tauri::AppHandle, label: &str, start: Option<String>) {
             crate::bootstrap::navigate_window(app, &window, nav);
         }
         None => {
-            // 缓存未就绪（理论上只在极早期触发），走完整 bootstrap（内部会重新解析并导航到该 tab）。
-            crate::bootstrap::bootstrap_for_label(app.clone(), label.to_string());
+            // 缓存未就绪（首个 tab 的 bootstrap 仍在途，极早期 window.open 会走到这里）：
+            // ⚠️ 不能直接再起一轮 bootstrap_for_label —— 两个 bootstrap 会互相 abort
+            // 代理（B 成功后掐掉 A 刚给在用 tab 起好的代理，旧 tab 立刻断连）。改成
+            // 后台轮询【等缓存】，就绪后回到本函数走缓存命中分支；超时（首轮 bootstrap
+            // 失败、缓存永远不会写入）才回落完整 bootstrap。
+            let app_wait = app.clone();
+            let label_wait = label.to_string();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    let ready = app_wait
+                        .state::<TabManager>()
+                        .navigation
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_some();
+                    if ready {
+                        let a = app_wait.clone();
+                        let l = label_wait.clone();
+                        let _ = app_wait.run_on_main_thread(move || {
+                            navigate_tab(&a, &l, None);
+                        });
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        dlog!(
+                            "[tabs] 等待首屏导航缓存超时（30s），回落完整 bootstrap：{label_wait}"
+                        );
+                        crate::bootstrap::bootstrap_for_label(app_wait.clone(), label_wait);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
         }
     }
 }
@@ -291,6 +345,10 @@ pub(crate) fn spawn_tab_with_target(
     }
 
     let label = next_tab_label(app);
+    // 标题回传令牌：CSPRNG 失败时拒绝建窗（见 new_tab_token 的注释）。
+    let Some(token) = new_tab_token() else {
+        return Err("生成页签令牌失败（系统随机源不可用）".to_string());
+    };
 
     // ⚠️ 先登记（占位）再建窗：`purge_orphan_tabs` 会销毁“label 不在册”的 tab 窗口，若先建窗，
     // 并发（用户连点“+”）时新窗口可能被另一个线程的清理误杀。建窗失败再回滚登记。
@@ -300,6 +358,7 @@ pub(crate) fn spawn_tab_with_target(
         tabs.push(TabInfo {
             label: label.clone(),
             title: TITLE.to_string(),
+            token: token.clone(),
         });
     }
     // tab 窗口：去边框 + 不占任务栏按钮，尺寸/位置按宿主客户区一次到位。
@@ -318,17 +377,32 @@ pub(crate) fn spawn_tab_with_target(
         .resizable(false)
         .visible(false)
         .background_color(crate::bootstrap::SPLASH_BG)
+        // ⚠️ 模式标记必须排在 OVERLAY_SCRIPT【之前】（初始化脚本按注册顺序执行）：
+        // tab 首文档是本地占位页（http://tauri.localhost/index.html），让 loading.js 以
+        // splash 语义运行（不做内容就绪自动淡出：占位页永远等不到真实内容）；导航到远程
+        // 地址后的新文档（127.0.0.1:<port> 或上游 https）则是 overlay 语义，渲染后淡出。
+        // 不区分会导致占位页 ~240ms 就淡出露出占位文案、且后续 fail() 被 done 态吞掉。
+        .initialization_script(
+            "window.__web2appLoadingMode = (location.hostname === 'tauri.localhost' \
+             || location.protocol === 'tauri:') ? 'splash' : 'overlay';",
+        )
         .initialization_script(crate::loading::OVERLAY_SCRIPT)
         .initialization_script(format!(
             "window.web2appExtra = {};",
             crate::config::extra_json()
         ))
-        // 注入当前 tab 的 label，供标题回传脚本（tab_title.js）读取后回传真实网页标题。
+        // 注入当前 tab 的 label 与一次性令牌，供标题回传脚本（tab_title.js）读取后随事件回传。
+        // ⚠️ 令牌只能进初始化脚本（与窗口 1:1），不要写进页面可读的其它共享位置。
         .initialization_script(format!(
             "window.__web2appTabLabel = {};",
             crate::loading::js_str(&label)
         ))
-        // 标题回传：监听 document.title 变化 → invoke("set_tab_title") → 标签栏显示真实标题。
+        // 标题回传：监听 document.title 变化 → emit(TAB_TITLE_EVENT, {label,title,token})
+        // → 标签栏显示真实标题。走核心事件而非应用命令的原因见 tab_title.js 头注释。
+        .initialization_script(format!(
+            "window.__web2appTabToken = {};",
+            crate::loading::js_str(&token)
+        ))
         .initialization_script(include_str!("tab_title.js"));
 
     // 建窗即给出与宿主内容区一致的初始**客户区**尺寸（逻辑像素；外框偏移由 tao 的
@@ -342,16 +416,22 @@ pub(crate) fn spawn_tab_with_target(
         }
     }
 
-    // Windows 专属：禁用拖放 handler + 注入拖拽 polyfill（与主窗口一致）。
-    #[cfg(windows)]
-    let window = window
+    // 禁用拖放 handler + 注入拖拽 polyfill（与主窗口一致）。本模块整体 cfg(windows)，
+    // 无需再写属性；rebinding 用 mut 因为后面的代理参数块还要再改这个 builder。
+    let mut window = window
         .disable_drag_drop_handler()
         .initialization_script(include_str!("dnd_polyfill.js"));
+
+    // 外部 HTTP 代理：与主窗口 / 宿主窗口同一组 --proxy-server（本模块整体 cfg(windows)，
+    // additional_browser_args 在这里必然存在）。宿主窗口是同 user-data-folder 下第一个
+    // 创建 WebView2 环境的窗口，这边属于双保险；两处都用 config::build_proxy_args() 同源。
+    if let Some(proxy_args) = crate::config::build_proxy_args() {
+        window = window.additional_browser_args(proxy_args.as_str());
+    }
 
     // 数据目录：与主窗口共享同一 WebView2 数据目录（同账号、共享 cookie/localStorage）。
     // ⚠️ `config::data_dir` 在进程内只解析一次并缓存，所以这里拿到的一定与主窗口同一个目录 ——
     //    这正是「多个 tab 共享登录态」赖以成立的前提，不要改成各算各的。
-    #[cfg(windows)]
     let window = match crate::config::data_dir(app) {
         Some(dir) => window.data_directory(dir),
         None => window,
@@ -505,25 +585,51 @@ pub(crate) fn close_tab_inner(app: &tauri::AppHandle, label: &str) {
         return;
     }
 
-    // ⑤ 更新激活索引并激活相邻 tab（优先右侧，否则左侧）。
+    // ⑤ 更新激活索引并激活相邻 tab（纯规则见 plan_active_after_close，与 Electron
+    //    tab-order.ts 同一条：优先右邻，末位取左邻；关的是后台 tab 只前移索引）。
     let active = {
         let state = app.state::<TabManager>();
         let guard = state.active.lock().unwrap_or_else(|p| p.into_inner());
         *guard
     };
-    if removed_idx == active {
-        let new_idx = removed_idx.min(remaining.len() - 1);
-        let new_label = remaining[new_idx].clone();
+    let (new_active, needs_activate) =
+        plan_active_after_close(active, removed_idx, remaining.len());
+    {
+        let state = app.state::<TabManager>();
+        let mut a = state.active.lock().unwrap_or_else(|p| p.into_inner());
+        *a = new_active;
+    }
+    if needs_activate {
+        let new_label = remaining[new_active].clone();
         activate_tab(app, &new_label);
     } else {
-        if removed_idx < active {
-            // 关闭的是激活 tab 之前的 tab：激活索引前移（并夹到合法范围，防越界悬空）。
-            let state = app.state::<TabManager>();
-            let mut a = state.active.lock().unwrap_or_else(|p| p.into_inner());
-            *a = (*a - 1).min(remaining.len() - 1);
-        }
         purge_orphan_tabs(app);
         push_tabs_to_shell(app);
+    }
+}
+
+/// 关闭一个 tab 后的激活态计划（**纯顺序规则**，不依赖任何 Tauri 对象，可直接单测）。
+///
+/// 与 `electron-app/src/main/tab-order.ts::nextActiveLabelAfterClose` 同一条规则，
+/// 区别仅在 Rust 还要维护「激活索引」本身：
+/// - 关的就是激活 tab → 激活落到右邻（删除后右邻移到该下标），删的是末位则取左邻，
+///   返回 `needs_activate = true`（调用方要显式 activate_tab 显示新窗口）；
+/// - 关的是激活 tab **之前**的后台 tab → 激活索引前移一位（夹到合法范围）；
+/// - 关的是之后的 tab → 激活索引不变。
+///
+/// `remaining_len` 为删除后的幸存数，调用方必须保证 ≥1（最后一个走关闭宿主分支）。
+fn plan_active_after_close(
+    active_before: usize,
+    removed_idx: usize,
+    remaining_len: usize,
+) -> (usize, bool) {
+    let last = remaining_len - 1;
+    if removed_idx == active_before {
+        (removed_idx.min(last), true)
+    } else if removed_idx < active_before {
+        ((active_before - 1).min(last), false)
+    } else {
+        (active_before.min(last), false)
     }
 }
 
@@ -667,7 +773,7 @@ fn push_tabs_to_shell(app: &tauri::AppHandle) {
 ///
 /// 宿主窗口本身不承载网页，只渲染 `shell://` 标签栏；首个 tab 随后由调用方创建。
 pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
-    let host = WebviewWindowBuilder::new(app, HOST_LABEL, shell_url())
+    let mut builder = WebviewWindowBuilder::new(app, HOST_LABEL, shell_url())
         .title(TITLE)
         .decorations(false)
         // ⚠️ `.shadow(false)` 是宿主与 tab 对齐的关键，别删。
@@ -687,12 +793,23 @@ pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow
         // 代价：窗口不再有系统投影。对「多窗口叠放伪装成标签页」来说反而是好事——
         // tab 窗口若各自带阴影，会互相盖到对方的标签栏/内容上。
         // 另：`resizable(false)` 后不能用鼠标拖边框改变大小；调整尺寸由应用层通过 Rust
-        // 命令触发（启动时从 `window_state` 恢复）即可。
+        // 命令触发（启动时从 window_state 恢复）即可。
         .shadow(false)
         .resizable(false)
         .inner_size(1100.0, 650.0)
         .min_inner_size(400.0, 300.0)
-        .background_color(crate::bootstrap::SPLASH_BG)
+        .background_color(crate::bootstrap::SPLASH_BG);
+
+    // ⚠️⚠️ 外部 HTTP 代理开关必须挂在【宿主窗口】上，不能只挂 tab 窗口：WebView2 同一
+    // user-data-folder 复用同一个 browser 进程，`--proxy-server` 仅在 browser 进程首次
+    // 启动（第一个创建的环境）时生效；多页签里宿主窗口最先创建，它若以空参数把 browser
+    // 进程拉起来，之后每个 tab 再带参数也会被忽略 → 全部页签绕过外部代理。tab builder
+    // 那边（spawn_tab_with_target）也挂同一份参数做双保险，两处必须同源。
+    if let Some(proxy_args) = crate::config::build_proxy_args() {
+        builder = builder.additional_browser_args(proxy_args.as_str());
+    }
+
+    let host = builder
         .build()
         .map_err(|e| format!("创建宿主窗口失败：{e}"))?;
 
@@ -783,9 +900,33 @@ pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-/// 前端：上报某个 tab 的实际网页标题（页面 title 变化时由注入脚本回传）。
-#[tauri::command]
-pub(crate) fn set_tab_title(app: tauri::AppHandle, label: String, title: String) {
+/// tab 远程页面经核心事件回传真实网页标题的落地函数。
+///
+/// 历史上它是一条 `#[tauri::command]`，但 tab 里跑的是**远程 origin**（代理 127.0.0.1
+/// 或直连上游），Tauri 2 对远程页面的应用自定义命令一律拒绝（框架自带测试
+/// `remote_origin_blocked_for_custom_commands_without_app_manifest`），且工程没有 app
+/// ACL manifest —— 前端 `.catch` 又静默吞掉，标签栏于是永远显示默认应用名。改走
+/// `core:event:allow-emit`（可授权给远程 origin）后由本函数落地。
+///
+/// ⚠️ Tauri 2.11 的 `app.listen` Event **不携带发送窗口标识**（只有 id/payload），
+/// 无法知道事件来自哪个 webview；因此 payload 必须带回建窗时注入该 tab 的一次性
+/// [`TabInfo::token`]，与在册记录逐字相等才接受 —— 否则任意外部页面都能伪造其它
+/// 页签的标题（钓鱼式欺骗）。title 最终经 shell.html 的 textContent 渲染，无 XSS 面。
+pub(crate) fn report_tab_title(
+    app: &tauri::AppHandle,
+    label: String,
+    token: String,
+    title: String,
+) {
+    {
+        let state = app.state::<TabManager>();
+        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+        let trusted = tabs.iter().any(|t| t.label == label && t.token == token);
+        if !trusted {
+            dlog!("[tabs] 拒绝标题回传：label/token 与在册 tab 不匹配（label={label}）");
+            return;
+        }
+    }
     {
         let state = app.state::<TabManager>();
         state
@@ -801,15 +942,34 @@ pub(crate) fn set_tab_title(app: tauri::AppHandle, label: String, title: String)
             t.title = title.clone();
         }
     }
-    push_tabs_to_shell(&app);
+    push_tabs_to_shell(app);
+}
+
+/// tab 首屏「重试」事件的落地：校验 label/token 后为该 tab 重走完整 bootstrap。
+///
+/// tab 首文档是本地占位页（不是 splash:// 协议页），loading.js 的重试按钮不能像单窗口
+/// 那样导航到 `splash://localhost/retry`；改为发 [`TAB_RETRY_EVENT`]。token 校验与
+/// [`report_tab_title`] 同理由（app.listen 的 Event 不带发送窗口标识）。
+pub(crate) fn retry_tab_bootstrap(app: &tauri::AppHandle, label: String, token: String) {
+    let trusted = {
+        let state = app.state::<TabManager>();
+        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+        tabs.iter().any(|t| t.label == label && t.token == token)
+    };
+    if !trusted {
+        dlog!("[tabs] 拒绝首屏重试：label/token 与在册 tab 不匹配（label={label}）");
+        return;
+    }
+    dlog!("[tabs] 收到首屏重试事件，重新走 bootstrap：{label}");
+    crate::bootstrap::bootstrap_for_label(app.clone(), label);
 }
 
 /// 计算 `target="_blank"` / `window.open()` 弹窗在**新 tab** 中应该落在哪里。
 ///
 /// 背景（这是“弹窗打开的网址一直是 app_url”的根因）：启用本地反向代理时，WebView 实际访问的是
 /// `http://127.0.0.1:<port>`，页面里所有相对链接、`window.open(path)` 解析出来的 URL 主机都是
-/// `127.0.0.1`，而上游真实主机是另一回事。历史实现拿目标 URL 的主机去和**上游主机**比对
-/// （`upstream_host`），必然不相等 → 一律放弃目标路径，新 tab 就只剩 app_url。
+/// `127.0.0.1`，而上游真实主机是另一回事。历史实现拿目标 URL 的主机去和**上游主机**
+/// （`upstream_origin`）比对，必然不相等 → 一律放弃目标路径，新 tab 就只剩 app_url。
 ///
 /// 规则：
 /// 1. 目标与**入口主机**同源（代理模式下即 127.0.0.1:port）→ 取目标的 path/query/fragment
@@ -843,12 +1003,16 @@ fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> Option<Strin
     }
 
     let base = url::Url::parse(&nav.url).ok()?;
+    let base_origin = crate::bootstrap::origin_of(&base);
 
-    let same_as_entry = tu.host_str() == base.host_str();
+    // 源（scheme://host[:默认端口归一化]）比对：旧实现只比 host_str，忽略 scheme 与端口，
+    // https://realhost:8443 会被误判成上游 https://realhost。
+    let target_origin = crate::bootstrap::origin_of(&tu);
+    let same_as_entry = target_origin.is_some() && target_origin == base_origin;
     let same_as_upstream = nav
-        .upstream_host
+        .upstream_origin
         .as_deref()
-        .is_some_and(|h| Some(h) == tu.host_str());
+        .is_some_and(|h| target_origin.as_deref() == Some(h));
     if same_as_entry || same_as_upstream {
         let mut joined = base.clone();
         joined.set_path(tu.path());
@@ -868,7 +1032,6 @@ fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> Option<Strin
 ///
 /// 仅多页签模式下有意义：不拦截到当前窗，而是新建一个 tab，并导航到弹窗请求的目标地址
 /// （落点由 [`resolve_popup_url`] 计算；算不出来时回落到入口地址）。
-#[cfg(windows)]
 pub(crate) fn open_new_tab_from_request(app: &tauri::AppHandle, target_url: Option<String>) {
     let start = resolve_popup_url(app, target_url.as_deref());
     // 建 tab 时直接带上目标地址做**一次**导航（历史实现是先建窗导航主地址、再二次导航改地址，
@@ -881,7 +1044,8 @@ mod tests {
     use super::*;
 
     /// 构造一个可单测的 Navigation（本地反向代理模式）。
-    /// `entry`：代理入口（形如 http://127.0.0.1:PORT/）；`upstream`：上游真实主机。
+    /// `entry`：代理入口（形如 http://127.0.0.1:PORT/）；`upstream`：上游真实**源**
+    /// （scheme://host[:非默认端口]，与 bootstrap::origin_of 同形态）。
     fn proxy_nav(entry: &str, upstream: Option<&str>) -> Navigation {
         Navigation {
             url: entry.to_string(),
@@ -889,7 +1053,7 @@ mod tests {
             pass: String::new(),
             use_local_proxy: true,
             proxy_abort: None,
-            upstream_host: upstream.map(str::to_string),
+            upstream_origin: upstream.map(str::to_string),
         }
     }
 
@@ -911,9 +1075,28 @@ mod tests {
     #[test]
     fn popup_same_as_upstream_remaps_through_entry() {
         // 页面里写死的绝对链接（指向上游真实主机）→ 映射到代理入口。
-        let nav = proxy_nav("http://127.0.0.1:4567/", Some("real.example.com"));
+        let nav = proxy_nav("http://127.0.0.1:4567/", Some("https://real.example.com"));
         let out = resolve_popup_url_for(&nav, Some("https://real.example.com/path/a")).unwrap();
         assert_eq!(out, "http://127.0.0.1:4567/path/a");
+        // 显式默认端口与省略端口同源
+        let out = resolve_popup_url_for(&nav, Some("https://real.example.com:443/path/b")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/path/b");
+    }
+
+    #[test]
+    fn popup_non_default_port_is_not_same_origin() {
+        // 旧实现只比 host：同主机的非默认端口会被误判同源、抹掉端口映射到错误服务。
+        let nav = proxy_nav("http://127.0.0.1:4567/", Some("https://real.example.com"));
+        assert_eq!(
+            resolve_popup_url_for(&nav, Some("https://real.example.com:8443/path")),
+            Some("https://real.example.com:8443/path".into()),
+            "非默认端口不算上游源：代理模式下外链原样打开，不抹端口"
+        );
+        // scheme 不同也不同源（http 对 https）
+        assert_eq!(
+            resolve_popup_url_for(&nav, Some("http://real.example.com/path")),
+            Some("http://real.example.com/path".into())
+        );
     }
 
     #[test]
@@ -952,5 +1135,40 @@ mod tests {
             None
         );
         assert_eq!(resolve_popup_url_for(&nav, Some("not a url")), None);
+    }
+
+    #[test]
+    fn close_adjacency_plan_matches_tab_order_rule() {
+        // 4 个页签 [0,1,2,3]，删除后幸存 3 个。
+        // 关激活本身：右邻优先（删末位时夹到左邻）。
+        assert_eq!(plan_active_after_close(0, 0, 3), (0, true));
+        assert_eq!(plan_active_after_close(1, 1, 3), (1, true));
+        assert_eq!(plan_active_after_close(2, 2, 3), (2, true));
+        assert_eq!(plan_active_after_close(3, 3, 3), (2, true), "删末位 → 左邻");
+        // 关激活【之前】的后台 tab：索引前移，不需要显式激活。
+        assert_eq!(plan_active_after_close(2, 0, 3), (1, false));
+        assert_eq!(plan_active_after_close(3, 1, 3), (2, false));
+        // 关激活【之后】的 tab：索引不变。
+        assert_eq!(plan_active_after_close(0, 2, 3), (0, false));
+        assert_eq!(plan_active_after_close(1, 2, 3), (1, false));
+        // 2 页签关 1（幸存 1）：左右邻都是它。
+        assert_eq!(plan_active_after_close(0, 0, 1), (0, true));
+        assert_eq!(plan_active_after_close(1, 1, 1), (0, true));
+        assert_eq!(plan_active_after_close(1, 0, 1), (0, false));
+    }
+
+    /// 外部代理开关必须同时挂在宿主与 tab 两个 builder 上（少一个 → 多页签绕过外部代理，
+    /// 见 create_host_window 的注释）。只统计 #[cfg(test)] 之前的生产代码段，避免本断言
+    /// 自己的字符串被计入（自引用）。
+    #[test]
+    fn external_proxy_args_on_both_host_and_tab_builders() {
+        let full = include_str!("tabs.rs");
+        let src = full.split("#[cfg(test)]").next().unwrap_or(full);
+        assert_eq!(
+            src.matches(".additional_browser_args(").count(),
+            2,
+            "宿主窗口与 tab 窗口必须各有一处 additional_browser_args"
+        );
+        assert!(src.contains("crate::config::build_proxy_args()"));
     }
 }

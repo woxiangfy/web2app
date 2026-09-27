@@ -11,12 +11,12 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 134 条） |
+| M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 138 条） |
 | M2 sidecar（本地反向代理 + 加密解析） | ✅ | 复用 Rust `proxy.rs` / `resolve.rs`，零重写 |
 | M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
 | M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（**仅 `debug` 打开时才有**，见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
 | **M4 页面行为（下载接管 / 右键菜单 / F12）** | ✅ **已完成** | 实现落在 `src/main/page-behavior.ts`：①**下载接管** `will-download` → `pause` → 系统「另存为」（`dialog.showSaveDialog`，默认落点=系统下载目录、按后缀收敛过滤器、开覆盖确认）→ `setSavePath` + `resume`；用户取消走 `cancel()`，**绝不**静默存到别处（对标 `save_dialog.rs`）；②**右键菜单**自建（Electron 不暴露 Chromium 原生菜单），取舍与 Tauri 一致——不给打印 / 另存为 / 更多工具，**带「设置」项**（与 Shift+F1 / 托盘同一入口）；③**F12** `before-input-event` → `openDevTools({ mode: 'detach' })`，开关为 `devtoolsEnabled()` = `!isPackaged \|\| debug`（对齐 Tauri 的 `DEVTOOLS_ENABLED`；打包版可用配置 `debug: true` 打开，这是本壳与 Tauri 的**有意**差异——绿色版没有 debug 构建分发）。⚠️ 两个坑：①`item.pause()` 不可省，否则 `showSaveDialog` 异步返回后 Electron 会再弹**它自己**的保存对话框（两个抢注意力）；②多页签模式只给内容视图挂右键菜单（挂到壳窗口会在标签栏上弹出「返回 / 前进」这类错位项） |
-| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **31/31**（2026-09-26 补齐 3 页签邻接选择 P7b，2 页签验不出关中间/关末尾跳错页签）、单窗口 **134/134** 零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，单窗口那批断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
+| **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **33/33**（2026-09-27 补 P7c 关后台页签壳 DOM 即时刷新 2 条，旧实现在非活动分支漏 `pushToShell` 会留幽灵页签）、单窗口 **138/138**（2026-09-27 第 16 节新增子框架桥梁隔离 4 条）零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，单窗口那批断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
 | **M7 CI 流水线** | ✅ **已落库** | `.github/workflows/electron-ci.yml`（push / PR 到主分支自动触发，path 过滤 `electron-app/**` + 共享真源 `webview-app/src/**`）：①`lint`（Ubuntu）typecheck + 单测；②`e2e`（Windows）单窗口探针 + 多页签探针 + 启动冒烟；③`package`（非 PR）出 zip / portable 并上传产物。⚠️ 三个 CI 特有的坑已写进文件头注释：`.npmrc` 的国内镜像必须用 `--registry` 覆盖掉、`config.json` 本就不在仓库里（探针自起 127.0.0.1 夹具站点，无配置也能跑完）、pnpm 固定 v12 |
 
 > 除上表三项外，后续「新增/改动会影响哪些验证」见文末「验证清单」——
@@ -36,7 +36,7 @@ pnpm run unit        # 纯函数单测（node:test，毫秒级）：改 config.t
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe（本地代理 + 加密解析）
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json（pack/dist 会自动调用）
 pnpm run smoke       # 冒烟自检：打印生效路径/配置 + 断言启动页模板/设置页/托盘图标/窗口标题/启动日志落盘（内部强制 debug=true），退出码即结论
-pnpm run probe       # 兼容契约探针：134 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
+pnpm run probe       # 兼容契约探针：138 条断言，退出码即结论 —— 动过注入脚本/代理/设置链路必跑
 pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 + 截一张 PNG（改标题栏/滚动条/几何后看它）
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
@@ -456,7 +456,7 @@ Get-Content .\data\logs\startup.log -Tail 40
 | `bodyScrollable` | `true` | 页面照常能滚 |
 | `window.scrollTo(0,200)` | `scrollY≈200` **且** scroll 事件触发 | 转发没坏（事件异步，要等一帧再读） |
 
-`pnpm run probe`（134 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
+`pnpm run probe`（138 条）与 `pnpm run shot` 都是这套判据；`pnpm run shot` 另给 PNG 与 `INFO` 明细。
 ⚠️ **不要**再用 `rect.width == innerWidth` 或「滚动条宽度归零」当判据 —— 前者测不出覆盖，
 后者把缺陷锁死成期望值。**改完必须重新打包**：脚本随 asar 分发在 `out/inject/titlebar.js` 里
 （2026-09-26 起不再放 `resources/inject/`），跑旧的 exe 永远看不到修复。
@@ -513,7 +513,7 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 
 ## 兼容契约探针（`pnpm run probe`）
 
-`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **134 条**契约，
+`src/main/probe.ts` 自己起一个 `127.0.0.1` 随机端口的夹具站点，逐个导航并断言 **138 条**契约，
 **退出码即结论**（不通过则非 0，可以直接挂 CI）。夹具全部内联在代码里，不落盘、不进打包产物。
 
 覆盖范围：启动页内联注入、标题栏几何与配色、38px 让位（fixed / sticky / `100vh` / `inset:0` 四种页面形态）、
@@ -529,7 +529,9 @@ echo "https://example.com" | ./target/release/w2a-proxy.exe --url-stdin   # 看�
 * `Origin` 被改写为**上游源**（且只有一个）—— 详见下面那条已修的坑；
 * `stop()` 之后 sidecar 进程**真的退出**（`kill(pid, 0)` 探活），不留孤儿。
 
-M3 之后还覆盖**系统集成**（**61 条，即第 11–14 节**；第 15 节是 M4 页面行为 4 条、第 16 节关闭按钮 1 条）：
+M3 之后还覆盖**系统集成**（**61 条，即第 11–14 节**；第 15 节是 M4 页面行为 4 条；
+第 16 节是**子框架桥梁隔离** 4 条——同源 iframe 拿不到 `web2app` / `web2appExtra`，
+顶框仍正常暴露；第 17 节关闭按钮 1 条）：
 
 * `Hotkey`（旧版存 JS `event.code`）→ Electron accelerator 的映射，含「不认识的键名返回 null，绝不猜」；
 * `settings.json` 的**序列化字节形态**必须与 `serde_json` 写出来的一致（字段名 / 嵌套 / 布尔类型 /
@@ -610,7 +612,7 @@ M3 之后还覆盖**系统集成**（**61 条，即第 11–14 节**；第 15 �
 
 | 版本 | 日期 | 变更说明 |
 |---|---|---|
-| 0.1.0 | 2026-09-27 | **失败遮罩撤回时机修正 + 常量同源**：①首个页签创建失败后的「重试」原先在 `spawnFirstTab` **开头**就撤掉错误遮罩，而重试是异步的（sidecar 解析可能数秒）⇒ 撤掉后用户又对着空白壳干等（正是该遮罩要消灭的形态）；改为**仅成功时撤**，重试期间保留遮罩（按钮此时已切「重试中…」并置灰，有持续反馈）；②遮罩的 `top` 原写死 `38px`、文案写死「32 个上限」，与 `tabs.ts` 的 `TAB_BAR_HEIGHT` / `MAX_TABS` 同值三处、改栏高或改上限不会同步；改为从 `tabs.ts` 插值同源。门禁：`typecheck` 通过、`unit` **35/35** |
+| 0.1.0 | 2026-09-27 | **第五轮审计闭环（6 项 P1 + P2，对应根 README v1.37）**：①修启动失败后的**无限自动重试**循环（失败重载 splash 会再次自动 bootstrap；新增 `splashAutoBootConsumed`，自动启动一生一次，失败只等用户点重试）；②修关闭**后台页签**后标签栏残留幽灵页签（`closeTab` 非活动分支补 `pushToShell`，探针新增 P7c 2 条，31 → **33**，含反向对照「撤推送 → 壳=3 集合=2 FAIL」）；③设置保存失败时**被销毁的托盘对称回滚**（best-effort 重建，旧实现只回滚新建侧）；④preload 整个运行时主体收进 `window.self === window.top` 分支——子框架不 `sendSync` bootstrap、不暴露 `web2app` / `web2appExtra`、不注册 overlay 监听（探针新增第 16 节 4 条，134 → **138**；实测 Electron 44 默认不向子框架注入 preload，本改动为纵深防御+前向兼容）；⑤`config.ts` 新增 `normalizePublicKey`（字面量 `\n`/`\r` 归一，与打包解析器同源——PEM 公钥域名模式此前在本壳必败）；`sanitizeDirName` 补齐连续空白压缩与首尾句点剥离，与 Rust `sanitize_dir_name` 完全对齐；`debugFlagTruthy` 让 `WEB2APP_DEBUG` 接受 1/true/yes（与 Rust 逐字一致，旧实现只认 `'1'`）；⑥P2：设置 IPC 四个 handler 补 sender 校验（纵深防御）；`stopSidecar` 用 WeakSet 幂等（重复调用不再叠加定时器/监听器）；sidecar 握手成功后异常退出写进日志（旧实现静默）；删不可达的「同地址短路」分支；订正探针头「12 条契约」、分段 0–15、注入脚本 49KB、backgroundThrottling 等过期注释；⑦独立审查（R1）后补：正常 `stop()` 不再误报「异常退出」（WeakSet 区分主动停止）、目录名清洗空白集精确对齐 Rust White_Space（NEL 压空格 / BOM 保留，新增 1 条单测）。门禁：`typecheck` 通过、单测 **40/40**（+5：清洗 2、public_key 2、debug 真值 1）、探针 **138/138** 与 **33/33** 全绿 |
 | 0.1.0 | 2026-09-26 | **注入资源随 app.asar 分发 + 三类清单审计修复**：①打包形态调整 —— 注入资源（`titlebar.js` / `loading.js` / `splash.html` / `settings.html`）改由 `stage-assets.cjs` 铺到 `out/inject/`，随 `files: out/**/*` **进 `app.asar`**，删除 asar 外的 `resources/inject/`（`electron-builder.yml`、`index.ts`、`settings-window.ts`、`check-asar-config.cjs` 同步）；②两壳共用真源的 UI 打磨：`titlebar.js` 与 `shell.html` 的按钮悬停提示从原生 `title` 换成自绘 CSS tooltip（随深浅色主题、无系统延迟），按钮光标 `default → pointer`；`settings.html` 压缩两行低价值文案；③**审计修复**：修多页签 `closeTab` 邻接选择 bug（删除后才算索引恒为 -1，关中间 / 关末尾都跳回第一个幸存页签，与 Tauri `close_tab_inner` 分叉）——纯规则抽到无 Electron 依赖的 `tab-order.ts` 并新增 `test/tabs.test.ts` 6 条单测，探针补 3 页签邻接断言（多页签 26 → **31**，单测 29 → **35**）；首个页签创建失败时壳页面注入**可见错误遮罩 + 重试按钮**（新增 `tabs:retry_first_tab`，治空白壳 + debug=false 静默）；sidecar 握手成功行校验 `proxyUrl` 合法、stdin 异步 error 加监听；设置保存失败时回滚本次新建的托盘；`tabs-v4.cjs` 修 node 下必崩（改为自动 spawn electron 承载）；清理死代码（`currentWakeAccelerator`、sidecar 死字段、托盘死候选）与一批过期注释；④文档：三个 README 与 docs 计数 / 路径 / workflow 条数全面对齐（根 README v1.35） |
 | 0.1.0 | 2026-09-24 | **M4 页面行为交付（下载接管 / 右键菜单 / F12）**：新增 `src/main/page-behavior.ts`，「纯规则函数 + Electron 挂载」分层——纯规则（`devtoolsEnabled` / `isDevtoolsKey` / `contextMenuTemplate` / `saveDialogOptions`）由 `test/page-behavior.test.ts` 14 条毫秒级单测钉住，挂载点由探针 4 条断言验（探针 130 → **134**）。下载：暂停 → 系统另存为 → 落盘 / 取消，取消**不**静默另存；右键菜单取舍对齐 Tauri（不给打印/另存为/更多工具，带「设置」项）；F12 对齐 `DEVTOOLS_ENABLED`（未打包恒开、打包版由 `debug` 决定）。⚠️ 实现时踩到：Node 按 **ESM** 解析 `.ts`，`import { Menu } from 'electron'`（CJS）直接抛 `Named export not found` ⇒ 必须默认导入再解构 |
 | 0.1.0 | 2026-09-24 | **M7 CI 流水线落库**：新增 `.github/workflows/electron-ci.yml`（lint / e2e / package 三作业）。取证三件事：①`pnpm install` 必须显式 `--registry=https://registry.npmjs.org` 覆盖 `.npmrc` 的国内镜像；②**不生成** `config.json` —— 它本就不在仓库里，实测「无配置」场景下探针仍 130/130（探针自起 127.0.0.1 夹具站点），这样 CI 验的正是「fresh clone 能跑」；③Node 22 可直接 `node --test` 跑 `.ts`（实测 15/15），故与既有 workflow 同取 22 |

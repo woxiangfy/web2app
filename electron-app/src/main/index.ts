@@ -12,7 +12,14 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { setupPortablePaths } from './portable'
-import { buildProxySwitches, extraJson, loadConfigAny, sanitizeDirName, type AppConfig } from './config'
+import {
+  buildProxySwitches,
+  debugFlagTruthy,
+  extraJson,
+  loadConfigAny,
+  sanitizeDirName,
+  type AppConfig,
+} from './config'
 import { needsSidecar, resolveTarget, type ResolveHow, type ResolvedTarget } from './navigate'
 import {
   locateSidecar,
@@ -159,12 +166,13 @@ const cfg: AppConfig = loaded.config
  *
  * 判据（任一成立即开启）：
  *   · `config.json` 的 `debug` —— 打包期定下来，改它必须重新打包；
- *   · `--debug` / 环境变量 `WEB2APP_DEBUG=1` —— 运行时逃生口，交付出去的包也能临时取证，
- *     不必为了排障重新打包；
+ *   · `--debug` / 环境变量 `WEB2APP_DEBUG=1`（真值集合 1/true/yes，与 Tauri 壳逐字一致，
+ *     见 config.debugFlagTruthy）—— 运行时逃生口，交付出去的包也能临时取证，不必重新打包；
  *   · 探针 / 冒烟模式**强制打开** —— 它们存在的意义就是取证，探针的「退出码即结论」与冒烟
  *     的路径断言全都靠这些输出，静默会让自检退化成「永远绿」。
  */
-const DEBUG = cfg.debug || process.env.WEB2APP_DEBUG === '1' || hasFlag('--debug') || PROBE || SMOKE
+const DEBUG =
+  cfg.debug || debugFlagTruthy(process.env.WEB2APP_DEBUG) || hasFlag('--debug') || PROBE || SMOKE
 
 // ⚠️ 静默要**尽可能早**：晚一步就会漏掉 setupPortablePaths 那类启动早期输出。
 //    此后 `console.*` 全是空操作，只有 rawConsole 还能出声（见 startup-log.ts）。
@@ -325,6 +333,16 @@ let mainWindow: BrowserWindow | null = null
 let target: ResolvedTarget | null = null
 /** 目标地址解析 + 首次导航只允许发生一次（重试路径会显式重置） */
 let navStarted = false
+/**
+ * 「splash 加载完成 → 自动 bootstrap」一生只允许自动发生**一次**。
+ *
+ * ⚠️ 没有它会出现紧密无限重试循环：bootstrap 失败分支会重新 `loadURL(splash://…)`
+ * （为了把失败态刷给启动页），而 splash 每次 did-finish-load 又自动再 bootstrap ——
+ * 失败 → 重载 → 再解析/再起 sidecar → 再失败……无计数、无退避，sidecar 缺失时是紧密
+ * 循环，DNS 模式则每轮新 spawn 一个 w2a-proxy.exe。失败后必须**等用户点重试**
+ *（splash /retry 处理器显式调 bootstrap，不经过这个自动名额）。
+ */
+let splashAutoBootConsumed = false
 
 /** 多页签管理器（仅 tabs_enabled=true 时非空）。 */
 let tabManager: TabManager | null = null
@@ -454,7 +472,9 @@ async function bootstrap(): Promise<void> {
     void win.loadURL('splash://localhost/').catch(() => {})
     return
   }
-  if (target && target.url === r.url) return // 同地址重复调用（如重试）就不要再导航
+  // 注：曾经这里有一条 `if (target && target.url === r.url) return` 防重复导航，但
+  // bootstrap 的两个调用点（首次自动启动 / splash /retry[显式 target=null]）进入时
+  // target 恒为 null，该分支不可达；真正的并发去重由 splashAutoBootConsumed 负责。
   target = r
 
   console.log(
@@ -604,7 +624,10 @@ function registerTabsIpc(): void {
   })
 }
 
-/** 同步送注入脚本源码给 preload（49KB，每次导航一次，开销可忽略）。 */
+/**
+ * 同步送注入脚本源码给 preload（仅顶层框架；2026-09 实测 titlebar.js 60,236 字节 +
+ * loading.js 22,653 字节 ≈ 81KB，每次启动一次同步 IPC，开销可忽略）。
+ */
 function registerBootstrapIpc(): void {
   ipcMain.on('web2app:bootstrap', (e) => {
     e.returnValue = {
@@ -792,6 +815,10 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
     if (cur.startsWith('splash:')) {
       if (PROBE) return // 探针自己控制导航节奏
       if (navStarted) return
+      // 仅【首次】splash 加载自动解析；bootstrap 失败后重载 splash 走到这里时不再自动
+      // 续跑（否则失败→重载→自动重试构成无限循环），等用户点启动页上的「重试」。
+      if (splashAutoBootConsumed) return
+      splashAutoBootConsumed = true
       navStarted = true
       void bootstrap()
       return
@@ -1042,6 +1069,10 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
   // 「保存失败」、文件没写成，但托盘图标已在本次会话驻留 —— 进程级副作用有两个
   //（快捷键 / 托盘），只回滚一个就不叫「任一步失败都不写内存态」。
   let trayCreatedThisCall = false
+  // 对称地记录本调用是否【销毁】了托盘：true→false 分支先 destroyTray()，随后若保存
+  // 失败，托盘也必须 best-effort 重建 —— 否则界面提示「保存失败」、配置没写成，
+  // 本次会话的托盘却没了（与新建侧是同一类自相矛盾，曾经只回滚了一半）。
+  let trayExistedBefore = false
   try {
     // 2) 托盘开关变化 → 创建 / 销毁（与旧版一样是「变化才动」，避免每次保存都重建图标）
     if (next.tray_enabled !== runtimeSettings.tray_enabled) {
@@ -1054,6 +1085,7 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
         if (!ok) throw new Error('托盘创建失败（未找到 icons/icon.png）')
         trayCreatedThisCall = true
       } else {
+        trayExistedBefore = true
         destroyTray()
       }
     }
@@ -1072,6 +1104,18 @@ function applySettings(next: Settings, opts: { persist: boolean }): void {
     if (trayCreatedThisCall) {
       destroyTray()
       console.warn('[web2app] 保存失败，本次新建的托盘已回滚')
+    }
+    // 对称回滚：本次销毁过托盘 → best-effort 按旧配置重建（图标文件恰好缺失时只告警，
+    // 不能再抛 —— 我们正在错误传播路径上）。
+    if (trayExistedBefore) {
+      const restored = createTray({
+        title: cfg.title,
+        iconPath: locateTrayIcon(app.getAppPath(), process.resourcesPath),
+        actions: trayActions(),
+      })
+      console.warn(
+        `[web2app] 保存失败，已尝试重建回滚前的托盘：${restored ? '成功' : '重建也失败（图标缺失？）'}`
+      )
     }
     if (!sameHotkey(prev.wake_hotkey, next.wake_hotkey)) {
       const rb = applyWakeHotkey(prev.wake_hotkey, () => toggleMainWindow(mainWindow))

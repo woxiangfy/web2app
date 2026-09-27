@@ -378,7 +378,6 @@ async fn proxy_handler(
         .to_string();
     let ct_lower = dbg_ct.to_ascii_lowercase();
     let is_interesting = dbg_status != StatusCode::OK
-        || dbg_status.is_redirection()
         || ct_lower.contains("pdf")
         || ct_lower.contains("octet-stream");
     if is_interesting {
@@ -408,13 +407,22 @@ async fn proxy_handler(
             ),
         );
     }
+    // Connection 头里点名的附加逐跳头（响应路径专用，见 is_response_hop_header）。
+    let connection_options: Vec<String> = proxied_resp
+        .headers()
+        .get(header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(connection_named_headers)
+        .unwrap_or_default();
+
     for (name, value) in proxied_resp.headers() {
-        // 仅跳过逐跳头。Content-Length 与 Content-Encoding 都必须【原样转发】：本代理的 reqwest
+        // 跳过逐跳头（响应路径含 connection/upgrade 及其点名的头）。Content-Length 与
+        // Content-Encoding 都必须【原样转发】：本代理的 reqwest
         // 未开启 gzip/brotli/deflate 解压特性（见 Cargo.toml），响应体会按上游原样流式透传——
         // 体的字节长度恒等于上游 Content-Length，转发该头是正确的。一旦跳过 Content-Length，响应
         // 会退化为 chunked 且无长度；多数资源可容错，但 WebView2 内嵌 PDF 查看器严重依赖
         // Content-Length，缺了它就渲染空白（这是"笔记内 PDF 预览失效"的回归根因）。
-        if is_hop_by_hop(name) {
+        if is_response_hop_header(name, &connection_options) {
             continue;
         }
         // 上游若给 Set-Cookie 写了 `Domain=<真实host>`，而 WebView 当前连的是 127.0.0.1，浏览器会因
@@ -622,6 +630,31 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     )
 }
 
+/// HTTP【响应路径】上应剥离的逐跳头：在 [`is_hop_by_hop`] 基础上再加 connection/upgrade。
+///
+/// 请求侧刻意保留这两个（WS 升级请求 `Connection: Upgrade` + `Upgrade: websocket` 必须
+/// 原样转发）；但普通 HTTP 响应里它们同样是逐跳头——上游回的 `Connection: keep-alive/close`
+/// 该由 hyper ↔ WebView 这段连接自己管理，原样转发会让两端连接语义打架。
+/// ⚠️ 101 Switching Protocols 响应走的是 WebSocket 分支，不经过响应头复制循环，所以这里
+/// 剥离 connection/upgrade 不影响 WS 握手。
+fn is_response_hop_header(name: &HeaderName, connection_options: &[String]) -> bool {
+    let n = name.as_str();
+    is_hop_by_hop(name)
+        || matches!(n, "connection" | "upgrade")
+        || connection_options.iter().any(|h| h == n)
+}
+
+/// 解析响应 `Connection` 头里点名的附加逐跳头（RFC 7230 §6.1：该字段列出的头也必须
+/// 逐跳处理，如 `Connection: close, x-foo`）。全部小写化，空值/非 ASCII 安全过滤。
+fn connection_named_headers(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.is_ascii())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 /// 重写 Set-Cookie 里的 `Domain` 属性：把上游真实主机改写为代理主机（127.0.0.1），
 /// 防止 WebView 因当前域（localhost）与 Domain 不一致而丢弃 cookie（导致会话中断）。
 /// 其它属性（Path / Expires / SameSite / Secure / HttpOnly 等）原样保留。
@@ -681,6 +714,35 @@ mod tests {
         assert!(!is_hop_by_hop(&HeaderName::from_static("connection")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("upgrade")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("authorization")));
+    }
+
+    #[test]
+    fn response_path_strips_connection_and_upgrade() {
+        // 请求侧放行的 connection/upgrade，响应侧必须剥离（101 不走此路径）。
+        assert!(is_response_hop_header(
+            &HeaderName::from_static("connection"),
+            &[]
+        ));
+        assert!(is_response_hop_header(
+            &HeaderName::from_static("upgrade"),
+            &[]
+        ));
+        assert!(is_response_hop_header(
+            &HeaderName::from_static("keep-alive"),
+            &[]
+        ));
+        // Connection 点名的附加逐跳头也要剥离
+        let opts = connection_named_headers("close, X-Foo");
+        assert_eq!(opts, vec!["close".to_string(), "x-foo".to_string()]);
+        assert!(is_response_hop_header(
+            &HeaderName::from_static("x-foo"),
+            &opts
+        ));
+        // 正常端到端头不剥
+        assert!(!is_response_hop_header(
+            &HeaderName::from_static("content-length"),
+            &opts
+        ));
     }
 
     #[test]
@@ -862,7 +924,9 @@ mod tests {
         let app_url = url::Url::parse(&format!("http://alice:secret@{}", addr)).unwrap();
         let (proxy_url, abort) = super::start_proxy(&app_url).await.unwrap();
 
-        let client = reqwest::Client::new();
+        // no_proxy：开发机若配了 HTTP(S)_PROXY 环境变量，reqwest 默认会读，测试流量
+        // 被劫持到外部代理就会偶发红（CI 与本机都踩过）；回环测试必须显式绕过。
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         // ① GET 大文件：验证鉴权注入 + cookie 重写 + 流式响应无截断
         let resp = client

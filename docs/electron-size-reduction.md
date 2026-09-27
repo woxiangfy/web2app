@@ -154,8 +154,13 @@ win:
 ### 5.3 已做过的（不用再重复劳动）
 
 - `files: [out/**/*, package.json]` 白名单已收紧；`package.json` 无 `dependencies` ⇒ 整个 `node_modules` 不进包（`app.asar` 仅 0.20MB 即证据）。
-- `asar: true` + `extraResources` 分门别类：注入脚本/settings/图标走 resources，**sidecar 走 extraResources 因为 asar 内 exe 无法 spawn**。
-- sidecar `w2a-proxy.exe` 已 `opt-level=3 + lto + codegen-units=1 + strip`（`webview-app/Cargo.toml:92`）⇒ 3.58MB 已是偏优结果，不再调 profile。
+- `asar: true`：注入脚本（titlebar.js / loading.js / shell.html）与 `dist/settings.html`
+  自 v1.35 起铺到 **`out/inject/` 并随 `app.asar` 分发**（2026-09-27 订正：旧写法「走
+  resources」已失效，asar 外不再有注入资源）；图标与 sidecar 仍是 `extraResources` ——
+  sidecar 必须在 asar 外，因为 asar 内 exe 无法 `spawn`。
+- sidecar `w2a-proxy.exe` 已 `opt-level=3 + lto + codegen-units=1 + strip`（见
+  `webview-app/Cargo.toml` 的 `[profile.release]`，符号名为主、行号会漂移；2026-09-27
+  实测位于 94–101 行）⇒ 3.58MB 已是偏优结果，不再调 profile。
 - 只出 x64 单架构、无多余 target。
 
 ## 6. 验证清单（改完必跑）

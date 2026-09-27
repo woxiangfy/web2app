@@ -113,9 +113,9 @@ export class TabManager {
         nodeIntegration: false,
         sandbox: true,
         webviewTag: false,
-        // 探针下不节流（避免断言失真），与 index.ts 的 backgroundThrottling 口径一致。
-        // 由 index.ts 通过第二个构造参数注入 PROBE 态更干净，但这里保持零依赖：
-        // 节流与否不影响 tabs 本体的几何与切换语义，交给 index.ts 在挂完钩子后自行调整。
+        // 探针下不节流（避免隐藏视图的定时器被节流导致断言失真）。生产视图不设此项，
+        // 用 Chromium 默认（后台标签降速省电）；2026-09 订正：旧注释声称「index.ts 挂完
+        // 钩子后会自行调整 backgroundThrottling」，该机制不存在（index.ts 从不改它）。
         backgroundThrottling: true,
       },
     })
@@ -194,6 +194,12 @@ export class TabManager {
       // 走到这里至少还有一个幸存页签（size===0 的分支上面已 return），next 必非 null。
       const next = nextActiveLabelAfterClose(labelsBefore, removedIndex)
       if (next) this.activate(next)
+    } else {
+      // ⚠️ 关的是【后台页签】：activate() 不会被走到，而 shell.html 点 × 后不做本地
+      // 乐观更新、完全依赖宿主推送 —— 不补这条推送，被关页签会以「幽灵页签」残留在
+      // 标签栏 DOM 里，直到下一次切换/新建/标题推送（对齐 Tauri close_tab_inner
+      // 非活动分支里显式的 push_tabs_to_shell）。
+      this.pushToShell()
     }
     return true
   }

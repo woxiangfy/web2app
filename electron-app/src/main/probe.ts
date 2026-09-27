@@ -1,8 +1,9 @@
 /**
  * 兼容契约探针（`WEB2APP_PROBE=1`）。
  *
- * 存在的理由：本壳的价值全在「与 Tauri 版行为一致」这 12 条契约上，而它们全都是
- * **错了也静默**的逻辑（顶部栏没挂上、38px 没让位、按钮没反应、新窗口开成裸窗口）。
+ * 存在的理由：本壳的价值全在「与 Tauri 版行为一致」的一整套兼容契约上，而它们全都是
+ * **错了也静默**的逻辑（顶部栏没挂上、38px 没让位、按钮没反应、新窗口开成裸窗口、
+ * 子框架误拿特权桥、关后台页签不刷新……）。
  * Tauri 侧当年只能靠「截图 + 人眼比对」，还因为 WebView2 走 DWM 合成而拿不到内容
  * （GDI CopyFromScreen 抓到的是下层窗口、PrintWindow 全黑）——这边不必受这个罪：
  * Electron 可以 `executeJavaScript` 读 DOM、可以 `capturePage()` 截图。
@@ -120,6 +121,16 @@ const FIXTURES: Record<string, Fixture> = {
   /** 空 body 页面：加载层应一直留在屏幕上（无内容可判就绪） */
   '/empty.html': {
     body: PAGE('', '', ''),
+  },
+
+  /** 子框架隔离页：内嵌同源 iframe，验证 preload 不向任何子框架暴露特权窗口桥 */
+  '/frame.html': {
+    body: PAGE(
+      '',
+      '<div id="content"><h1>frame-host</h1>' +
+        '<iframe id="f" src="/empty.html" width="200" height="120"></iframe></div>',
+      ''
+    ),
   },
 
   /** 新窗口目标页 */
@@ -1434,7 +1445,59 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   p.check('F12：按下后开发者工具真的打开了', devtoolsOpened, '3s 内 isDevToolsOpened() 仍为 false')
   if (devtoolsOpened) wc.closeDevTools()
 
-  // ---------- 16. 关闭按钮（收尾：会真的销毁窗口） ----------
+  // ---------- 16. 子框架桥梁隔离（iframe 不得拿到窗口按钮 / extra） ----------
+  // preload 默认对每个子框架都执行；若不判断 window.self === window.top，被壳页面嵌入的
+  // 任意第三方 iframe 就能在自己的主世界调 minimize()/close()/openSettings()、读到 extra。
+  await nav('/frame.html')
+  const frameReady = await waitUntil(async () => {
+    try {
+      return Boolean(await wc.executeJavaScript(
+        `(() => { const f = document.getElementById('f');
+           return !!(f && f.contentWindow && f.contentDocument &&
+                     f.contentDocument.readyState === 'complete'); })()`,
+        true
+      ))
+    } catch {
+      return false
+    }
+  }, 5000)
+  p.check('16 前提：同源 iframe 已加载完成', frameReady, '5s 内未就绪')
+  const frameJson = (await wc.executeJavaScript(
+    `(() => {
+       const f = document.getElementById('f');
+       if (!f || !f.contentWindow) return JSON.stringify({ err: 'no-frame' });
+       // 必须在【子框架自己的 realm】里求值：contextBridge 代理有跨帧膜，父框架直接读
+       // f.contentWindow.web2app 恒为 undefined（不能那样验）。
+       try {
+         // 再取一份子框架内的 web2appExtra（探针第 16 节）。
+         const probe = f.contentWindow.eval(
+           'JSON.stringify({ bridge: typeof window.web2app, extra: typeof window.web2appExtra })'
+         );
+         return JSON.stringify({
+           topHasBridge: typeof window.web2app === 'object' &&
+             typeof window.web2app.minimize === 'function',
+           child: JSON.parse(probe),
+         });
+       } catch (e) {
+         return JSON.stringify({ evalErr: String(e) });
+       }
+     })()`,
+    true
+  )) as string
+  const frameInfo = JSON.parse(frameJson) as {
+    err?: string
+    evalErr?: string
+    topHasBridge?: boolean
+    child?: { bridge?: string; extra?: string }
+  }
+  p.check('顶层框架暴露窗口桥 web2app（功能不收窄）',
+    frameInfo.topHasBridge === true, frameJson)
+  p.check('子框架不暴露窗口桥（iframe 拿不到 minimize/close/openSettings）',
+    frameInfo.child?.bridge === 'undefined', frameJson)
+  p.check('子框架不暴露 web2appExtra',
+    frameInfo.child?.extra === 'undefined', frameJson)
+
+  // ---------- 17. 关闭按钮（收尾：会真的销毁窗口） ----------
   await clickBtn('w2t-close')
   const closed = await new Promise<boolean>((resolve) => {
     const t = setTimeout(() => resolve(false), 3000)
@@ -1471,7 +1534,7 @@ export interface TabsProbeContext {
 }
 
 /**
- * 跑多页签断言组。与 `runProbe` 分开：单窗口断言组（0–15）假设「主窗口自身是远程页面」，
+ * 跑多页签断言组。与 `runProbe` 分开：单窗口断言组（节 0–17）假设「主窗口自身是远程页面」，
  * 而页签模式下主窗口自身是壳页面（shell.html），没有 titlebar.js 注入的按钮/留白，
  * 那些断言不适用。这里只验页签本体语义。
  *
@@ -1600,6 +1663,34 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P7b 邻接切换后仅新激活页签可见（不靠 z-order 蒙混）',
     visible.length === 1 && visible[0] === tabs.active?.view,
     `可见视图数=${visible.length}`)
+
+  // ---------- P7c：关闭【后台页签】壳标签栏必须即时刷新（幽灵页签回归） ----------
+  // shell.html 点 × 后不做本地乐观更新，完全依赖宿主 pushToShell() 推送；旧实现在
+  // closeTab 的非活动分支漏推 → 被关页签残留在壳 DOM 里直到下一次切换/标题推送。
+  const shellTabCount = async (): Promise<number> =>
+    (await win.webContents.executeJavaScript(
+      `document.querySelectorAll('#tabs .tab').length`,
+      true
+    )) as number
+  const y1 = await tabs.spawnTab('about:blank')
+  const y2 = await tabs.spawnTab('about:blank')
+  tabs.activate(x1!) // 激活固定在 x1：下面关的两个都是【后台页签】
+  const shellSynced = await waitUntil(
+    async () => (await shellTabCount()) === tabs.count,
+    4000
+  )
+  p.check('P7c 前提：壳标签栏条目数与页签集合一致',
+    shellSynced, `壳=${await shellTabCount()} 集合=${tabs.count}`)
+  tabs.closeTab(y1!)
+  const shellAfterClose = await waitUntil(
+    async () => (await shellTabCount()) === tabs.count,
+    4000
+  )
+  p.check('P7c 关闭后台页签后壳标签栏即时刷新（无幽灵页签）',
+    shellAfterClose, `壳=${await shellTabCount()} 集合=${tabs.count}`)
+  tabs.closeTab(y2!) // 还原到 [x1] 单页签稳态
+  await sleep(100)
+
   // 此后只剩 [x1]（激活）。它建在 about:blank 上，而 P9 的 window.open('/opened.html')
   // 依赖真实 http 源来解析相对 URL（about:blank 没有 base，Chromium 无法解析相对地址），
   // 故先把幸存页签导航到夹具页，再作为 P9 的 opener（不再硬编码 label2）。

@@ -151,6 +151,7 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
     }
 
     let settled = false
+    let handshakeOk = false
     let buf = ''
 
     const finish = (fn: () => void) => {
@@ -240,7 +241,8 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
         : typeof child.pid === 'number'
           ? child.pid
           : 0
-      finish(() =>
+      finish(() => {
+        handshakeOk = true
         resolve({
           proxyUrl,
           resolvedUrl: String(v.resolvedUrl ?? ''),
@@ -248,8 +250,8 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
           authPass: String(v.authPass ?? ''),
           pid,
           stop: () => stopSidecar(child),
-        }),
-      )
+        })
+      })
     })
 
     child.stderr?.on('data', (chunk: Buffer) => {
@@ -265,6 +267,20 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
     })
 
     child.on('exit', (code, signal) => {
+      if (handshakeOk) {
+        // 主动 stop()（应用退出 / 重启）触发的退出是预期行为，不能报「异常退出」——
+        // 否则每次正常关应用都会刷一条假警报，稀释日志可信度。
+        if (stoppingChildren.has(child)) {
+          opts.log(`[sidecar] 已随宿主停止退出（code=${code} signal=${signal}）`)
+          return
+        }
+        // 握手成功后意外死亡 = 代理链路没了（页面层只会看到重试也连不上）。
+        // 必须留一条日志，否则用户侧零证据（原实现 settled 后静默吞掉）。
+        opts.log(
+          `[sidecar] 握手成功后异常退出（code=${code} signal=${signal}）；代理已不可用，相关页面需重启应用恢复`,
+        )
+        return
+      }
       finish(() =>
         reject(
           new SidecarError(
@@ -297,9 +313,14 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
   })
 }
 
-/** 关掉 sidecar：先关 stdin（它的退出信号），1s 后仍在则强杀。 */
+/** 已在停止流程中的 child：防止重复 stop() 叠加多个强杀定时器与 exit 监听器。 */
+const stoppingChildren = new WeakSet<ChildProcess>()
+
+/** 关掉 sidecar：先关 stdin（它的退出信号），1s 后仍在则强杀。幂等。 */
 export function stopSidecar(child: ChildProcess): void {
   if (child.exitCode !== null || child.signalCode !== null) return
+  if (stoppingChildren.has(child)) return
+  stoppingChildren.add(child)
 
   try {
     // 关 stdin = 告诉 sidecar「宿主走了」。它读到的就是 EOF。
@@ -309,7 +330,6 @@ export function stopSidecar(child: ChildProcess): void {
   }
 
   const t = setTimeout(() => killHard(child), 1000)
-  // 用 once 而不是 on：避免多次 stop() 时监听器堆积。
   child.once('exit', () => clearTimeout(t))
   // 不让这个定时器吊住 Electron 的退出流程。
   t.unref?.()

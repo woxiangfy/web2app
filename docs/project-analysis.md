@@ -60,14 +60,14 @@
 
 | # | 位置 | 建议 | 状态 |
 |---|---|---|---|
-| 1 | `proxy.rs` WS 二进制帧 | `Bytes::from(b.to_vec())` 多余堆拷贝 → 直接 `A::Binary(b)` | ✅ 已落地（`proxy.rs` 的帧转换 `tungstenite_to_axum`，`A::Binary(b)` 在 `:599`）+ 单测 |
+| 1 | `proxy.rs` WS 二进制帧 | `Bytes::from(b.to_vec())` 多余堆拷贝 → 直接 `A::Binary(b)` | ✅ 已落地（`proxy.rs` 的帧转换 `tungstenite_msg_to_axum`；2026-09-27 订正函数名，旧稿误写 `tungstenite_to_axum`）+ 单测 |
 | 2 | `proxy.rs` 诊断日志 | `status==200` 且非 PDF 时短路，避免每次构造 `dbg_ct` | ✅ 已落地（`proxy.rs` 的 `dbg_ct`，实测 `:373`） |
 | 3 | `bootstrap.rs` `strip_userinfo` | clone 代价很小 | ➖ 有意不采纳（收益低于改动风险） |
 | 4 | `sanitize_dir_name` vs `sanitize_filename` | 提取共享 `sanitize_windows_name(name, collapse_ws)` | ✅ 已落地（`config.rs` 定义 `:101`；`config.rs:131` 与 `webview_hooks.rs:158` 两处调用） |
 | 5 | `loading.js` / `titlebar.js` 的 `whenHostReady` 重复 ~70 行 | 构建期拼接或 CI 断言一致性 | ⬜ 未落地（仍两份各自维护；等待逻辑已重构为轮询重试） |
 | 6 | `resolve-tool` 手写 args 解析重复 3 份 | 归并统一 `parse_args` | ✅ 已落地（`crates/resolve-tool/src/main.rs:69`） |
 | 7 | 公钥解析重复 | 下沉到 `resolve-core::parse_signing_key_pem`，两端复用 | ✅ 已落地（`crates/resolve-core/src/lib.rs:241`） |
-| 8 | `resolve-core` `SECRET` 缺省回落公开默认值 | 打包阶段强制校验非空非默认，否则 fail-fast | ✅ 已落地（`build-custom.yml`） |
+| 8 | `resolve-core` `SECRET` 缺省回落公开默认值 | 打包阶段强制校验非空非默认，否则 fail-fast | ⚠️ 建议项，**现状为告警不是 fail-fast**（2026-09-27 复核）：域名模式缺/用内置 `RESOLVE_SECRET` 时，`parse-packaging-config.py` 只发 `::warning::`（域名数组单 URL 也只提示），打包继续；Tauri 编译期仍可 `option_env!` 注入内置默认值。fail-fast 从未在 `build-custom.yml` 落地，旧表「✅」失实 |
 | 9 | `EXTRA` 原样内联 | 注入前 `serde_json::from_str::<Value>` 校验，非法回落 `"{}"` | ✅ 已落地（`config.rs` 的 `extra_json()`，实测 `:327`） |
 | 10 | `ci.yml` fmt 用 `continue-on-error` | 改为阻断（显式 pin rustfmt 组件版本） | ✅ 已落地 |
 | 11 | Android 作业不跑 clippy | 增加 `cargo clippy --target aarch64-linux-android` 并阻断 | ✅ 已落地 |

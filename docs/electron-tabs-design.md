@@ -170,7 +170,7 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | 5 | `src/main/index.ts` | `shell://` 协议注册（与既有 `splash:` / `settings:` 同处），指向 `shell.html`；壳页面复用现有 `preload.ts` + 壳命令白名单 | 现有 `protocol.handle('settings', …)` 同型 |
 | 6 | `src/main/tabs.ts` | 内容视图 bounds 一律用 **`getContentBounds()`** 推算；窗口 `resize` → 重算全部视图 | §3-3（1px 差） |
 | 7 | 各内容视图 | `setBackgroundColor(SPLASH_BG)` 顶住首帧（视图默认白底）；首帧信号用 `did-finish-load` / `dom-ready`（`ready-to-show` 在视图上不触发，§3-5） | §2 官方文档 |
-| 8 | `electron-builder.yml` | `extraResources` **加回 `shell.html`** | 上一轮 P1 清理时已注明「实现 tabs 时加回该行」 |
+| 8 | `electron-builder.yml` | `extraResources` **加回 `shell.html`**（⚠️ 时点记录：2026-09-26 v1.35 起注入资源改走 `out/inject/` 进 **app.asar**，不再走 extraResources；现状见 `electron-builder.yml` / `stage-assets.cjs`） | 上一轮 P1 清理时已注明「实现 tabs 时加回该行」 |
 
 **P1（对齐既有语义 / 防回归）**
 
@@ -283,7 +283,7 @@ Start-Process -FilePath "...\Web2App.exe" -ArgumentList '--probe','--tabs' -Wait
 | T1 骨架 | `createWindow()` 分叉 + 1 个内容视图 + 壳命令 sender 校验（§7-3）；窗口按钮可用 | 按钮四动作生效，且非法 sender 被拒绝并留日志（不许静默） | ✅ 2026-09-17 |
 | T2 页签管理 | 新建 / 切换 / 关闭 / 相邻激活 / 熔断 / 标题回传 | §8 的 P2–P8、P12 全绿 | ✅ 2026-09-17 |
 | T3 链路对齐 | bootstrap 复用（禁止新页签重启代理）、新窗口策略、下载/右键逐视图挂载、托盘/快捷键/设置窗/几何回归 | P9–P11 全绿；单窗口模式 A1 仍全绿 | ✅ 2026-09-17 |
-| T4 探针与出包 | 新增断言组 + `--tabs`；`extraResources` 加回 `shell.html`；打包产物自证 | A1–A4 全绿；`dist` 出 zip/portable | ✅ 2026-09-17 |
+| T4 探针与出包 | 新增断言组 + `--tabs`；`extraResources` 加回 `shell.html`（⚠️ 2026-09-26 v1.35 起改为 `out/inject/` 进 asar）；打包产物自证 | A1–A4 全绿；`dist` 出 zip/portable | ✅ 2026-09-17 |
 
 合计约 2 天，与 `electron-plan.md` §5 对 M5 的估量一致。
 **go/no-go 卡点**是 T0 的 V4（子视图绘制顺序）——它决定 A′ 还是 A，不再是「功能能否做」的卡点。
