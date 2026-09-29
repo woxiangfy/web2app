@@ -17,7 +17,7 @@
 |---|---|---|
 | Windows 安装版（MSI）/ 单文件绿色版（zip） | `.github/workflows/build-custom.yml` | **编译期**：值被写成二进制里的常量 |
 | Android APK（已签名） | `.github/workflows/build-custom.yml`（勾选 `android`） | **编译期**：同上 |
-| Windows 绿色版（Electron，zip / portable exe） | `.github/workflows/electron-build-custom.yml` | **打包期**：规范化后写进 `app.asar` |
+| Windows 绿色版 / 安装版（Electron，zip / portable exe / NSIS setup） | `.github/workflows/electron-build-custom.yml` | **打包期**：规范化后写进 `app.asar` |
 
 > ⚠️ **两个壳都是「改配置必须重新打包」**，区别只是 Tauri 侧需要重新**编译**、Electron 侧只需重新**打包**。
 > 两者都**不支持**交付后改配置——这正是配置被放进程序本体的原因（见 §6）。
@@ -383,13 +383,13 @@ python3 .github/scripts/check-workflows.py                                # work
 
 ### 7.1 手动打包（推荐为每个应用出一份包）
 
-| | Tauri 版 | Electron 绿色版 |
+| | Tauri 版 | Electron 绿色版 / 安装版 |
 |---|---|---|
 | workflow | `build-custom.yml` | `electron-build-custom.yml` |
-| 勾选项 | `windows_installer` / `windows_portable` / `android` | `electron_zip` / `electron_portable` |
+| 勾选项 | `windows_installer` / `windows_portable` / `android` | `electron_zip` / `electron_portable` / `electron_nsis` |
 | 配置来源 | `config_json` 或 `config_url`（二选一，前者优先） | 同左 |
-| 产物 | `.msi` / `-portable.zip` / `.apk` | `.zip`（解压即用）/ `-portable.exe`（单文件） |
-| 产物体积 | 单文件绿色版 **< 20MB**（自有 exe 11.06MB） | zip ≈147.6MB / portable ≈96.5MB（Chromium 载荷） |
+| 产物 | `.msi` / `-portable.zip` / `.apk` | `.zip`（解压即用）/ `-portable.exe`（单文件）/ `-setup.exe`（NSIS 安装向导） |
+| 产物体积 | 单文件绿色版 **< 20MB**（自有 exe 11.06MB） | zip ≈147.6MB / portable ≈96.5MB / setup ≈107.3MB（Chromium 载荷） |
 
 **配置怎么给**：
 
@@ -428,6 +428,9 @@ node scripts/pack-local.mjs --config tests/test1.json --target electron-all --dr
 # Electron 绿色版（zip + single-file portable exe）
 node scripts/pack-local.mjs --config tests/test1.json --target electron-all
 
+# Electron Windows 安装版（NSIS setup exe；与绿色版分开跑，理由见下）
+node scripts/pack-local.mjs --config tests/test1.json --target electron-nsis
+
 # Tauri Windows 安装版 / 单文件版（需先 cargo install tauri-cli --version "^2"）
 node scripts/pack-local.mjs --config tests/test1.json --target tauri-msi
 node scripts/pack-local.mjs --config tests/test1.json --target tauri-portable
@@ -440,7 +443,12 @@ node scripts/pack-local.mjs --parity
 要求 **Node ≥ 18**（用到内置 `fetch`），**零第三方依赖**。
 
 `--config` / `--json` / `--url` 三选一；`--target` ∈
-`electron-{zip,portable,all}` / `tauri-{msi,portable,all}`。
+`electron-{zip,portable,nsis,all}` / `tauri-{msi,portable,all}`。
+
+> ⚠️ **`electron-nsis` 刻意不并入 `electron-all`**：打安装版必须带
+> `-c.extraMetadata.distribution=nsis` 标记（写进 app.asar 内 package.json，运行时据此
+> 强制使用系统默认数据目录 `%APPDATA%`，忽略 `data_dir`）；若与 zip/portable 同次构建，
+> 绿色产物会被一起误标成安装版。三种形态都要时，绿色版与安装版分别跑一次。
 
 **⚠️⚠️ 本地行为一律由 JSON 决定 —— 不允许有「JSON 之外还得有人再做一步」的隐式前提。**
 这条踩过两次，都已修（本地判据与 CI 逐字同源）：
@@ -456,8 +464,10 @@ node scripts/pack-local.mjs --parity
 - 输出目录：本地打包的**交付产物一律落到仓库根 `tests/` 下** —— 那是 README §3.2 约定的本地测试
   产物目录，根 `.gitignore` 的 `/tests/` 整目录忽略，**不会进版本库**；CI 不受影响（工作区一次性，
   仍走各自默认路径）。两壳默认**分子目录**（绿色版都叫 `<app_name>.exe`，混放会互相覆盖）：
-  - **Electron → `tests/pack/`**：win-unpacked/ 整树与 zip/portable（单次约 150MB）由 electron-builder
-    直接输出到这里；CI 里仍走 `electron-builder.yml` 指定的 `electron-app/release/`。
+  - **Electron → `tests/pack/`**：win-unpacked/ 整树、zip/portable 与 NSIS setup exe（单次约 150MB）
+    由 electron-builder 直接输出到这里；CI 里仍走 `electron-builder.yml` 指定的 `electron-app/release/`。
+    也可在 `electron-app/` 下直接跑 `pnpm run dist:installer`（等价于
+    `--target electron-nsis`，输出同样重定向到 `tests/pack/`）。
     脚本**不自己清空**输出目录，先让 electron-builder 按常规流程清；**只有它因「删不掉」而失败时**，
     脚本才自动换 `tests/pack-local-<时间戳>/` 重试一次（全新目录没东西可清 ⇒ 必然能出包）。
     ⚠️ 不要改成「脚本先自己清一遍」：本机的删除有配额，清一次上千个文件会把配额烧光，害得
@@ -576,7 +586,7 @@ node scripts/pack-local.mjs --parity
 | 落盘日志（Tauri 侧） | `webview-app/src/debug_log.rs`；`dlog!` 宏定义在 `src/lib.rs`，sidecar 侧的同名宏在 `crates/proxy-server/src/main.rs` |
 | 落盘日志（Electron 侧） | `electron-app/src/main/startup-log.ts`；装配（`DEBUG` 判定 / `silenceConsole()`）在 `src/main/index.ts` |
 | 打包入口（Tauri / Android） | `.github/workflows/build-custom.yml` |
-| 打包入口（Electron 绿色版） | `.github/workflows/electron-build-custom.yml` |
+| 打包入口（Electron 绿色版 / 安装版） | `.github/workflows/electron-build-custom.yml` |
 | 打 tag 自动发布 | `.github/workflows/release.yml` |
 | asar 配置护栏 | `electron-app/scripts/check-asar-config.cjs` |
 | 静态检查所有 workflow | `.github/scripts/check-workflows.py` |

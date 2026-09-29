@@ -1,22 +1,27 @@
-# 绿色版（免安装）打包配置。
+# 打包配置：绿色版（免安装）+ 安装版（NSIS）。
 #
-# ⚠️ 三个 target 一次产出，同一个构建目录里给出两种分发形态：
-#   dir      → Web2App-<ver>-win-x64/          解压即用的目录（自己压 zip 也行）
-#   zip      → Web2App-<ver>-win-x64.zip       解压即用，体积最小
-#   portable → Web2App-<ver>-win-x64-portable.exe  单文件自解压
+# 四个 target：
+#   dir      → Web2App-<ver>-win-x64/               解压即用的目录（自己压 zip 也行）
+#   zip      → Web2App-<ver>-win-x64.zip            解压即用，体积最小
+#   portable → Web2App-<ver>-win-x64-portable.exe   单文件自解压
+#   nsis     → Web2App-<ver>-win-x64-setup.exe      Windows 安装向导
 #
 # ⚠️ electron-builder 26 起**没有**顶层 `zip:` 配置块（写了会以
 #    `Invalid configuration object … unknown property 'zip'` 直接拒绝启动）。
 #    zip 产物名只能由顶层 artifactName 模板给 —— TargetConfiguration 只接受 target/arch。
-#    26.15.3 实测通过。
 #
 # 注意 portable 的语义（见 src/main/portable.ts）：启动时把运行时解压到 %TEMP%，
 # 因此 app.getPath('exe') 指向副本，数据目录靠 PORTABLE_EXECUTABLE_DIR 定位。
+#
+# ⚠️ 安装版与绿色版的数据目录策略不同（src/main/distribution.ts / portable.ts）：
+#    nsis 打包命令必须额外带 `-c.extraMetadata.distribution=nsis`（见 package.json 的
+#    dist:installer 脚本与 workflow），运行时据此**强制使用系统默认目录 %APPDATA%**，
+#    忽略 config.json 的 data_dir。绿色版命令绝不带该标记。
 appId: com.example.web2app
 productName: Web2App
 copyright: Copyright © 2026 Web2App
 
-# zip 用；portable 在自己的块里覆盖成带 -portable 后缀的名字
+# zip 用；portable / nsis 在自己的块里覆盖成带后缀的名字
 artifactName: ${productName}-${version}-win-${arch}.${ext}
 
 directories:
@@ -26,7 +31,7 @@ directories:
 files:
   # `out/**/*` 已包含运行期配置 `out/config.json` 与注入资源 `out/inject/*`
   # （均由 scripts/stage-assets.cjs 生成），所以它们随 asar 一起封进包内 ——
-  #   这是**刻意**的，见下方 extraResources 与 scripts/stage-assets.cjs 的说明。
+  # 这是**刻意**的：配置不再放包外明文，想改必须重新打包。
   - out/**/*
   - package.json
 
@@ -41,25 +46,26 @@ win:
       arch: [x64]
     - target: portable
       arch: [x64]
+    - target: nsis
+      arch: [x64]
 
 portable:
   artifactName: ${productName}-${version}-win-${arch}-portable.${ext}
   # 绿色版绝不要 UAC：默认就是 user，这里显式写死防止后续被改动
   requestExecutionLevel: user
 
-# ⚠️⚠️ 这里**没有** `extraFiles`，是有意的（2026-09-22 改造）：
-#
-# 运行期配置 `config.json` 原本用 extraFiles 放到 exe 同级，好处是「改完重启即生效」。
-# 但那份是**明文、可读、可改**的 —— 放在包外等于配置形同虚设：任何人都能改掉 app_url、
-# 或关掉域名解析校验，再把包原样分发出去，而使用者看不出任何区别。
-#
-# 现在它由 `scripts/stage-assets.cjs` 生成到 `out/config.json`，跟着上面的 `files`
-# 一起进 `app.asar`；运行时由 `src/main/index.ts::configRoot()` 读 `app.getAppPath()/out/config.json`。
-# ⇒ 想改配置必须重新打包（与 Tauri 版一致）；代价是绿色版不再支持用户侧改配置。
-#
-# ⛔ 不要试图把它放回 `build/`（directories.buildResources）：electron-builder 会
-#    把 buildResources 目录整个排除在包外（app-builder-lib/out/fileMatcher.js 里的
-#    `!<buildResources>{,/**/*}`），放那儿会**静默**不打包、应用退回内置默认配置。
+nsis:
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+  # 向导式安装（非一键安装）：用户可选安装目录、看到安装进度
+  oneClick: false
+  # per-user 安装到 %LOCALAPPDATA%\Programs —— 与绿色版一致，不弹 UAC；
+  # 改成 true 则装 Program Files（需要管理员权限）。数据目录与此无关，始终在 %APPDATA%。
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  # 卸载时保留 %APPDATA% 下的用户数据（与绿色版「删程序不删 data\」的语义一致）
+  deleteAppDataOnUninstall: false
 
 extraResources:
   # 窗口 / 托盘图标：复用 Tauri 版的图标资源（Tray 用 256px PNG 再缩到 16px）。

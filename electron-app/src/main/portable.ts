@@ -38,6 +38,11 @@ export interface PortablePaths {
   fellBack: boolean
   /** 单文件自解压模式（用于日志 / 关于页展示） */
   selfExtracting: boolean
+  /**
+   * 安装版（NSIS）模式：数据目录被**强制**为系统默认目录，config.json 的 data_dir
+   * 已被刻意忽略（用于日志 / 关于页展示，不参与路径决策）。
+   */
+  forcedSystem: boolean
 }
 
 const WRITE_PROBE = '.web2app-write-probe'
@@ -94,6 +99,15 @@ export interface SetupOptions {
   dataDir?: string
   /** 应用名（config.app_name），用于系统默认模式下的子目录名 */
   appName?: string
+  /**
+   * 强制系统默认数据目录（安装版 = true）。
+   *
+   * 为 true 时**忽略 `dataDir` 配置的一切取值**，一律使用 `%APPDATA%\<app_name>`：
+   * 安装版由系统管理安装目录（perMachine 安装时是 Program Files，对标准用户只读），
+   * 数据跟程序放在一起既不可写也不符合安装/卸载语义。判据来自构建期标记，见
+   * `distribution.ts::isInstallerBuild`（由 index.ts 读出后传入）。
+   */
+  forceSystem?: boolean
 }
 
 /** 系统默认程序目录：`%APPDATA%\<app_name>`（由 app_name 命名，不受程序位置影响） */
@@ -120,6 +134,16 @@ function applyDataDir(dir: string): void {
 export function setupPortablePaths(opts: SetupOptions = {}): PortablePaths {
   const root = installRoot()
   const selfExtracting = isSelfExtracting()
+
+  // 安装版（NSIS）：**刻意忽略 config.json 的 data_dir**，数据一律进系统默认程序目录。
+  // 安装目录由系统管理（可能位于只读的 Program Files），且卸载/升级语义都以系统目录为准，
+  // 这条分支必须先于下面一切 data_dir 解析。
+  if (opts.forceSystem) {
+    const dir = systemDataDir(opts.appName)
+    applyDataDir(dir)
+    return { root, dataDir: dir, mode: 'system', fellBack: false, selfExtracting, forcedSystem: true }
+  }
+
   // config.ts 的 toDataDir 已归一成字符串；默认值与契约同为 "data"。
   const configured = (opts.dataDir ?? 'data').trim()
 
@@ -127,7 +151,7 @@ export function setupPortablePaths(opts: SetupOptions = {}): PortablePaths {
   if (configured === '') {
     const dir = systemDataDir(opts.appName)
     applyDataDir(dir)
-    return { root, dataDir: dir, mode: 'system', fellBack: false, selfExtracting }
+    return { root, dataDir: dir, mode: 'system', fellBack: false, selfExtracting, forcedSystem: false }
   }
 
   // 相对路径的基准是 **exe 所在目录**（installRoot），不是进程工作目录 —— 后者会随启动方式
@@ -141,7 +165,14 @@ export function setupPortablePaths(opts: SetupOptions = {}): PortablePaths {
     const fallback = systemDataDir(opts.appName)
     console.error(`[web2app] 数据目录不可写，已回退系统默认目录：${target} → ${fallback}`)
     applyDataDir(fallback)
-    return { root, dataDir: fallback, mode: 'fallback', fellBack: true, selfExtracting }
+    return {
+      root,
+      dataDir: fallback,
+      mode: 'fallback',
+      fellBack: true,
+      selfExtracting,
+      forcedSystem: false,
+    }
   }
 
   applyDataDir(target)
@@ -151,5 +182,6 @@ export function setupPortablePaths(opts: SetupOptions = {}): PortablePaths {
     mode: absolute ? 'absolute' : 'relative',
     fellBack: false,
     selfExtracting,
+    forcedSystem: false,
   }
 }

@@ -22,7 +22,9 @@
     "smoke": "pnpm run build && node scripts/launch.cjs --smoke",
     "probe": "pnpm run sidecar && pnpm run build && node scripts/launch.cjs --probe",
     "pack": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win --dir",
-    "dist": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win zip portable"
+    "dist": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win zip portable",
+    "dist:installer": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win nsis -c.extraMetadata.distribution=nsis --config.directories.output=../tests/pack",
+    "dist:all": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win zip portable && electron-builder --win nsis -c.extraMetadata.distribution=nsis --config.directories.output=../tests/pack"
   },
   "devDependencies": {
     "@types/node": "^24.13.5",

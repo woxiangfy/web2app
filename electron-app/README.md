@@ -41,6 +41,8 @@ pnpm run shot        # 布局取证：注入 titlebar.js 后打印四条判据 +
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
 pnpm run dist        # 出 zip + 单文件 portable exe（→ release/）；要解压目录形态用 pack
+pnpm run dist:installer  # 出 Windows 安装版 NSIS setup exe（→ ../tests/pack，不进 git）
+pnpm run dist:all        # 绿色版（zip/portable）+ 安装版一次出齐
 ```
 
 **一次性排查工具**（怀疑「断言过、人眼不对」时才用，与产品使用无关）：
@@ -104,12 +106,20 @@ electron-builder 的包管理器检测落空、回退到环境变量判断）。
 #### 手动打包（推荐为每个应用出一份包）
 
 本地 `pnpm run pack` / `pnpm run dist` 出的是**当前 `config.json`**的包，适合开发调试。
-要为某个具体应用出一份正式绿色版，走 GitHub Actions 的
-**`自定义打包（Electron 绿色版）`**（`.github/workflows/electron-build-custom.yml`）：
+要为某个具体应用出一份正式包，走 GitHub Actions 的
+**`自定义打包（Electron 绿色版 / 安装版）`**（`.github/workflows/electron-build-custom.yml`）：
 
 1. Actions → 该 workflow → **Run workflow**；
 2. 粘贴一份配置 JSON（或填一个返回 JSON 的 URL）—— 与 Tauri 版**同一份契约、同一个解析器**；
-3. 勾选要打的形态：`electron_zip`（解压即用）/ `electron_portable`（单文件 exe）。
+3. 勾选要打的形态：`electron_zip`（解压即用）/ `electron_portable`（单文件 exe）/
+   `electron_nsis`（Windows 安装向导 setup exe）。
+
+**本地出安装版**：`pnpm run dist:installer`（等价于
+`node ../scripts/pack-local.mjs --config <配置> --target electron-nsis`）。
+产物 `*-setup.exe` 直接输出到仓库根 `tests/pack/`（`/tests/` 整目录 git 忽略，不影响上传）。
+⚠️ 安装版必须独立一次构建：它带 `distribution=nsis` 标记，与 zip/portable 同次构建会把绿色产物
+一起误标成安装版。安装版运行时**强制使用系统默认数据目录** `%APPDATA%\<app_name>`，
+忽略配置的 `data_dir`（由 `src/main/distribution.ts` 读取标记、`portable.ts` 执行强制）。
 
 它比本地打包多做了三件事：用共享解析器**规范化**配置（真 bool / 真数组）并写进 `out/config.json`；
 在 `RESOLVE_SECRET` 存在的环境下**编译 sidecar**（否则 `resolve_secret` 会静默失效）；

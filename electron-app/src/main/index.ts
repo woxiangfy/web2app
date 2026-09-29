@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { setupPortablePaths } from './portable'
+import { isInstallerBuild } from './distribution'
 import {
   buildProxySwitches,
   debugFlagTruthy,
@@ -180,9 +181,13 @@ const DEBUG =
 //    报错不会被静默吞掉 —— 那是必须让人看到的一类错误。
 if (!DEBUG) silenceConsole()
 
+// 安装版（NSIS，打包期由 -c.extraMetadata.distribution=nsis 在 package.json 里打标）：
+// setupPortablePaths 内部强制走系统默认数据目录，cfg.data_dir 被刻意忽略。
+const installerBuild = isInstallerBuild(app.getAppPath())
 const paths = setupPortablePaths({
   dataDir: cfg.data_dir,
   appName: sanitizeDirName(cfg.app_name),
+  forceSystem: installerBuild,
 })
 
 // ---------- 1.1 settings.json 的位置（M3） ----------
@@ -1438,8 +1443,20 @@ function describeFileLog(log: FileLogHandle | null): string {
 function logStartup(): void {
   console.log('[web2app] 启动信息')
   console.log(`  入口目录      : ${paths.root}`)
-  console.log(`  分发形态      : ${paths.selfExtracting ? '单文件自解压 (portable)' : '解压目录 (zip/dir)'}`)
-  console.log(`  数据目录      : ${paths.dataDir}  (mode=${paths.mode}${paths.fellBack ? ', 已回退' : ''})`)
+  console.log(
+    `  分发形态      : ${
+      paths.forcedSystem
+        ? '安装版 (NSIS，系统管理数据目录)'
+        : paths.selfExtracting
+          ? '单文件自解压 (portable)'
+          : '解压目录 (zip/dir)'
+    }`,
+  )
+  console.log(
+    `  数据目录      : ${paths.dataDir}  (mode=${paths.mode}${
+      paths.fellBack ? ', 已回退' : ''
+    }${paths.forcedSystem ? ', 强制系统目录（忽略 data_dir）' : ''})`,
+  )
   console.log(`  配置文件      : ${loaded.path ?? '(未找到，使用默认值)'}`)
   console.log(`  应用名 / 标题 : ${cfg.app_name} / ${cfg.title}`)
   console.log(`  注入脚本目录  : ${injectDir()}`)

@@ -161,7 +161,9 @@ const REMOVED_KEYS = {
 // Windows 上永远非法的目录名字符。`:` 与 `\` `/` 是路径语法的一部分，不在此列。
 const DATA_DIR_BAD = new Set('<>"|?*'.split(''))
 
-const TARGETS = ['electron-zip', 'electron-portable', 'electron-all', 'tauri-msi', 'tauri-portable', 'tauri-all']
+// electron-nsis：Windows 安装版（NSIS setup），与绿色版分开 —— 它必须带
+// `-c.extraMetadata.distribution=nsis` 标记（见 doElectron），与 zip/portable 不能同次构建。
+const TARGETS = ['electron-zip', 'electron-portable', 'electron-nsis', 'electron-all', 'tauri-msi', 'tauri-portable', 'tauri-all']
 
 // ===========================================================================
 // Python 语义小工具
@@ -835,6 +837,10 @@ async function doElectron(args, merged, env, name, rr) {
   const forms = []
   if (args.target === 'electron-zip' || args.target === 'electron-all') forms.push('zip')
   if (args.target === 'electron-portable' || args.target === 'electron-all') forms.push('portable')
+  // ⚠️ nsis 刻意**不并入 electron-all**：打安装版必须带 distribution=nsis 标记（见
+  // builderCmd），而该标记会合并进同次构建的 app.asar，若与 zip/portable 同次构建，
+  // 绿色产物会被一起误标成安装版（数据目录被强制到 %APPDATA%）。要全出就分别跑两次。
+  if (args.target === 'electron-nsis') forms.push('nsis')
   emit(`\n[4/4] electron-builder：${forms.join(' + ')}`)
 
   // ⚠️ 受限网络下 electron-builder 会**自己去下载** Electron 运行时（223MB）并卡到超时：
@@ -874,6 +880,9 @@ async function doElectron(args, merged, env, name, rr) {
     '--win',
     ...forms,
     `-c.productName=${name}`,
+    // 安装版标记：打进 app.asar 的 package.json，运行时 distribution.ts 据此强制
+    // 使用系统默认数据目录（%APPDATA%），忽略 config 的 data_dir。绿色版不带此参数。
+    ...(forms.includes('nsis') ? ['-c.extraMetadata.distribution=nsis'] : []),
     ...extraBuilder,
     `--config.directories.output=${dir}`,
     ...extra,

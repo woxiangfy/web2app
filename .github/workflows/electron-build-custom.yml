@@ -6,8 +6,11 @@ name: 自定义打包（Electron 绿色版）
 # 与 `build-custom.yml`（Tauri 版）的关系：
 #   - **同一份配置 JSON 契约、同一个解析实现**（`.github/scripts/parse-packaging-config.py`），
 #     所以「同一个 JSON 在两条流水线上得到同样的语义」这件事由代码保证，不靠人工同步；
-#   - 差别只在产物形态：Tauri 出 MSI / APK，这里出 zip / 单文件 portable exe；
+#   - 差别只在产物形态：Tauri 出 MSI / APK，这里出 zip / 单文件 portable exe / NSIS 安装包；
 #   - 字段表与多端行为对照见 `docs/packaging-config.md`。
+#
+# 安装版（NSIS）与绿色版的数据目录策略不同：安装版运行时强制使用系统默认目录
+# %APPDATA%\<app_name>，忽略配置里的 data_dir（见 electron-app/src/main/distribution.ts）。
 #
 # ⚠️ 与「本地 pnpm run dist」的差别（为什么建议走这里）：
 #   1. 配置由共享解析器规范化后写进 `electron-app/config.json`，再随 asar 进包 —— 本地手工
@@ -33,6 +36,11 @@ on:
         required: false
         default: true
         type: boolean
+      electron_nsis:
+        description: '打 Windows 安装版（NSIS setup exe）—— 安装/卸载由系统管理，数据固定在 %APPDATA%'
+        required: false
+        default: true
+        type: boolean
 
 # ⚠️ 单仓库化：Electron 工程在 `electron-app/` 子目录，所有 run 步骤都在它下面执行。
 #    但 `upload-artifact` / `uses:` 的路径以**仓库根**为基准，那些地方要带 `electron-app/` 前缀。
@@ -42,9 +50,9 @@ defaults:
 
 jobs:
   windows:
-    name: Build Electron (Windows 绿色版)
+    name: Build Electron (Windows 绿色版 / 安装版)
     runs-on: windows-latest
-    if: ${{ github.event.inputs.electron_zip != 'false' || github.event.inputs.electron_portable != 'false' }}
+    if: ${{ github.event.inputs.electron_zip != 'false' || github.event.inputs.electron_portable != 'false' || github.event.inputs.electron_nsis != 'false' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -143,6 +151,7 @@ jobs:
         env:
           WANT_ZIP: ${{ github.event.inputs.electron_zip }}
           WANT_PORTABLE: ${{ github.event.inputs.electron_portable }}
+          WANT_NSIS: ${{ github.event.inputs.electron_nsis }}
         run: |
           set -euo pipefail
 
@@ -155,22 +164,39 @@ jobs:
           echo "PKG_NAME=$NAME" >> "$GITHUB_ENV"
           echo "productName = $NAME"
 
-          TARGETS=""
-          if [ "$WANT_ZIP" != "false" ]; then TARGETS="$TARGETS zip"; fi
-          if [ "$WANT_PORTABLE" != "false" ]; then TARGETS="$TARGETS portable"; fi
-          if [ -z "$TARGETS" ]; then
-            echo "::error::zip 与 portable 都未勾选，没有可打的形态"; exit 1
-          fi
-          echo "目标形态：$TARGETS"
-
           EXTRA=()
           if [ -n "${ICON_PNG:-}" ]; then
             EXTRA+=("-c.win.icon=$ICON_PNG")
             echo "使用自定义图标：$ICON_PNG"
           fi
 
-          # shellcheck disable=SC2086
-          pnpm exec electron-builder --win$TARGETS -c.productName="$NAME" "${EXTRA[@]}"
+          # 绿色版目标（zip / portable）。
+          GREEN_TARGETS=""
+          if [ "$WANT_ZIP" != "false" ]; then GREEN_TARGETS="$GREEN_TARGETS zip"; fi
+          if [ "$WANT_PORTABLE" != "false" ]; then GREEN_TARGETS="$GREEN_TARGETS portable"; fi
+
+          if [ -n "$GREEN_TARGETS" ]; then
+            echo "绿色版目标：$GREEN_TARGETS"
+            # shellcheck disable=SC2086
+            pnpm exec electron-builder --win$GREEN_TARGETS -c.productName="$NAME" "${EXTRA[@]}"
+          else
+            echo "绿色版 zip / portable 均未勾选，跳过"
+          fi
+
+          # 安装版（NSIS）必须是**独立的一次构建**：
+          # `-c.extraMetadata.distribution=nsis` 会合并进本次构建 app.asar 内的 package.json，
+          # 与绿色版同次构建会把绿色产物也误标成安装版 → 数据目录被强制到 %APPDATA%。
+          if [ "$WANT_NSIS" != "false" ]; then
+            echo "安装版目标：nsis（标记 distribution=nsis）"
+            pnpm exec electron-builder --win nsis \
+              -c.productName="$NAME" \
+              -c.extraMetadata.distribution=nsis \
+              "${EXTRA[@]}"
+          fi
+
+          if [ -z "$GREEN_TARGETS" ] && [ "$WANT_NSIS" = "false" ]; then
+            echo "::error::zip / portable / nsis 全部未勾选，没有可打的形态"; exit 1
+          fi
         # ⚠️ `pnpm exec` 而不是 `npx`：包管理器已统一到 pnpm，且 pnpm 不会像 npm 那样
         #    因 `--` 被字面透传而踩到参数解析的坑。
 
@@ -195,4 +221,12 @@ jobs:
         with:
           name: ${{ env.PKG_NAME }}-win-x64-portable
           path: electron-app/release/*-portable.exe
+          if-no-files-found: error
+
+      - name: Upload 安装版（NSIS setup exe）
+        if: ${{ github.event.inputs.electron_nsis != 'false' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PKG_NAME }}-win-x64-setup
+          path: electron-app/release/*-setup.exe
           if-no-files-found: error
