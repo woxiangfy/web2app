@@ -734,35 +734,21 @@ fn push_tabs_to_shell(app: &tauri::AppHandle) {
         return;
     };
 
-    // 组装成 JS 数组 [{label, title, active}]。锁的作用域收在块内，
-    // `host.eval` 在锁外调用（锁不跨 FFI）。
-    let items = {
-        let state = app.state::<TabManager>();
-        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
-        let active = *state.active.lock().unwrap_or_else(|p| p.into_inner());
-        let titles = state.titles.lock().unwrap_or_else(|p| p.into_inner());
-
-        let mut items = String::from("[");
-        for (i, t) in tabs.iter().enumerate() {
-            if i > 0 {
-                items.push(',');
-            }
-            let title = titles
-                .get(&t.label)
-                .cloned()
-                .unwrap_or_else(|| t.title.clone());
-            let title_js = crate::loading::js_str(&title);
-            let active_js = if i == active { "true" } else { "false" };
-            items.push_str(&format!(
-                "{{label:{},title:{},active:{}}}",
-                crate::loading::js_str(&t.label),
-                title_js,
-                active_js
-            ));
+    // 组装成 JS 数组 [{label, title, active}]。快照在 `tab_rows` 内部取，
+    // `host.eval` 在任何锁之外调用（锁不跨 FFI）。
+    let mut items = String::from("[");
+    for (i, (label, title, active)) in tab_rows(app).into_iter().enumerate() {
+        if i > 0 {
+            items.push(',');
         }
-        items.push(']');
-        items
-    };
+        let label_js = crate::loading::js_str(&label);
+        let title_js = crate::loading::js_str(&title);
+        let active_js = if active { "true" } else { "false" };
+        items.push_str(&format!(
+            "{{label:{label_js},title:{title_js},active:{active_js}}}"
+        ));
+    }
+    items.push(']');
 
     let js =
         format!("try{{window.__web2appTabs&&window.__web2appTabs.render({items});}}catch(e){{}}");
@@ -884,6 +870,20 @@ pub(crate) fn close_tab(app: tauri::AppHandle, label: String) {
 /// 前端：获取当前 tab 列表（label + title + active），用于初始化标签栏。
 #[tauri::command]
 pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
+    // 与宿主标签栏（push_tabs_to_shell）共用同一份快照，保证 IPC 与界面永远一致。
+    tab_rows(&app)
+}
+
+/// tab 列表的统一快照：`(label, 展示标题, 是否激活)`。
+///
+/// ⚠️ 为什么抽出来：[`get_tabs`]（IPC 命令）与 [`push_tabs_to_shell`]（宿主标签栏 eval）
+/// 此前各写了一遍「锁 tabs / active / titles → 标题取 `titles` 缓存、缺失回落 `TabInfo::title`
+/// → 拼 active 标志」。两处一旦漂移，现象是**IPC 返回的标题与标签栏显示的不是同一个**
+/// —— 静默不一致，没有任何报错。
+///
+/// ⚠️ 三把锁的顺序必须固定为 `tabs → active → titles`：与[`set_tabs_visible`] 取锁的顺序
+/// 一致，避免两处反向加锁形成 AB-BA 死锁。
+fn tab_rows(app: &tauri::AppHandle) -> Vec<(String, String, bool)> {
     let state = app.state::<TabManager>();
     let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
     let active = *state.active.lock().unwrap_or_else(|p| p.into_inner());
@@ -891,6 +891,8 @@ pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
     tabs.iter()
         .enumerate()
         .map(|(i, t)| {
+            // 展示标题：优先用 tab 页面回传的真实网页标题，没有则回落到建窗时的
+            // 占位标题（通常是应用显示名）。
             let title = titles
                 .get(&t.label)
                 .cloned()
@@ -898,6 +900,18 @@ pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
             (t.label.clone(), title, i == active)
         })
         .collect()
+}
+
+/// 校验「tab 一次性令牌」：label 与 token 必须同时命中在册记录。
+///
+/// ⚠️ 为什么必须有：[`report_tab_title`] 与 [`retry_tab_bootstrap`] 都接**核心事件**，
+/// 而 Tauri 2.11 的 `app.listen` Event **不携带发送窗口标识**（只有 id / payload），
+/// 无法知道事件来自哪个 webview。少了这道校验，任意外部页面都能伪造其它页签的标题或
+/// 强制别的 tab 重启 bootstrap。两处此前各写一遍同样判断，抽出来保证不会只改一边。
+fn tab_token_matches(app: &tauri::AppHandle, label: &str, token: &str) -> bool {
+    let state = app.state::<TabManager>();
+    let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+    tabs.iter().any(|t| t.label == label && t.token == token)
 }
 
 /// tab 远程页面经核心事件回传真实网页标题的落地函数。
@@ -918,14 +932,9 @@ pub(crate) fn report_tab_title(
     token: String,
     title: String,
 ) {
-    {
-        let state = app.state::<TabManager>();
-        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
-        let trusted = tabs.iter().any(|t| t.label == label && t.token == token);
-        if !trusted {
-            dlog!("[tabs] 拒绝标题回传：label/token 与在册 tab 不匹配（label={label}）");
-            return;
-        }
+    if !tab_token_matches(app, &label, &token) {
+        dlog!("[tabs] 拒绝标题回传：label/token 与在册 tab 不匹配（label={label}）");
+        return;
     }
     {
         let state = app.state::<TabManager>();
@@ -951,12 +960,7 @@ pub(crate) fn report_tab_title(
 /// 那样导航到 `splash://localhost/retry`；改为发 [`TAB_RETRY_EVENT`]。token 校验与
 /// [`report_tab_title`] 同理由（app.listen 的 Event 不带发送窗口标识）。
 pub(crate) fn retry_tab_bootstrap(app: &tauri::AppHandle, label: String, token: String) {
-    let trusted = {
-        let state = app.state::<TabManager>();
-        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
-        tabs.iter().any(|t| t.label == label && t.token == token)
-    };
-    if !trusted {
+    if !tab_token_matches(app, &label, &token) {
         dlog!("[tabs] 拒绝首屏重试：label/token 与在册 tab 不匹配（label={label}）");
         return;
     }

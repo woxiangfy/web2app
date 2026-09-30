@@ -214,6 +214,13 @@ fn update_with(
     save_at(write_to, &doc)
 }
 
+/// **仅供本模块单测**：直接打真文件，不必构造 `AppHandle`。
+///
+/// ⚠️ 为什么必须 `#[cfg(test)]`：生产代码里没有任何调用方（写盘一律走 [`update`]，
+/// 它才带「读候选 → 写新位置」的升级兼容语义）。放在这里而不加 cfg 就是一个
+/// **永不使用的生产函数** —— 只不过被 crate 根的 `#![allow(dead_code)]` 盖住了，
+/// 谁也看不见。
+#[cfg(test)]
 fn update_at(p: &Path, f: impl FnOnce(&mut Document)) -> Result<(), String> {
     update_with(p, &[p.to_path_buf()], f)
 }

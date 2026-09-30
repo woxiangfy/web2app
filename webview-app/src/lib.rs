@@ -201,14 +201,7 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // 多页签模式聚焦宿主窗口，单窗口模式聚焦 "main"。
-        #[cfg(windows)]
-        let label: &str = if tabs::tabs_enabled() {
-            tabs::HOST_LABEL
-        } else {
-            "main"
-        };
-        #[cfg(not(windows))]
-        let label: &str = "main";
+        let label = bootstrap::main_window_label();
         if let Some(w) = app.get_webview_window(label) {
             let _ = w.unminimize();
             let _ = w.show();
@@ -216,10 +209,7 @@ pub fn run() {
         }
         // 多页签模式：tab 窗口是独立顶层窗口，宿主恢复显示时要一并把当前 tab 显示出来
         // （否则只看到标签栏，内容区是空的）。
-        #[cfg(windows)]
-        if tabs::tabs_enabled() {
-            tabs::set_tabs_visible(app, true);
-        }
+        bootstrap::sync_tabs_visibility(app, true);
     }));
 
     let builder = builder.setup(move |app| {
@@ -489,15 +479,7 @@ pub fn run() {
                     #[cfg(desktop)]
                     {
                         // 多页签模式持久化宿主窗口几何，单窗口模式持久化 "main"。
-                        #[cfg(windows)]
-                        let label: &str = if tabs::tabs_enabled() {
-                            tabs::HOST_LABEL
-                        } else {
-                            "main"
-                        };
-                        #[cfg(not(windows))]
-                        let label: &str = "main";
-                        window_state::persist_label(app_handle, label);
+                        window_state::persist_label(app_handle, bootstrap::main_window_label());
                     }
                     if let Some(abort) = app_handle
                         .state::<ProxyTask>()
@@ -666,20 +648,7 @@ fn hotkey_label(h: &settings::Hotkey) -> String {
 /// SettingsState 判断托盘语义（托盘未启用时等价于允许关闭）。只有「窗口几何持久化」
 /// 依赖的 `window_state` 模块才是桌面端专属，故 cfg 下沉到那一行。
 fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi) {
-    let target_label: String = {
-        #[cfg(windows)]
-        {
-            if crate::tabs::tabs_enabled() {
-                crate::tabs::HOST_LABEL.to_string()
-            } else {
-                "main".to_string()
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            "main".to_string()
-        }
-    };
+    let target_label = bootstrap::main_window_label().to_string();
 
     // 记录主窗口当前大小/位置，供下次启动恢复（仅桌面端；Android 无窗口几何持久化）。
     #[cfg(desktop)]
@@ -697,10 +666,7 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
         }
         // 多页签模式：tab 窗口是独立顶层窗口，宿主隐藏时**必须一并隐藏**，
         // 否则桌面上会残留没有标签栏的“孤儿内容窗口”，用户会以为应用卡死了。
-        #[cfg(windows)]
-        if crate::tabs::tabs_enabled() {
-            crate::tabs::set_tabs_visible(app_handle, false);
-        }
+        bootstrap::sync_tabs_visibility(app_handle, false);
     } else {
         // 允许关闭（不隐藏到托盘）：tab 窗口同样不会随宿主销毁，必须显式清掉，
         // 否则「标签栏关了、内容还在」且 Tauri 因为仍有窗口而不触发退出。

@@ -62,6 +62,45 @@ pub(crate) fn local_proxy_enabled() -> bool {
     PROXY_ENABLED
 }
 
+/// 「主窗口」的 label：多页签模式下是宿主窗口，单窗口模式下是 `"main"`。
+///
+/// ⚠️⚠️ **这是唯一真源** —— 历史上「多页签 → 宿主窗口，否则 → main」这条判断在 lib.rs
+/// （单实例聚焦 / 退出 Geometry 持久化 / 主窗关闭语义）与 tray.rs 里各写了一遍，
+/// 共 4 处相同逻辑。改一处忘另一处的表象是「托盘点开、或第二次启动聚焦到的是另一个窗口」
+/// 这类难定位的错位，所以收敛到这里。
+///
+/// 为什么放在本模块而不是 `tray` / `tabs`：判断的两侧都**不是桌面端专属** —— 主窗关闭语义
+/// （`crate::handle_main_close`）在 Android 上同样要走，而 `tray` 是 `cfg(desktop)`、
+/// `tabs` 是 `cfg(windows)`，放进它们会让非桌面目标拿不到这个函数。本模块无条件编译，
+/// 平台差异用内部的 `#[cfg(windows)]` 吸收（与 [`local_proxy_enabled`] 同一写法）。
+pub(crate) fn main_window_label() -> &'static str {
+    #[cfg(windows)]
+    {
+        if crate::tabs::tabs_enabled() {
+            return crate::tabs::HOST_LABEL;
+        }
+    }
+    "main"
+}
+
+/// 主窗口显隐后，同步多页签模式下各 tab 窗口的可见性。
+///
+/// 多页签模式里每个 tab 都是独立顶层窗口，宿主隐藏不会连带隐藏它们，桌面上会残留
+/// “没有标签栏的内容窗口”。非 Windows / 非多页签模式为空操作。
+///
+/// 与 [`main_window_label`] 同理由（`tabs` 是 `cfg(windows)`，桌面端之外也要能调用），
+/// 平台和模式的双重开关都收在本函数内部。
+pub(crate) fn sync_tabs_visibility(app: &tauri::AppHandle, visible: bool) {
+    #[cfg(windows)]
+    {
+        if crate::tabs::tabs_enabled() {
+            crate::tabs::set_tabs_visible(app, visible);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (app, visible);
+}
+
 /// 去掉 URL 中的 userinfo（用户名:密码），返回“干净”地址。
 /// 用于直连 / 外部代理场景下 WebView 的导航地址（鉴权由 WebView2 原生事件或本地代理注入，
 /// 不应把密码写进浏览器地址栏 / 交给外部代理字符串）。
