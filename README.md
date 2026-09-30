@@ -16,7 +16,7 @@
 | `electron-app` | Electron 绿色版工程 | 第二交付形态：TypeScript 主进程 / 渲染进程、sidecar 复用、打包与探针脚本（里程碑交付状态见 §一，权威值以本目录 README 为准） | `electron-app/README.md` |
 | `docs`     | 文档索引清单   | 存放全仓库级专项详细文档（`docs/archive/` 存放已归档的历史方案稿） | 见下方`四、文档索引清单`       |
 | `.github`  | CI 与打包工作流 | 全仓库统一的 GitHub Actions（2026-09-22 由 `webview-app/` 上移到仓库根；命令经 `defaults.run.working-directory: webview-app` 落到 Rust 工程目录，产物路径则显式带 `webview-app/` 前缀） | — |
-| `scripts`  | 本地脚本（**不进 CI**） | 本机侧驱动脚本。当前只有 `pack-local.mjs`：读一份配置 JSON，在本机跑出与 CI **同语义**的产物（Tauri MSI/单文件、Electron zip/portable/NSIS 安装版；产物统一落仓库根 `tests/`，不进版本库）。⚠️ 它是 CI 解析器的 **Node 复刻**（Python 不是必然存在的依赖），两侧靠 `--parity` 逐项比对钉住等价 | `docs/packaging-config.md` §7.2 |
+| `scripts`  | 本地脚本（**不进 CI**） | 本机侧驱动脚本（均为零第三方依赖的 Node 脚本）：①`init-env.mjs` —— 环境初始化：webview-app 跑 `cargo fetch`（默认仅宿主平台目标，避免拉 Linux/macOS/Android 无关 crate；`--all-targets` 恢复全平台，`--update` 先更新 Cargo.lock）、electron-app 跑 `pnpm install`（自动注入 electron / electron-builder 国内镜像环境变量，装完校验 electron 平台二进制并兜底），支持 `--webview` / `--electron` / `--frozen` / `--no-mirror` / `--check`；②`pack-local.mjs`：读一份配置 JSON，在本机跑出与 CI **同语义**的产物（Tauri MSI/单文件、Electron zip/portable/NSIS 安装版；产物统一落仓库根 `tests/`，不进版本库），⚠️ 它是 CI 解析器的 **Node 复刻**（Python 不是必然存在的依赖），两侧靠 `--parity` 逐项比对钉住等价 | `docs/packaging-config.md` §7.2 |
 | `signing`  | 打包签名与发布凭据（**未纳入版本控制**） | keystore、打包配置与发布 secrets（**含敏感信息，不得外发**）；由仓库根 `.gitignore` 忽略 | — |
 
 > 新增子项目/目录时，**必须在此表补充登记**，并在对应目录下维护独立的项目说明文档；目录废弃也需同步标记更新。
