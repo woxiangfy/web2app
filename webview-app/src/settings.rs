@@ -90,6 +90,26 @@ pub fn settings_open_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SHIFT), Code::F1)
 }
 
+/// 唤醒快捷键的可读文案（空 key = 未启用）。与 Electron 侧 `hotkeyLabel()` 同形，
+/// 供启动诊断日志使用（`lib.rs::log_startup`）。本函数跨平台（Hotkey 本身跨平台）。
+pub(crate) fn hotkey_label(h: &Hotkey) -> String {
+    if h.key.trim().is_empty() {
+        return "（未设置）".to_string();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    if h.ctrl {
+        parts.push("Ctrl");
+    }
+    if h.alt {
+        parts.push("Alt");
+    }
+    if h.shift {
+        parts.push("Shift");
+    }
+    parts.push(h.key.as_str());
+    parts.join("+")
+}
+
 /// 读取设置；文件不存在或解析失败时使用默认值。
 ///
 /// 整份文件（设置 + 窗口几何）的读写与「读-改-写」都在 [`crate::store`]，这里只取设置那一段。
@@ -140,6 +160,22 @@ pub fn open_settings_window(app: &AppHandle) {
         .background_color(crate::bootstrap::SPLASH_BG)
         .center()
         .build();
+}
+
+/// settings 自定义协议处理器：编译期把 dist/settings.html 内嵌后经协议返回设置页。
+///
+/// 与 tabs::handle_shell / loading::handle_splash 同属「内嵌前端页」处理器：
+/// 不依赖 devUrl（tauri dev 会把 App 相对路径代理到 devUrl，导致设置页被解析到
+/// example.com），dev / release 行为完全一致。跨平台（协议在 lib.rs 无条件注册）。
+pub(crate) fn handle_settings(
+    _ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
+    _req: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let html = include_str!("../dist/settings.html");
+    tauri::http::Response::builder()
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(html.as_bytes().to_vec())
+        .unwrap()
 }
 
 /// 读取当前设置（供设置页 / 前端调用）。

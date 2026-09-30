@@ -106,16 +106,9 @@ pub fn run() {
         // "加载中…"），把域名解析 / 本地反向代理启动等耗时操作挪到后台线程（见 bootstrap），
         // 消除"进程已启动但窗口还没出来"这段完全无反馈的等待。
         .register_uri_scheme_protocol(loading::SPLASH_SCHEME, loading::handle_splash)
-        .register_uri_scheme_protocol("settings", |_ctx, _req| {
-            // 编译期把 dist/settings.html 内嵌，经自定义协议提供设置页。
-            // 这样不依赖 devUrl（tauri dev 会把 App 相对路径代理到 devUrl，
-            // 导致设置页被解析到 example.com），dev / release 行为完全一致。
-            let html = include_str!("../dist/settings.html");
-            tauri::http::Response::builder()
-                .header("Content-Type", "text/html; charset=utf-8")
-                .body(html.as_bytes().to_vec())
-                .unwrap()
-        })
+        // 设置页：编译期内嵌 dist/settings.html，经自定义协议提供（不依赖 devUrl，
+        // dev / release 行为完全一致；处理器实现见 settings::handle_settings）。
+        .register_uri_scheme_protocol("settings", settings::handle_settings)
         .manage(ProxyTask::default())
         .manage(SettingsState::default())
         // ⚠️⚠️ **全项目只能有这一次调用** —— `Builder::invoke_handler` 是【替换】语义、**不是追加**：
@@ -534,7 +527,10 @@ fn log_startup(app: &tauri::AppHandle, settings: &settings::Settings) {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(取不到配置目录)".to_string())
     );
-    dlog!("  唤醒快捷键    : {}", hotkey_label(&settings.wake_hotkey));
+    dlog!(
+        "  唤醒快捷键    : {}",
+        settings::hotkey_label(&settings.wake_hotkey)
+    );
     dlog!(
         "  托盘 / 关闭行为: {} / {}",
         if settings.tray_enabled {
@@ -617,25 +613,6 @@ fn describe_tabs() -> &'static str {
         }
     }
     "未启用"
-}
-
-/// 唤醒快捷键的可读文案（空 key = 未启用）。与 Electron 侧 `hotkeyLabel()` 同形。
-fn hotkey_label(h: &settings::Hotkey) -> String {
-    if h.key.trim().is_empty() {
-        return "（未设置）".to_string();
-    }
-    let mut parts: Vec<&str> = Vec::new();
-    if h.ctrl {
-        parts.push("Ctrl");
-    }
-    if h.alt {
-        parts.push("Alt");
-    }
-    if h.shift {
-        parts.push("Shift");
-    }
-    parts.push(h.key.as_str());
-    parts.join("+")
 }
 
 /// 处理「主窗口关闭」：若“启用托盘 + 关闭时最小化到托盘”同时满足 → 隐藏到托盘；

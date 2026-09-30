@@ -19,8 +19,9 @@
  * env 将来若透传给别的 Node 子进程就会复发那个极难排查的「ExitCode 0 却没输出」。
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { firstExisting } from './first-existing'
 
 /** 请求 sidecar 做什么。`domains` 与 `url` 二选一，同时给则以 `domains` 为准（对齐 Tauri 侧）。 */
 export interface SidecarRequest {
@@ -84,15 +85,11 @@ function exeName(): string {
  */
 export function locateSidecar(appPath: string, resourcesPath: string): string | null {
   const name = exeName()
-  const candidates = [
+  return firstExisting([
     join(resourcesPath, 'sidecar', name),
     join(appPath, '..', 'webview-app', 'target', 'release', name),
     join(appPath, '..', 'webview-app', 'target', 'debug', name),
-  ]
-  for (const c of candidates) {
-    if (existsSync(c)) return c
-  }
-  return null
+  ])
 }
 
 /** 组装命令行参数（对齐 sidecar 的 `--help`）。 */

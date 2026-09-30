@@ -50,7 +50,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { sanitizeDirName } from './config'
+import { sanitizeDirName, toStr } from './config'
 
 export const SETTINGS_FILE = 'settings.json'
 
@@ -138,10 +138,6 @@ function toBool(v: unknown, dflt: boolean): boolean {
     return s === 'true' || s === '1' || s === 'yes' || s === 'on'
   }
   return dflt
-}
-
-function toStr(v: unknown, dflt = ''): string {
-  return typeof v === 'string' ? v : v == null ? dflt : String(v)
 }
 
 /** 解析 hotkey。缺字段按 false / 空串补齐，非法类型不抛错。 */

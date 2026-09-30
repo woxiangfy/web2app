@@ -10,9 +10,10 @@
  *    不像 Tauri 需要显式写 `show_menu_on_left_click(false)`。但它依赖平台实现，
  *    所以点击断言仍然写进了探针 —— 这属于「错了也静默」的那类逻辑。
  */
-import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { Menu, Tray, nativeImage, type BrowserWindow } from 'electron'
+
+import { firstExisting } from './first-existing'
 
 export interface TrayActions {
   /** 左键单击：显隐主窗口 */
@@ -25,17 +26,13 @@ export interface TrayActions {
 
 /** 托盘图标定位。开发态与打包态各一处，都找不到时返回 null。 */
 export function locateTrayIcon(appPath: string, resourcesPath: string): string | null {
-  const candidates = [
+  return firstExisting([
     // 打包态：electron-builder 的 extraResources（见 electron-builder.yml）
     join(resourcesPath, 'icons', 'icon.png'),
     // 开发态：直接复用 Tauri 版的图标资源，不复制出第二份。
     // （appPath 是 electron-app/，其下没有 icons 目录，不要再加 appPath/icons 候选 —— 恒不命中）
     join(appPath, '..', 'webview-app', 'icons', 'icon.png'),
-  ]
-  for (const c of candidates) {
-    if (existsSync(c)) return c
-  }
-  return null
+  ])
 }
 
 let tray: Tray | null = null

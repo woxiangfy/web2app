@@ -290,29 +290,14 @@ async fn proxy_handler(
     let method = parts.method.clone();
     let mut rb = state.client.request(method.clone(), target.as_str());
 
-    // 透传请求头（去掉 hop-by-hop，并跳过我们会重新设置的 Host / Origin / X-Forwarded-* /
-    // Authorization / Cookie / Content-Length——
-    // Cookie 在循环外单独处理（要摘掉门禁 cookie）；
-    // Content-Length 由 reqwest 按实际收集到的 body 重新计算，避免与原始值冲突/重复）。
-    //
-    // ⚠️⚠️ `origin` 必须在**这里**跳过，不能靠「后面再设一次来覆盖」：
-    // `http::request::Builder::header()`（以及 reqwest 的同名方法）是 **HeaderMap::append**
-    // 而不是 insert —— 后面那次设置只会**追加**第二个 Origin，上游最终收到的是逗号拼接的
-    // `http://127.0.0.1:代理端口, http://127.0.0.1:上游端口`。这比不改写更糟：任何做 Origin
-    // 校验的后端（防跨站）都会直接拒连，表现是「页面能开、但 POST / 实时联动全挂」。
-    // 2026-09-16 由 Electron 侧的探针抓出来的，同一份代码 Tauri 版也中招。
+    // 透传请求头：逐跳头 + 代理受管头（Host / Origin / X-Forwarded-* / Authorization /
+    // Cookie / Content-Length）一律跳过 —— 完整清单与各头的跳过理由（含 Content-Length
+    // 由 reqwest 按流式 body 重算、Cookie 循环外单独回种）见 is_managed_request_header。
+    // ⚠️⚠️ Origin 必须在此跳过而非事后覆盖（append 语义会产生逗号拼接的双 Origin），
+    // 事故细节见 is_managed_request_header 的注释（2026-09-16 Electron 侧探针抓出，双壳同代码）。
     for (name, value) in &parts.headers {
         let name_str = name.as_str();
-        if is_hop_by_hop(name)
-            || name_str.eq_ignore_ascii_case("host")
-            || name_str.eq_ignore_ascii_case("origin")
-            || name_str.eq_ignore_ascii_case("authorization")
-            || name_str.eq_ignore_ascii_case("cookie")
-            || name_str.eq_ignore_ascii_case("x-forwarded-proto")
-            || name_str.eq_ignore_ascii_case("x-forwarded-host")
-            || name_str.eq_ignore_ascii_case("x-forwarded-for")
-            || name_str.eq_ignore_ascii_case("content-length")
-        {
+        if is_hop_by_hop(name) || is_managed_request_header(name_str, true) {
             continue;
         }
         rb = rb.header(name.clone(), value.clone());
@@ -477,23 +462,12 @@ async fn handle_websocket(
     // 必须原样转发给上游——tokio-tungstenite 的 connect_async 不会替我们补 Connection/Upgrade，
     // 缺了就会报 "Missing ... header connection"；Sec-WebSocket-Key 必须保留浏览器原始值，否则
     // 上游回的 Accept 与浏览器校验对不上（tungstenite 检测到 key 已存在时用 or_insert_with 保留）。
-    // 仅去掉我们自行重设的 host / origin / Authorization / X-Forwarded-*，以及真正的逐跳头（keep-alive 等）。
-    //
-    // ⚠️⚠️ `origin` 必须在这里跳过：下方那次 Origin 重写用的是 `builder.header(...)`，
-    // 而它是 **append** 而非 insert —— 不跳过就会向上游发出**两个** Origin
-    //（`http://127.0.0.1:代理端口, http://127.0.0.1:上游端口`），比不改写更糟：
-    // 做 Origin 校验的后端（WS 防跨站劫持）会直接拒连。这条由 Electron 侧探针实测抓到。
+    // 跳过集合 = 逐跳头 + 代理受管头（host / origin / Authorization / Cookie / X-Forwarded-*），
+    // 与 HTTP 请求路径共用 is_managed_request_header；WS 无 body 故 content-length 传 false。
+    // ⚠️⚠️ Origin 同样必须在循环里跳过（append 语义 → 双 Origin），详见该函数注释。
     for (name, value) in &headers {
         let name_str = name.as_str();
-        if is_hop_by_hop(name)
-            || name_str.eq_ignore_ascii_case("host")
-            || name_str.eq_ignore_ascii_case("origin")
-            || name_str.eq_ignore_ascii_case("authorization")
-            || name_str.eq_ignore_ascii_case("cookie")
-            || name_str.eq_ignore_ascii_case("x-forwarded-proto")
-            || name_str.eq_ignore_ascii_case("x-forwarded-host")
-            || name_str.eq_ignore_ascii_case("x-forwarded-for")
-        {
+        if is_hop_by_hop(name) || is_managed_request_header(name_str, false) {
             continue;
         }
         builder = builder.header(name.clone(), value.clone());
@@ -630,6 +604,32 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     )
 }
 
+/// 请求转发时由代理【统一接管】的端到端请求头：透传循环里必须跳过，由代理重设或单独处理
+/// （Host / Origin / X-Forwarded-* / Authorization 后面统一重写；Cookie 在循环外摘掉
+/// 门禁 cookie 后单独回种）。
+///
+/// 与 [`is_hop_by_hop`] 的分工：后者处理 HTTP 连接层的逐跳语义，本函数处理「代理改写」语义，
+/// 两者正交、不可合并。HTTP 请求路径与 WebSocket 握手路径共用这一份清单（单一真源），
+/// 唯一差异是 `content-length`：
+/// * HTTP 路径传 `true` —— reqwest 按实际收集到的流式 body 重新计算 Content-Length，
+///   透传原值会与之冲突/重复；
+/// * WS 握手路径传 `false` —— 握手没有 body，保留浏览器原始头集合。
+///
+/// ⚠️⚠️ `origin` 必须在**透传循环里**跳过，不能靠「后面再设一次来覆盖」：
+/// `http::request::Builder::header()`（reqwest 同名方法同理）是 **append** 而非 insert，
+/// 事后再设只会得到逗号拼接的两个 Origin（`http://127.0.0.1:代理端口, …:上游端口`），
+/// 做 Origin 校验的后端会直接拒连。2026-09-16 由 Electron 侧探针实测抓到，双壳同一份代码。
+fn is_managed_request_header(name: &str, include_content_length: bool) -> bool {
+    name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("origin")
+        || name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("cookie")
+        || name.eq_ignore_ascii_case("x-forwarded-proto")
+        || name.eq_ignore_ascii_case("x-forwarded-host")
+        || name.eq_ignore_ascii_case("x-forwarded-for")
+        || (include_content_length && name.eq_ignore_ascii_case("content-length"))
+}
+
 /// HTTP【响应路径】上应剥离的逐跳头：在 [`is_hop_by_hop`] 基础上再加 connection/upgrade。
 ///
 /// 请求侧刻意保留这两个（WS 升级请求 `Connection: Upgrade` + `Upgrade: websocket` 必须
@@ -714,6 +714,36 @@ mod tests {
         assert!(!is_hop_by_hop(&HeaderName::from_static("connection")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("upgrade")));
         assert!(!is_hop_by_hop(&HeaderName::from_static("authorization")));
+    }
+
+    #[test]
+    fn managed_request_headers_shared_set_with_content_length_gate() {
+        // 两条转发路径共用的受管头：大小写不敏感。
+        for n in [
+            "host",
+            "origin",
+            "authorization",
+            "cookie",
+            "x-forwarded-proto",
+            "x-forwarded-host",
+            "x-forwarded-for",
+        ] {
+            assert!(
+                is_managed_request_header(&n.to_ascii_uppercase(), true),
+                "{n} 在 HTTP 路径必须跳过"
+            );
+            assert!(
+                is_managed_request_header(n, false),
+                "{n} 在 WS 路径必须跳过"
+            );
+        }
+        // 唯一差异：Content-Length 仅 HTTP 路径跳过（body 由 reqwest 重算）；
+        // WS 握手无 body，必须保留浏览器的原始头集合。
+        assert!(is_managed_request_header("Content-Length", true));
+        assert!(!is_managed_request_header("Content-Length", false));
+        // 普通端到端头两条路径都不拦（交给原语逐跳判定）。
+        assert!(!is_managed_request_header("accept", true));
+        assert!(!is_managed_request_header("sec-websocket-key", false));
     }
 
     #[test]

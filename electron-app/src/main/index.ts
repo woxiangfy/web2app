@@ -7,7 +7,7 @@
  *   3. protocol.registerSchemesAsPrivileged —— 必须早于 app ready
  *   4. requestSingleInstanceLock() —— 单实例锁文件落在 userData 下，故在第 1 步之后
  */
-import { app, BrowserWindow, ipcMain, protocol } from 'electron'
+import { app, BrowserWindow, protocol } from 'electron'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -64,8 +64,12 @@ import {
   readSettingsHtml,
   registerSettingsIpc,
 } from './settings-window'
-import { MAX_TABS, TAB_BAR_HEIGHT, TabManager } from './tabs'
+import { MAX_TABS, TabManager } from './tabs'
+import { hideShellStartupError, showShellStartupError } from './shell-overlay'
 import { rawConsole, silenceConsole, startFileLogging, type FileLogHandle } from './startup-log'
+import { createSplashPage, SPLASH_BG } from './splash-page'
+import { runSmokeChecks } from './smoke'
+import { registerAppIpc } from './app-ipc'
 import {
   attachContextMenu,
   attachDevtools,
@@ -257,79 +261,11 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'shell', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ])
 
-const SPLASH_BG = '#f7f8fa' // = bootstrap::SPLASH_BG(0xf7,0xf8,0xfa)
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-/** 转成可安全嵌进 JS 字符串字面量的双引号串（含两侧引号），对齐 Rust 侧 `js_str`。 */
-function jsStr(s: string): string {
-  let out = '"'
-  for (const ch of s) {
-    switch (ch) {
-      case '\\': out += '\\\\'; break
-      case '"': out += '\\"'; break
-      case '\n': out += '\\n'; break
-      case '\r': out += '\\r'; break
-      case '\u2028': out += '\\u2028'; break
-      case '\u2029': out += '\\u2029'; break
-      case '<': out += '\\u003c'; break
-      default: out += ch
-    }
-  }
-  return out + '"'
-}
-
-const FALLBACK_SPLASH = `<!doctype html><meta charset="utf-8">
-<style>html,body{margin:0;height:100%;background:${SPLASH_BG}}
-.d{display:flex;height:100%;align-items:center;justify-content:center;
-font:14px/1.6 system-ui,sans-serif;color:#5f5e5a}</style><div class="d">加载中…</div>`
-
 /**
- * 启动页阶段的失败态：写进启动页 HTML 而不是走 IPC。
- *
- * 理由：启动页把加载层内联在**主世界**，而 preload 的 IPC 通道在**隔离世界**里
- * （`window.__web2appLoading` 读不到）。启动页是我们自己生成的 HTML，把失败态直接
- * 烤进去最简单也最可靠；加载层挂载完成后会自己把它取走（见 loading.js 的 applyPendingFail）。
- * 真实页面上的失败走另一条路（IPC → preload → 同世界的加载层）。
+ * 启动页渲染器（占位符替换 + 失败态烘焙），实现与契约见 `splash-page.ts`。
+ * 实例化必须晚于 readInject 定义；pendingFail 状态封在渲染器内部。
  */
-let pendingFail: { title: string; detail: string } | null = null
-
-/**
- * 渲染 splash.html 模板。
- *
- * ⚠️⚠️ 必须用 split/join 而不是 String.replace —— 注入的是 titlebar.js / loading.js
- * 全文，其中含 `$&`、`$'` 这类序列，在 replace 的替换串里是特殊模式，会把注入内容
- * 改坏（这类 bug 表现为「脚本里少了一段、页面报奇怪的语法错」）。Rust 侧同理。
- */
-function renderSplash(): string {
-  const tpl = readInject('splash.html')
-  if (!tpl) {
-    console.warn('[web2app] 未找到 splash.html，使用内置占位启动页')
-    return FALLBACK_SPLASH
-  }
-  let html = tpl
-    .split('__WEB2APP_TITLE__').join(escapeHtml(cfg.title))
-    .split('__WEB2APP_TITLEBAR_JS__').join(readInject('titlebar.js') ?? '')
-    .split('__WEB2APP_LOADING_JS__').join(readInject('loading.js') ?? '')
-
-  if (pendingFail) {
-    // ⚠️⚠️ 这里同样**必须**用 split/join（与 renderSplash 顶部的占位符替换同一条理由）：
-    //    detail 里含失败 URL（配置里的地址，或页面重定向过来的地址），其中完全可能出现
-    //    `$&` / `` $` `` / `$'`；作为 `String.replace` 的**替换串**时它们是特殊模式，
-    //    会把命中的 `</body>` 前后内容整段塞进这个 JS 字符串字面量 —— 启动页脚本直接语法错，
-    //    用户看到的是「加载失败页什么都不显示」，比没有失败提示还糟。
-    const failScript =
-      `<script>try{window.__web2appPendingFail={title:${jsStr(pendingFail.title)},detail:${jsStr(pendingFail.detail)}};}catch(e){}</script>\n</body>`
-    html = html.split('</body>').join(failScript)
-  }
-  return html
-}
+const splashPage = createSplashPage({ title: cfg.title, readInject })
 
 // ---------- 4. 单实例 ----------
 const gotLock = app.requestSingleInstanceLock()
@@ -471,7 +407,7 @@ async function bootstrap(): Promise<void> {
 
   if (!r.ok) {
     console.error(`[web2app] ${r.title}：${r.detail}`)
-    pendingFail = { title: r.title, detail: r.detail }
+    splashPage.setPendingFail({ title: r.title, detail: r.detail })
     // 重新灌一遍启动页（带着失败态），用户至少能看到发生了什么并点重试
     navStarted = false
     void win.loadURL('splash://localhost/').catch(() => {})
@@ -499,200 +435,10 @@ function sendOverlay(cmd: { kind: 'fail'; title: string; detail: string } | { ki
   win.webContents.send('web2app:overlay', cmd)
 }
 
-// ---------- 6. 窗口按钮 IPC（titlebar.js 的对接面） ----------
-function registerWindowIpc(): void {
-  const winOf = (e: Electron.IpcMainInvokeEvent) => BrowserWindow.fromWebContents(e.sender)
-
-  // ⚠️⚠️ 多页签模式下的安全硬化：内容视图（子 WebContentsView）的 webContents 经
-  //   `BrowserWindow.fromWebContents()` **也会解析到宿主窗口**（两者 getType() 都是 'window'，
-  //   实测见设计文档 §3.5-2）。所以仅靠 fromWebContents 无法区分「壳发的」还是「内容页发的」。
-  //   窗口按钮这类特权命令必须校验 sender.id === 壳 webContents.id，不匹配**记日志并拒绝**
-  //   （绝不允许静默失效——那正是本项目最忌的失败形态）。
-  //
-  //   单窗口模式下壳 webContents == 主窗口 webContents，这条校验天然通过，行为零变化。
-  const assertPrivileged = (e: Electron.IpcMainInvokeEvent): void => {
-    if (!TABS_MODE) return
-    const host = mainWindow
-    if (!host || host.isDestroyed()) throw new Error('宿主窗口不存在')
-    if (e.sender.id !== host.webContents.id) {
-      console.warn(
-        `[web2app] 拒绝内容视图发起的窗口命令（sender.id=${e.sender.id} ≠ 壳=${host.webContents.id}）`
-      )
-      throw new Error('拒绝：仅壳页面可操作窗口')
-    }
-  }
-
-  // ⚠️ 三个都用 handle（而不是 on）：调用失败要能变成 Promise rejection 传到页面，注入脚本
-  // 会把它打到控制台。用 on 的话「按钮点了没反应」在页面侧完全无声（Tauri 版栽过这个坑）。
-  ipcMain.handle('win:minimize', (e) => {
-    assertPrivileged(e)
-    winOf(e)?.minimize()
-  })
-  ipcMain.handle('win:toggle-maximize', (e) => {
-    assertPrivileged(e)
-    const w = winOf(e)
-    if (!w) throw new Error('找不到窗口')
-    if (w.isMaximized()) w.unmaximize()
-    else w.maximize()
-    return w.isMaximized()
-  })
-  ipcMain.handle('win:close', (e) => {
-    assertPrivileged(e)
-    winOf(e)?.close()
-  })
-  // 标题栏「设置」按钮（最小化左侧）—— 与托盘菜单 / Shift+F1 共用 openSettings()。
-  ipcMain.handle('win:open-settings', (e) => {
-    assertPrivileged(e)
-    openSettings()
-  })
-}
-
-/**
- * 壳页面（shell.html）的 IPC 对接面 —— 命令名与 Tauri 侧一致（get_tabs / switch_tab /
- * close_tab / minimize_host / close_host / history_nav），由 shell-preload 的
- * `__TAURI_INTERNALS__.invoke` 垫片以 `tabs:` 前缀转发到这里。
- *
- * ⚠️ 全部校验 sender === 壳 webContents（内容视图发同类消息必须被拒，留日志）。关闭宿主
- *   走的是与托盘/退出统一的语义（closeTab 里 close 掉最后一个页签会触发 host.close()，
- *   host 的 close 处理器负责「隐藏到托盘 or 真正退出」）。
- */
-function registerTabsIpc(): void {
-  const host = () => {
-    const w = mainWindow
-    if (!w || w.isDestroyed()) throw new Error('宿主窗口不存在')
-    return w
-  }
-  const assertShell = (e: Electron.IpcMainInvokeEvent): BrowserWindow => {
-    const w = host()
-    if (e.sender.id !== w.webContents.id) {
-      console.warn(`[web2app] 拒绝非壳页签命令（sender.id=${e.sender.id} ≠ 壳=${w.webContents.id}）`)
-      throw new Error('拒绝：仅壳页面可操作页签')
-    }
-    return w
-  }
-  const mgr = () => {
-    if (!tabManager) throw new Error('多页签未启用')
-    return tabManager
-  }
-
-  ipcMain.handle('tabs:get_tabs', (e) => {
-    assertShell(e)
-    // 返回元组数组 [label,title,active]，对齐 Tauri get_tabs 的 Vec<(String,String,bool)>
-    return mgr().listForIpc()
-  })
-  ipcMain.handle('tabs:switch_tab', (e, args: { label?: unknown } | undefined) => {
-    assertShell(e)
-    const label = typeof args?.label === 'string' ? args.label : ''
-    if (!label) throw new Error('参数错误：缺少 label')
-    mgr().activate(label)
-    return null
-  })
-  ipcMain.handle('tabs:close_tab', (e, args: { label?: unknown } | undefined) => {
-    assertShell(e)
-    const label = typeof args?.label === 'string' ? args.label : ''
-    if (!label) throw new Error('参数错误：缺少 label')
-    mgr().closeTab(label)
-    return null
-  })
-  ipcMain.handle('tabs:minimize_host', (e) => {
-    assertShell(e).minimize()
-    return null
-  })
-  ipcMain.handle('tabs:close_host', (e) => {
-    assertShell(e).close()
-    return null
-  })
-  // 标签栏的「设置」按钮：与单窗口模式的最小化左侧那个按钮同一个入口，
-  // 命令名 `open_settings` 与 shell.html / shell-preload 白名单 / 这里三处逐字一致。
-  ipcMain.handle('tabs:open_settings', (e) => {
-    assertShell(e)
-    openSettings()
-    return null
-  })
-  ipcMain.handle('tabs:history_nav', (e, args: { direction?: unknown } | undefined) => {
-    assertShell(e)
-    const dir = args?.direction
-    const active = mgr().active
-    if (!active) return null
-    const nav = active.view.webContents.navigationHistory
-    // webContents.goBack() 在 Electron 44 已 Deprecated，用 navigationHistory.goBack()
-    if (dir === 'back') nav.goBack()
-    else if (dir === 'forward') nav.goForward()
-    return null
-  })
-  // 壳页面失败遮罩上的「重试」按钮（仅主进程在首签失败时注入该遮罩，页面自身不调用）。
-  // 复用启动期同一条 spawnFirstTab 路径：成功撤遮罩、失败重新挂遮罩。
-  ipcMain.handle('tabs:retry_first_tab', (e) => {
-    assertShell(e)
-    void spawnFirstTab()
-    return null
-  })
-}
-
-/**
- * 同步送注入脚本源码给 preload（仅顶层框架；2026-09 实测 titlebar.js 60,236 字节 +
- * loading.js 22,653 字节 ≈ 81KB，每次启动一次同步 IPC，开销可忽略）。
- */
-function registerBootstrapIpc(): void {
-  ipcMain.on('web2app:bootstrap', (e) => {
-    e.returnValue = {
-      chromeH: CHROME_H,
-      shell: 'electron' as const,
-      extra: cfg.extra,
-      titlebarJs: readInject('titlebar.js') ?? '',
-      loadingJs: readInject('loading.js') ?? '',
-    }
-  })
-}
-
-/**
- * Basic 鉴权：直连模式下导航地址里的 userinfo 已被剥掉，凭据在这里回填。
- *
- * Tauri 版是 WebView2 原生事件 + 本地代理注入 Authorization 两条路；Electron 侧
- * Chromium 对应的是 `login` 事件。⚠️ 地址栏上不出现密码这条约束两端一致。
- */
-function registerAuthHandler(): void {
-  app.on('login', (event, _wc, _details, authInfo, callback) => {
-    if (authInfo.isProxy) {
-      // 外部代理自带凭据时（http://user:pass@proxy:8080）用它
-      const from = cfg.proxy_http || cfg.proxy_https
-      try {
-        const u = new URL(from)
-        if (u.username) {
-          event.preventDefault()
-          callback(decodeURIComponent(u.username), decodeURIComponent(u.password))
-          return
-        }
-      } catch {
-        /* 配的不是合法 URL，落到下面的日志分支 */
-      }
-      console.warn('[web2app] 代理要求鉴权，但配置里没有代理凭据，已取消')
-      return
-    }
-    if (target?.user) {
-      // 只向【入口主机】回填凭据。页面里任何第三方子资源（或被注入内容诱导出的外域
-      // 401）都可能触发 login 事件；不校验主机就等于把入口站点的账号密码盲发给任意域。
-      // authInfo.host 含非默认端口（与 URL.host 同形态），直接比对即可。
-      let entryHost: string | null = null
-      try {
-        entryHost = new URL(target.url).host
-      } catch {
-        entryHost = null
-      }
-      if (entryHost && authInfo.host === entryHost) {
-        event.preventDefault()
-        callback(target.user, target.pass)
-        return
-      }
-      console.warn(
-        `[web2app] 鉴权主机 ${authInfo.host} 与入口主机 ${entryHost ?? '(未知)'} 不一致，拒绝回填凭据`
-      )
-      return
-    }
-    // 不留 preventDefault：交给 Chromium 默认行为（取消），并留下可排查的日志
-    console.warn(`[web2app] 站点要求鉴权，但配置里没有凭据：${authInfo.host}`)
-  })
-}
+// ---------- 6. 窗口按钮 IPC / 新窗口拦截 ----------
+// 四组 IPC（win:* / tabs:* / web2app:bootstrap）与 app 'login' 鉴权注册已抽到
+// app-ipc.ts；whenReady 后以 registerAppIpc(deps) 一次性注入（状态经 getter 读取）。
+// 下面只留主窗口自身的 setWindowOpenHandler（建窗时挂载）。
 
 /**
  * 新窗口请求：与 Tauri 版**逐条对齐**（webview_hooks.rs 的单窗口模式分支）。
@@ -846,7 +592,12 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
         //   只解析、不导航壳页面；导航目标是本内容视图。
         //   url 有值时（window.open 场景）直接用；否则用默认 target（首屏）。
         const t = url ? { url, user: '', pass: '', how: 'direct' as const } : await resolveInitialTarget()
-        // 挂窗口打开处理器：内容页 window.open → 新建页签
+        // 挂窗口打开处理器：内容页 window.open → 新建页签。
+        // ⚠️ 与单窗口版（registerWindowOpenHandler）看着像，实则两处刻意不同、勿强行合并：
+        //   1) 动作是「新建页签」（走 spawnTab → resolveTarget 的代理/DNS 完整链路），不是原地导航；
+        //   2) 不做 new URL 预校验 —— spawnTab 内部解析目标时自会失败（失败进页签标题 + 遮罩），
+        //      单窗口版那道校验是为了区分「原地导航失败交给 did-fail-load」才需要的。
+        //   两边共享的只有 about: 拒绝这一条（1 行表达式），抽 helper 反而要参数化行为分叉。
         view.webContents.setWindowOpenHandler(({ url: opened }) => {
           console.warn(`[web2app] 页签模式拦截到新窗口请求：${opened}`)
           if (!opened || opened === 'about:blank' || opened.startsWith('about:')) {
@@ -914,73 +665,6 @@ function openSettings(): void {
     preloadPath: settingsPreloadPath(),
     readHtml: readSettingsPageHtml,
   })
-}
-
-/**
- * 多页签模式下首个页签创建失败时，向壳页面注入的**可见**失败遮罩 id。
- *
- * 为什么必须有它：内容视图不注入 loading.js（见 createWindow 的 onSpawn 注释），
- * 首个页签 spawn 失败（sidecar 缺失 / DNS 解析失败 / 代理启动失败）时视图已被
- * spawnTab 回收，壳上只剩标签栏下面一片空白；而默认 `debug=false` 时 console 三路
- * 又被静默 —— 用户侧零证据、零入口，正是本项目最忌的失败形态（单窗口模式有
- * splash 的 pendingFail + 重试按钮，这里必须有等价物）。
- */
-const SHELL_FAIL_ID = '__w2a_shell_fail'
-
-/** 在壳页面注入失败遮罩（错误文案 + 「重试」按钮）。幂等：重复调用先撤旧遮罩。 */
-function showShellStartupError(win: BrowserWindow, detail: string): void {
-  if (win.isDestroyed()) return
-  // 文案经 JSON.stringify 嵌入（天然 JS 字符串转义，杜绝引号/换行注入断脚本）；
-  // 按钮经 shell-preload 白名单里的 retry_first_tab 重试，主进程侧还有 assertShell 校验。
-  // 遮罩的 top 与标签栏高度同源（TAB_BAR_HEIGHT 插值）：写死 38 会在改栏高时盖住标签栏。
-  const js = `(function () {
-    var OLD = document.getElementById(${JSON.stringify(SHELL_FAIL_ID)});
-    if (OLD) OLD.parentNode.removeChild(OLD);
-    var box = document.createElement('div');
-    box.id = ${JSON.stringify(SHELL_FAIL_ID)};
-    box.style.cssText =
-      'position:fixed;top:${TAB_BAR_HEIGHT}px;left:0;right:0;bottom:0;display:flex;flex-direction:column;' +
-      'gap:14px;align-items:center;justify-content:center;padding:24px;' +
-      'background:#f7f8fa;color:#1f2530;font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;' +
-      'z-index:2147483646;user-select:none';
-    var msg = document.createElement('div');
-    msg.style.cssText = 'max-width:560px;text-align:center;word-break:break-word';
-    msg.textContent = ${JSON.stringify(detail)};
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = '重试';
-    btn.style.cssText =
-      'padding:7px 22px;border:1px solid #c3cbd8;border-radius:6px;background:#fff;' +
-      'color:#1f2530;font:14px "Segoe UI","Microsoft YaHei",sans-serif;cursor:pointer';
-    btn.onclick = function () {
-      btn.disabled = true;
-      btn.textContent = '重试中…';
-      window.__TAURI_INTERNALS__.invoke('retry_first_tab').catch(function (e) {
-        btn.disabled = false;
-        btn.textContent = '重试';
-        alert('重试失败：' + (e && e.message ? e.message : String(e)));
-      });
-    };
-    box.appendChild(msg);
-    box.appendChild(btn);
-    document.body.appendChild(box);
-  })();`
-  win.webContents.executeJavaScript(js, true).catch(() => {
-    /* 壳页面尚未就绪：首签失败只可能发生在壳加载完成之后，此处静默即可 */
-  })
-}
-
-/** 撤掉壳页面的失败遮罩（重试成功 / 正常启动路径）。幂等。 */
-function hideShellStartupError(win: BrowserWindow): void {
-  if (win.isDestroyed()) return
-  win.webContents
-    .executeJavaScript(
-      `try{var e=document.getElementById(${JSON.stringify(SHELL_FAIL_ID)});if(e)e.parentNode.removeChild(e);true}catch(e){false}`,
-      true,
-    )
-    .catch(() => {
-      /* 同上 */
-    })
 }
 
 /**
@@ -1147,7 +831,7 @@ if (!gotLock) {
       const path = new URL(req.url).pathname.replace(/\/+$/, '')
       if (path === '/retry') {
         console.log('[web2app] 启动页请求重试，重新走一遍启动流程')
-        pendingFail = null
+        splashPage.setPendingFail(null)
         // 先把手上的响应交出去，再触发导航，避免同一次请求里嵌套导航
         setImmediate(() => {
           navStarted = false
@@ -1155,7 +839,7 @@ if (!gotLock) {
           void bootstrap()
         })
       }
-      return new Response(renderSplash(), {
+      return new Response(splashPage.render(), {
         headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
       })
     })
@@ -1195,10 +879,17 @@ if (!gotLock) {
       console.log(`[web2app] 探针模式：夹具站点 ${probeBase}`)
     }
 
-    registerBootstrapIpc()
-    registerWindowIpc()
-    registerTabsIpc()
-    registerAuthHandler()
+    registerAppIpc({
+      tabsMode: TABS_MODE,
+      getMainWindow: () => mainWindow,
+      openSettings,
+      getTabManager: () => tabManager,
+      spawnFirstTab: () => void spawnFirstTab(),
+      bootstrap: { chromeH: CHROME_H, extra: cfg.extra, readInject },
+      getTarget: () => target,
+      proxyHttp: cfg.proxy_http,
+      proxyHttps: cfg.proxy_https,
+    })
     registerSettingsIpc({
       getSettings: () => runtimeSettings,
       saveSettings: (next) => applySettings(next, { persist: true }),
@@ -1317,82 +1008,17 @@ if (!gotLock) {
     }
 
     // 冒烟自检：WEB2APP_SMOKE=1 时打完启动信息就退出，不需要人眼看着窗口。
-    // 存在的意义：绿色版路径/配置解析/模板替换都是「错了也静默」的逻辑，
-    // 有了这个开关才能在 CI 里无人值守地验证它们（Tauri 版当年为此专门编过探针 exe）。
+    // 检查项与退出码规则见 smoke.ts（探针之外的第二条 CI 取证通道）。
     if (SMOKE) {
-      // 顺手断言启动页模板替换是否完整 —— 三个占位符漏一个，
-      // 表现就是「标题栏或加载动画不出现」这种要花半天定位的故障。
-      const html = renderSplash()
-      const leftover = ['__WEB2APP_TITLE__', '__WEB2APP_TITLEBAR_JS__', '__WEB2APP_LOADING_JS__'].filter(
-        (p) => html.includes(p)
-      )
-      console.log(
-        `[web2app] 启动页模板：${html.length} 字符；未替换占位符：${leftover.length ? leftover.join(', ') : '无'}`
-      )
-
-      // M3：设置链路的关键资源与契约。这三条都是「缺了也静默」的东西：
-      //   · settings.html 找不到 → 设置窗只剩一个兜底页，用户看不出异常但功能少了；
-      //   · 命令名对不上 → preload 垫片会拒绝调用，设置页的「保存」点了没反应；
-      //   · 托盘图标缺失 → 勾了「启用托盘」也没图标。
-      // ⚠️ 清缓存那条命令（clear_web_data）同样列进来：设置页点了没反应与上面同源 ——
-      //    页面里的字面量、垫片白名单、IPC 注册名三处必须逐字一致。
-      const page = readSettingsPageHtml() ?? ''
-      const missingCmds = [
-        'get_settings',
-        'save_settings',
-        'close_settings_window',
-        'clear_web_data',
-      ].filter((c) => !page.includes(c))
-      console.log(
-        `[web2app] 设置页资源：${page ? `${page.length} 字符` : '未找到！'}` +
-          `；命令契约：${missingCmds.length ? '缺少 ' + missingCmds.join(', ') : '齐全'}`
-      )
-      const icon = locateTrayIcon(app.getAppPath(), process.resourcesPath)
-      console.log(`[web2app] 托盘图标：${icon ?? '未找到'}`)
-
-      // 窗口标题必须等于配置里的 title。
-      // ⚠️ 这条断言是 2026-09-17 加的：createWindow 曾经漏传 `title`，
-      //    而 page-title-updated 被拦，结果是标题永远停在 Electron 默认名
-      //    （"web2app-electron"）—— 配置里的 title 静默失效，只有人眼看任务栏才发现。
-      const actualTitle = mainWindow.getTitle()
-      const titleOk = actualTitle === cfg.title
-      console.log(
-        `[web2app] 窗口标题：'${actualTitle}'（期望 '${cfg.title}'）${titleOk ? '' : '  ✗ 不一致！'}`
-      )
-
-      // 文件日志（M6）必须**真的写出来了**，且已包含 logStartup() 的内容。
-      // ⚠️ 这条和上面三条一样属于「错了也静默」：文件没写出来，用户下次报
-      //    「双击没反应」时我们手里就什么证据都没有。
-      //    注意断言的是「内容已落盘」，不只是「文件存在」—— 只判存在的话，
-      //    一个空文件（比如包装没装上、只有 header）也会让它通过。
-      // ⚠️ 日志现在是 debug 门控的（默认关）⇒ 冒烟模式**强制** DEBUG=true（见上方 DEBUG
-      //    的定义），否则这条断言会在默认配置下必然失败 —— 那不是发现缺陷，是判据错了。
-      let logOk = false
-      let logDetail: string
-      let logPath = '(未启用)'
-      if (!fileLog) {
-        logDetail = '未启用（冒烟模式本应强制打开 debug，出现即 bug）'
-      } else {
-        logPath = fileLog.path
-        if (!fileLog.ok) {
-          logDetail = `不可写（${fileLog.error ?? '未知原因'}）`
-        } else {
-          try {
-            const text = readFileSync(fileLog.path, 'utf8')
-            logOk = text.includes('[web2app] 启动信息')
-            logDetail = `${text.length} 字符`
-          } catch (e) {
-            logDetail = `读取失败：${(e as Error).message}`
-          }
-        }
-      }
-      console.log(
-        `[web2app] 日志文件：${logPath}（${logDetail}）${logOk ? '' : '  ✗ 未包含启动信息！'}`
-      )
-
+      const bad = runSmokeChecks({
+        title: cfg.title,
+        actualTitle: mainWindow.getTitle(),
+        renderSplash: () => splashPage.render(),
+        readSettingsPage: readSettingsPageHtml,
+        trayIconPath: () => locateTrayIcon(app.getAppPath(), process.resourcesPath),
+        fileLog,
+      })
       console.log('[web2app] WEB2APP_SMOKE=1，自检完成，退出')
-      const bad =
-        leftover.length > 0 || !page || missingCmds.length > 0 || !icon || !titleOk || !logOk
       app.exit(bad ? 1 : 0)
     }
   }).catch((e: unknown) => {

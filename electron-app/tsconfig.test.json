@@ -1,0 +1,20 @@
+{
+  // 仅用于类型检查 test/（`pnpm run typecheck` 的第二步）。
+  //
+  // 为什么与主 tsconfig 分开：主配置 rootDir=src、outDir=out，`pnpm run build` 会真的
+  // 输出 JS；把 test/ 纳进主配置会让 out/ 里多出测试文件。这里独立一份、noEmit，
+  // 只做「单测源码本身的类型错误也能在 typecheck 阶段被拦住」——
+  // node --test 靠 Node 运行时类型擦除直接执行 .ts，运行通过不代表类型正确。
+  //
+  // ⚠️ include 必须同时列出 src：测试文件以 '../src/main/xxx.ts' 相对导入源码，
+  //    缺了 src 会变成「找不到模块 / 隐式 any」的假红。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    // 测试以 '../src/main/x.ts' 带扩展名导入（node --test 直接跑 TS 的要求）；
+    // 该选项只允许在 noEmit 下开启，与本配置用途一致，切勿搬进 build 用的主 tsconfig。
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

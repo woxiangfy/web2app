@@ -151,7 +151,13 @@ export function mustBool(v: unknown, key: string, dflt: boolean): boolean {
   )
 }
 
-function toStr(v: unknown, dflt = ''): string {
+/**
+ * 字符串字段宽容收敛：字符串原样；null/undefined 取默认值；其它类型 String() 转换。
+ *
+ * 这是 config.json / settings.json 解析共用的唯一实现（settings.ts 此前有一份逐字
+ * 相同的私有拷贝，2026-10-01 合并）—— 两壳配置解析的「非字符串怎么收敛」必须同规则。
+ */
+export function toStr(v: unknown, dflt = ''): string {
   return typeof v === 'string' ? v : v == null ? dflt : String(v)
 }
 

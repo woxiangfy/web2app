@@ -18,7 +18,7 @@
  *    `frame:false` 下 Chromium 才会把 drag 区当标题栏处理）。
  *    窗口本身居中显示（`center()`），底色取与页面底衬同一个浅灰，避免出现白边。
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   app,
@@ -28,6 +28,7 @@ import {
   type WebContents,
 } from 'electron'
 
+import { firstExisting } from './first-existing'
 import type { Settings } from './settings'
 
 export const SETTINGS_URL = 'settings://localhost/'
@@ -49,13 +50,11 @@ const SETTINGS_BG = '#eceef1'
  *    「存在即打包副本」判，开发态会误读 stage 副本、失去单一真源（与 injectDir 同理）。
  */
 export function locateSettingsHtml(appPath: string): string | null {
-  const candidates = app.isPackaged
-    ? [join(appPath, 'out', 'inject', 'settings.html')]
-    : [join(appPath, '..', 'webview-app', 'dist', 'settings.html'), join(appPath, 'dist', 'settings.html')]
-  for (const c of candidates) {
-    if (existsSync(c)) return c
-  }
-  return null
+  return firstExisting(
+    app.isPackaged
+      ? [join(appPath, 'out', 'inject', 'settings.html')]
+      : [join(appPath, '..', 'webview-app', 'dist', 'settings.html'), join(appPath, 'dist', 'settings.html')],
+  )
 }
 
 export function readSettingsHtml(appPath: string): string | null {
