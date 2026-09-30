@@ -5,7 +5,7 @@
 本项目是 **web2app —— 把指定 Web 站点封装为桌面应用的「网页转桌面」壳**，采用双壳并行：
 
 - `webview-app/`：Rust + Tauri 2 跨平台壳（Windows 为主战场，Android 交叉编译验证）；
-- `electron-app/`：Electron + TypeScript 实现的 Windows 免安装绿色版壳（**M0–M7 全部交付**：M4 页面行为——下载接管 / 右键菜单 / F12，与 M7 CI 流水线于 2026-09-24 补齐）。
+- `electron-app/`：Electron + TypeScript 实现的 Windows 免安装绿色版壳。
 
 两个壳共享同一份前端真源与配置语义，对外表现为：自绘标题栏的独立窗口、托盘最小化、全局快捷键、多页签、下载接管、窗口几何持久化与设置页；入口地址由 DNS TXT + Ed25519 签名 / AES-256-GCM 解密下发，并支持本地反向代理统一注入鉴权。
 
