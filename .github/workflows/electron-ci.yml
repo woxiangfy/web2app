@@ -1,14 +1,15 @@
-name: CI（Electron 绿色版）
+name: CI（Electron）
 
 # ---------------------------------------------------------------------------
-# Electron 绿色版的自动化流水线（M7）。
+# Electron 桌面版（绿色版 zip/portable + 安装版 NSIS）的自动化流水线（M7）。
 #
 # 与既有几条 workflow 的分工：
 #   - `ci.yml` —— **只服务 Tauri 版**（`webview-app/`）。它顶部的
 #     `defaults.run.working-directory: webview-app` 决定了它天然不覆盖本目录，
 #     所以 Electron 侧必须另开一个文件，而不是往 `ci.yml` 里加作业；
-#   - `electron-build-custom.yml` —— **手动**打包（贴一份配置 JSON → 出 zip / portable）。
-#     本文件是**自动**的：push / PR 即跑 lint 与端到端探针，主分支另产出包。
+#   - `electron-build-custom.yml` —— **手动**打包（贴一份配置 JSON → 出 zip / portable / NSIS 安装包）。
+#     本文件同样只**手动触发**（`workflow_dispatch`）：跑 lint 与端到端探针，
+#     触发时把 `package` 开关打开（默认开）则另产出包。
 #     两者共用同一个共享解析器与同一份脚本，不重复实现。
 #
 # ⚠️ 三个只在 CI 上才现形的坑（都写进注释，改前先读）：
@@ -17,7 +18,7 @@ name: CI（Electron 绿色版）
 #      故 install 一律显式带 `--registry=https://registry.npmjs.org` 覆盖它。
 #      ⚠️ 别再去设 `ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR`：
 #      electron 的 install.js 在 CI 上直连 GitHub Releases 是快的，指镜像才是慢的那条路。
-#   2. **`config.json` 不在仓库里**（被 `electron-app/.gitignore` 忽略，它随绿色版分发）。
+#   2. **`config.json` 不在仓库里**（被 `electron-app/.gitignore` 忽略，它随绿色版 / 安装版产物分发）。
 #      故 CI 是**没有** config.json 的 —— 这不是缺陷，而是本流水线刻意验证的场景：
 #      「fresh clone 直接能跑」。`config.ts` 找不到文件时回落 `DEFAULTS`
 #      （见 `src/main/config.ts:336`），而探针**自己起 127.0.0.1 随机端口的夹具站点**
@@ -32,25 +33,10 @@ name: CI（Electron 绿色版）
 #   当前 35/35（数量随用例增长，失败信息以 pnpm run unit 实际输出为准）。
 # ---------------------------------------------------------------------------
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'electron-app/**'
-      # 共享单一真源：改注入脚本 / sidecar 会影响本壳，必须一起验
-      - 'webview-app/src/**'
-      - 'webview-app/crates/**'
-      - '.github/workflows/electron-ci.yml'
-  pull_request:
-    branches: [main, master]
-    paths:
-      - 'electron-app/**'
-      - 'webview-app/src/**'
-      - 'webview-app/crates/**'
-      - '.github/workflows/electron-ci.yml'
   workflow_dispatch:
     inputs:
       package:
-        description: '同时出包（zip / portable）并上传产物'
+        description: '出包并上传产物（zip + portable exe + NSIS 安装包）。关掉则只跑 lint / 探针 / 冒烟'
         required: false
         default: true
         type: boolean
@@ -147,8 +133,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 3) 出包并上传产物
-  #    只在**非 PR** 时跑：PR 上出包既慢又没人下载，上传的还只是一个默认配置的应用。
-  #    `workflow_dispatch` 时由 `package` 开关控制（默认开）。
+  #    只在手动触发且 `package` 开关打开（默认开）时跑：出包慢，上传的还只是一个
+  #    默认配置的应用，只想验证 lint / 探针时不必每次都打。
   #
   #    ⚠️ 出包用的是**仓库默认配置**（没有 config.json ⇒ `DEFAULTS`），
   #       产物只用于验证「打包链路活着」，**不是**给终端用户的发行包 ——
@@ -158,7 +144,7 @@ jobs:
     name: Package (Windows)
     runs-on: windows-latest
     needs: [lint, e2e]
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.package) }}
+    if: ${{ inputs.package }}
     steps:
       - uses: actions/checkout@v7
 
@@ -181,10 +167,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
 
-      - name: 出包（zip + portable）
-        # `dist` = sidecar → build → stage → electron-builder。
+      - name: 出包（zip + portable 绿色版，NSIS 安装版）
+        # `dist` = sidecar → build → stage → electron-builder --win zip portable。
         # ⚠️ `stage` 会校验三个布尔字段的真 bool 类型 —— 配置写错在这里失败，而不是等用户双击。
-        run: pnpm run dist
+        #
+        # ⚠️ NSIS 必须是**独立的第二次构建**（与 electron-build-custom.yml 同一条纪律）：
+        #    `-c.extraMetadata.distribution=nsis` 会合并进本次构建 app.asar 内的 package.json，
+        #    运行时据此强制使用系统默认数据目录 %APPDATA%（见 src/main/distribution.ts）。
+        #    若与绿色版同次构建，zip / portable 会被一起误标成安装版 → 绿色版数据目录策略失效。
+        #    out/ 与 sidecar 在 `dist` 里已就绪，这里只重新封一次包，不重复编译。
+        #    ⚠️ 不能图省事用 `pnpm run dist:installer`：那个脚本把输出重定向到 ../tests/pack
+        #       （供本地安装测试用），产物不会落在下面 upload 的 release/ 目录。
+        run: |
+          pnpm run dist
+          pnpm exec electron-builder --win nsis -c.extraMetadata.distribution=nsis
 
       - name: 校验 config.json 与注入资源已进 app.asar
         # 防的是**静默失败**：配置或注入资源（titlebar.js / loading.js / shell.html /
@@ -205,4 +201,11 @@ jobs:
         with:
           name: web2app-electron-win-x64-portable
           path: electron-app/release/*-portable.exe
+          if-no-files-found: error
+
+      - name: Upload 安装版（NSIS setup exe）
+        uses: actions/upload-artifact@v7
+        with:
+          name: web2app-electron-win-x64-setup
+          path: electron-app/release/*-setup.exe
           if-no-files-found: error
