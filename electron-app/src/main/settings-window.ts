@@ -16,7 +16,7 @@
  *    用户要求的版式是「没有顶部的窗体、面板居中、内容多可滚动」—— 标题与关闭按钮由
  *    `dist/settings.html` 自绘在面板头部（`-webkit-app-region:drag` 负责拖动，
  *    `frame:false` 下 Chromium 才会把 drag 区当标题栏处理）。
- *    窗口本身居中显示（`center()`），底色取与页面底衬同一个浅灰，避免出现白边。
+ * 窗口本身居中显示（`center()`），底色与设置页面板同色（白，见 SETTINGS_BG）。
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -37,8 +37,13 @@ export const SETTINGS_URL = 'settings://localhost/'
 const SETTINGS_SIZE = { width: 620, height: 600 }
 /** 设置窗最小尺寸（与 Tauri 版 `min_inner_size(460, 400)` 一致）。 */
 const SETTINGS_MIN_SIZE = { width: 460, height: 400 }
-/** 窗口底色 = 设置页的底衬（`--backdrop` 浅色值），无边框窗四周露出的那一圈就是它。 */
-const SETTINGS_BG = '#eceef1'
+/**
+ * 窗口底色 = 设置页面板色 `--surface`（白）。
+ * 2026-09-23 设置页改版后面板铺满整窗、无底衬，旧值 `#eceef1`（当年的 --backdrop
+ * 浅灰）已失效：页面正常铺满时看不见它，但无边框窗在 ready-to-show 前 / 缩放瞬间
+ * 会在顶边露出一条灰边（2026-10-01 使用者截图里顶部那条灰带的来源之一）。
+ */
+const SETTINGS_BG = '#ffffff'
 
 /**
  * 定位设置页 HTML。

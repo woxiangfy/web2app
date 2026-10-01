@@ -769,6 +769,98 @@ function moveFile(src, dest) {
   rmSync(src, { force: true })
 }
 
+/**
+ * 把单张 PNG 封进 Windows ICO（单帧）。**零第三方依赖**，只写 ICO 容器头，图像体原样放 PNG。
+ *
+ * 为什么必须在本地做：electron-builder 26 收到 `win.icon=*.png` 时，要用它**运行时从
+ * GitHub releases 下载**的 icons-bundle 工具集把 PNG 转成 ICO；直接给 `.ico` 则零下载。
+ * 本机实测受限网络下 GitHub 不可达 ⇒ 锁重试约 8 分钟后 EPERM，打包必败。
+ *
+ * ICO 自 Vista 起允许图像体是 PNG 压缩流（微软官方 ICO 的 256×256 帧本来就是 PNG），
+ * 单帧 PNG-in-ICO 合法，electron-builder 的 ICO 校验与 resedit 嵌入都能直接消费。
+ *
+ * 不做多尺寸：没有 PNG 解码库就无法缩放，256 帧由 Windows 自行缩放到 16~256 各档。
+ * 故要求输入 ≥256 —— 与 electron-builder 的 ERR_ICON_TOO_SMALL 同一条判据，提前给出中文报错。
+ */
+function pngToIco(png) {
+  if (png.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+    throw new FatalError('生成 ICO 失败：icon_url 下载的文件不是 PNG')
+  }
+  // IHDR：宽在偏移 16、高在偏移 20，均为大端 4 字节。
+  const width = png.readUInt32BE(16)
+  const height = png.readUInt32BE(20)
+  const dim = Math.max(width, height)
+  if (!Number.isInteger(dim) || dim <= 0 || dim > 1024) {
+    throw new FatalError(`生成 ICO 失败：PNG 尺寸非法（${width}x${height}）`)
+  }
+  if (dim < 256) {
+    throw new FatalError(
+      `icon_url 的 PNG 只有 ${width}x${height}，Windows 应用图标要求至少 256x256` +
+        '（electron-builder 同样会以 ERR_ICON_TOO_SMALL 拒绝），请换一张大图',
+    )
+  }
+  const header = Buffer.alloc(6)
+  header.writeUInt16LE(0, 0) // reserved
+  header.writeUInt16LE(1, 2) // type：1 = icon
+  header.writeUInt16LE(1, 4) // 图像条目数 = 1
+  const entry = Buffer.alloc(16)
+  const sizeByte = dim >= 256 ? 0 : dim // ICO 尺寸字节里 0 即 256
+  entry.writeUInt8(sizeByte, 0) // 宽
+  entry.writeUInt8(sizeByte, 1) // 高
+  entry.writeUInt8(0, 2) // 调色板颜色数（0）
+  entry.writeUInt8(0, 3) // reserved
+  entry.writeUInt16LE(1, 4) // 色彩平面
+  entry.writeUInt16LE(32, 6) // 位深
+  entry.writeUInt32LE(png.length, 8) // 图像体大小
+  entry.writeUInt32LE(22, 12) // 图像体偏移 = 6（ICONDIR）+ 16（一条 ICONDIRENTRY）
+  return Buffer.concat([header, entry, png])
+}
+
+/**
+ * electron-builder 26 在 Windows 上会**按需**从 GitHub releases 另下几套工具集：
+ * zip 目标的 7zip@1.0.0、portable / nsis 目标必需的 nsis@1.2.1 等。这与已用
+ * `electronDist` 跳过的 223MB Electron 运行时是两套下载，受限网络下会在出包阶段卡到超时。
+ *
+ * 策略：用户已显式配置镜像环境变量时一律尊重；否则探一次**真实 release 资源**（短超时，
+ * 跟随 302 到 objects 主机——只探 github.com 主站不准：主站能开不代表 release 能下），
+ * 不通就自动换 npmmirror 镜像。镜像产物仍由 electron-builder 用内置 SHA256 校验，镜像无法投毒。
+ */
+const BUILDER_BINARIES_PROBE_URL =
+  'https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis@1.2.1/nsis-bundle-3.12.tar.gz'
+const BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
+const BUILDER_BINARIES_MIRROR_ENV_KEYS = [
+  'NPM_CONFIG_ELECTRON_BUILDER_BINARIES_MIRROR',
+  'npm_config_electron_builder_binaries_mirror',
+  'npm_package_config_electron_builder_binaries_mirror',
+  'ELECTRON_BUILDER_BINARIES_MIRROR',
+]
+
+async function resolveBuilderBinariesMirror(env, dry) {
+  const existing = BUILDER_BINARIES_MIRROR_ENV_KEYS.map((k) => env[k]).find((v) => v && v.trim())
+  if (existing) {
+    emit(`    electron-builder 工具集下载源：沿用环境变量 ${existing}`)
+    return
+  }
+  if (dry) {
+    emit('    electron-builder 工具集下载源：dry-run，不做 GitHub 连通性探测')
+    return
+  }
+  let reachable = false
+  try {
+    // HEAD 跟随重定向：能拿到任意 HTTP 响应（302/200）= release 下载链通；超时/连接失败才换镜像。
+    await fetch(BUILDER_BINARIES_PROBE_URL, { method: 'HEAD', signal: AbortSignal.timeout(8000) })
+    reachable = true
+  } catch {
+    reachable = false
+  }
+  if (reachable) {
+    emit('    electron-builder 工具集下载源：GitHub release 可达，使用官方源')
+    return
+  }
+  env.ELECTRON_BUILDER_BINARIES_MIRROR = BUILDER_BINARIES_MIRROR
+  emit(`    GitHub release 8s 探测不通 ⇒ electron-builder 工具集自动改用镜像：${BUILDER_BINARIES_MIRROR}`)
+}
+
 // ===========================================================================
 // 打包分支
 // ===========================================================================
@@ -805,11 +897,12 @@ async function doElectron(args, merged, env, name, rr) {
     const buildDir = join(ELECTRON, 'build')
     const dest = join(buildDir, 'icon.png')
     if (dry) {
-      emit(`\n[2/4] 将下载图标 ${url} → ${rel(dest)}`)
+      emit(`\n[2/4] 将下载图标 ${url} → ${rel(dest)}，并本地转换 PNG→ICO`)
     } else {
       mkdirSync(buildDir, { recursive: true })
       run(['curl', '-fsSL', '--retry', '3', url, '-o', dest], ELECTRON, env, false)
-      const magic = readFileSync(dest).subarray(0, 8).toString('hex')
+      const png = readFileSync(dest)
+      const magic = png.subarray(0, 8).toString('hex')
       if (magic !== '89504e470d0a1a0a') throw new FatalError(`icon_url 下载的不是 PNG（文件头=${magic}）`)
       // 托盘图标取 resources/icons/icon.png（由 extraResources 从 webview-app/icons/ 拷进包），
       // 只设 -c.win.icon 对托盘无效 ⇒ 必须同步覆盖那一份。它是 tracked，所以先备份。
@@ -817,8 +910,15 @@ async function doElectron(args, merged, env, name, rr) {
       rr.file(tray)
       copyFileSync(dest, tray)
       emit(`托盘图标已同步 → ${rel(tray)}（打包后还原）`)
+      // exe 图标必须给 .ico：给 PNG 会逼 electron-builder 运行时从 GitHub 下载 icons-bundle
+      // 转换（受限网络必败，见 pngToIco 注释）。icons/icon.ico 是 tracked，stage-assets 会把它
+      // 铺到 build/icon.ico；与 icon.png 同样先备份、打包后还原。
+      const ico = join(WEBVIEW, 'icons', 'icon.ico')
+      rr.file(ico)
+      writeFileSync(ico, pngToIco(png))
+      emit(`exe 图标已本地生成 PNG→ICO → ${rel(ico)}（免 GitHub 下载，打包后还原）`)
     }
-    extra = ['-c.win.icon=build/icon.png']
+    extra = ['-c.win.icon=build/icon.ico']
   } else {
     const why = !merged.icon_url ? '配置里 icon_url 为空' : '--no-icon 显式跳过'
     emit(`\n[2/4] 跳过图标：${why}，沿用仓库默认图标`)
@@ -854,6 +954,9 @@ async function doElectron(args, merged, env, name, rr) {
     extraBuilder.push('--config.electronDist=node_modules/electron/dist')
     emit(`    使用本地 Electron 运行时（跳过下载）：${rel(localDist)}`)
   }
+  // NSIS（portable/nsis 目标）等工具集是 electron-builder 另一条按需下载链，GitHub 不通时
+  // 自动换镜像（见 resolveBuilderBinariesMirror）；必须在构造 builder 命令前改好 env。
+  await resolveBuilderBinariesMirror(env, dry)
 
   // 输出目录：本地打包默认落到**仓库根的 `tests/pack/`**。README §3.2 约定 tests/ 只装本地测试过程的
   // 临时/中间产物，根 `.gitignore` 的 `/tests/` 整目录忽略 ⇒ 150MB 量级、上千文件的 win-unpacked/ 树
@@ -883,6 +986,16 @@ async function doElectron(args, merged, env, name, rr) {
     // 安装版标记：打进 app.asar 的 package.json，运行时 distribution.ts 据此强制
     // 使用系统默认数据目录（%APPDATA%），忽略 config 的 data_dir。绿色版不带此参数。
     ...(forms.includes('nsis') ? ['-c.extraMetadata.distribution=nsis'] : []),
+    // 清空 package.json 的 description：electron-builder 把它原样写进桌面/开始菜单
+    // 快捷方式的「备注」（lnk Comment，即鼠标悬停提示）与卸载注册表 Comments。
+    // 那句壳工程自述（"web2app for Windows — Electron 绿色版壳…"）对终端用户无意义，
+    // 空串 ⇒ CreateShortCut 收到空备注，悬停不再有提示（2026-10-01 使用者要求）。
+    // 仅安装版覆盖，绿色版没有快捷方式、package.json 保持原样。
+    ...(forms.includes('nsis') ? ['-c.extraMetadata.description='] : []),
+    // 桌面 / 开始菜单**快捷方式名**用配置的 title（显示名，如 "Note"），而非安装名。
+    // productName=app_name 仍承担：exe 文件名、安装目录、「程序与功能」卸载条目；
+    // shortcutName 只改快捷方式本身的显示名（2026-10-01 使用者要求）。
+    ...(forms.includes('nsis') ? [`-c.nsis.shortcutName=${merged.title}`] : []),
     ...extraBuilder,
     `--config.directories.output=${dir}`,
     ...extra,

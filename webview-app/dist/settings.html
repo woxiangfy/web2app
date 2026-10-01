@@ -29,6 +29,10 @@
     --surface: #ffffff;
     --surface-hover: #ebedf0;
     --border: #d8dce2;
+    /* 面板头/底两条「窗口边界」分隔线专用色：--border(#d8dce2) 太淡，
+       实拍在白底上几乎不可见（使用者 2026-10-01：「顶部没有边框」）。
+       卡片描边仍用 --border，两者层级不同，不要合并。 */
+    --hairline: #c3c8d0;
     --text: #1f2937;
     --text-secondary: #6b7280;
     --primary: #2563eb;
@@ -41,6 +45,7 @@
       --surface: #18181b;
       --surface-hover: #3f3f46;
       --border: #3f3f46;
+      --hairline: #4c4d57;
       --text: #f4f4f5;
       --text-secondary: #a1a1aa;
       --primary: #3b82f6;
@@ -80,8 +85,9 @@
     align-items: center;
     gap: 8px;
     padding: 10px 10px 10px 18px;
-    /* 头部与正文之间的分隔线：旧版靠面板自身的外框提供这条边界感，现在由它顶上。 */
-    border-bottom: 1px solid var(--border);
+    /* 头部与正文之间的分隔线：旧版靠面板自身的外框提供这条边界感，现在由它顶上。
+       用 --hairline 而非 --border：这条线承担「窗口顶边」的视觉职责，淡了等于没有。 */
+    border-bottom: 1px solid var(--hairline);
     -webkit-app-region: drag; /* Electron：无边框窗靠它拖动 */
   }
   .panel-hd .title {
@@ -120,7 +126,9 @@
     min-height: 0;      /* ⚠️ 少了它 flex 子项不会收缩，正文永远撑高、滚动条不出现 */
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 2px 18px 10px;
+    /* 上 10px：让头部边界线与第一张卡片拉开距离 —— 只留 2px 时两条线贴在一起，
+       头部那条等于白画（2026-10-01 使用者反馈的直接成因之一）。 */
+    padding: 10px 18px 10px;
   }
   /* 细滚动条：与面板内边距对齐，不喧宾夺主 */
   .panel-bd::-webkit-scrollbar { width: 10px; }
@@ -136,7 +144,8 @@
   /* ---------- 底部：固定不滚 ---------- */
   .panel-ft {
     flex: none;
-    border-top: 1px solid var(--border);
+    /* 与头部对称：同一条「窗口边界」分隔线，用 --hairline。 */
+    border-top: 1px solid var(--hairline);
     padding: 10px 18px 12px;
     display: flex;
     flex-direction: column;

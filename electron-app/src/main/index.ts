@@ -826,6 +826,15 @@ if (!gotLock) {
     presentMainWindow()
   })
 
+  // 关闭 Chromium 拼写检查：Electron 默认开启，远程网页里的非英文词（用户名、
+  // 随机串、中文站点的英文片段）会被画上红色波浪线（2026-10-01 使用者反馈）。
+  // Tauri/WebView2 默认不做这层检查，这里对齐它。挂在 web-contents-created 上，
+  // 主窗口、设置窗、多页签的每个 WebContentsView（含各自 partition 的 session）
+  // 一创建就关掉，比逐窗口写 webPreferences.spellcheck 更不容易漏。
+  app.on('web-contents-created', (_e, contents) => {
+    contents.session.setSpellCheckerEnabled(false)
+  })
+
   app.whenReady().then(async () => {
     protocol.handle('splash', (req) => {
       const path = new URL(req.url).pathname.replace(/\/+$/, '')
