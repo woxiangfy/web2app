@@ -12,6 +12,9 @@
  *          要准备 Android 交叉编译时用 `--all-targets`（或 `cargo fetch --target <android-triple>`）。
  *       `--update` 时先跑 `cargo update`：把 Cargo.lock 更新到 semver 允许的新版本，再 fetch。
  *         ⚠️ Cargo.lock 是**受版本控制**的文件，--update 会改动它（git diff 可见，自行决定是否提交）。
+ *       tauri-cli（`cargo tauri`）**只检查不自动安装**：它是本地打 Tauri 包（pack-local.mjs
+ *         --target tauri-*）的硬依赖，但普通 `cargo build` / sidecar 不需要，且首次编译要几分钟。
+ *         `--check` 缺失时会报非 0 并给出安装命令：cargo install tauri-cli --version "^2"。
  *
  *   · electron-app/（Electron + TypeScript，pnpm）
  *       `pnpm install`，并**显式注入两个镜像环境变量**（默认开，--no-mirror 关）：
@@ -118,6 +121,23 @@ function toolVersion(cmd) {
   return m ? `${m[1]}.${m[2]}.${m[3]}` : String(r.stdout || '').trim() || null
 }
 
+/**
+ * 检测 tauri-cli（cargo 的 `tauri` 子命令，crate 包名是 tauri-cli，装完提供 cargo-tauri.exe）。
+ *
+ * ⚠️ 必须用 `cargo tauri --version` 探，不能 `toolVersion('cargo-tauri')`：
+ *    cargo 子命令通过 PATH 上的 cargo-tauri 可执行文件分发，但不同安装方式
+ *    （cargo install / 手动放 bin）落地路径一致性以 cargo 自己的解析为准；
+ *    pack-local.mjs 的前置检测也是同一条命令（have(['cargo','tauri','--version'])），
+ *    两边判据必须一致，否则会出现「init 说装了、打包却说没装」。
+ * 未安装时 cargo 以非 0 退出并打印 "no such command"，这里归一化成 null。
+ */
+function tauriCliVersion() {
+  const r = spawnSync('cargo', ['tauri', '--version'], { encoding: 'utf8' })
+  if (r.error || r.status !== 0) return null
+  const m = String(r.stdout || '').match(/(\d+)\.(\d+)\.(\d+)/)
+  return m ? `${m[1]}.${m[2]}.${m[3]}` : String(r.stdout || '').trim() || null
+}
+
 /** 比较 "a.b.c" 与 [major, minor]：≥ 返回 true。 */
 function atLeast(version, [needMajor, needMinor = 0]) {
   if (!version) return false
@@ -189,6 +209,23 @@ function checkToolchain() {
   } else {
     console.log('  rustc   ✗ 未找到')
     problems.push('未找到 rustc（通常随 rustup 与 cargo 一起安装）')
+  }
+
+  // tauri-cli 是「本地打 Tauri 包」的硬依赖（pack-local.mjs --target tauri-* 在第一步就
+  // 查 `cargo tauri --version`，缺失直接退出）。普通 `cargo build` / sidecar 编译不需要它，
+  // 所以：① 仅在选中 webview 侧时检查；② init 默认不自动安装（首次要编译数分钟），
+  // 只在缺失时给出与 CI / pack-local 完全一致的安装命令。
+  if (wantWebview) {
+    const tauriVersion = tauriCliVersion()
+    if (tauriVersion) {
+      console.log(`  tauri   ${tauriVersion}（cargo tauri 子命令，本地打 Tauri 包用）`)
+    } else {
+      console.log('  tauri   ✗ 未找到 cargo tauri 子命令（本地打 Tauri 包需要；普通 cargo build 不需要）')
+      problems.push(
+        '未安装 tauri-cli（cargo tauri）：执行 `cargo install tauri-cli --version "^2"` ' +
+          '（与 CI 的 Install Tauri CLI 同一步，首次编译约几分钟）',
+      )
+    }
   }
 
   const pnpmVersion = toolVersion('pnpm')
