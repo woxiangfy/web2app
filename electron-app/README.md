@@ -471,8 +471,8 @@ Get-Content .\data\logs\startup.log -Tail 40
 后者把缺陷锁死成期望值。**改完必须重新打包**：脚本随 asar 分发在 `out/inject/titlebar.js` 里
 （2026-09-26 起不再放 `resources/inject/`），跑旧的 exe 永远看不到修复。
 
-> 排查这类「断言过、人眼不对」的问题请用 `scripts/scrollbar-lab.cjs`（多模式对照，几种做法一次跑完）
-> 与 `scripts/png-inspect.cjs`（把 PNG 读成结构图 + 逐像素扫描）。两者都零依赖，
+> 排查这类「断言过、人眼不对」的问题请用 `scripts/diag/scrollbar-lab.cjs`（多模式对照，几种做法一次跑完）
+> 与 `scripts/diag/png-inspect.cjs`（把 PNG 读成结构图 + 逐像素扫描）。两者都零依赖，
 > 专治沙箱里没有图片库、`Add-Type` 被安全策略拦的情况。
 
 ## 本地代理 sidecar（`w2a-proxy.exe`）

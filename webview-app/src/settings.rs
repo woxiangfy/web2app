@@ -90,23 +90,46 @@ pub fn settings_open_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SHIFT), Code::F1)
 }
 
-/// 唤醒快捷键的可读文案（空 key = 未启用）。与 Electron 侧 `hotkeyLabel()` 同形，
-/// 供启动诊断日志使用（`lib.rs::log_startup`）。本函数跨平台（Hotkey 本身跨平台）。
+/// 唤醒快捷键的可读文案（空 key = 未启用），供启动诊断日志使用（`lib.rs::log_startup`）。
+/// 本函数跨平台（Hotkey 本身跨平台）。
+///
+/// ⚠️⚠️ 跨壳契约：与 Electron 侧 `hotkey.ts::hotkeyLabel()` **逐字同形**（modifier 顺序、
+/// 连接符、空值文案的半角括号都要一致），这样两侧启动日志可直接对照。美化规则：
+///   · 空 key（含纯空白）→ `(未设置)`（半角括号，与 Electron 一致）；
+///   · `Digit` 前缀去掉（`Digit4` → `4`）、`Key` 前缀去掉（`KeyA` → `A`）；
+///   · `Numpad` 前缀换成 `Num` 后接剩余部分（`Numpad0` → `Num0`、`NumpadDecimal` → `NumDecimal`）；
+///   · 四个方向键转箭头（`ArrowUp` → `↑` 等）；其余键名（`F1` / `Space` / `Backquote`…）原样。
 pub(crate) fn hotkey_label(h: &Hotkey) -> String {
-    if h.key.trim().is_empty() {
-        return "（未设置）".to_string();
+    let key = h.key.trim();
+    if key.is_empty() {
+        return "(未设置)".to_string();
     }
-    let mut parts: Vec<&str> = Vec::new();
+    let pretty = if let Some(rest) = key.strip_prefix("Digit") {
+        rest.to_string()
+    } else if let Some(rest) = key.strip_prefix("Key") {
+        rest.to_string()
+    } else if let Some(rest) = key.strip_prefix("Numpad") {
+        format!("Num{rest}")
+    } else {
+        match key {
+            "ArrowUp" => "↑".to_string(),
+            "ArrowDown" => "↓".to_string(),
+            "ArrowLeft" => "←".to_string(),
+            "ArrowRight" => "→".to_string(),
+            other => other.to_string(),
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
     if h.ctrl {
-        parts.push("Ctrl");
+        parts.push("Ctrl".to_string());
     }
     if h.alt {
-        parts.push("Alt");
+        parts.push("Alt".to_string());
     }
     if h.shift {
-        parts.push("Shift");
+        parts.push("Shift".to_string());
     }
-    parts.push(h.key.as_str());
+    parts.push(pretty);
     parts.join("+")
 }
 
@@ -359,6 +382,48 @@ mod tests {
         assert!(
             hotkey_to_shortcut(&bogus).is_none(),
             "无法解析的键名应返回 None"
+        );
+    }
+
+    // hotkey_label 跨平台（不依赖 tauri Shortcut），且与 Electron 侧 hotkey.ts::hotkeyLabel()
+    // 逐字同形 —— 下面的期望值就是双壳契约，改动任一侧都必须同步另一侧。
+    #[test]
+    fn hotkey_label_aligns_with_electron() {
+        fn hk(ctrl: bool, alt: bool, shift: bool, key: &str) -> Hotkey {
+            Hotkey {
+                ctrl,
+                alt,
+                shift,
+                key: key.into(),
+            }
+        }
+        // 空 key（含纯空白）：半角括号文案，修饰键也被忽略
+        assert_eq!(hotkey_label(&hk(false, false, false, "")), "(未设置)");
+        assert_eq!(hotkey_label(&hk(true, false, false, "   ")), "(未设置)");
+        // Digit / Key 前缀美化（Alt+4 与 Electron 探针 probe-single.ts 钉的是同一条）
+        assert_eq!(hotkey_label(&hk(false, true, false, "Digit4")), "Alt+4");
+        assert_eq!(hotkey_label(&hk(true, false, true, "KeyA")), "Ctrl+Shift+A");
+        assert_eq!(hotkey_label(&hk(false, false, false, "Digit0")), "0");
+        // Numpad：前缀换 Num 后接剩余部分（注意不是 accelerator 用的 num0 / numdec）
+        assert_eq!(hotkey_label(&hk(false, false, false, "Numpad0")), "Num0");
+        assert_eq!(
+            hotkey_label(&hk(false, false, false, "NumpadDecimal")),
+            "NumDecimal"
+        );
+        // 方向键转箭头
+        assert_eq!(hotkey_label(&hk(false, false, false, "ArrowUp")), "↑");
+        assert_eq!(hotkey_label(&hk(false, false, false, "ArrowDown")), "↓");
+        assert_eq!(hotkey_label(&hk(false, false, false, "ArrowLeft")), "←");
+        assert_eq!(hotkey_label(&hk(false, false, false, "ArrowRight")), "→");
+        // 其余键名原样；修饰键顺序固定 Ctrl → Alt → Shift
+        assert_eq!(hotkey_label(&hk(false, false, false, "F1")), "F1");
+        assert_eq!(
+            hotkey_label(&hk(false, false, false, "Backquote")),
+            "Backquote"
+        );
+        assert_eq!(
+            hotkey_label(&hk(true, true, true, "Digit0")),
+            "Ctrl+Alt+Shift+0"
         );
     }
 }

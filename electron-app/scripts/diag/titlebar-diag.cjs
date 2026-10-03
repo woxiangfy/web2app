@@ -12,7 +12,7 @@
  *   ③ `elementFromPoint` 在 x = 805..828 逐点问「这里是哪个元素」——
  *      直接回答那条 15px 里站的是滚动条、页面内容、还是标题栏自己
  *
- * 用法：`node scripts/titlebar-diag.cjs [--url=<url>] [--width=] [--height=] [--png=out.png]`
+ * 用法：`node scripts/diag/titlebar-diag.cjs [--url=<url>] [--width=] [--height=] [--png=out.png]`
  */
 const { spawn } = require('node:child_process')
 const { writeFileSync, readFileSync } = require('node:fs')
@@ -27,7 +27,7 @@ const WIDTH = Number(arg('width', 829))
 const HEIGHT = Number(arg('height', 438))
 const URL_ARG = arg('url', '')
 
-const titlebarJs = readFileSync(join(__dirname, '..', '..', 'webview-app', 'src', 'titlebar.js'), 'utf8')
+const titlebarJs = readFileSync(join(__dirname, '..', '..', '..', 'webview-app', 'src', 'titlebar.js'), 'utf8')
 const target = join(process.env.TEMP, 'w2a-titlebar-diag-inner.js')
 
 const DIAG = `(function () {

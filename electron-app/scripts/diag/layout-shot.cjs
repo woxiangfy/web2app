@@ -37,7 +37,7 @@ const HEIGHT = Number(arg('height', 380))
 const URL_ARG = arg('url', '')
 const NO_SHOT = argv.includes('--no-shot')
 
-const titlebarJs = readFileSync(join(__dirname, '..', '..', 'webview-app', 'src', 'titlebar.js'), 'utf8')
+const titlebarJs = readFileSync(join(__dirname, '..', '..', '..', 'webview-app', 'src', 'titlebar.js'), 'utf8')
 const pngDecodePath = join(__dirname, 'png-decode.cjs')
 const target = join(process.env.TEMP, 'w2a-layout-shot-inner.js')
 

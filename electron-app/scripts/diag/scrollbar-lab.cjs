@@ -18,7 +18,7 @@
  * ⚠️ 三个候选的 track/thumb 都染成**刺眼的红/蓝**，这样纵向颜色剖面能一眼看出
  *    「哪一段在画滚动条」，不需要靠猜近似灰。
  *
- * 用法：`node scripts/scrollbar-lab.cjs [--url=<url>] [--width=] [--height=]`
+ * 用法：`node scripts/diag/scrollbar-lab.cjs [--url=<url>] [--width=] [--height=]`
  */
 const { spawn } = require('node:child_process')
 const { writeFileSync, readFileSync } = require('node:fs')
@@ -33,7 +33,7 @@ const WIDTH = Number(arg('width', 829))
 const HEIGHT = Number(arg('height', 438))
 const URL_ARG = arg('url', '')
 
-const titlebarJs = readFileSync(join(__dirname, '..', '..', 'webview-app', 'src', 'titlebar.js'), 'utf8')
+const titlebarJs = readFileSync(join(__dirname, '..', '..', '..', 'webview-app', 'src', 'titlebar.js'), 'utf8')
 
 const SCROLLBAR_RESET =
   'html{scrollbar-width:auto!important;scrollbar-color:auto!important}' +

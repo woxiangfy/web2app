@@ -303,15 +303,37 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 > 新方案把「跟着程序走」变成两壳的**同一个默认值且同名同义**：
 > `false` ⇒ `"data"`、`true` ⇒ `""`。
 
-### 4.4 `proxy_bypass` 的默认值三处必须一致
+### 4.4 `proxy_bypass` 的默认值十处必须一致（已被自测钉住）
 
-同一个串 `localhost;127.0.0.1;<-loopback>` 同时写在：
+同一个串 `localhost;127.0.0.1;<-loopback>` 是跨壳、跨阶段的**单一字面量契约**，同时出现在
+以下 10 个入库文件里。`node scripts/pack-local.mjs --selftest` 会逐个读这些文件校验，
+改掉一个其余没跟上 ⇒ 本地与 CI 的自测直接失败（CI 见 `.github/workflows/ci.yml`）。
 
-1. `webview-app/src/config.rs` 的 `PROXY_BYPASS` 常量（编译期默认）；
-2. `electron-app/src/main/config.ts` 的 `DEFAULTS.proxy_bypass`（运行期默认）；
-3. `.github/scripts/parse-packaging-config.py` 的 `DEFAULTS["proxy_bypass"]`（打包期默认）。
+**① 运行期默认（程序读取，2 处）**
 
-**留空 = 不下发 bypass 参数**（即空值不覆盖 Chromium 默认）。三处不一致会导致
+1. `webview-app/src/config.rs` 的 `env_str!("PROXY_BYPASS", …)`（Tauri 编译期默认）；
+2. `electron-app/src/main/config.ts` 的 `DEFAULTS.proxy_bypass`（Electron 运行期默认）。
+
+**② 打包期默认（脚本读取，3 处）**
+
+3. `.github/scripts/parse-packaging-config.py` 的 `DEFAULTS["proxy_bypass"]`（CI 真源；
+   同文件顶部字段表与文件尾部内置自测还各出现一次）；
+4. `scripts/packlib/constants.mjs` 的 `DEFAULTS.proxy_bypass`（Node 复刻；
+   断言在 `scripts/packlib/selftest.mjs`，`--parity` 另钉住它与第 3 项逐字等价）；
+5. `electron-app/scripts/stage-assets.cjs` —— 没有 `config.json` 时生成的全字段兜底模板。
+
+**③ 示例 / 工作流 / 文档片段（5 处）**
+
+6. `webview-app/config.example.json`；
+7. `electron-app/config.example.json`；
+8. `.github/workflows/generate-signing-key.yml`（签名密钥向导生成给用户的配置模板）；
+9. `.github/workflows/build-custom.yml`（手工触发工作流输入框的注释说明）；
+10. `webview-app/README.md`（Rust 配置示例里的 `const PROXY_BYPASS` 片段）。
+
+⚠️ `electron-app/config.json`（**未入库**、本地调试用）由 pack-local 打包时按第 4 项规范化
+生成，是产物不是真源，不在此清单内。
+
+**留空 = 不下发 bypass 参数**（即空值不覆盖 Chromium 默认）。任一真源不一致都会导致
 「没配 bypass 时两个壳的直连范围不同」。
 
 ---

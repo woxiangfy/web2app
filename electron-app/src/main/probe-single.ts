@@ -22,18 +22,15 @@ import {
 } from './probe-infra'
 import type { SidecarHandle } from './sidecar'
 import {
-  hotkeyLabel,
-  hotkeyToAccelerator,
   loadSettings,
   parseSettings,
-  sameHotkey,
   saveSettings,
   storeLocation,
   writeDocument,
-  type Hotkey,
   type Settings,
   type StoreLocation,
 } from './settings'
+import { hotkeyLabel, hotkeyToAccelerator, sameHotkey, type Hotkey } from './hotkey'
 import {
   captureWindowState,
   loadWindowState,

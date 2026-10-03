@@ -32,7 +32,7 @@
    - `webview-app`：Rust 单元测试用 `#[cfg(test)]` 内联在 `src/*.rs` 内（Rust 惯例，`cargo test` 直接跑）；
    - `electron-app`：契约探针 `src/main/probe.ts`（`pnpm run probe`，命令行加 `--tabs` 走页签断言组）、
      纯函数单测 `test/*.test.ts`（`pnpm run unit`，node:test，零 Electron 依赖直接跑 TS）、
-     冒烟与取证脚本 `scripts/*.cjs`（`smoke` / `start` 经 `launch.cjs` 拉起；`shot` / `lab` / `diag` / `png` / `tabs-v4` / `tabs-v4-negative`）。
+     启动经 `electron-app/scripts/launch.cjs`（`smoke` / `start`）；像素 / 布局取证脚本在 `electron-app/scripts/diag/`（`shot` / `lab` / `diag` / `png` / `tabs-v4` / `tabs-v4-negative`）。
 2. `tests/` 目录只装**一次性验证产物**（探针日志、截图、产物副本）——**不是测试代码**；
    测试过程产生的临时文件、中间产物一律落到这里，不污染业务代码目录。
 3. 核心功能变更必须补充对应的测试用例，保障可回归验证。

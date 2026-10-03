@@ -31,14 +31,14 @@ import {
 } from './sidecar'
 import { runProbe, runTabsProbe, startProbeServer, type ProbeServer } from './probe'
 import {
-  hotkeyLabel,
   loadSettings,
-  sameHotkey,
-  saveSettings,
   SETTINGS_FILE,
   storeLocation,
   type Settings,
 } from './settings'
+import { hotkeyLabel } from './hotkey'
+import { createSettingsController } from './settings-controller'
+import { registerProtocols } from './protocols'
 import {
   captureWindowState,
   loadWindowState,
@@ -47,7 +47,6 @@ import {
   type RestorePlan,
 } from './window-state'
 import {
-  createTray,
   destroyTray,
   hasTray,
   hideMainWindow,
@@ -58,13 +57,12 @@ import {
 import { applyWakeHotkey, registerSettingsShortcut, releaseShortcuts } from './shortcuts'
 import {
   closeSettingsWindow,
-  FALLBACK_HTML,
   getSettingsWindow,
   openSettingsWindow,
   readSettingsHtml,
   registerSettingsIpc,
 } from './settings-window'
-import { MAX_TABS, TabManager } from './tabs'
+import { MAX_TABS, TAB_BAR_HEIGHT, TabManager } from './tabs'
 import { hideShellStartupError, showShellStartupError } from './shell-overlay'
 import { rawConsole, silenceConsole, startFileLogging, type FileLogHandle } from './startup-log'
 import { createSplashPage, SPLASH_BG } from './splash-page'
@@ -77,9 +75,6 @@ import {
   devtoolsEnabled,
 } from './page-behavior'
 import { clearWebData } from './web-data'
-
-/** 自绘标题栏高度（逻辑像素）。与 Tauri 版一致，勿改。 */
-const CHROME_H = 38
 
 /** 命令行开关。
  *
@@ -713,111 +708,33 @@ function presentMainWindow(): void {
   }
 }
 
-function trayActions() {
-  return {
-    toggle: () => {
-      // 可见 → 收进托盘；不可见 → 走带页签自愈的唤起路径（不能直接 toggle，
-      // 否则最后一个页签关掉后的空壳无法恢复）。
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
-        toggleMainWindow(mainWindow)
-      } else {
-        presentMainWindow()
-      }
-    },
-    onShow: () => presentMainWindow(),
-    onHide: () => hideMainWindow(mainWindow),
-    onSettings: () => openSettings(),
+/**
+ * 设置应用控制器：唤醒快捷键 / 托盘的创建销毁 / 持久化，以及失败时对**进程级副作用**
+ * （快捷键 + 托盘）的成组回滚。启动时与设置窗保存共用这同一个入口（对齐旧版
+ * `settings.rs::save_settings`：快捷键 → 托盘 → 持久化，任一步失败都不写内存态）。
+ * 实现与回滚注释见 settings-controller.ts；窗口显隐 / 退出 / 图标定位经 deps 注入。
+ */
+const settingsCtl = createSettingsController({
+  title: cfg.title,
+  getSettings: () => runtimeSettings,
+  setSettings: (s) => {
+    runtimeSettings = s
+  },
+  // 探针模式下 storeLoc 会被改到 %TEMP%（见上方 PROBE 分叉），故用 getter 延迟读。
+  getStoreLoc: () => storeLoc,
+  isMainWindowVisible: () => !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(),
+  openSettings: () => openSettings(),
+  presentMainWindow: () => presentMainWindow(),
+  hideMainWindow: () => hideMainWindow(mainWindow),
+  toggleMainWindow: () => toggleMainWindow(mainWindow),
+  requestQuit: () => {
     // ⚠️ 必须先置 quitting：否则 app.quit() 触发的 close 事件会被「关闭到托盘」分支拦下，
     //    表现就是「点了退出，窗口只是藏进托盘、进程还在」。
-    onQuit: () => {
-      quitting = true
-      app.quit()
-    },
-  }
-}
-
-/**
- * 应用一份设置：运行时副作用（快捷键 / 托盘）+ 可选持久化。
- *
- * 启动时与设置窗保存时共用同一条路径 —— 两条路各写一份的典型后果是
- * 「启动时正常、从设置页改了就行为不一致」。旧版（`settings.rs::save_settings`）
- * 也是这么组织的，顺序（快捷键 → 托盘 → 持久化）刻意保持一致：
- * 任一步失败都不写内存态 —— 快捷键自身注册失败会把旧键回滚，**后续步骤**失败
- * 也会把已生效的快捷键回滚（见下面的 catch），否则「失败」就只是半真半假的说法。
- *
- * @throws 出错时抛出带用户可读文案的 Error（设置页会把它显示出来）
- */
-function applySettings(next: Settings, opts: { persist: boolean }): void {
-  const prev = runtimeSettings
-
-  // 1) 唤醒快捷键
-  const r = applyWakeHotkey(next.wake_hotkey, () => toggleMainWindow(mainWindow))
-  if (!r.ok) throw new Error(r.error ?? '快捷键注册失败')
-
-  // 记录本调用是否【新建】了托盘：持久化失败时要把它一起回滚，否则界面提示
-  // 「保存失败」、文件没写成，但托盘图标已在本次会话驻留 —— 进程级副作用有两个
-  //（快捷键 / 托盘），只回滚一个就不叫「任一步失败都不写内存态」。
-  let trayCreatedThisCall = false
-  // 对称地记录本调用是否【销毁】了托盘：true→false 分支先 destroyTray()，随后若保存
-  // 失败，托盘也必须 best-effort 重建 —— 否则界面提示「保存失败」、配置没写成，
-  // 本次会话的托盘却没了（与新建侧是同一类自相矛盾，曾经只回滚了一半）。
-  let trayExistedBefore = false
-  try {
-    // 2) 托盘开关变化 → 创建 / 销毁（与旧版一样是「变化才动」，避免每次保存都重建图标）
-    if (next.tray_enabled !== runtimeSettings.tray_enabled) {
-      if (next.tray_enabled) {
-        const ok = createTray({
-          title: cfg.title,
-          iconPath: locateTrayIcon(app.getAppPath(), process.resourcesPath),
-          actions: trayActions(),
-        })
-        if (!ok) throw new Error('托盘创建失败（未找到 icons/icon.png）')
-        trayCreatedThisCall = true
-      } else {
-        trayExistedBefore = true
-        destroyTray()
-      }
-    }
-
-    // 3) 持久化
-    if (opts.persist) {
-      const written = saveSettings(storeLoc, next)
-      console.log(`[web2app] 设置已保存：${written}`)
-    }
-  } catch (e) {
-    // ⚠️ 回滚本次已生效的进程级副作用。第 1 步是全局快捷键（进程级资源），
-    //    第 2 步可能已经新建托盘 —— 后两步失败时如果不回滚，就会留下这种自相矛盾的状态：
-    //    界面上提示「保存失败」、settings.json 没写（下次启动仍是旧值），
-    //    但**本次会话里新键 / 新托盘已经生效**。承诺的「任一步失败都不写内存态」
-    //    只有在把副作用也一并回滚之后才成立。
-    if (trayCreatedThisCall) {
-      destroyTray()
-      console.warn('[web2app] 保存失败，本次新建的托盘已回滚')
-    }
-    // 对称回滚：本次销毁过托盘 → best-effort 按旧配置重建（图标文件恰好缺失时只告警，
-    // 不能再抛 —— 我们正在错误传播路径上）。
-    if (trayExistedBefore) {
-      const restored = createTray({
-        title: cfg.title,
-        iconPath: locateTrayIcon(app.getAppPath(), process.resourcesPath),
-        actions: trayActions(),
-      })
-      console.warn(
-        `[web2app] 保存失败，已尝试重建回滚前的托盘：${restored ? '成功' : '重建也失败（图标缺失？）'}`
-      )
-    }
-    if (!sameHotkey(prev.wake_hotkey, next.wake_hotkey)) {
-      const rb = applyWakeHotkey(prev.wake_hotkey, () => toggleMainWindow(mainWindow))
-      console.warn(
-        `[web2app] 保存失败，唤醒快捷键已回滚到 ${hotkeyLabel(prev.wake_hotkey)}：` +
-          `${rb.ok ? '成功' : '回滚也失败（当前无唤醒快捷键）'}`
-      )
-    }
-    throw e
-  }
-
-  runtimeSettings = next
-}
+    quitting = true
+    app.quit()
+  },
+  trayIconPath: () => locateTrayIcon(app.getAppPath(), process.resourcesPath),
+})
 
 if (!gotLock) {
   app.quit()
@@ -836,43 +753,18 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
-    protocol.handle('splash', (req) => {
-      const path = new URL(req.url).pathname.replace(/\/+$/, '')
-      if (path === '/retry') {
-        console.log('[web2app] 启动页请求重试，重新走一遍启动流程')
-        splashPage.setPendingFail(null)
-        // 先把手上的响应交出去，再触发导航，避免同一次请求里嵌套导航
-        setImmediate(() => {
-          navStarted = false
-          target = null
-          void bootstrap()
-        })
-      }
-      return new Response(splashPage.render(), {
-        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-      })
-    })
-
-    // settings:// → 设置页 HTML（单一真源：webview-app/dist/settings.html）
-    protocol.handle('settings', () => {
-      const html = readSettingsPageHtml()
-      if (!html) {
-        console.warn('[web2app] 未找到 settings.html，设置窗使用内置精简页')
-      }
-      return new Response(html ?? FALLBACK_HTML, {
-        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-      })
-    })
-
-    // shell:// → 多页签壳页面（单一真源：webview-app/src/shell.html，零改动）
-    protocol.handle('shell', () => {
-      const html = readInject('shell.html')
-      if (!html) {
-        console.warn('[web2app] 未找到 shell.html，壳页面缺失（多页签模式将白屏）')
-      }
-      return new Response(html ?? '<!doctype html><meta charset="utf-8"><body style="background:#f7f8fa">标签栏资源缺失</body>', {
-        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-      })
+    // splash:// / settings:// / shell:// 三个处理器（scheme 特权声明在文件顶部，
+    // 必须早于 ready；这里只注册 handle）。重试 / 渲染 / 资源读取经 deps 接回本文件状态。
+    registerProtocols({
+      renderSplash: () => splashPage.render(),
+      setSplashPendingFail: (f) => splashPage.setPendingFail(f),
+      onSplashRetry: () => {
+        navStarted = false
+        target = null
+        void bootstrap()
+      },
+      readSettingsHtml: readSettingsPageHtml,
+      readInject,
     })
 
     // 探针模式：起夹具站点、覆盖 app_url，并把导航节奏交给 runProbe
@@ -894,14 +786,15 @@ if (!gotLock) {
       openSettings,
       getTabManager: () => tabManager,
       spawnFirstTab: () => void spawnFirstTab(),
-      bootstrap: { chromeH: CHROME_H, extra: cfg.extra, readInject },
+      // chromeH 与标签栏同高（跨壳 38px 契约，唯一字面量在 tabs.ts 的 TAB_BAR_HEIGHT）。
+      bootstrap: { chromeH: TAB_BAR_HEIGHT, extra: cfg.extra, readInject },
       getTarget: () => target,
       proxyHttp: cfg.proxy_http,
       proxyHttps: cfg.proxy_https,
     })
     registerSettingsIpc({
       getSettings: () => runtimeSettings,
-      saveSettings: (next) => applySettings(next, { persist: true }),
+      saveSettings: (next) => settingsCtl.applySettings(next, { persist: true }),
       preloadPath: settingsPreloadPath(),
       readHtml: readSettingsPageHtml,
       // 设置页「清除全部」：清浏览数据 + 重载内容页（实现见 web-data.ts）。
@@ -937,7 +830,7 @@ if (!gotLock) {
     //    真实副作用，见 probe.ts M3 段落；断言语境下的创建/抢占是被显式验证并收尾的）。
     if (!PROBE) {
       try {
-        applySettings(loadedSettings.settings, { persist: false })
+        settingsCtl.applySettings(loadedSettings.settings, { persist: false })
       } catch (e) {
         // 启动期失败只记日志：托盘图标缺失 / 快捷键被占用都不该让应用打不开
         console.error(`[web2app] 应用设置时出错（已降级继续启动）：${(e as Error).message}`)
@@ -979,7 +872,7 @@ if (!gotLock) {
         m3: {
           storeLoc,
           getSettings: () => runtimeSettings,
-          saveSettings: (next) => applySettings(next, { persist: true }),
+          saveSettings: (next) => settingsCtl.applySettings(next, { persist: true }),
           openSettingsWindow: () => openSettings(),
           closeSettingsWindow: () => closeSettingsWindow(),
           getSettingsWindow: () => getSettingsWindow(),

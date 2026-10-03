@@ -16,7 +16,7 @@
  */
 import { globalShortcut } from 'electron'
 
-import { SETTINGS_SHORTCUT, hotkeyLabel, hotkeyToAccelerator, sameHotkey, type Hotkey } from './settings'
+import { SETTINGS_SHORTCUT, hotkeyLabel, hotkeyToAccelerator, sameHotkey, type Hotkey } from './hotkey'
 
 /** 注册结果，供日志与设置页的报错文案使用。 */
 export interface RegisterResult {

@@ -72,7 +72,7 @@ app.on('window-all-closed', () => {})
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// 像素读取（内联，逻辑同 scripts/png-decode.cjs，避免跨进程 require 路径问题）
+// 像素读取（内联，逻辑同 scripts/diag/png-decode.cjs，避免跨进程 require 路径问题）
 function decodePng(buf) {
   const zlib = require('node:zlib')
   let off = 8, w = 0, h = 0, colorType = 6

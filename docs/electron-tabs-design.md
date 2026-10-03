@@ -244,7 +244,7 @@ Start-Process -FilePath "...\Web2App.exe" -ArgumentList '--probe','--tabs' -Wait
 > 与页签改造无交集）。**M5 的验收项至此全部关闭**。仍留待真机的 V4 子项：`resize` 时子视图与标签栏之间
 > 「无 1px 缝」（属 V2 的跨 DPI 目视，本机只覆盖 200% 一档）。
 
-### 8.4 V4 的程序化验证（2026-09-17，`scripts/tabs-v4.cjs`）
+### 8.4 V4 的程序化验证（2026-09-17，`scripts/diag/tabs-v4.cjs`）
 
 壳页面（窗口自身 `webContents`）填「标签栏红 + 内容区蓝」，子 `WebContentsView` 填「纯绿」、
 `bounds={x:0,y:38,...}`；`desktopCapturer` 系统级抓屏后逐像素断言 `y=20` 是红、`y=60` 是绿且绝非蓝。

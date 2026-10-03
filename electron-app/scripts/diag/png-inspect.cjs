@@ -6,7 +6,7 @@
  * 用现成图片库（沙箱没有 PIL，PowerShell 的 `Add-Type` 被安全策略拦）。
  * 解码逻辑在 `png-decode.cjs`，本脚本只负责把它渲染成人能读的样子。
  *
- * 用法：`node scripts/png-inspect.cjs <png> [--block=8] [--cols=24]`
+ * 用法：`node scripts/diag/png-inspect.cjs <png> [--block=8] [--cols=24]`
  *   --block  结构图的降采样块大小（默认 8px）
  *   --cols   右边缘扫描的列数（默认 24）
  */
@@ -23,7 +23,7 @@ const BLOCK = num('block', 8)
 const COLS = num('cols', 24)
 
 if (!file) {
-  console.error('用法：node scripts/png-inspect.cjs <png> [--block=8] [--cols=24]')
+  console.error('用法：node scripts/diag/png-inspect.cjs <png> [--block=8] [--cols=24]')
   process.exit(2)
 }
 

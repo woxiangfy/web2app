@@ -8,7 +8,8 @@ import type { BrowserWindow } from 'electron'
 
 import type { ProbeServer } from './probe-server'
 import type { SidecarHandle, SidecarRequest } from './sidecar'
-import type { Hotkey, Settings, StoreLocation } from './settings'
+import type { Settings, StoreLocation } from './settings'
+import type { Hotkey } from './hotkey'
 import type { RegisterResult } from './shortcuts'
 
 export interface Rect {
