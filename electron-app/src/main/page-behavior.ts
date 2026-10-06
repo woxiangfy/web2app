@@ -48,7 +48,7 @@ const { app, clipboard, dialog, Menu } = electron
  *   · `debug` —— 配置里的 `debug: true` ⇒ 打包版也开。
  *
  * ⚠️ 这个差异是**有意**的：绿色版没有「编一个 debug 版给用户」这条路径，
- *    用户在打包版里想排查 Network / Console 只能靠配置开关。已记进 README 差异表。
+ *    用户在打包版里想排查 Network / Console 只能靠配置开关。已记进 `electron-app/AGENTS.md` 的 M4 条。
  */
 export function devtoolsEnabled(isPackaged: boolean, debug: boolean): boolean {
   return !isPackaged || debug

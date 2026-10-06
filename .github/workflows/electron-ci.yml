@@ -30,7 +30,7 @@ name: CI（Electron）
 #
 # Node 版本取 22：①与 `electron-build-custom.yml` 一致；②`pnpm run unit` 直接
 #   `node --test "test/**/*.test.ts"`（不带编译步骤），依赖 Node 的类型剥离，
-#   当前 35/35（数量随用例增长，失败信息以 pnpm run unit 实际输出为准）。
+#   当前 47/47（数量随用例增长，失败信息以 pnpm run unit 实际输出为准）。
 # ---------------------------------------------------------------------------
 on:
   workflow_dispatch:

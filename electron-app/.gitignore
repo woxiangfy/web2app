@@ -5,7 +5,7 @@ node_modules.isolated-broken-*/
 package-lock.json.npm-bak
 out/
 release/
-# 备用输出目录：README 教过用 `-c.directories.output=<新目录>` 绕开被占用的 release/，
+# 备用输出目录：`electron-app/AGENTS.md` 教过用 `-c.directories.output=<新目录>` 绕开被占用的 release/，
 # 而一次产物就是 150MB 量级 —— 不忽略它们等于给「误把产物提交进仓库」留门。
 # ⚠️ 自 2026-09-17 起，临时测试产物统一落到 tests/ 下，不再在根目录新建 dist-*。
 dist/

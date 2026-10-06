@@ -216,11 +216,11 @@ export function selftest() {
         `${f} 的 proxy_bypass 必须等于默认串`,
       )
     }
-    // ③ 工作流模板 / 注释与 README 示例片段中的同一字面量
+    // ③ 工作流模板 / 注释与根 `AGENTS.md` 示例片段中的同一字面量
     for (const f of [
       '.github/workflows/generate-signing-key.yml',
       '.github/workflows/build-custom.yml',
-      'webview-app/README.md',
+      'webview-app/AGENTS.md',
     ]) {
       assertThat(readFileSync(join(ROOT, f), 'utf8').includes(BYPASS), `proxy_bypass 默认串必须出现在 ${f}`)
     }

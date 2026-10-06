@@ -197,9 +197,15 @@ pub async fn start_proxy(
     let local_addr = listener.local_addr()?;
     // 入口 URL 自带一次性门禁密钥（见模块文档「入口门禁」）。
     let access_token = generate_access_token();
+    // ⚠️ 入口 URL 必须带上上游自己的路径：本代理是「以 origin 为根」的反向代理，
+    //    入口若只写 `/`，配置了子路径的 app_url（如 `https://example.com/app/`）会被送到
+    //    站点根，与直连 / 外部代理模式（`strip_userinfo` 保留完整路径，见 bootstrap.rs 与
+    //    proxy-server/main.rs）行为不一致 —— 表现为「一开代理就打开错页」，且完全静默。
+    //    上游无路径时 `path()` 恒为 `"/"`，产物与旧实现逐字节相同（零回归）。
     let local_url = format!(
-        "http://127.0.0.1:{}/?{ACCESS_KEY}={access_token}",
-        local_addr.port()
+        "http://127.0.0.1:{}{}?{ACCESS_KEY}={access_token}",
+        local_addr.port(),
+        upstream.path()
     );
 
     let client = reqwest::Client::builder()
@@ -701,6 +707,40 @@ mod tests {
     fn basic_auth_none_without_user() {
         let u = Url::parse("https://example.com").unwrap();
         assert!(build_basic_auth(&u).is_none());
+    }
+
+    /// 回归：本地代理的入口 URL 必须保留上游自己的路径。
+    ///
+    /// 曾经的实现把入口写死成 `http://127.0.0.1:PORT/?w2a_key=…`，于是配置了子路径的
+    /// `app_url`（如 `https://example.com/app/`）在**开启本地代理**时会被送到站点根，
+    /// 而直连 / 外部代理模式（`strip_userinfo`）却保留完整路径 —— 同一份配置两种落点，
+    /// 且没有任何报错。只校验生成的入口 URL，不发起网络请求。
+    #[tokio::test]
+    async fn proxy_entry_url_keeps_upstream_path() {
+        let app_url = Url::parse("https://alice:secret@example.com/app/index.html").unwrap();
+        let (entry, abort) = super::start_proxy(&app_url).await.unwrap();
+        abort.abort();
+        let u = Url::parse(&entry).unwrap();
+        assert_eq!(u.path(), "/app/index.html", "入口应保留上游路径：{entry}");
+        assert_eq!(
+            u.host_str(),
+            Some("127.0.0.1"),
+            "入口应指向本地回环：{entry}"
+        );
+        assert!(
+            u.query().unwrap_or("").contains(&format!("{ACCESS_KEY}=")),
+            "入口应自带门禁密钥：{entry}"
+        );
+    }
+
+    /// 零回归护栏：上游不带路径时（`path()` 恒为 `"/"`），入口 URL 与旧实现逐字节一致。
+    #[tokio::test]
+    async fn proxy_entry_url_origin_only_unchanged() {
+        let app_url = Url::parse("http://example.com").unwrap();
+        let (entry, abort) = super::start_proxy(&app_url).await.unwrap();
+        abort.abort();
+        let u = Url::parse(&entry).unwrap();
+        assert_eq!(u.path(), "/", "无路径上游的入口应仍落在根：{entry}");
     }
 
     #[test]

@@ -3,10 +3,10 @@
 > 把一个网址打包成桌面 / 手机原生应用的轻量工具。
 > **Rust + Tauri 2** 编写，支持 **Windows（WebView2）** 与 **Android**。
 >
-> 仓库级规则、目录地图与文档索引见根目录 `README.md`。Windows 免安装绿色版由另一个壳
+> 仓库级规则、目录地图与文档索引见根目录 `AGENTS.md`。Windows 免安装绿色版由另一个壳
 > `electron-app/`（Electron + TS）交付，两者共用同一份注入脚本与 `config.json` 契约 ——
 > 改动**单一真源**（`src/{titlebar.js,loading.js,shell.html,splash.html}`、`src/{proxy.rs,resolve.rs}`、
-> `dist/settings.html`）后必须双壳同步验证，详见根 README「五、补充说明」。
+> `dist/settings.html`）后必须双壳同步验证，详见根 `AGENTS.md`「3.4 其它全局约定」。
 
 Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统托盘、用全局快捷键一键显隐；
 当网址带 `https://用户名:密码@host` 形式的 Basic 鉴权时，会自动给**每一个请求（含 WebSocket）**注入凭据。
@@ -111,7 +111,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 Web2App 的解法是内置一个**本地反向代理**（`src/proxy.rs`）：
 
 1. 程序启动时监听 `127.0.0.1:随机端口`；
-2. WebView 只访问这个本地代理地址（入口 URL 自带一次性随机密钥 `?w2a_key=...`）；
+2. WebView 只访问这个本地代理地址（入口 URL 保留上游路径并自带一次性随机密钥 `?w2a_key=...`）；
 3. 代理对**每一个 HTTP 请求和 WebSocket 握手**统一注入 `Authorization: Basic ...` 头，再转发到真实服务器；
 4. 代理对 `Host` / `X-Forwarded-*` 头做透传，让上游收到的请求与「浏览器直连」时一致；
 5. **入口门禁**：每个请求（含 WS 握手）必须在 query 或 `w2a_key` HttpOnly cookie 带上本次启动的
@@ -140,6 +140,7 @@ webview-app/
 ├── src/
 │   ├── main.rs             # 桌面入口（薄壳，装配在 lib.rs）
 │   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
+│   ├── contract_tests.rs   # 静态契约测试（IPC 命令注册表 / capabilities 与事件名字面量；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
 │   ├── bootstrap.rs        # 后台解析真实地址 → 就绪后导航
 │   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
@@ -329,12 +330,16 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-09-27 实测 144 条通过：resolve-core 13 + resolve-tool 7 + w2a-proxy 29 + 主 crate 95；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-07 实测 151 条通过：resolve-core 13 + resolve-tool 7 + w2a-proxy 32 + 主 crate 99；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
 主 crate 的多数测试跑在 `#[cfg(not(windows))]` 路径上，因此**同时**在验证 Android 侧逻辑；
 Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也会跑它们。
+
+> ⚠️ `src/proxy.rs` 同时被主 crate 与 `crates/proxy-server`（sidecar `w2a-proxy.exe`）经 `#[path]` 复用，
+> 因此**它的单元测试会在两个 crate 各跑一遍**（上表 w2a-proxy 的条数里含同一批代理用例）——新增代理
+> 测试时两个计数会同时 +N，这是预期而非重复实现。
 
 ---
 
@@ -345,7 +350,7 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 产物路径则显式带 `webview-app/` 前缀）——2 条**自动**（`ci.yml` / `release.yml`）+
 3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，
 在 Actions 页手动 Run workflow）；另外 2 条服务 **Electron 绿色版壳**（工作目录是 `electron-app/`，
-用法见 `electron-app/README.md`）：自动的 `electron-ci.yml`（lint / 探针 e2e / 出包）与
+用法见 `electron-app/AGENTS.md`）：自动的 `electron-ci.yml`（lint / 探针 e2e / 出包）与
 手动的 `electron-build-custom.yml`（自定义打包）。
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
@@ -573,7 +578,7 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
 字段名严格一致（可直接参考 `generate-signing-key.yml` 产出的 `packaging-config.single.json`）。
 
 > ⚠️ `android_keystore_base64` 是 keystore 的**明文等价物**（任何人拿到都能用它给同包名应用签名冒充你），
-> 等于一把私钥。**不要**把它提交进公开仓库的 JSON / README / 历史记录；正式长期使用更推荐放仓库
+> 等于一把私钥。**不要**把它提交进公开仓库的 JSON / 文档 / 历史记录；正式长期使用更推荐放仓库
 > **Secrets**（方式 2），配置 JSON 里只留方式 1 用于「每个应用各自一把密钥、随配置分发」的场景。
 > 想验证 JSON 里的 keystore 是否有效，可用 `keytool -list -keystore <解码后的.jks> -storepass <密码>` 查看别名。
 

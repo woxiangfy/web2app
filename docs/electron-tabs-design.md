@@ -4,7 +4,7 @@
 > **当前状态**：**已实现并完成真机验收（T0–T4 全部 ✅；V1–V4 目视项 2026-09-18 全部关闭）**。
 > `tabs_enabled=true` 走多页签模式（壳页面 + 子 `WebContentsView`）；`tabs_enabled=false`（默认）
 > 单窗口模式行为逐条不变。真机清单与实测结论见 `electron-tabs-test-steps.md`；
-> 里程碑状态与命令以 `../electron-app/README.md` 为准。本文是**决策与架构记录**，不再保留逐日过程
+> 里程碑状态与命令以 `../electron-app/AGENTS.md` 为准。本文是**决策与架构记录**，不再保留逐日过程
 > （原 §13 变更记录已精简为一行要点）。
 
 ---
@@ -21,7 +21,7 @@
 
 | # | 判据 | 手段 |
 | :-- | :--- | :--- |
-| A1 | 单窗口模式**零回归**：现有 `probe` **134** 条全绿（2026-09-25 实测；条数随探针演进，以实跑输出为准） | `pnpm run probe --no-sandbox --in-process-gpu`，退出码 0 |
+| A1 | 单窗口模式**零回归**：现有 `probe` **138** 条全绿（2026-09-27 实测；条数随探针演进，以实跑输出为准） | `pnpm run probe --no-sandbox --in-process-gpu`，退出码 0 |
 | A2 | 多页签模式：新增断言组全绿 | 同上，加 `--tabs`（本文 §8 清单） |
 | A3 | **打包产物**自带探针在两种模式下均退出码 0 | `Start-Process -Wait -PassThru` 取 `ExitCode`。⚠️ 前提：**探针的起窗模式必须由探针标志决定、不受 `tabs_enabled` 影响**（v1.6 修复）——否则 `tabs_enabled=true` 的包里 `--probe` 会以页签模式起窗而失败 |
 | A4 | 标签栏与内容区**逐像素**不重叠、不留缝 | §8 的「位置 + 存在性」成对判据 |
@@ -215,14 +215,14 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | P10 | `target="_blank"` 的目标 path 被保留（未被降级成入口地址） | 对齐 Tauri `resolve_popup_url` 回归判据 |
 | P11 | **特权命令 sender 校验**：从内容视图发 `close_host` 类消息必须被拒绝，且日志有拒绝记录 | §3-2 安全硬化；只断言「壳能关窗」会被「谁都能关窗」满足 |
 | P12 | 重复 `addChildView(view)` 后 children **不增**且该视图在数组末尾；`setVisible(false)` 后重复 add 仍为 `false` | §3-4 实测语义，防后续 Electron 升级改变行为后无人察觉 |
-| P13 | 单窗口模式跑全量断言 = **134** 条不变、退出码 0 | 零回归闸门 |
+| P13 | 单窗口模式跑全量断言 = **138** 条不变、退出码 0 | 零回归闸门 |
 
 ### 8.2 工具与命令
 
 ```bash
 # 无 GPU 沙箱必须带这两个参数（历史教训：只靠 disableHardwareAcceleration 不够）
-pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口 134 条（2026-09-25 实测）
-pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 31 条（2026-09-26 实测）
+pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口 138 条（2026-09-27 实测）
+pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 33 条（2026-09-27 实测）
 pnpm run tabs-v4 / tabs-v4-negative                          # V4 绘制顺序 正/负向对照（退出码即结论）
 
 # 打包产物自证（必须 Start-Process -Wait 取 ExitCode；直接 & 调用 GUI exe 是假绿）
@@ -269,7 +269,7 @@ Start-Process -FilePath "...\Web2App.exe" -ArgumentList '--probe','--tabs' -Wait
 | R3 | 视图不自动销毁 ⇒ 内存泄漏（官方明示） | `closeTab` 时 `webContents.close()` + 清 Map 引用；`destroyAllTabs()` 兜底；探针加「关掉后引用为 0」断言 |
 | R4 | 每页签独立渲染进程，内存线性增长 | 32 上限熔断；P2-17 可选开节流 |
 | R5 | 双模式代码路径分叉，回归成本上升 | `tabs_enabled` **只在最外层分叉一次**，禁止在既有函数里散落 `if`；单窗口路径保持逐字节不变（A1 闸门守住） |
-| R6 | 能力差异被当成 bug（如 Electron 有最大化、Tauri 没有） | §6 差异矩阵写进 `electron-app/README.md`；§11-D2 显式决策 |
+| R6 | 能力差异被当成 bug（如 Electron 有最大化、Tauri 没有） | §6 差异矩阵写进 `electron-app/AGENTS.md`；§11-D2 显式决策 |
 | R7 | 沙箱内 GPU 抖动导致假失败 | 断言容错加载、但**不允许容错断言**（前置探针已加重试） |
 | R8 | chrome 与内容一旦重叠，拖拽区判定变并集且上游不修（#43320） | **架构级规避**：平铺布局，chrome 与内容**永不重叠**；壳页面只给 `.bar` / `.tabs` 设 drag，不给 `body` 设 |
 

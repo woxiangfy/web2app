@@ -110,7 +110,7 @@ export async function doElectron(args, merged, env, name, rr) {
   // 自动换镜像（见 resolveBuilderBinariesMirror）；必须在构造 builder 命令前改好 env。
   await resolveBuilderBinariesMirror(env, dry)
 
-  // 输出目录：本地打包默认落到**仓库根的 `tests/pack/`**。README §3.2 约定 tests/ 只装本地测试过程的
+  // 输出目录：本地打包默认落到**仓库根的 `tests/pack/`**。根 `AGENTS.md` §3.2 约定 tests/ 只装本地测试过程的
   // 临时/中间产物，根 `.gitignore` 的 `/tests/` 整目录忽略 ⇒ 150MB 量级、上千文件的 win-unpacked/ 树
   // **不会进 git、不污染版本库**。这与 CI 不冲突：CI 工作区一次性，electron-builder.yml 的
   // directories.output=release 只在 CI / 直接跑 pnpm dist 时生效；本地一律用下面的绝对路径覆盖。

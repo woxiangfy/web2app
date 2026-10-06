@@ -2,9 +2,9 @@
 
 > 修订日期：2026-09-16 ｜ 现状核对：**2026-09-20** ｜ 精简：2026-09-22
 > ⚠️ **本文档是「决策与架构记录」，不是当前状态的权威描述。**
-> 里程碑状态、命令、契约与判据**一律以 `../electron-app/README.md` 为准**。
+> 里程碑状态、命令、契约与判据**一律以 `../electron-app/AGENTS.md` 为准**。
 > 原稿中的逐日过程记录（各阶段进展、踩坑细节）已精简删除，同类教训均已沉淀到
-> `../electron-app/README.md` 与 `.workbuddy/memory/topics/electron-app.md`。
+> `../electron-app/AGENTS.md` 与 `.workbuddy/memory/topics/electron-app.md`。
 
 ## 决策锁定（2026-09-16）
 
@@ -16,11 +16,11 @@
 | 体积 | **不限** | 不做极致裁剪；asar 保持默认（实测基线见 `electron-size-reduction.md`） |
 | 分发 | **只出绿色版**：解压目录版与单文件自解压版**都要** | 打包链简化；放弃自动更新 |
 | 数据目录 | **exe 同级 `data\`**（`data_dir="data"`，默认；相对基准 = exe 目录） | 真绿色、整目录可搬走；只读介质自动回退 |
-| 代码签名 | **不做** | SmartScreen 引导说明见 `../electron-app/README.md` |
+| 代码签名 | **不做** | SmartScreen 引导说明见 `../electron-app/AGENTS.md` |
 | Tauri 版 | **继续维护，且持续更新** | 双壳长期并行 → 注入脚本单一真源成为硬要求 |
 | 多页签 | ~~暂缓~~ → **已完成（M5）** | 选型 A′ = `BrowserWindow` 当壳 + 子 `WebContentsView`，`tabs_enabled` 是生效开关 |
 
-**进度（2026-09-24 核对）**：M0–M7 **全部完成** —— M4（下载接管 / 右键菜单 / F12）与 M7（CI 流水线）于 2026-09-24 交付。（本表是决策记录，**权威状态以 `electron-app/README.md` 为准**。）
+**进度（2026-09-24 核对）**：M0–M7 **全部完成** —— M4（下载接管 / 右键菜单 / F12）与 M7（CI 流水线）于 2026-09-24 交付。（本表是决策记录，**权威状态以 `electron-app/AGENTS.md` 为准**。）
 
 ---
 
@@ -41,7 +41,7 @@
 
 ### 1.2 绿色版依然要处理的非"绿色"残留
 
-- **SmartScreen**：未签名 exe 首次运行弹「Windows 已保护你的电脑」——预期行为，文案见 `electron-app/README.md`；
+- **SmartScreen**：未签名 exe 首次运行弹「Windows 已保护你的电脑」——预期行为，文案见 `electron-app/AGENTS.md`；
 - **注册表**：Electron 默认不写注册表 → 天然满足；
 - **自动更新**：绿色版放弃 `autoUpdater`，人工发新包。
 
@@ -49,11 +49,10 @@
 
 ## 2. 目标架构
 
-> 设计期草案文件名与实际不符；**实际 `src/main/` 为 16 个文件（2026-09-26 实测）**：
-> `config.ts` / `index.ts` / `navigate.ts` / `page-behavior.ts`（M4）/ `portable.ts` / `probe.ts` /
-> `settings-window.ts` / `settings.ts` / `shortcuts.ts` / `sidecar.ts` / `startup-log.ts` /
-> `tab-order.ts`（页签邻接纯规则）/ `tabs.ts` / `tray.ts` / `web-data.ts`（清缓存）/
-> `window-state.ts` —— 以目录实际文件为准（启动参数装配在 `scripts/launch.cjs`，不在 src 下）；
+> 设计期草案文件名与实际不符；**以目录实际文件为准**：`src/main/` 入口为 `index.ts`，另含
+> `config.ts` / `portable.ts` / `tabs.ts` / `page-behavior.ts`（M4）/ `startup-log.ts` /
+> `probe.ts`（入口编排，断言组拆在 `probe-single.ts` / `probe-tabs.ts` / `probe-infra.ts` /
+> `probe-server.ts`）等（启动参数装配在 `scripts/launch.cjs`，不在 src 下）；
 > `src/renderer/` 为 `preload.ts` / `settings-preload.ts` / `shell-preload.ts` /
 > `tabs-probe-preload.ts`（4 个）。
 
@@ -66,7 +65,7 @@
   —— **零重写、零复制**，两壳永远跑同一份实现。
 - 握手：启动后向 **stdout 打一行 JSON 并 flush**（`ok` / `proxyUrl` / `resolvedUrl` / `upstreamHost` / `hadAuth` /
   `authUser` / `authPass` / `pid`）；日志一律走 stderr。
-- 生命周期：`will-quit` 里 `kill()`；子进程监视 stdin EOF 自杀（防僵尸三层，见 README「进程间契约」）。
+- 生命周期：`will-quit` 里 `kill()`；子进程监视 stdin EOF 自杀（防僵尸三层，见 `../electron-app/AGENTS.md`「进程间契约」）。
 - ⚠️ sidecar **必须走 `extraResources`，不能进 asar**（asar 内 exe 无法 spawn）。
 
 ### 2.2 启动序列
@@ -91,7 +90,7 @@
 | # | 契约项 | 要求 |
 |---|---|---|
 | 1 | **`config.json` 字段** | 沿用现有 18 字段（2026-09-22 起），不增不改名；`android_*` 四个字段**静默忽略**；⚠️ 布尔**只认真 `bool`**（字符串写法已硬失败，"接受字符串形式"是 2026-09-22 之前的旧行为） |
-| 2 | **顶部留白 38px** | 自绘标题栏 + 顶部让位 38px + `applyChromeFit()` 三件事全保留，与 Tauri 版逐像素一致。⚠️ 让位的**现行写法**是「**`html` 不滚、`body` 滚**」：`html{height:100%;overflow:hidden}` + `body{margin-top:38px;height:calc(100vh - 38px);overflow-y:auto}` —— 旧的 `html,body{padding-top:38px}` 会让滚动条越过标题栏，已废弃（见 README「自绘标题栏与页面滚动条」） |
+| 2 | **顶部留白 38px** | 自绘标题栏 + 顶部让位 38px + `applyChromeFit()` 三件事全保留，与 Tauri 版逐像素一致。⚠️ 让位的**现行写法**是「**`html` 不滚、`body` 滚**」：`html{height:100%;overflow:hidden}` + `body{margin-top:38px;height:calc(100vh - 38px);overflow-y:auto}` —— 旧的 `html,body{padding-top:38px}` 会让滚动条越过标题栏，已废弃（见 `../electron-app/AGENTS.md`「自绘标题栏与页面滚动条」） |
 | 3 | **标题栏按钮** | 后退 / 前进 / **设置** / 最小化 / 最大化（双击标题栏最大化）/ 关闭，行为与位置一致（2026-09-23 起「设置」紧挨最小化**左侧**，探针按几何钉住） |
 | 4 | **Basic 鉴权** | 覆盖 HTTP **与 WebSocket**；`Set-Cookie` 的 `Domain=真实host` → `127.0.0.1` 重写；`X-Forwarded-Proto` 透传上游 scheme |
 | 5 | **新窗口策略** | `target="_blank"` / `window.open()` → 单窗口模式原地导航、多页签模式新开 tab |
@@ -117,7 +116,7 @@
 | **M2 代理接入** | `w2a-proxy` sidecar、spawn+握手、鉴权端到端 | ✅ 完成 |
 | **M3 系统集成** | 托盘、全局快捷键、单实例、设置窗（Shift+F1）、窗口几何持久化 | ✅ 完成 |
 | **M4 页面行为** | 新窗口策略、下载另存为、右键菜单、F12、加载层、外链不泄漏凭据 | ✅ **已交付（2026-09-24）**：下载接管 / 右键菜单 / F12 三项补齐（实现在 `electron-app/src/main/page-behavior.ts`）；新窗口策略与加载层随 M1 已交付 |
-| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针**多页签 31/31、单窗口 134/134**，2026-09-26 实测；2026-09-18 真机目视 V1–V4 关闭） |
+| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针**多页签 33/33、单窗口 138/138**，2026-09-27 实测；2026-09-18 真机目视 V1–V4 关闭） |
 | **M6 打包** | 三形态出包、版本信息、config 注入、日志目录、SmartScreen 文案 | ✅ 完成 |
 | **M7 CI** | Windows workflow：build → lint → E2E → 产物上传 | ✅ **已落库（2026-09-24）**：`.github/workflows/electron-ci.yml`，lint（Ubuntu）+ e2e（Windows）+ package（非 PR，上传 zip / portable）三作业 |
 
@@ -140,7 +139,7 @@ Tauri 侧断言靠 `<img src="/beacon">` 回传（WebView2 走 DWM 合成，截�
 |---|---|---|
 | 1 | **绿色版数据目录不可写** | `try/catch` 回退 `%APPDATA%`；启动日志明示实际数据目录 |
 | 2 | **sidecar 僵尸进程** | 子进程监视 stdin EOF 自杀 + `will-quit` kill + 启动时端口探测 |
-| 3 | **未签名 exe 的 SmartScreen** | 引导文案（README）；不教用户关闭 SmartScreen |
+| 3 | **未签名 exe 的 SmartScreen** | 引导文案（`../electron-app/AGENTS.md`）；不教用户关闭 SmartScreen |
 | 4 | **无自动更新** | 人工发新包 + 应用内「关于」显示版本 |
 | 5 | **Chromium 版本滚动** | 固定升级节奏；`npm audit` + Dependabot |
 | 6 | **双壳长期漂移** | §3 契约 + 注入脚本单一真源 + 探针双向跑 |
@@ -165,7 +164,7 @@ Tauri 侧断言靠 `<img src="/beacon">` 回传（WebView2 走 DWM 合成，截�
 
 ---
 
-## 7. 出包过程中的两个关键教训（详见 `electron-app/README.md`）
+## 7. 出包过程中的两个关键教训（详见 `electron-app/AGENTS.md`）
 
 1. **`createWindow()` 漏传 `title` → 配置 title 静默失效**（拦了 `page-title-updated` 后不会退回页面标题）。
 2. **`tsc` 默认「有错也输出」+ 只跑 typecheck 不重跑 build → 半成品 JS 封进 asar**（`noEmitOnError: true` + 打包前必 `build`）。

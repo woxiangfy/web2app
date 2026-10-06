@@ -26,7 +26,7 @@
  *        install.js 只认环境变量；不设就去连 GitHub Releases，国内表现为**卡住不返回**（不是报错）。
  *       装完只认一个结果：`node_modules/electron/dist/electron.exe` 是否存在
  *        —— pnpm install 退出码 0 不代表二进制装上了。缺失时自动跑
- *        `node node_modules/electron/install.js` 兜底（README 记载的补救法，实测约 3 秒）。
+ *        `node node_modules/electron/install.js` 兜底（`electron-app/AGENTS.md` 记载的补救法，实测约 3 秒）。
  *
  * 为什么是 Node：与 scripts/pack-local.mjs 同样理由 —— 弄 electron-app 必然已有 node
  * （electron-builder、pnpm run * 全是 node 程序），node 是「拿这个仓库做开发」的必要条件；
@@ -164,7 +164,7 @@ function run(cmd, { cwd, env } = {}) {
  * Electron 侧子进程环境。
  *
  * ⚠️ 剥掉 ELECTRON_RUN_AS_NODE：部分宿主（IDE / agent 沙箱）给所有子进程注入它（=1），
- *    泄漏进任何 electron 可执行文件会让其退化成纯 node 模式（见 electron-app/README
+ *    泄漏进任何 electron 可执行文件会让其退化成纯 node 模式（见 electron-app/AGENTS.md
  *    「为什么必须经 launch.cjs」一节）。安装链路虽然不直接 spawn electron.exe，但照仓库
  *    既定纪律统一剥掉，免得 install.js 的解压/校验子步骤踩到。NODE_OPTIONS 不动
  *    （那是宿主的输出通道，清了会变哑巴）。
@@ -338,7 +338,7 @@ function initElectron() {
   }
   run(installCmd, { cwd: ELECTRON, env })
 
-  // README 反复强调的判据：退出码 0 不算数，只认平台二进制真的在 dist/ 里。
+  // `electron-app/AGENTS.md` 反复强调的判据：退出码 0 不算数，只认平台二进制真的在 dist/ 里。
   const exe = electronExePath()
   if (!existsSync(exe)) {
     console.log('\n  ⚠️ pnpm install 已返回，但未发现 electron 平台二进制；执行 install.js 兜底 …')

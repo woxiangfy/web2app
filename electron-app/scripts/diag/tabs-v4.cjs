@@ -38,14 +38,14 @@
 
 // ⚠️⚠️ 本脚本必须由 **electron 二进制**承载（顶层直接解构 electron API）。
 // `pnpm run tabs-v4` 的解释器是 node —— node 下 require('electron') 返回的是 electron.exe
-// 的**路径字符串**（见 README「为什么必须经 launch.cjs」一节），解构拿到 undefined，
+// 的**路径字符串**（见 electron-app/AGENTS.md「为什么必须经 launch.cjs」一节），解构拿到 undefined，
 // 第 52 行的 app.on 立刻抛 TypeError。与 layout-shot.cjs 同一手法：检测到自己跑在
 // node 下时，spawn electron 重新承载本文件并透传全部参数与退出码；electron 下直接放行。
 const electronEntry = require('electron')
 if (typeof electronEntry === 'string') {
   const { spawn } = require('node:child_process')
   const env = { ...process.env }
-  delete env.ELECTRON_RUN_AS_NODE // 必须删，否则 electron 会以纯 node 模式启动（README 同坑）
+  delete env.ELECTRON_RUN_AS_NODE // 必须删，否则 electron 会以纯 node 模式启动（AGENTS.md 同坑）
   const child = spawn(electronEntry, [__filename, ...process.argv.slice(2)], {
     stdio: 'inherit',
     env,

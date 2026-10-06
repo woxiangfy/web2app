@@ -165,7 +165,7 @@ pub(crate) fn config_dir(app: &AppHandle) -> Option<PathBuf> {
 /// 不是「系统的配置」，这是使用者 2026-09-23 明确指出的行为一致性要求。
 ///
 /// 非 Windows（Android）：没有 WebView2 数据目录这个概念，仍用应用私有配置目录
-/// （`/data/data/<pkg>/<app_name>/settings.json`，见 `webview-app/README.md` §移动端）。
+/// （`/data/data/<pkg>/<app_name>/settings.json`，见 `webview-app/AGENTS.md` §移动端）。
 #[cfg(windows)]
 pub(crate) fn store_dir(app: &AppHandle) -> Option<PathBuf> {
     data_dir(app)

@@ -328,7 +328,7 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 7. `electron-app/config.example.json`；
 8. `.github/workflows/generate-signing-key.yml`（签名密钥向导生成给用户的配置模板）；
 9. `.github/workflows/build-custom.yml`（手工触发工作流输入框的注释说明）；
-10. `webview-app/README.md`（Rust 配置示例里的 `const PROXY_BYPASS` 片段）。
+10. `webview-app/AGENTS.md`（Rust 配置示例里的 `const PROXY_BYPASS` 片段）。
 
 ⚠️ `electron-app/config.json`（**未入库**、本地调试用）由 pack-local 打包时按第 4 项规范化
 生成，是产物不是真源，不在此清单内。
@@ -483,7 +483,7 @@ node scripts/pack-local.mjs --parity
 - `icon_url` 非空时会下载 PNG 并应用：Electron 侧**同时**覆盖 `webview-app/icons/icon.png`
   （托盘图标走 `extraResources`，只设 `-c.win.icon` 对托盘无效），Tauri 侧跑 `cargo tauri icon`
   重新生成整套图标。要**刻意**跳过用 `--no-icon`（逃逸口，不是默认路径）。
-- 输出目录：本地打包的**交付产物一律落到仓库根 `tests/` 下** —— 那是 README §3.2 约定的本地测试
+- 输出目录：本地打包的**交付产物一律落到仓库根 `tests/` 下** —— 那是根 `AGENTS.md` §3.2 约定的本地测试
   产物目录，根 `.gitignore` 的 `/tests/` 整目录忽略，**不会进版本库**；CI 不受影响（工作区一次性，
   仍走各自默认路径）。两壳默认**分子目录**（绿色版都叫 `<app_name>.exe`，混放会互相覆盖）：
   - **Electron → `tests/pack/`**：win-unpacked/ 整树、zip/portable 与 NSIS setup exe（单次约 150MB）
