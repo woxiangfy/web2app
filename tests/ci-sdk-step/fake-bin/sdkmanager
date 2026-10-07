@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# 假 sdkmanager —— 只在本地验证 workflow 的「平台/构建工具安装」步骤时使用（不进 CI）。
+# 行为：
+#   --licenses          立刻退出 0（让上游 `yes |` 吃到 SIGPIPE，验证 pipefail 兜底）；
+#   --list              按 $FAKE_PKGS 打印形如真实 sdkmanager 的表格；
+#                       带 --channel=3 时若设置了 $FAKE_PKGS_CANARY 则改用 canary 清单
+#                       （复刻真实行为：stable 只有到 android-36，37.x 只在 canary）；
+#   安装 <包名>…         包名在当前通道清单里才建目录，否则 Warning + exit 1
+#                       （复刻「列不到就装不上」：sdkmanager 对找不到的包直接 exit 1）。
+set -uo pipefail
+
+echo "sdkmanager $*" >> "${FAKE_LOG:-/dev/null}"
+
+CHANNEL_LIST="${FAKE_PKGS:?FAKE_PKGS 未设置}"
+for a in "$@"; do
+  [ "$a" = "--channel=3" ] && [ -n "${FAKE_PKGS_CANARY:-}" ] && CHANNEL_LIST="$FAKE_PKGS_CANARY"
+done
+
+for a in "$@"; do
+  if [ "$a" = "--licenses" ]; then
+    echo "All SDK package licenses accepted."
+    exit 0
+  fi
+done
+
+for a in "$@"; do
+  if [ "$a" = "--list" ]; then
+    echo "Installed packages:"
+    echo "  Path | Version | Description | Location"
+    echo "  ----- | ------- | ----------- | --------"
+    echo "Available Packages:"
+    echo "  Path | Version | Description | Location"
+    echo "  ----- | ------- | ----------- | --------"
+#   表格形态刻意复刻真实输出：包名在 Path 列与 Location 列各出现一次（用于验证上游必须 sort -u）
+    while read -r p; do
+      [ -z "$p" ] && continue
+      printf '  %s | %s | Android SDK %s | %s\n' "$p" "1" "${p##*;}" "$p"
+    done < "$CHANNEL_LIST"
+    exit 0
+  fi
+done
+
+rc=0
+for p in "$@"; do
+  case "$p" in --*) continue ;; esac
+  if ! grep -qx "$p" "$CHANNEL_LIST"; then
+    echo "Warning: Failed to find package '$p'" >&2
+    rc=1
+    continue
+  fi
+  case "$p" in
+    platforms\;*)
+      d="${ANDROID_HOME}/platforms/${p#platforms;}"
+      mkdir -p "$d"
+      printf 'AndroidVersion.ApiLevel=%s\n' "$(printf '%s' "${p#platforms;android-}" | cut -d. -f1)" > "$d/source.properties"
+      ;;
+    build-tools\;*)
+      mkdir -p "${ANDROID_HOME}/build-tools/${p#build-tools;}"
+      ;;
+  esac
+  echo "Installed $p"
+done
+exit $rc

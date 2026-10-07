@@ -285,7 +285,10 @@ Get-Content .\data\logs\startup.log -Tail 40
   - Visual Studio 生成工具（含「使用 C++ 的桌面开发」工作负载）
 - **Android**
   - JDK 17
-  - Android SDK + NDK（r27 及以上）、`build-tools 34`、`platforms;android-34`
+  - Android SDK + NDK（r27 及以上）。**平台与 build-tools 版本不要写死**：Tauri 模板随 tauri-cli 前移
+    （Tauri 2.12 起 `compileSdk = 37`，且不再指定 `buildToolsVersion`），CI 由
+    `.github/scripts/install-android-sdk.sh` 读模板实际值、再从仓库里真实存在的包名中挑
+    （注意 Android 16 起平台包带次版本号：`platforms;android-37.0` 而非 `android-37`，且 37.x 只在 canary 通道）
   - 已执行过 `cargo tauri android init`（见下）
 
 ### Windows
@@ -330,7 +333,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-07 v1.49 实测 172 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 99；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-07 v1.50 实测 175 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 102；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -364,8 +367,9 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 - **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译，并跑 `clippy` / `test`。
 - **Check (Android)**：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，并跑 **Android 目标 clippy**
   （**阻断**，不产出 APK）。
-- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、校验全仓库 workflow YAML
-  （`check-workflows.py`）、逐个校验两份 `config.example.json` 与 `scripts/pack-local.mjs`
+- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、校验全仓库 workflow YAML 与
+  `.github/scripts/*.sh` 语法（`check-workflows.py`）、逐个校验两份 `config.example.json` 与
+  `scripts/pack-local.mjs`
   的 `--parity`（Node 复刻与 Python 解析器的 39 组用例必须逐条一致）。详见
   `docs/packaging-config.md` §5。
 
@@ -441,7 +445,7 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 - 设为 `true` 后，应用不再是一个单一窗口，而是「一个宿主窗口 + 顶部标签栏」，每个 tab 是独立的 WebView、**共享同一份数据目录**（同账号，cookie / localStorage 天然互通）。
 - tab 可切换、可关闭；新 tab 由网页里的 `target="_blank"` / `window.open()` **直接新开**（标签栏的「+」按钮已有意移除，见 `src/shell.html` 注释；程序化建窗仍可走 `create_tab` 命令）。
 - Android 端忽略此字段（移动端无多页签能力）。
-- 该开关等价于编译期环境变量 `TABS_ENABLED`；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。
+- 该开关等价于编译期环境变量 `TABS_ENABLED`；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。打包解析器写入环境变量的是 Python 风格 `True` / `False`（首字母大写），Rust 侧 `env_bool!` 按 ASCII 大小写不敏感识别（v1.50 起；此前只认小写，`True` 会静默回落 `false` —— 配置写了多页签、产物仍是单窗口）。
 - ⚠️ 字符串形式（`"true"`）会被打包解析器直接拒绝（布尔字段只认真 `bool`，见 `docs/packaging-config.md`）。
 
 ```json

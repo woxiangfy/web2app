@@ -400,25 +400,17 @@ jobs:
           echo "icon-custom.png 已下载（将在 android init 后应用）"
 
       - name: Initialize Android project (gen/android) + 安装匹配平台
-        # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
-        # --ci 跳过交互式询问；--skip-targets-install 因为上面已用 rust-toolchain 装了 aarch64 target。
-        # 生成后读取模板实际的 compileSdk / buildToolsVersion，安装对应版本的 platforms 与 build-tools，
-        # 避免写死版本与模板不一致导致 gradle 配置期 "Failed to find Platform SDK with path: android-N"。
-        run: |
-          if [ ! -d "gen/android" ]; then
-            cargo tauri android init --ci --skip-targets-install
-          fi
-
-          APP_GRADLE=$(ls gen/android/app/build.gradle.kts gen/android/app/build.gradle 2>/dev/null | head -n1)
-          SDK=34; BT=34.0.0
-          if [ -n "$APP_GRADLE" ]; then
-            v=$(grep -oE 'compileSdk\s*[=:]\s*[0-9]+' "$APP_GRADLE" | grep -oE '[0-9]+' | head -n1)
-            [ -n "$v" ] && SDK=$v
-            b=$(grep -oE 'buildToolsVersion\s*[=:]\s*"[0-9.]+"' "$APP_GRADLE" | grep -oE '[0-9.]+' | head -n1)
-            [ -n "$b" ] && BT=$b
-          fi
-          echo "目标 compileSdk=$SDK buildToolsVersion=$BT"
-          yes | sdkmanager "platforms;android-$SDK" "build-tools;$BT"
+        # 逻辑在 .github/scripts/install-android-sdk.sh —— release.yml 的同名步骤调用**同一个脚本**，
+        # 不再各存一份副本（避免两边漂移）：没有 gen/android 就先 `cargo tauri android init`，
+        # 再按模板实际写的 compileSdk，从 sdkmanager 仓库里真实存在的包名中挑平台安装。
+        #
+        # ⚠️ 2026-10-07 修线上失败「Warning: Failed to find package 'platforms;android-37'」：
+        #   ① Android 16 起平台包带**次版本号**（仓库里只有 platforms;android-37.0/-37.1/-37.2，
+        #      **没有** platforms;android-37），而 Tauri 模板的 compileSdk 已前移到 37；
+        #   ② 新平台还先落在 canary 通道（stable 只到 android-36），所以安装命令也要带 --channel=3。
+        # 脚本按「无小数优先 → 最小小数版本」挑包，并在只装到 android-N.x 时补 platforms/android-N
+        # 软链；模板版本继续前移（如 39）时回落最高可用平台并改写 gradle，而不是挂掉整条流水线。
+        run: bash ../.github/scripts/install-android-sdk.sh
 
       - name: 应用自定义图标到 Android 工程
         # 官方推荐：android init 之后运行 `cargo tauri icon`，它会把生成的 Android

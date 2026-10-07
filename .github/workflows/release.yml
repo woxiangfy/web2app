@@ -275,24 +275,11 @@ jobs:
           PY
 
       - name: Initialize Android project (gen/android) + 安装匹配平台
-        # 首次构建时仓库里没有 gen/android，就在 CI 上自动生成。
-        # --ci 跳过交互式询问；--skip-targets-install 因为上面已用 rust-toolchain 装了 aarch64 target。
-        # 生成后读取模板实际的 compileSdk / buildToolsVersion，安装对应版本的 platforms 与 build-tools。
-        run: |
-          if [ ! -d "gen/android" ]; then
-            cargo tauri android init --ci --skip-targets-install
-          fi
-
-          APP_GRADLE=$(ls gen/android/app/build.gradle.kts gen/android/app/build.gradle 2>/dev/null | head -n1)
-          SDK=34; BT=34.0.0
-          if [ -n "$APP_GRADLE" ]; then
-            v=$(grep -oE 'compileSdk\s*[=:]\s*[0-9]+' "$APP_GRADLE" | grep -oE '[0-9]+' | head -n1)
-            [ -n "$v" ] && SDK=$v
-            b=$(grep -oE 'buildToolsVersion\s*[=:]\s*"[0-9.]+"' "$APP_GRADLE" | grep -oE '[0-9.]+' | head -n1)
-            [ -n "$b" ] && BT=$b
-          fi
-          echo "目标 compileSdk=$SDK buildToolsVersion=$BT"
-          yes | sdkmanager "platforms;android-$SDK" "build-tools;$BT"
+        # 逻辑在 .github/scripts/install-android-sdk.sh —— 与 build-custom.yml 调用**同一个脚本**，
+        # 不再各存一份副本（避免两边漂移）。脚本内部：没有 gen/android 就先
+        # `cargo tauri android init`，再按模板实际写的 compileSdk 从仓库真实存在的包名中挑平台安装。
+        # 2026-10-07 修复见该脚本头部注释（次版本号平台 android-37.0 + canary 通道）。
+        run: bash ../.github/scripts/install-android-sdk.sh
 
       - name: 应用自定义图标到 Android 工程
         # 官方推荐：android init 之后运行 `cargo tauri icon`，它会把生成的 Android

@@ -29,9 +29,19 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-// const 上下文可用的字符串相等判断：`str` 的 `==` 与 `match` 在常量求值中不可用
-// （`PartialEq` 尚未稳定为 const trait，见 issue #143874），这里用字节逐个比较实现。
-const fn str_eq(a: &str, b: &str) -> bool {
+// const 上下文可用的 ASCII 字母小写折叠（`u8::to_ascii_lowercase` 在 const fn 里不可用）。
+const fn ascii_lower(b: u8) -> u8 {
+    if b >= b'A' && b <= b'Z' {
+        b + (b'a' - b'A')
+    } else {
+        b
+    }
+}
+
+// const 上下文可用的 ASCII 大小写不敏感字符串相等判断：`str` 的 `==` 与 `match`
+// 在常量求值中不可用（`PartialEq` 尚未稳定为 const trait，见 issue #143874），
+// 这里用字节逐个比较实现。
+const fn str_eq_ci(a: &str, b: &str) -> bool {
     let ab = a.as_bytes();
     let bb = b.as_bytes();
     if ab.len() != bb.len() {
@@ -39,12 +49,52 @@ const fn str_eq(a: &str, b: &str) -> bool {
     }
     let mut i = 0;
     while i < ab.len() {
-        if ab[i] != bb[i] {
+        if ascii_lower(ab[i]) != ascii_lower(bb[i]) {
             return false;
         }
         i += 1;
     }
     true
+}
+
+// 编译期布尔环境变量解析：`true/1/yes` => true，`false/0/no` => false（均 ASCII 大小写不敏感）；
+// None / 空串 / 无法识别 => 默认值。抽成 const fn 是为了能直接单测（宏无法被单测调用）。
+//
+// ⚠️ 必须大小写不敏感：打包配置 JSON 的两个解析器（CI 的 Python 与本地 Node 复刻）都按
+//    `str(bool)` 序列化布尔，注入的是 `TABS_ENABLED=True` / `PROXY_ENABLED=False`（Python
+//    风格首字母大写，见 docs/packaging-config.md §3.3）。这里若只认小写 "true"，"True" 会
+//    静默落入默认值 —— 多页签 / 代理 / 诊断开关会全部静默失效（曾实测：tabs_enabled=true
+//    打出来的 Tauri 包仍是单窗口）。
+//
+// 白名单匹配走 const 循环助手 `any_ci`（const fn 里不能用 `match` 比 `str`，也不能直接
+// `.iter().any()`），同时避免一串 then 块完全相同的 if-else（clippy::if_same_then_else）。
+const fn parse_env_bool(value: Option<&str>, default: bool) -> bool {
+    match value {
+        None => default,
+        Some(s) => {
+            if s.is_empty() {
+                default
+            } else if any_ci(s, &["true", "1", "yes"]) {
+                true
+            } else if any_ci(s, &["false", "0", "no"]) {
+                false
+            } else {
+                default
+            }
+        }
+    }
+}
+
+// const 上下文可用的「s 与候选列表任一项大小写不敏感相等」。
+const fn any_ci(s: &str, candidates: &[&str]) -> bool {
+    let mut i = 0;
+    while i < candidates.len() {
+        if str_eq_ci(s, candidates[i]) {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 // 编译期环境变量注入宏：读环境变量 $name，非空则用，否则用 $default。
@@ -63,33 +113,12 @@ macro_rules! env_str {
     }};
 }
 
-// 布尔型注入宏：true/1/yes => true；false/0/no => false；其余用默认值。
-// 注意：在 `const XXX: bool = env_bool!(...)` 的常量上下文中，既不能用 `==` / `match` 比较
-// `str`（`PartialEq` 非 const trait），也不能用 `&&` / `||`（conditionally-const），都会触发
-// E0658。故这里借助上面的 const fn `str_eq` + if-else 链实现（字节级比较，const 安全）。
+// 布尔型注入宏：true/1/yes => true；false/0/no => false（ASCII 大小写不敏感）；
+// 未设置 / 空串 / 其余取值用默认值。解析逻辑在 const fn `parse_env_bool`（可单测）。
 macro_rules! env_bool {
-    ($name:literal, $default:expr) => {{
-        match option_env!($name) {
-            Some(s) => {
-                if str_eq(s, "true") {
-                    true
-                } else if str_eq(s, "1") {
-                    true
-                } else if str_eq(s, "yes") {
-                    true
-                } else if str_eq(s, "false") {
-                    false
-                } else if str_eq(s, "0") {
-                    false
-                } else if str_eq(s, "no") {
-                    false
-                } else {
-                    $default
-                }
-            }
-            None => $default,
-        }
-    }};
+    ($name:literal, $default:expr) => {
+        parse_env_bool(option_env!($name), $default)
+    };
 }
 
 // 把名字清洗为 Windows 合法的文件/目录名：替换路径非法字符 < > : " / \ | ? * 与控制字符
@@ -437,12 +466,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn str_eq_matches_equal_strings() {
-        assert!(str_eq("abc", "abc"));
-        assert!(!str_eq("abc", "abd"));
-        assert!(!str_eq("abc", "ab"));
-        assert!(!str_eq("", "a"));
-        assert!(str_eq("", ""));
+    fn str_eq_ci_matches_ignoring_ascii_case() {
+        assert!(str_eq_ci("abc", "abc"));
+        assert!(str_eq_ci("True", "true"));
+        assert!(str_eq_ci("TRUE", "true"));
+        assert!(str_eq_ci("YES", "yes"));
+        // 非 ASCII 字母不折叠（白名单里也没有这类值），长度 / 内容不同仍为不等
+        assert!(!str_eq_ci("abc", "abd"));
+        assert!(!str_eq_ci("abc", "ab"));
+        assert!(!str_eq_ci("", "a"));
+        assert!(str_eq_ci("", ""));
+    }
+
+    // ---------- parse_env_bool ----------
+    // 这是打包配置 JSON → 环境变量 → 编译期常量这条链上最容易静默断裂的一环：
+    // 两个解析器（CI Python / 本地 Node 复刻）注入的都是 Python 风格 "True"/"False"。
+    #[test]
+    fn parse_env_bool_accepts_python_style_capitals() {
+        assert!(parse_env_bool(Some("True"), false));
+        assert!(!parse_env_bool(Some("False"), true));
+        assert!(parse_env_bool(Some("TRUE"), false));
+        assert!(!parse_env_bool(Some("FALSE"), true));
+    }
+
+    #[test]
+    fn parse_env_bool_whitelist_is_case_insensitive() {
+        for v in ["true", "TRUE", "True", "tRuE", "1", "yes", "Yes", "YES"] {
+            assert!(parse_env_bool(Some(v), false), "{v} 应判真");
+        }
+        for v in ["false", "FALSE", "False", "0", "no", "No", "NO"] {
+            // 默认值给 true：确认是「认出假值」而非「落进默认值」
+            assert!(
+                !parse_env_bool(Some(v), true),
+                "{v} 应判假（即使默认值为 true）"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_env_bool_missing_empty_or_unknown_falls_back() {
+        // None / 空串 → 默认值（env_str! 与 write_env 都把空串当「未设置」）
+        assert!(!parse_env_bool(None, false));
+        assert!(parse_env_bool(None, true));
+        assert!(!parse_env_bool(Some(""), false));
+        assert!(parse_env_bool(Some(""), true));
+        // "on" 刻意不认：两壳曾对 "on" 判定相反（见 docs/packaging-config.md §3.3），只能回落默认值
+        assert!(!parse_env_bool(Some("on"), false));
+        assert!(parse_env_bool(Some("on"), true));
+        // 其他无法识别的值同样回落，绝不猜真值
+        assert!(!parse_env_bool(Some("garbage"), false));
+        assert!(parse_env_bool(Some("2"), true));
     }
 
     #[test]

@@ -87,3 +87,30 @@
   `SyntaxError: Named export 'Menu' not found`。必须 `import electron from 'electron'` 再解构，
   这样「tsc 编译成 CJS」与「Node 直跑 ESM」两条路径都成立。纯 Node 下解构出 undefined 但不报错，
   这正是「纯函数区能被单测直接 import」的前提（顶层不得碰任何 Electron API）。
+
+## 附：CI / GitHub Actions 专属（2026-10-07 Android 打包失败后立）
+
+- ⚠️⚠️ **Android SDK 平台包名不一定是 `platforms;android-<N>`**：Android 16 起带**次版本号**
+  （仓库只有 `platforms;android-36.1` / `37.0` / `37.1` / `37.2`，**没有** `platforms;android-37`），
+  且新平台**先落 canary 通道**（stable 只到 `android-36`）⇒ 既要按真实包名挑，也要给安装命令加 `--channel=3`。
+  判据来源别猜：直接取 `dl.google.com/android/repository/repository2-1.xml`（stable）与 `repository2-3.xml`
+  （canary），`grep -o 'path="platforms;android-[0-9.]*"'` 一跑就清楚。落点 = 共享脚本
+  `.github/scripts/install-android-sdk.sh`（build-custom / release 调同一份）；本地行为验证 =
+  `bash tests/ci-sdk-step/run-tests.sh`（假 sdkmanager + 真清单数据，33 条断言）。
+- ⚠️⚠️ **给旧脚本加 `set -euo pipefail` = 加一批新失败模式**，三个已实测的「静默 exit 2 / 零输出」陷阱：
+  ① `ls a b | head -n1`：`ls` 只要有参数不存在退出码就是 **2** ⇒ 整步静默退出、日志空白（最贵的一种，
+  因为什么线索都不留）；② `yes | sdkmanager …`：sdkmanager 先退出 ⇒ `yes` 收 SIGPIPE(=141) ⇒ pipefail 判失败；
+  ③ `printf 大输入 | grep -q`：grep 命中即退 ⇒ printf 收 SIGPIPE，同上。⇒ 兜底一律 `|| true`，
+  且**别用管道做「文件里是否包含」判断**（改写文件再 grep）。改完必须重跑行为验证 + 反向对照。
+- ⚠️ **抽出去给 workflow 调用的 `.sh` 会掉出守卫范围**：`check-workflows.py` 原先只查 `run:` 内联脚本，
+  且仅限显式写了 `shell: bash` 的步骤 ⇒ 抽出共享脚本后已补 `.github/scripts/*.sh` 的 `bash -n`
+  （反向对照：追加未闭合 `if` → rc=1 且有明确报错，还原后 sha256 不变）。
+- ⚠️⚠️ **干跑 / 生成脚本的产物一律写系统临时区，绝不落进仓库树**：干跑脚本原先把用例目录写
+  `$HERE/tmp/run-<时间戳>/`（跑一次 ~72 个文件），**连跑 9 次就攒了 455 个文件 / 1.5MB**，而且没有任何
+  一步会清它（`tests/` 又是未纳管目录 ⇒ 攒到用户来问「临时文件删了吗」）。正确形态：
+  `TMP_BASE="${CI_SDK_STEP_TMP:-${TMPDIR:-/tmp}/<name>}"`，`mkdir -p` 后**把路径打印出来**（要留证据时靠
+  这个环境变量指定）；不要在脚本里 `rm -rf` 旧目录——本机递归删除会被安全垫片拦、CI 上又是不必要的风险。
+  另：`data/` 里生成清单时留下的中间态文件（`tmp-pkgs.txt` 这类）要当场删，否则「没人引用但一直在」。
+- ⚠️⚠️ **文档里的「计数」是最容易漂的第二处**（第一处是代码）：本次 `docs/changes/2026-10-07.md` 里
+  改完断言数后**仍留一处 `PASS=31`**（前一轮 `sed` 只替换到了另一句）。⇒ 订正计数后必须
+  `grep -rn "PASS=\|条断言"` 把**所有**出现点扫一遍，别信单次 sed。

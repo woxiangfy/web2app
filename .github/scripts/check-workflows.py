@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""静态检查 GitHub Actions 工作流：YAML 合法性 + 内联脚本语法。
+"""静态检查 GitHub Actions 工作流：YAML 合法性 + 内联脚本语法 + `.github/scripts/*.sh` 语法。
 
 ## 为什么需要
 
 `.github/workflows/*.yml` 里塞了大量**内联脚本**（`python - <<'PY'`、`python3 -c '...'`、
-大段 bash）。它们有三类只在 CI 上才炸、本地完全看不出来的错：
+大段 bash），另有若干**被 workflow 调用的 shell 脚本**（`.github/scripts/*.sh`，如
+`install-android-sdk.sh`）。它们有三类只在 CI 上才炸、本地完全看不出来的错：
 
 1. YAML 块标量与 heredoc 缩进没对齐 ⇒ 整个 workflow 无法解析，Actions 页只报一个语焉不详的错；
 2. heredoc 里的 Python 语法错 ⇒ 打包跑到一半才失败（而且要等 checkout / 装工具链之后）；
@@ -170,7 +171,11 @@ def find_bash() -> str | None:
 
 
 def check_bash_syntax(name: str, run: str, errors: list[str]) -> None:
-    """显式 `shell: bash` 的步骤整体过一遍 `bash -n`（只解析、不执行）。"""
+    """把一段 bash 整体过一遍 `bash -n`（只解析、不执行）。
+
+    调用点有两处：显式 `shell: bash` 的 workflow 步骤，以及 `.github/scripts/*.sh`
+    （它们被 workflow 直接 `bash xxx.sh` 调用，语法错同样只在 CI 上炸）。
+    """
     bash = find_bash()
     if not bash:
         return
@@ -218,12 +223,21 @@ def main() -> int:
                 if step.get("shell") == "bash":
                     check_bash_syntax(label, run, errors)
 
+    # 被 workflow 调用的共享 shell 脚本：不在 run 里，但同样是「只在 CI 上才炸」的脚本
+    # （如 install-android-sdk.sh），一并过 bash -n。
+    scripts = sorted((ROOT / ".github" / "scripts").glob("*.sh"))
+    for path in scripts:
+        rel = path.relative_to(ROOT).as_posix()
+        checked += 1
+        check_bash_syntax(rel, path.read_text(encoding="utf-8"), errors)
+
     if errors:
         print("工作流检查发现问题：")
         for e in errors:
             print(f"::error::{e}")
         return 1
-    print(f"工作流检查通过 ✓（{len(WORKFLOWS)} 个文件 / {checked} 个 run 步骤）")
+    print(f"工作流检查通过 ✓（{len(WORKFLOWS)} 个 workflow / {checked} 个脚本片段，"
+          f"其中 {len(scripts)} 个 .github/scripts/*.sh）")
     return 0
 
 

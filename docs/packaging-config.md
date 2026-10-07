@@ -142,6 +142,10 @@ AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自�
 
 哪些字段是布尔：`proxy_enabled`、`tabs_enabled`、`debug`。
 
+> 注：真 bool 经打包解析器写入环境变量时是 Python 风格的 `True` / `False`（首字母大写，
+> CI 的 `write_env` 与本地 Node 复刻同源），Tauri 的 `env_bool!` 按 **ASCII 大小写不敏感**
+> 识别（`True` / `TRUE` 等价于 `true`）；`"on"` 无论如何都不认。
+
 > ⚠️ 数据目录**曾经也是布尔**（旧字段 `data_dir_default`），现已改成**字符串** `data_dir`——
 > 布尔只能表达「二选一」，而这个概念需要表达「哪个相对路径 / 哪个绝对路径 / 用系统目录」。
 > 见 §4.3。
@@ -374,7 +378,7 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 ```bash
 python3 .github/scripts/parse-packaging-config.py --selftest
 python3 .github/scripts/parse-packaging-config.py --print-contract-keys   # 打印字段名，供模板断言
-python3 .github/scripts/check-workflows.py                                # workflow YAML + 内联脚本语法
+python3 .github/scripts/check-workflows.py                                # workflow YAML + 内联脚本语法 + .github/scripts/*.sh
 ```
 
 ---
@@ -611,4 +615,4 @@ node scripts/pack-local.mjs --parity
 | 打包入口（Electron 绿色版 / 安装版） | `.github/workflows/electron-build-custom.yml` |
 | 打 tag 自动发布 | `.github/workflows/release.yml` |
 | asar 配置护栏 | `electron-app/scripts/check-asar-config.cjs` |
-| 静态检查所有 workflow | `.github/scripts/check-workflows.py` |
+| 静态检查所有 workflow（YAML + 内联脚本 + `.github/scripts/*.sh`） | `.github/scripts/check-workflows.py` |

@@ -1,1 +1,1 @@
-node ../scripts/pack-local.mjs --config json/osfipin.note.json --target tauri-portable
+node ../scripts/pack-local.mjs --config json/osfipin.mark.json --target tauri-portable
