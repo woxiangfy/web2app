@@ -52,3 +52,4 @@ node_modules/
 # ⚠️ `scripts/pack-local.mjs` 的 Electron 本地打包产物**默认就落在这里**（tests/pack/：
 #    win-unpacked/ 整树 + zip/portable，单次约 150MB / 上千文件），靠本条规则保证不入库。
 /tests/pack/
+/tests/json/

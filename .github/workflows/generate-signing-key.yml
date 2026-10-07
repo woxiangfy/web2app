@@ -54,7 +54,7 @@ jobs:
 
       # keytool 随 JDK 提供；GitHub 的 ubuntu-latest 自带 openjdk，这里显式装 JDK17 保证 keytool 可用、与打包 CI 一致。
       - name: 安装 JDK 17（提供 keytool）
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'

@@ -163,7 +163,7 @@ webview-app/
 │   └── dnd_polyfill.js     # WebView2 拖拽 polyfill
 ├── crates/
 │   ├── resolve-core/       # 纯加密核心（Ed25519 + AES-256-GCM + HKDF），零平台依赖
-│   ├── resolve-tool/       # 服务端 CLI：生成密钥对 / 生成 DNS TXT 密文
+│   ├── resolve-tool/       # 服务端 CLI：生成密钥对 / 生成 DNS TXT 密文 / 解密验证
 │   └── proxy-server/       # Electron 侧 sidecar（bin 名 w2a-proxy），#[path] 复用 src/proxy.rs
 ├── dist/
 │   ├── index.html          # 多页签 tab 窗口的首文档（body 必须空白：loading.js 靠它判定加载中；真实内容由 bootstrap 导航到远程地址）
@@ -330,7 +330,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-07 实测 151 条通过：resolve-core 13 + resolve-tool 7 + w2a-proxy 32 + 主 crate 99；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-07 v1.49 实测 172 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 99；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -460,7 +460,7 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 ```json
 {
   "app_url": ["node1.example.com", "node2.example.com"],
-  "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=",
+  "public_key": "HkCpkH1tMpNIxWoWAkvlX8vm93BOc5PtIKrQxl8RUDo=",
   "app_name": "MyApp"
 }
 ```
@@ -471,17 +471,31 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 | --- | --- | --- |
 | **防劫持（硬保证）** | 服务端 Ed25519 **私钥签名**，客户端**公钥验签** | 攻击者即使拿到公钥 + 完全控制 DNS TXT，没有私钥就无法伪造出能通过验签的密文，最多破坏记录导致解密失败（DoS），**无法劫持到恶意网址** |
 | **隐藏真实网址（软保证）** | AES-256-GCM 认证加密包装 | 外部查 TXT 只能看到密文。但对称密钥由客户端内置 Secret 派生，**攻击者反编译客户端可还原**，故此层只防"公网批量爬取/随手 dig"，不防针对性反编译 |
-| **每次加密不同** | Nonce(12B) + 随机盐(8B) 每次随机 | 同一 URL 多次加密密文完全不同，防重放/防密文比对猜测 |
-| **密文尽可能短** | Ed25519(64B) + AEAD tag(16B) + Nonce(12B) | 约 130~150 字节，base64 后约 180~200 字符，**单条 DNS TXT 可放下**（上限 255 字节） |
+| **每次加密不同** | Nonce(12B) 每次随机（同时充当 HKDF salt，派生密钥也每次不同） | 同一 URL 多次加密密文完全不同，防重放/防密文比对猜测 |
+| **密文尽可能短** | 固定开销 97B（Nonce12 + 分隔/签发日/有效期 5 + 签名64 + tag16）+ URL 本体 | v4 唯一格式 base64 后通常 160~180 字符，**单条 DNS TXT 可放下**（单串上限 255 字节）；v1/v2/v3 旧格式不再兼容 |
 
 要点：
 
-- **数据格式**（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端 `resolve-core`（`crates/resolve-core`）一致）：
+- **数据格式（v4 唯一）**（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端
+  `resolve-core`（`crates/resolve-core`）一致）：
   `TXT = base64( Nonce(12B) ‖ AES-256-GCM(HKDF(Secret,Nonce), Payload ‖ Ed25519签名) )`，
-  其中 `Payload = URL ‖ 0x00 ‖ 时间戳ts(8B) ‖ 有效期ttl(8B) ‖ 0x00 ‖ 随机盐(8B)`。
-- **有效期（ttl）由服务端生成时决定**：`ttl` 是随密文下发的有效期秒数，
-  - `ttl > 0`：客户端校验 `now - ts <= ttl`，超出即拒绝（防重放/防过期记录）；
-  - `ttl = 0`：**永不失效**，客户端跳过时间校验（适合后端地址长期不变的场景）。
+  其中 `Payload = URL ‖ 0x00 ‖ 签发日d(2B) ‖ 有效期ttl_d(2B)`（分隔符后尾部固定 4B）。
+  **解密端只认这一种结构**：v3（秒级 16B 尾）/ v2（带盐 25B）/ v1（无 ttl 17B）
+  记录一律报「Payload 尾部结构异常」拒绝，线上旧 TXT 需用当前工具重新签发（详见
+  `docs/txttest-verify-materials.md`）。
+- **Secret：客户端编译期注入不变，服务端加密支持 `--secret` 逐次指定**：
+  - 客户端侧，AES 密钥源头仍是 `resolve-core` 编译期的 `option_env!("RESOLVE_SECRET")`：
+    构建前在 shell 设好自定义 Secret（cargo 自动追踪该 env，改值会重编 `resolve-core`），
+    不设则用内置默认串 `web2app-fixed-secret-2026`。
+  - 服务端侧，`resolve-tool encrypt/all` 与 Python 工具自 v1.46 起支持 `--secret <值>`
+    逐次调用显式传入，取值优先级 **参数 > 环境变量 `RESOLVE_SECRET` > 内置默认**，同一份
+    工具二进制不必为不同 Secret 分别编译；PowerShell/cmd 的 env 老用法继续有效（设了 env
+    就省略 `--secret`）。两端 Secret 不一致时 HKDF 派生密钥不同、客户端必然解密失败。
+- **签发日与有效期（ttl_days）由服务端生成时决定**：时间以 **UTC 天**为单位，
+  `d` = 签发日距固定基准日 **2026-01-01** 的天数（u16，可覆盖至约 2205 年），
+  `ttl_d` 是随密文下发的有效期天数：
+  - `ttl_d > 0`：客户端校验 `今日 - d <= ttl_d`，超出即拒绝（最小粒度 1 天）；
+  - `ttl_d = 0`：**永不失效**，客户端跳过日期校验（适合后端地址长期不变的场景）。
   这样是否设有效期、设多长，完全由生成密文的一方决定，客户端无需重新编译。
 - **`public_key` 格式**：Ed25519 公钥的**裸 base64（32 字节）**，或 SPKI PEM（`BEGIN PUBLIC KEY`）。
   推荐直接用 `genkey` 生成的 `public_key.b64` 内容。
@@ -493,18 +507,33 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 1. **纯 Rust 工具 `resolve-tool`**（推荐，无需 Python 依赖；独立 crate，不编译 Tauri）：
    ```bash
    cargo run -p resolve-tool -- genkey --out keys   # 生成私钥(服务端持有) + 公钥(客户端)
-   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0
-   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl 0 --count 3
+   cargo run -p resolve-tool -- genkey --stdout     # 不落盘：私钥 PEM/公钥直接打印到控制台（等价于双击 scripts/gen-resolve-keys.bat）
+   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl-days 0
+   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl-days 7 --count 3
+   # 客户端构建期注入了自定义 Secret 时，用 --secret 逐次显式传入（值必须与客户端一致）：
+   cargo run -p resolve-tool -- encrypt keys/private_key.pem "https://user:pass@host" --ttl-days 0 --secret "与客户端一致的 Secret"
+   # encrypt 第一个参数也接受内联 PEM 字符串（以 -----BEGIN 开头，可折叠成单行、勿带 # 注释行），配合 genkey --stdout 全程不落盘：
+   cargo run -p resolve-tool -- encrypt "-----BEGIN PRIVATE KEY-----<PEM 本体拼成一行>-----END PRIVATE KEY-----" "https://user:pass@host" --ttl-days 0
    ```
-   `--ttl 秒`：0 = 永不失效；正数 = 生成后 N 秒内有效（默认 172800 = 48h）。
-   `--count N`：每个 URL 生成 N 份密文（随机 Nonce/盐，密文不同但解密结果相同），可把同一个
+   `--ttl-days 天`：默认 **0 = 永不失效**；正数 = 生成后 N 天内有效（最小粒度 1 天，上限 65535），到期客户端拒绝（防重放/防过期需显式开启）。
+   `--count N`：每个 URL 生成 N 份密文（随机 Nonce，密文不同但解密结果相同），可把同一个
    地址分发到多个域名 / 多条 DNS TXT 记录。
-   也可用 `all` 一键生成密钥对 + 密文：`cargo run -p resolve-tool -- all "https://..." --out keys --count 3`。
+   `--secret <值>`：显式指定本次加密的 Secret（优先级高于环境变量；空串报错），不传则回落
+   编译期/环境变量 `RESOLVE_SECRET` → 内置默认。
+   也可用 `all` 一键生成密钥对 + 密文：`cargo run -p resolve-tool -- all "https://..." --out keys --count 3`（同样支持 `--secret`）。
+   **解密验证**一条 TXT 密文（AES-GCM 认证 + Ed25519 验签，通过后打印真实 URL、签发日期与 TTL 天数；公钥为文件路径或直接内联的裸 base64/SPKI PEM；密文省略时走 stdin）：
+   ```bash
+   cargo run -p resolve-tool -- decrypt "<公钥裸 base64>" "<TXT 密文>" --secret "与客户端一致的 Secret"
+   echo "<TXT 密文>" | cargo run -p resolve-tool -- decrypt "<公钥裸 base64>"
+   ```
+   过期记录（ttl_days>0 且已超时）仍展示解密内容，但退出码为 1，与客户端「过期即拒绝」一致。
 
 2. **Python 脚本 `tools/encrypt_url.py`**（需 `pip install cryptography`）：
    ```bash
    python tools/encrypt_url.py genkey keys          # 生成私钥 + 公钥
-   python tools/encrypt_url.py keys/private_key.pem "https://user:pass@host" --ttl 0
+   python tools/encrypt_url.py keys/private_key.pem "https://user:pass@host" --ttl-days 0
+   python tools/encrypt_url.py keys/private_key.pem "https://user:pass@host" --ttl-days 0 --secret "与客户端一致的 Secret"
+   # 与 resolve-tool 相同，第一个参数也支持直接传内联 PEM 字符串（多行完整 PEM，勿带 # 注释行）；--secret 同名同义（参数 > 环境变量 > 默认）
    ```
 
 把密文作为某个域名的 TXT 记录值，把 `keys/public_key.b64` 的内容作为配置里的 `public_key`。

@@ -28,3 +28,6 @@ Thumbs.db
 # 动态解析验证临时产物（含私钥，切勿入库）
 /txttest_keys/
 /txttest_verify_materials.md
+
+# 动态解析【生产】密钥对与 Secret（含私钥，切勿入库）
+/deploy_keys/

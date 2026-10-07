@@ -44,14 +44,15 @@ name: 自定义打包
 #     "proxy_https": "",                     // 外部 HTTPS 代理（默认空）
 #     "proxy_bypass": "",                    // 不走代理的地址，分号分隔
 #                                            //   （默认 "localhost;127.0.0.1;<-loopback>"，两壳一致）
-#     "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=", // Ed25519 公钥（裸 base64 或 SPKI PEM）。
+#     "public_key": "HkCpkH1tMpNIxWoWAkvlX8vm93BOc5PtIKrQxl8RUDo=", // Ed25519 公钥（裸 base64 或 SPKI PEM）。
 #                                            //   仅当 app_url 为【域名数组】时必填：运行时对每个域名
 #                                            //   做 DNS TXT 查询，TXT 值是一段 base64 密文，用本公钥
 #                                            //   验签 + AES-GCM 解密得到真实 URL。任一域名解析/解密/验签
 #                                            //   失败自动尝试下一个，全部失败报"服务器连接失败"。
 #     "resolve_secret": "my-secret-2026",    // （可选，默认内置值）AES 对称加密 Secret，需与服务端
-#                                            //   生成 TXT 密文时用的 Secret 一致。默认空=用代码内置默认值
-#                                            //   （向后兼容旧密文）。填了就为本次产物单独指定 Secret，
+#                                            //   生成 TXT 密文时用的 Secret 一致（resolve-tool encrypt
+#                                            //   --secret 或环境变量 RESOLVE_SECRET）。默认空=用代码内置
+#                                            //   默认值。填了就为本次产物单独指定 Secret，
 #                                            //   使每个包不再共享同一个固定密钥串（提高反编译门槛）。
 #                                            //   ⚠️ 它是**编译期**注入：两个壳都一样，改了必须重新打包。
 #     "data_dir": "data",                    // 字符串（默认 "data"，两壳行为一致）= 应用数据放哪：

@@ -14,8 +14,8 @@ name: 动态解析工具（生成密钥对 / 生成 TXT 密文）
 #   ② 生成 TXT 密文（encrypt）
 #       用一把已有的私钥，对一个或多个真实 URL 做 Ed25519 签名 + AES-256-GCM 加密，
 #       输出一组 base64 密文（每行一条，均可写入某个跳板域名的 DNS TXT 记录）。
-#       支持指定有效期 ttl（秒）：>0 表示生成后 ttl 秒内有效；0 表示永不失效。
-#       支持指定 count（份数）：每个 URL 生成多份密文（随机 Nonce/盐，密文不同但解密
+#       支持指定有效期 ttl_days（天）：>0 表示生成后 ttl_days 天内有效；0 表示永不失效。
+#       支持指定 count（份数）：每个 URL 生成多份密文（随机 Nonce，密文不同但解密
 #       结果相同），可把同一个地址分发到多个域名 / 多条 TXT 记录。
 #
 #   ③ 一键生成密钥对 + 密文（all）
@@ -47,10 +47,10 @@ on:
         description: '【encrypt / all 用】每个 URL 生成的密文份数（同一 URL 的多份密文解密结果相同，可分发到多个域名/多条 TXT；默认 1）'
         required: false
         default: '1'
-      ttl:
-        description: '【encrypt / all 用】有效期秒数（0=永不失效；默认 172800=48h）'
+      ttl_days:
+        description: '【encrypt / all 用】有效期天数（默认 0=永不失效；需要防重放/防过期时填正整数，上限 65535）'
         required: false
-        default: '172800'
+        default: '0'
       secret:
         description: '【encrypt / all 用，可选】AES 对称加密 Secret，**必须与打包时 build-custom.yml 配置的 resolve_secret 一致**（否则该包解密失败）。不填 = 自动生成一把随机 Secret（写入产物说明文件，打包时把它填进 resolve_secret 即可）。填了则本次密文只能用"同一 secret 打的包"解密。'
         required: false
@@ -133,7 +133,7 @@ jobs:
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
-          TTL: ${{ github.event.inputs.ttl }}
+          TTL_DAYS: ${{ github.event.inputs.ttl_days }}
           COUNT: ${{ github.event.inputs.count }}
           # 关键：用 toJSON 把多行私钥编码成 JSON 字符串（换行→\n 字面量）。
           # 若直接 `env: PRIVATE_KEY: ${{ github.event.inputs.private_key }}`，多行值会被
@@ -143,8 +143,11 @@ jobs:
           if [ -z "$URL" ]; then
             echo "::error::必须提供 url（要加密的真实 URL，可用空格分隔多个）"; exit 1
           fi
-          if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
-            echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
+          if ! echo "$TTL_DAYS" | grep -Eq '^[0-9]+$'; then
+            echo "::error::ttl_days 必须是非负整数天数，收到：$TTL_DAYS"; exit 1
+          fi
+          if [ "$TTL_DAYS" -gt 65535 ]; then
+            echo "::error::ttl_days 超出上限 65535，收到：$TTL_DAYS"; exit 1
           fi
           if ! echo "$COUNT" | grep -Eq '^[0-9]+$' || [ "$COUNT" -lt 1 ]; then
             echo "::error::count 必须是正整数，收到：$COUNT"; exit 1
@@ -160,7 +163,7 @@ jobs:
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
-          TTL: ${{ github.event.inputs.ttl }}
+          TTL_DAYS: ${{ github.event.inputs.ttl_days }}
           COUNT: ${{ github.event.inputs.count }}
           SECRET: ${{ github.event.inputs.secret }}
         # ⚠️ resolve-tool 的 Secret 是编译期 option_env!("RESOLVE_SECRET")：必须在 cargo 编译
@@ -179,14 +182,14 @@ jobs:
           fi
           echo "SECRET_EFFECTIVE=$SECRET_EFFECTIVE" >> "$GITHUB_ENV"
           # 只对这条 cargo 命令注入 RESOLVE_SECRET（不 export 避免污染后续 step）。
-          RESOLVE_SECRET="$SECRET_EFFECTIVE" cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl "$TTL" --count "$COUNT" \
+          RESOLVE_SECRET="$SECRET_EFFECTIVE" cargo run -p resolve-tool -- encrypt "$RUNNER_TEMP/private_key.pem" $URL --ttl-days "$TTL_DAYS" --count "$COUNT" \
             | tee "$RUNNER_TEMP/cipher.txt"
 
       - name: 导出密文 + 使用说明
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
-          TTL: ${{ github.event.inputs.ttl }}
+          TTL_DAYS: ${{ github.event.inputs.ttl_days }}
           COUNT: ${{ github.event.inputs.count }}
           SECRET: ${{ env.SECRET_EFFECTIVE }}
         run: |
@@ -196,7 +199,7 @@ jobs:
             echo "TXT 密文（每条均可写入 DNS TXT 记录）"
             echo "======================================================"
             echo "URL : $URL"
-            echo "ttl : $TTL 秒（0=永不失效）"
+            echo "ttl_days: $TTL_DAYS 天（0=永不失效）"
             echo "份数: 每个 URL 生成 $COUNT 份（同一 URL 的多份密文解密结果相同）"
             echo "Secret: $SECRET_LABEL（打包时 build-custom.yml 的 resolve_secret 必须填这同一个，否则该包解密失败）"
             echo ""
@@ -243,14 +246,17 @@ jobs:
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
-          TTL: ${{ github.event.inputs.ttl }}
+          TTL_DAYS: ${{ github.event.inputs.ttl_days }}
           COUNT: ${{ github.event.inputs.count }}
         run: |
           if [ -z "$URL" ]; then
             echo "::error::必须提供 url（要加密的真实 URL，可用空格分隔多个）"; exit 1
           fi
-          if ! echo "$TTL" | grep -Eq '^[0-9]+$'; then
-            echo "::error::ttl 必须是非负整数秒数，收到：$TTL"; exit 1
+          if ! echo "$TTL_DAYS" | grep -Eq '^[0-9]+$'; then
+            echo "::error::ttl_days 必须是非负整数天数，收到：$TTL_DAYS"; exit 1
+          fi
+          if [ "$TTL_DAYS" -gt 65535 ]; then
+            echo "::error::ttl_days 超出上限 65535，收到：$TTL_DAYS"; exit 1
           fi
           if ! echo "$COUNT" | grep -Eq '^[0-9]+$' || [ "$COUNT" -lt 1 ]; then
             echo "::error::count 必须是正整数，收到：$COUNT"; exit 1
@@ -260,7 +266,7 @@ jobs:
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
-          TTL: ${{ github.event.inputs.ttl }}
+          TTL_DAYS: ${{ github.event.inputs.ttl_days }}
           COUNT: ${{ github.event.inputs.count }}
           SECRET: ${{ github.event.inputs.secret }}
         run: |
@@ -277,14 +283,14 @@ jobs:
           fi
           echo "SECRET_EFFECTIVE=$SECRET_EFFECTIVE" >> "$GITHUB_ENV"
           # 同 encrypt 的注释：必须在 cargo 编译前注入 RESOLVE_SECRET。
-          RESOLVE_SECRET="$SECRET_EFFECTIVE" cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl "$TTL" --count "$COUNT" \
+          RESOLVE_SECRET="$SECRET_EFFECTIVE" cargo run -p resolve-tool -- all $URL --out "$RUNNER_TEMP/resolve-all" --ttl-days "$TTL_DAYS" --count "$COUNT" \
             | tee "$RUNNER_TEMP/resolve-all/result.txt"
 
       - name: 附上使用说明
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
-          TTL: ${{ github.event.inputs.ttl }}
+          TTL_DAYS: ${{ github.event.inputs.ttl_days }}
           COUNT: ${{ github.event.inputs.count }}
           SECRET: ${{ env.SECRET_EFFECTIVE }}
         run: |
@@ -306,7 +312,7 @@ jobs:
           EOF
           {
             echo ""
-            echo "本次输入：URL = $URL ，ttl = $TTL 秒（0=永不失效），每 URL 份数 = $COUNT"
+            echo "本次输入：URL = $URL ，ttl_days = $TTL_DAYS 天（0=永不失效），每 URL 份数 = $COUNT"
           } >> "$RUNNER_TEMP/resolve-all/README.txt"
           # Secret 单独追加（不用 heredoc，避免内容被注释符干扰）：打包 resolve_secret 必须与此一致。
           echo "" >> "$RUNNER_TEMP/resolve-all/README.txt"

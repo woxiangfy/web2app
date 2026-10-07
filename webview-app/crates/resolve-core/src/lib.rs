@@ -10,23 +10,28 @@
 //!      Ed25519【公钥】验签。
 //!   2. **隐藏真实网址（软保证）**：明文用 AES-256-GCM 认证加密，对称密钥由固定 Secret
 //!      经 HKDF 派生，防公网批量爬取，不防针对性反编译。
-//!   3. **每次加密结果不同**：Nonce 与随机盐每次随机生成。
+//!   3. **每次加密结果不同**：Nonce(12B) 每次随机生成（它同时充当 HKDF 的 salt，
+//!      故派生出的 AES 密钥也每次不同；无需额外随机盐）。
 //!
 //! # 数据格式（服务端 `tools/encrypt_url.py` / `resolve-tool` 与客户端必须一致）
 //!
 //! ```text
-//! Payload   = URL || 0x00 || 时间戳(8B, 大端) || 有效期ttl(8B, 大端) || 0x00 || 随机盐(8B)
+//! Payload   = URL || 0x00 || 签发日d(2B 大端) || 有效期ttl_d(2B 大端)
 //! Signature = Ed25519.sign(Payload)                       // 64 字节
 //! Key       = HKDF-SHA256(ikm=Secret, salt=Nonce, info="web2app-resolve")  // 32 字节
 //! Cipher    = AES-256-GCM.encrypt(Key, Nonce, Payload || Signature)  // 附 16 字节 tag
 //! TXT 值    = base64( Nonce(12B) || Cipher )
 //! ```
 //!
-//! # 有效期（ttl）语义
+//! 解密端**只认当前 v4 格式**（见 [`parse_payload_parts`]，尾部固定 4B）；v3 秒级
+//! 时间戳（16B 尾）与更早的 v1/v2 格式一律拒绝——线上旧 TXT 需用当前工具重新签发。
 //!
-//! `ttl` 是【服务端生成时指定】的有效期时长（单位：秒）：
-//!   - `ttl > 0`：客户端校验 `now - ts <= ttl`，超出即拒绝。
-//!   - `ttl = 0`：永不失效，跳过时间戳校验。
+//! # 日期与有效期（ttl_days）语义
+//!
+//! 时间以** UTC 天**为单位，`d` = 签发日距固定基准日 **2026-01-01** 的天数（u16，
+//! 可覆盖至约 2205 年）；`ttl_d` 是有效期天数（u16）：
+//!   - `ttl_d > 0`：客户端校验 `今日 - d <= ttl_d`，超出即拒绝（最小粒度 1 天）。
+//!   - `ttl_d = 0`：永不失效，跳过日期校验。
 
 use aes_gcm::aead::{Aead, KeyInit, Payload as AeadPayload};
 use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
@@ -50,8 +55,13 @@ const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 /// Ed25519 签名长度（64 字节）。
 const SIG_LEN: usize = 64;
-/// Payload 里时间戳 / 有效期 / 随机盐各占 8 字节。
-const FIELD_LEN: usize = 8;
+/// Payload 里签发日 / 有效期各占 2 字节（u16，尾部固定 4B，也是唯一受支持的格式）。
+const FIELD_LEN: usize = 2;
+/// 日期基准日 2026-01-01 对应的 UNIX 天数（距 1970-01-01；56 年含 14 个闰年 ⇒ 20454）。
+/// 签发日 `d` 与它相加即 UNIX 天数，可换算成公历日期（`resolve-tool` 展示用）。
+pub const BASE_UNIX_DAY: i64 = 20454;
+/// 有效期 / 日期字段的 u16 上界（超过即拒绝；65535 天 ≈ 179 年）。
+const MAX_DAYS: u64 = u16::MAX as u64;
 
 /// 对称加密的 Secret（与服务端 `tools/encrypt_url.py` 保持一致）。
 ///
@@ -126,58 +136,100 @@ pub fn parse_public_key(pem: &str) -> Result<VerifyingKey, String> {
         .map_err(|e| format!("Ed25519 公钥解析失败：{e}"))
 }
 
-/// 用 HKDF-SHA256 从 Secret + Nonce 派生 AES-256 密钥。
-fn derive_key(nonce: &[u8]) -> [u8; KEY_LEN] {
-    let hk = Hkdf::<Sha256>::new(Some(nonce), SECRET);
+/// 用 HKDF-SHA256 从【显式传入】的 Secret + Nonce 派生 AES-256 密钥。
+///
+/// 服务端工具 `resolve-tool encrypt --secret <值>` / Python `--secret` 走这一支：
+/// 同一份编译产物可以按调用指定任意 Secret，无需为不同 Secret 分别编译。客户端解密
+/// 仍只用编译期注入的 [`SECRET`]（见 [`decrypt_txt`]）。
+pub fn derive_key_with_secret(nonce: &[u8], secret: &[u8]) -> [u8; KEY_LEN] {
+    let hk = Hkdf::<Sha256>::new(Some(nonce), secret);
     let mut key = [0u8; KEY_LEN];
     hk.expand(HKDF_INFO, &mut key)
         .expect("HKDF 展开 32 字节不应失败");
     key
 }
 
-/// 构造 Payload：`URL || 0x00 || ts(8B 大端) || ttl(8B 大端) || 0x00 || salt(8B)`。
-fn build_payload(url: &str, ts: u64, ttl: u64, salt: &[u8; 8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(url.len() + 1 + 8 + 8 + 1 + 8);
+/// 构造 Payload：`URL || 0x00 || d(2B 大端) || ttl_d(2B 大端)`（v4 按天紧凑格式）。
+fn build_payload(url: &str, day: u16, ttl_days: u16) -> Vec<u8> {
+    let mut p = Vec::with_capacity(url.len() + 1 + FIELD_LEN + FIELD_LEN);
     p.extend_from_slice(url.as_bytes());
     p.push(0x00);
-    p.extend_from_slice(&ts.to_be_bytes());
-    p.extend_from_slice(&ttl.to_be_bytes());
-    p.push(0x00);
-    p.extend_from_slice(salt);
+    p.extend_from_slice(&day.to_be_bytes());
+    p.extend_from_slice(&ttl_days.to_be_bytes());
     p
+}
+
+/// 取当前 UTC 日期对应的 UNIX 天数（距 1970-01-01）。
+///
+/// 系统时钟早于 UNIX 纪元时返回明确错误。供 [`current_day`] 与 `resolve-tool`
+/// 展示「距今/剩余天数」共用，避免各处重复写时钟换算。
+pub fn current_unix_day() -> Result<i64, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("系统时钟早于 UNIX 纪元：{e}"))?
+        .as_secs();
+    Ok((secs / 86_400) as i64)
+}
+
+/// 取当前 UTC 日期相对基准日 2026-01-01 的天数（u16）。
+///
+/// 时钟早于基准日（理论上不会发生）或超出 u16 范围（约 2205 年）时返回明确错误，
+/// 由调用方决定如何失败，而不是静默截断成错误日期。
+fn current_day() -> Result<u16, String> {
+    let day = current_unix_day()? - BASE_UNIX_DAY;
+    u16::try_from(day).map_err(|_| format!("当前日期超出 v4 可表达范围（day={day}）"))
+}
+
+/// 用编译期 Secret 签名 + 加密一个 URL（客户端 / 默认服务端用法）。
+pub fn sign_and_encrypt(
+    signing_key: &ed25519_dalek::SigningKey,
+    url: &str,
+    ttl_days: u64,
+    sign_day: Option<u64>,
+) -> Result<String, String> {
+    sign_and_encrypt_with_secret(signing_key, url, ttl_days, sign_day, SECRET)
 }
 
 /// 用 Ed25519 私钥签名 + AES-GCM 加密一个 URL，返回 base64 密文（单行，写入 DNS TXT）。
 ///
 /// - `url`：要隐藏的真实地址。
-/// - `ttl`：有效期秒数（>0 按窗口校验；=0 永不失效）。
-/// - `ts`：可选，指定生成时间戳（默认取当前系统时间；测试可传固定值）。
-pub fn sign_and_encrypt(
+/// - `ttl_days`：有效期**天数**（>0 按天窗口校验；=0 永不失效；上限 65535）。
+/// - `sign_day`：可选，指定签发日（距 2026-01-01 的天数，测试用；默认取当前 UTC 日）。
+/// - `secret`：本次加密使用的对称 Secret 原始字节（服务端 `--secret` 参数透传；
+///   HKDF 直接吃字符串字节，不做 hex/base64 解码）。**必须与目标客户端构建内置的
+///   RESOLVE_SECRET 逐字节一致**，否则客户端解密必然失败。
+pub fn sign_and_encrypt_with_secret(
     signing_key: &ed25519_dalek::SigningKey,
     url: &str,
-    ttl: u64,
-    ts: Option<u64>,
+    ttl_days: u64,
+    sign_day: Option<u64>,
+    secret: &[u8],
 ) -> Result<String, String> {
-    let ts = ts.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    });
+    if ttl_days > MAX_DAYS {
+        return Err(format!("有效期天数超出上限 {MAX_DAYS}（收到 {ttl_days}）"));
+    }
+    let day = match sign_day {
+        Some(d) => {
+            if d > MAX_DAYS {
+                return Err(format!("签发日超出上限 {MAX_DAYS}（收到 {d}）"));
+            }
+            d as u16
+        }
+        None => current_day()?,
+    };
 
-    // 随机 Nonce(12B) + 随机盐(8B)。
+    // 随机 Nonce(12B)：既作 GCM nonce，又作 HKDF 的 salt，已足以保证每次密文与
+    // 派生密钥均不同，无需再放随机盐。
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes);
-    let mut salt = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
 
-    let payload = build_payload(url, ts, ttl, &salt);
+    let payload = build_payload(url, day, ttl_days as u16);
 
     // Ed25519 签名（64 字节）。
     let sig: Signature = signing_key.sign(&payload);
 
     // AES-GCM 加密 Payload || Signature。
-    let key = derive_key(&nonce_bytes);
+    let key = derive_key_with_secret(&nonce_bytes, secret);
     let cipher_suite =
         Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
     let cipher = cipher_suite
@@ -291,11 +343,61 @@ fn pem_encode(label: &str, der: &[u8]) -> String {
     out
 }
 
-/// 解密 + 验签一条 TXT 密文，返回真实 URL。
-///
-/// 流程：base64 解码 → 取前 12 字节 Nonce → HKDF 派生 Key → AES-GCM 解密（认证）→
-/// 分离 Payload 与 Signature（末 64 字节）→ Ed25519 公钥验签 → 校验时间戳 → 返回 URL。
+/// 一条密文解密 + 验签后的结构化结果（供 `resolve-tool decrypt` 等需要展示
+/// 签发日期 / TTL 的入口使用；客户端运行时只用其中的 [`DecryptedRecord::url`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecryptedRecord {
+    /// 真实目标 URL。
+    pub url: String,
+    /// 签发日（距基准日 2026-01-01 的 UTC 天数，Payload 固定字段，ttl_days=0 时依然存在）。
+    pub sign_day: u16,
+    /// 有效期天数；0 = 永不失效。
+    pub ttl_days: u16,
+}
+
+impl DecryptedRecord {
+    /// 有效期窗口校验（与客户端 `parse_payload` 的判定完全一致）：
+    /// `ttl_days > 0` 且今日与签发日偏差超过 ttl_days ⇒ 拒绝；`ttl_days = 0` 恒通过。
+    pub fn check_ttl(&self) -> Result<(), String> {
+        check_ttl(self.sign_day, self.ttl_days)
+    }
+}
+
+/// 用编译期 Secret 解密 + 验签一条 TXT 密文（客户端唯一入口）。
 pub fn decrypt_txt(public_key: &VerifyingKey, b64: &str) -> Result<String, String> {
+    decrypt_txt_with_secret(public_key, b64, SECRET)
+}
+
+/// 用编译期 Secret 解密 + 验签一条 TXT 密文，返回结构化结果（URL + 签发时间 + TTL）。
+pub fn decrypt_record(public_key: &VerifyingKey, b64: &str) -> Result<DecryptedRecord, String> {
+    decrypt_record_with_secret(public_key, b64, SECRET)
+}
+
+/// 解密 + 验签一条 TXT 密文，返回真实 URL（可显式指定 Secret，供服务端工具验证）。
+///
+/// 流程与 [`decrypt_record_with_secret`] 相同；在结构化解密成功后额外做有效期窗口
+/// 校验（过期即拒绝，与客户端运行时行为一致），只返回 URL。
+pub fn decrypt_txt_with_secret(
+    public_key: &VerifyingKey,
+    b64: &str,
+    secret: &[u8],
+) -> Result<String, String> {
+    let record = decrypt_record_with_secret(public_key, b64, secret)?;
+    record.check_ttl()?;
+    Ok(record.url)
+}
+
+/// 解密 + 验签一条 TXT 密文，返回结构化结果（URL + 签发日 + TTL，可显式指定 Secret）。
+///
+/// 与 [`decrypt_txt_with_secret`] 的区别：**不做有效期窗口判定**，即使记录已过期
+/// （ttl_days > 0 且已超时）也照常返回解出的全部字段，由调用方自行决定是否拒绝——
+/// `resolve-tool decrypt` 借此把过期记录的 URL / 签发日也展示出来用于诊断。
+/// 密码学两道硬验证（AES-GCM 认证、Ed25519 验签）一步不少，任一失败即返回 Err。
+pub fn decrypt_record_with_secret(
+    public_key: &VerifyingKey,
+    b64: &str,
+    secret: &[u8],
+) -> Result<DecryptedRecord, String> {
     let raw = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|e| format!("密文 base64 解码失败：{e}"))?;
@@ -307,11 +409,11 @@ pub fn decrypt_txt(public_key: &VerifyingKey, b64: &str) -> Result<String, Strin
     let (nonce_bytes, cipher) = raw.split_at(NONCE_LEN);
     let nonce = AesNonce::from_slice(nonce_bytes);
 
-    let key = derive_key(nonce_bytes);
+    let key = derive_key_with_secret(nonce_bytes, secret);
     let cipher_suite =
         Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化 AES 失败：{e}"))?;
 
-    // 解密 + 认证。认证失败（密文被篡改）会在此抛错。
+    // 解密 + 认证。认证失败（密文被篡改 / Secret 不匹配）会在此抛错。
     let plain = cipher_suite
         .decrypt(
             nonce,
@@ -320,7 +422,7 @@ pub fn decrypt_txt(public_key: &VerifyingKey, b64: &str) -> Result<String, Strin
                 aad: b"",
             },
         )
-        .map_err(|_| "密文认证失败（数据被篡改）".to_string())?;
+        .map_err(|_| "密文认证失败（数据被篡改或 Secret 不匹配）".to_string())?;
 
     // 明文 = Payload || Signature(64 字节)。
     if plain.len() < SIG_LEN + 1 {
@@ -334,14 +436,31 @@ pub fn decrypt_txt(public_key: &VerifyingKey, b64: &str) -> Result<String, Strin
         .verify(payload, &sig)
         .map_err(|_| "签名验签失败".to_string())?;
 
-    // 解析 Payload：URL || 0x00 || ts(8) || 0x00 || salt(8)。
-    parse_payload(payload)
+    // 只解析 Payload 字段（不做有效期判定），组装结构化结果。
+    let (url, sign_day, ttl_days) = parse_payload_parts(payload)?;
+    Ok(DecryptedRecord {
+        url,
+        sign_day,
+        ttl_days,
+    })
 }
 
-/// 解析 Payload，提取 URL 并校验有效期（防重放）。
+/// 解析 Payload，提取 URL 并校验有效期（按天防重放）。
 ///
-/// Payload 结构：`URL || 0x00 || ts(8B 大端) || ttl(8B 大端) || 0x00 || salt(8B)`。
+/// 唯一受支持的 v4 结构：`URL || 0x00 || d(2B 大端) || ttl_d(2B 大端)`，
+/// 分隔符之后固定 4 字节。v3 秒级格式（16B 尾）与更早 v1/v2 密文一律按
+/// 「Payload 尾部结构异常」拒绝，不做向后兼容（线上旧 TXT 需重新签发）。
 pub fn parse_payload(payload: &[u8]) -> Result<String, String> {
+    let (url, sign_day, ttl_days) = parse_payload_parts(payload)?;
+    check_ttl(sign_day, ttl_days)?;
+    Ok(url)
+}
+
+/// 只解析 v4 Payload 的字段，返回（URL，签发日，有效期天数），不做有效期判定。
+///
+/// 与 [`parse_payload`] 共用同一套格式校验（含对 v3/v1/v2 旧尾部的拒绝），区别仅在于
+/// 跳过日期窗口检查，供结构化解密入口使用。
+pub fn parse_payload_parts(payload: &[u8]) -> Result<(String, u16, u16), String> {
     // 找到 URL 后的第一个分隔符 0x00。
     let sep = payload
         .iter()
@@ -355,31 +474,35 @@ pub fn parse_payload(payload: &[u8]) -> Result<String, String> {
         return Err("Payload 中 URL 为空".to_string());
     }
 
-    // 剩余应为 ts(8) || ttl(8) || 0x00 || salt(8)，共 25 字节。
+    // 尾部必须恰好为 d(2) || ttl_d(2)，共 4 字节；任何其他长度（含 v3 的 16B）拒绝。
     let rest = &payload[sep + 1..];
-    if rest.len() != FIELD_LEN + FIELD_LEN + 1 + FIELD_LEN || rest[FIELD_LEN + FIELD_LEN] != 0x00 {
+    let fixed = FIELD_LEN + FIELD_LEN;
+    if rest.len() != fixed {
         return Err("Payload 尾部结构异常".to_string());
     }
-    let ts = u64::from_be_bytes(rest[..FIELD_LEN].try_into().unwrap());
-    let ttl = u64::from_be_bytes(rest[FIELD_LEN..FIELD_LEN + FIELD_LEN].try_into().unwrap());
+    let sign_day = u16::from_be_bytes(rest[..FIELD_LEN].try_into().unwrap());
+    let ttl_days = u16::from_be_bytes(rest[FIELD_LEN..fixed].try_into().unwrap());
+    Ok((url, sign_day, ttl_days))
+}
 
-    // 有效期校验：ttl > 0 时才校验时间窗口；ttl = 0 表示永不失效，跳过。
-    if ttl > 0 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if now != 0 {
-            let diff = now.abs_diff(ts);
-            if diff > ttl {
-                return Err(format!(
-                    "记录已过期（生成于 {ts}，有效期 {ttl}s，偏差 {diff}s）"
-                ));
-            }
-        }
+/// 有效期窗口校验（UTC 天）：`ttl_days > 0` 时今日与签发日偏差超过 ttl_days ⇒ 拒绝；
+/// `ttl_days = 0` 表示永不失效，直接通过。系统时钟不可用时无法判定，按放行处理。
+fn check_ttl(sign_day: u16, ttl_days: u16) -> Result<(), String> {
+    if ttl_days == 0 {
+        return Ok(());
     }
-
-    Ok(url)
+    let today = match current_day() {
+        Ok(d) => d,
+        // 取不到今日（时钟异常）无法判定时效，按放行处理——不因此阻断客户端启动。
+        Err(_) => return Ok(()),
+    };
+    let diff = today.abs_diff(sign_day);
+    if diff > ttl_days {
+        return Err(format!(
+            "记录已过期（签发日第 {sign_day} 天，有效期 {ttl_days} 天，偏差 {diff} 天）"
+        ));
+    }
+    Ok(())
 }
 
 /// 判断 APP_URL 是否为"域名数组"模式：配置为 JSON 数组（如 `["a.com","b.com"]`）。
@@ -425,27 +548,6 @@ mod tests {
         assert_eq!(normalize_domain("https://a.com:8443/path"), "a.com");
     }
 
-    // 服务端 sign_and_encrypt → 客户端 decrypt_txt 往返对称性（含 ttl 各种情况）。
-    #[test]
-    fn e2e_sign_encrypt_roundtrip() {
-        let (priv_pem, pub_b64) = generate_keypair().unwrap();
-        let signing_key = parse_signing_key_pem(&priv_pem)
-            .expect("generate_keypair 产出的 PEM 应能被 parse_signing_key_pem 解析");
-        let key = parse_public_key(&pub_b64).unwrap();
-
-        // ttl = 0（永不失效）
-        let c = sign_and_encrypt(&signing_key, "https://a.com/", 0, None).unwrap();
-        assert_eq!(decrypt_txt(&key, &c).unwrap(), "https://a.com/");
-
-        // ttl = 3600（1 小时，当前时间戳下应有效）
-        let c = sign_and_encrypt(&signing_key, "https://b.com/", 3600, None).unwrap();
-        assert_eq!(decrypt_txt(&key, &c).unwrap(), "https://b.com/");
-
-        // ttl = 3600 但时间戳是 2000 年 → 应因过期被拒绝。
-        let c = sign_and_encrypt(&signing_key, "https://c.com/", 3600, Some(946684800)).unwrap();
-        assert!(decrypt_txt(&key, &c).is_err(), "过期密文应被拒绝");
-    }
-
     #[test]
     fn normalize_domain_with_userinfo() {
         assert_eq!(normalize_domain("https://u:p@a.com"), "a.com");
@@ -462,20 +564,40 @@ mod tests {
         assert!(parse_domains("https://example.com").is_none());
     }
 
+    // 基准日常量钉死：2026-01-01 ⇒ 20454（56 年含 14 个闰年）。
     #[test]
-    fn parse_payload_valid() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let mut payload = b"https://a.com".to_vec();
-        payload.push(0x00);
-        payload.extend_from_slice(&now.to_be_bytes());
-        payload.extend_from_slice(&(48u64 * 3600).to_be_bytes()); // ttl = 48h
-        payload.push(0x00);
-        payload.extend_from_slice(&[1u8; 8]);
-        let url = parse_payload(&payload).unwrap();
-        assert_eq!(url, "https://a.com");
+    fn base_unix_day_constant() {
+        assert_eq!(BASE_UNIX_DAY, 20454);
+    }
+
+    // 服务端 sign_and_encrypt → 客户端 decrypt_txt 往返对称性（v4 按天，含 ttl_days 各种情况）。
+    #[test]
+    fn e2e_sign_encrypt_roundtrip() {
+        let (priv_pem, pub_b64) = generate_keypair().unwrap();
+        let signing_key = parse_signing_key_pem(&priv_pem)
+            .expect("generate_keypair 产出的 PEM 应能被 parse_signing_key_pem 解析");
+        let key = parse_public_key(&pub_b64).unwrap();
+
+        // ttl_days = 0（永不失效）。
+        let c = sign_and_encrypt(&signing_key, "https://a.com/", 0, None).unwrap();
+        assert_eq!(decrypt_txt(&key, &c).unwrap(), "https://a.com/");
+
+        // ttl_days = 7（7 天窗口，当日签发应有效）。
+        let c = sign_and_encrypt(&signing_key, "https://b.com/", 7, None).unwrap();
+        assert_eq!(decrypt_txt(&key, &c).unwrap(), "https://b.com/");
+
+        // ttl_days = 1 但签发日是第 0 天（2026-01-01，距今远超 1 天）→ 应因过期被拒绝。
+        let c = sign_and_encrypt(&signing_key, "https://c.com/", 1, Some(0)).unwrap();
+        assert!(decrypt_txt(&key, &c).is_err(), "过期密文应被拒绝");
+    }
+
+    // 构造 v4 Payload：URL || 0x00 || d(2) || ttl_d(2)（尾部固定 4 字节）。
+    fn v4_payload(url: &str, day: u16, ttl_days: u16) -> Vec<u8> {
+        let mut p = url.as_bytes().to_vec();
+        p.push(0x00);
+        p.extend_from_slice(&day.to_be_bytes());
+        p.extend_from_slice(&ttl_days.to_be_bytes());
+        p
     }
 
     #[test]
@@ -484,71 +606,128 @@ mod tests {
     }
 
     #[test]
+    fn parse_payload_valid() {
+        let today = current_day().unwrap();
+        let payload = v4_payload("https://a.com", today, 7); // 7 天窗口
+        assert_eq!(parse_payload(&payload).unwrap(), "https://a.com");
+    }
+
+    #[test]
+    fn parse_payload_boundary_inclusive() {
+        // 边界：今日 - 签发日 == ttl_days 时仍有效（<= 判定）。
+        let today = current_day().unwrap();
+        let payload = v4_payload("https://a.com", today - 7, 7);
+        assert_eq!(parse_payload(&payload).unwrap(), "https://a.com");
+    }
+
+    #[test]
     fn parse_payload_expired() {
-        let mut payload = b"https://a.com".to_vec();
-        payload.push(0x00);
-        payload.extend_from_slice(&946684800u64.to_be_bytes());
-        payload.extend_from_slice(&3600u64.to_be_bytes()); // ttl = 1h，早已过期
-        payload.push(0x00);
-        payload.extend_from_slice(&[1u8; 8]);
+        // 签发日 0（2026-01-01），窗口 1 天 → 今日必然已过期。
+        let payload = v4_payload("https://a.com", 0, 1);
         assert!(parse_payload(&payload).is_err());
     }
 
     #[test]
     fn parse_payload_ttl_zero_never_expires() {
-        let mut payload = b"https://a.com".to_vec();
-        payload.push(0x00);
-        payload.extend_from_slice(&946684800u64.to_be_bytes()); // 2000-01-01
-        payload.extend_from_slice(&0u64.to_be_bytes()); // ttl = 0 永不失效
-        payload.push(0x00);
-        payload.extend_from_slice(&[1u8; 8]);
+        let payload = v4_payload("https://a.com", 0, 0);
         assert_eq!(parse_payload(&payload).unwrap(), "https://a.com");
     }
 
-    // 端到端：Ed25519 签名 + AES-GCM 解密全链路。
+    // 只认 v4（4B 尾）：v3 秒级（16B 尾）/ v2 带盐 / v1 无 ttl 及任何其他尾部长度都必须拒绝。
     #[test]
-    fn e2e_ed25519_aesgcm_decrypt() {
-        let pub_b64 = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
-        let key = parse_public_key(pub_b64).unwrap();
+    fn parse_payload_rejects_legacy_and_bad_tails() {
+        // v3：ts8 + ttl8（16B，秒级时间戳，上一版格式）。
+        let mut v3 = b"https://a.com".to_vec();
+        v3.push(0x00);
+        v3.extend_from_slice(&[0u8; 16]);
+        assert!(parse_payload(&v3).is_err(), "v3 秒级旧格式必须拒绝");
 
-        let b1 = "Ivc+gSeUshcKlXCyqr39RiH/euyPbLjnvTYrk+vze+pgYebyezjJPNEaHBIpZTMZC1beyZuAc+hCJxLLXgA9Ec5QjHPcJgiI6wd6xLGunj2choHitk11Ah+s8Eiavef+K3oeDKVHUtcx3GU2jiC/Nasg02xTdS0pwb3VJXGJ70w5QHkWiDRi/PBHHcc=";
-        let b2 = "D3ajOlwF0LUFEPMSrk8gmM16Xi7ZDOOWSOGacW3LswC9dfyuNYTASNiZDmDTCzZzAN646ttKD6C6T+WKiL9jYhsY3ab3V0L8TUuHDBecOVUK0BbIZKaxlRqsfn2GEEk+KQFCB/xUvyDH9KRs0mzOUwGZUPeXDohglf9Oa+6KplWEpOqtK+WrvT/soi8=";
-        let b3 = "w9GWFwaxTWjKfIKidWY4U9ShDavVgKqM7zM5rm9L7qJ8FfLmW1486ZdcPmEUNazCYjGXT/g42Mlv6nwi+tchpT9nzktd4RfZRqYjBAU3SwRXzFPof5DHvHd7C481+iA9A49tuua7UPeOQB23FZpIPNUp1tRtTTyiXaSVs0om40ssInqSU0lH77AG3x8=";
-        let bili = "c3PSRYrZSj6wkY1vCVf+1W+hYdpmwjk6SO0J+XNP1Hq3NR/O2R5RAQtem5Dq/BQp+opCmj6Lu+MMf7wA/IKPZ0g00Tsr1ILIZXfGlUGP56F9whPhhYh+PGFG8McyvFp85JkDjmfcixaG88PLIhT1qRFTI3+G+ifZJxwKaL/uUOLFvY+RVG+V2suiWMjWbsw=";
+        // v2：ts8 + ttl8 + 0x00 + salt8（25B）。
+        let mut v2 = b"https://a.com".to_vec();
+        v2.push(0x00);
+        v2.extend_from_slice(&[0u8; 16]);
+        v2.push(0x00);
+        v2.extend_from_slice(&[1u8; 8]);
+        assert!(parse_payload(&v2).is_err(), "v2 带盐旧格式必须拒绝");
 
-        assert_ne!(b1, b2);
-        assert_ne!(b2, b3);
-        assert_ne!(b1, b3);
+        // v1：ts8 + 0x00 + salt8（17B）。
+        let mut v1 = b"https://a.com".to_vec();
+        v1.push(0x00);
+        v1.extend_from_slice(&[0u8; 8]);
+        v1.push(0x00);
+        v1.extend_from_slice(&[1u8; 8]);
+        assert!(parse_payload(&v1).is_err(), "v1 无 ttl 旧格式必须拒绝");
 
-        assert_eq!(decrypt_txt(&key, b1).unwrap(), "https://www.baidu.com/");
-        assert_eq!(decrypt_txt(&key, b2).unwrap(), "https://www.baidu.com/");
-        assert_eq!(decrypt_txt(&key, b3).unwrap(), "https://www.baidu.com/");
-        assert_eq!(
-            decrypt_txt(&key, bili).unwrap(),
-            "https://www.bilibili.com/"
-        );
+        // 任意其他长度（20B / 15B / 3B / 5B）同样拒绝。
+        for tail_len in [20usize, 15, 3, 5] {
+            let mut bad = b"https://a.com".to_vec();
+            bad.push(0x00);
+            bad.extend_from_slice(&vec![0u8; tail_len]);
+            assert!(parse_payload(&bad).is_err(), "尾部 {tail_len}B 必须拒绝");
+        }
     }
 
-    // 交叉验证：Python 端生成的密文，Rust 端解密结果必须一致。
+    // 密文长度钉死：raw = Nonce12 + URL + 1 + d2 + ttl_d2 + 签名64 + tag16，
+    // base64 长度 = 4*ceil(raw/3)。
     #[test]
-    fn e2e_crosscheck_python_generated() {
-        let pub_b64 = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
-        let key = parse_public_key(pub_b64).unwrap();
+    fn e2e_ciphertext_length_formula() {
+        let (priv_pem, pub_b64) = generate_keypair().unwrap();
+        let signing_key = parse_signing_key_pem(&priv_pem).unwrap();
+        let key = parse_public_key(&pub_b64).unwrap();
+
+        for url in [
+            "https://a.com/",
+            "https://user:pass@host",
+            "https://x.io/a/b/c?d=1",
+        ] {
+            let c = sign_and_encrypt(&signing_key, url, 0, None).unwrap();
+            assert_eq!(decrypt_txt(&key, &c).unwrap(), url);
+
+            let raw = NONCE_LEN + url.len() + 1 + FIELD_LEN + FIELD_LEN + SIG_LEN + 16;
+            assert_eq!(c.len(), ((raw + 2) / 3) * 4, "URL={url} 密文长度不符");
+        }
+    }
+
+    // 签发日 / ttl_days 超 u16 范围必须明确报错（不静默截断）。
+    #[test]
+    fn rejects_out_of_range_days() {
+        let (priv_pem, _pub_b64) = generate_keypair().unwrap();
+        let signing_key = parse_signing_key_pem(&priv_pem).unwrap();
+
+        assert!(sign_and_encrypt(&signing_key, "https://a.com/", 65536, None).is_err());
+        assert!(sign_and_encrypt(&signing_key, "https://a.com/", 0, Some(65536)).is_err());
+        assert!(sign_and_encrypt(&signing_key, "https://a.com/", 65535, Some(65535)).is_ok());
+    }
+
+    // v4 固定向量：用 txttest_keys/private_key.pem（公钥如下）经 resolve-tool 以
+    // `--ttl-days 0` 于 2026-10-07（第 279 天）生成，永不失效，作为跨次运行的稳定验签素材。
+    // 重新生成：cargo run -p resolve-tool -- encrypt txttest_keys/private_key.pem <url> --ttl-days 0 [--count N]
+    // 注意：这把公钥必须与磁盘 txttest_keys/private_key.pem 成对（2026-10-07 起
+    // 该目录为 9/22 重新生成的密钥对，旧 9/3 公钥 Sg9z… 的私钥已遗失、旧密文全部作废）。
+    const TXTTEST_PUB_B64: &str = "HkCpkH1tMpNIxWoWAkvlX8vm93BOc5PtIKrQxl8RUDo=";
+
+    #[test]
+    fn e2e_fixed_vectors_v4_decrypt() {
+        let key = parse_public_key(TXTTEST_PUB_B64).unwrap();
 
         let baidu = [
-            "Ivc+gSeUshcKlXCyqr39RiH/euyPbLjnvTYrk+vze+pgYebyezjJPNEaHBIpZTMZC1beyZuAc+hCJxLLXgA9Ec5QjHPcJgiI6wd6xLGunj2choHitk11Ah+s8Eiavef+K3oeDKVHUtcx3GU2jiC/Nasg02xTdS0pwb3VJXGJ70w5QHkWiDRi/PBHHcc=",
-            "D3ajOlwF0LUFEPMSrk8gmM16Xi7ZDOOWSOGacW3LswC9dfyuNYTASNiZDmDTCzZzAN646ttKD6C6T+WKiL9jYhsY3ab3V0L8TUuHDBecOVUK0BbIZKaxlRqsfn2GEEk+KQFCB/xUvyDH9KRs0mzOUwGZUPeXDohglf9Oa+6KplWEpOqtK+WrvT/soi8=",
-            "w9GWFwaxTWjKfIKidWY4U9ShDavVgKqM7zM5rm9L7qJ8FfLmW1486ZdcPmEUNazCYjGXT/g42Mlv6nwi+tchpT9nzktd4RfZRqYjBAU3SwRXzFPof5DHvHd7C481+iA9A49tuua7UPeOQB23FZpIPNUp1tRtTTyiXaSVs0om40ssInqSU0lH77AG3x8=",
+            "lYZ/Zc9lcULVU1P4Yi2rWphUpDbRQB8eNc7F8JEJ+tuehBvKYPyrG2+7w6nFxP3bUxUs7h2hxJcLJ1DYqYSYkF02lShVfqugBzjYnn/AhL1MaA4ccAOus4hbMw7jyCauZNlVpFJQFpEtXwuEMV+oHbhbncRrfww=",
+            "UkNSfLPY61NRy4gNTWnnlcoRku+KlahZxjgBEYXECslCr5zZKZ/SCbVVWvaIsd83i54P0M/8HgRK0HGXnSDfI3eEl7zzjcCZp39u2Ax+PntG5xppR9GwX6YFJxUCV6qwIN4sHlM2GrxrbqQnNRpaQtzUsj/tkKE=",
+            "/qWiSuR+S3zDrV/bAIQt70r+I2yGnr0jQewLiCu72HwsUuSXyptXasjRH/KFOaSj3h+fkdOBQuBKmcZ1wxuyIl2J4ARuJQRMBYe9jm8UvymWABjuAOVlFPOvQYP6hGmXBSsuwiiiNdDV1xmqTSyDsvinwFtw9d8=",
         ];
         let bili = [
-            "c3PSRYrZSj6wkY1vCVf+1W+hYdpmwjk6SO0J+XNP1Hq3NR/O2R5RAQtem5Dq/BQp+opCmj6Lu+MMf7wA/IKPZ0g00Tsr1ILIZXfGlUGP56F9whPhhYh+PGFG8McyvFp85JkDjmfcixaG88PLIhT1qRFTI3+G+ifZJxwKaL/uUOLFvY+RVG+V2suiWMjWbsw=",
+            "Gr/hABqoSiiWf6EKrjB+Dh875I9WjGMr6jezUnFlcqJLd7ZwtjY9N6Xfnkpwkegi2le/17Cgnbk6Kfgv3mPPraYIkawTy7GUtoLYx44pjqJ5Zkf3rmEqSvR94eesCnmlKbWVrbXvx4+CJ895cM1wzeZ8KyaeY10Md0Y=",
         ];
         let example = [
-            "hcqBZDDLey30KUF+L8PkjPIweNEUFQdu2ZXtoZg9tW35YP5UD4kB41crP4bv767vKGHYqB8vH5YgsnzP4lN3MurevuYwjAUc2XdcdzuEvT6EYebQH0Sd8zVi/ACIb8Q118H4FrQpYny3zmSZHicgKe8K7Twd8SToo+XhXg68y4dIoQpCwoYROjaK",
+            "qCBIQUvebOEpwdIDJmf1gVDKpSBTfTMM1GqWIusdjnCWauNmQJZl5oZ7LUHJL1Y5XanRf5USMWOY3MPOcIhU7f6Hs9lDhMuA6741Wn2/HkXGqCK49nngf8B536vjQPFtyAhXzS7MZEZwH5rTEsupT1PuGE/0",
         ];
 
+        assert_ne!(baidu[0], baidu[1]);
+        assert_ne!(baidu[1], baidu[2]);
         for c in baidu {
             assert_eq!(decrypt_txt(&key, c).unwrap(), "https://www.baidu.com/");
+            // 22 字符 URL：raw=119 ⇒ base64 160 字符（v3 同期为 176）。
+            assert_eq!(c.len(), 160);
         }
         for c in bili {
             assert_eq!(decrypt_txt(&key, c).unwrap(), "https://www.bilibili.com/");
@@ -558,12 +737,11 @@ mod tests {
         }
     }
 
-    // 防篡改验证：篡改密文任一字节，AES-GCM 认证或 Ed25519 验签必须失败。
+    // 防篡改：翻转密文首块一个字节，AES-GCM 认证必须失败。
     #[test]
     fn e2e_tamper_detected() {
-        let pub_b64 = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
-        let key = parse_public_key(pub_b64).unwrap();
-        let b1 = "Ivc+gSeUshcKlXCyqr39RiH/euyPbLjnvTYrk+vze+pgYebyezjJPNEaHBIpZTMZC1beyZuAc+hCJxLLXgA9Ec5QjHPcJgiI6wd6xLGunj2choHitk11Ah+s8Eiavef+K3oeDKVHUtcx3GU2jiC/Nasg02xTdS0pwb3VJXGJ70w5QHkWiDRi/PBHHcc=";
+        let key = parse_public_key(TXTTEST_PUB_B64).unwrap();
+        let b1 = "lYZ/Zc9lcULVU1P4Yi2rWphUpDbRQB8eNc7F8JEJ+tuehBvKYPyrG2+7w6nFxP3bUxUs7h2hxJcLJ1DYqYSYkF02lShVfqugBzjYnn/AhL1MaA4ccAOus4hbMw7jyCauZNlVpFJQFpEtXwuEMV+oHbhbncRrfww=";
 
         assert_eq!(decrypt_txt(&key, b1).unwrap(), "https://www.baidu.com/");
 
@@ -571,12 +749,81 @@ mod tests {
             .decode(b1)
             .unwrap();
         let mut tampered = raw.clone();
-        let idx = NONCE_LEN;
-        tampered[idx] ^= 0x01;
+        tampered[NONCE_LEN] ^= 0x01;
         let tampered_b64 = base64::engine::general_purpose::STANDARD.encode(&tampered);
         assert!(
             decrypt_txt(&key, &tampered_b64).is_err(),
             "篡改密文应被拒绝"
         );
+    }
+
+    // --secret：显式 Secret 加密只有同一 Secret 能解；编译期默认 Secret 解不开。
+    #[test]
+    fn e2e_custom_secret_roundtrip() {
+        let (priv_pem, pub_b64) = generate_keypair().unwrap();
+        let signing_key = parse_signing_key_pem(&priv_pem).unwrap();
+        let key = parse_public_key(&pub_b64).unwrap();
+        let url = "https://secret.example.com/";
+        let custom = b"a-one-off-custom-secret-from-cli";
+
+        let c = sign_and_encrypt_with_secret(&signing_key, url, 0, None, custom).unwrap();
+        // 同一自定义 Secret：正常往返。
+        assert_eq!(decrypt_txt_with_secret(&key, &c, custom).unwrap(), url);
+        // 错误 Secret（含编译期默认值）：GCM 认证失败。
+        assert!(
+            decrypt_txt(&key, &c).is_err(),
+            "默认 Secret 解不开自定义密文"
+        );
+        assert!(
+            decrypt_txt_with_secret(&key, &c, b"wrong-secret").is_err(),
+            "错误 Secret 必须解密失败"
+        );
+
+        // 反过来：默认 Secret 加密的密文，自定义 Secret 也解不开。
+        let c_default = sign_and_encrypt(&signing_key, url, 0, None).unwrap();
+        assert!(decrypt_txt_with_secret(&key, &c_default, custom).is_err());
+        assert_eq!(decrypt_txt(&key, &c_default).unwrap(), url);
+    }
+
+    // 结构化解密：返回 URL + 签发日 + TTL；过期记录也能取出全部字段（不做窗口判定）。
+    #[test]
+    fn e2e_decrypt_record_parts() {
+        let (priv_pem, pub_b64) = generate_keypair().unwrap();
+        let signing_key = parse_signing_key_pem(&priv_pem).unwrap();
+        let key = parse_public_key(&pub_b64).unwrap();
+
+        // ttl_days=0 + 固定签发日（第 100 天）：结构化结果逐字段对齐。
+        let c = sign_and_encrypt_with_secret(
+            &signing_key,
+            "https://parts.example.com/",
+            0,
+            Some(100),
+            SECRET,
+        )
+        .unwrap();
+        assert_eq!(
+            decrypt_record(&key, &c).unwrap(),
+            DecryptedRecord {
+                url: "https://parts.example.com/".to_string(),
+                sign_day: 100,
+                ttl_days: 0,
+            }
+        );
+
+        // ttl_days>0 且早已过期（第 0 天签发，窗口 1 天）：decrypt_record 照常返回，decrypt_txt 必须拒绝。
+        let c_expired = sign_and_encrypt_with_secret(
+            &signing_key,
+            "https://old.example.com/",
+            1,
+            Some(0),
+            SECRET,
+        )
+        .unwrap();
+        let r = decrypt_record(&key, &c_expired).unwrap();
+        assert_eq!(r.url, "https://old.example.com/");
+        assert_eq!(r.sign_day, 0);
+        assert_eq!(r.ttl_days, 1);
+        assert!(r.check_ttl().is_err(), "过期记录 check_ttl 必须拒绝");
+        assert!(decrypt_txt(&key, &c_expired).is_err());
     }
 }

@@ -97,7 +97,7 @@ URL 里的 `user:pass@`（userinfo）由**本地代理**转换成 `Authorization
 ```json
 {
   "app_url": ["a.com", "b.com"],
-  "public_key": "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU="
+  "public_key": "HkCpkH1tMpNIxWoWAkvlX8vm93BOc5PtIKrQxl8RUDo="
 }
 ```
 

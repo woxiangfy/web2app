@@ -147,7 +147,14 @@ mod tests {
     // 依赖外部 DNS（需联网），用 #[ignore] 标注，默认不跑；手动 `cargo test -- --ignored` 触发。
     // ⚠️ 用 multi_thread flavor：hickory 内部会 spawn 后台任务（UDP/TCP socket 读写），
     // current_thread runtime 下容易出现「任务已 spawn 但没机会跑」的假超时。
-    const TEST_PUB_B64: &str = "Sg9zFyUaBwWwGPm8TshK/LSNpZMbw0Ex4kMcwaK40jU=";
+    //
+    // 2026-10-07 复核：3 条用例当前均失败，属测试夹具失效、与解析代码无关——
+    //   ① txttest1.lcjm.cc 已 NXDOMAIN；② 线上旧 TXT 均为 v1/v2/v3 格式，resolve-core
+    //   只认 v4（尾部固定 4B 按天格式），旧记录在结构层即被拒绝（不再是「能解但过期」）；
+    //   ③ txttest_keys 于 2026-09-22 被整体重新生成，旧公钥 Sg9z… 的私钥已遗失，下面的
+    //   常量已换成现存私钥对应的公钥 HkCp…。恢复方法：续用/更换域名后用当前私钥重新签发
+    //   v4 TXT（建议 --ttl-days 0）并更新 DNS，详见 docs/txttest-verify-materials.md。
+    const TEST_PUB_B64: &str = "HkCpkH1tMpNIxWoWAkvlX8vm93BOc5PtIKrQxl8RUDo=";
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "需要联网查询真实 DNS TXT 记录"]
