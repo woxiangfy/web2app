@@ -102,6 +102,18 @@ const FIXTURES: Record<string, Fixture> = {
     body: PAGE('', '<div id="content"><h1>opened</h1></div>', ''),
   },
 
+  /**
+   * 慢响应页：响应头立刻发出、响应体按 `?ms=` 延迟下发（在请求处理里特判，不在此表）。
+   * 用途：制造「页面还在加载中」的确定时间窗，验证新建页签在加载完成前就已激活
+   *（标签栏即时切换回归，见 probe-tabs.ts 的 P10b）。
+   */
+  '/slow.html': {
+    body: PAGE('', '<div id="content"><h1>slow</h1></div>', '').replace(
+      '<title>探针</title>',
+      '<title>慢页</title>'
+    ),
+  },
+
   /** 页签模式夹具：带**可区分**的 <title>，供 P6 标题回传断言（标题→标签栏文本）。 */
   '/tabs-a.html': {
     body: PAGE('', '<div id="content"><h1>tabs-a</h1></div>', '').replace(
@@ -278,6 +290,15 @@ export function startProbeServer(): Promise<ProbeServer> {
         'cache-control': 'no-store',
         ...(fx.headers ?? {}),
       })
+      // /slow.html?ms=NNN：头先发出（导航即刻提交、URL 可读），body 延迟下发，
+      // did-finish-load / loadURL 的 resolve 随之延后，制造确定性的「加载中」窗口。
+      if (path === '/slow.html') {
+        let ms = Number(new URL(req.url ?? '/slow.html', 'http://127.0.0.1').searchParams.get('ms'))
+        if (!Number.isFinite(ms) || ms < 0) ms = 0
+        ms = Math.min(ms, 5000) // 硬上限：防止误传把探针永久挂住
+        setTimeout(() => res.end(fx.body), ms)
+        return
+      }
       res.end(fx.body)
     })
 

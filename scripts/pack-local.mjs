@@ -117,11 +117,12 @@ target：${TARGETS.join(' | ')}
   --no-icon       显式跳过 icon_url。**默认一切按 JSON 来**：icon_url 非空就下载并应用（与 CI 一致）
                   ⚠️ 应用图标会改写 tracked 的 icons/，脚本会备份并在打包后还原
   --out DIR       产物输出目录（本地测试打包产物，已被 /tests/ 忽略、不入库）：
-                  Electron 默认 tests/pack/；Tauri 默认 tests/pack/tauri/（两壳绿色版同名，必须分子目录）
+                  Electron 默认 tests/pack/electron/；Tauri 默认 tests/pack/tauri/
+                  （两壳绿色版同名，平级分子目录避免互相覆盖）
                   相对路径以**各自壳工程目录**为基准（electron-app/ 或 webview-app/）；
                   要在根 tests/ 下换目录写 --out ../tests/<名字>
                   ⚠️ Electron 默认目录清不掉时（被占用 / 环境禁删）脚本会**自动**换
-                  tests/pack-local-<时间戳>/ 重试一次，不需要人工删任何目录
+                  tests/pack/electron-local-<时间戳>/ 重试一次，不需要人工删任何目录
   --keep-config   打包后**不还原**被改写的文件（便于反复迭代，记得自己 git checkout）
   --dry-run       只打印将执行的命令，不动任何文件
   -h, --help      显示本帮助

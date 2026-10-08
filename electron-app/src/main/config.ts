@@ -26,7 +26,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** Windows 壳可用的 14 个字段；`android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
+/** Windows 壳可用的 15 个字段；`android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
 export interface AppConfig {
   /**
    * 目标地址。两种形态（与打包配置 JSON 的类型一一对应）：
@@ -38,6 +38,13 @@ export interface AppConfig {
   app_name: string
   /** 【显示名】窗口标题、托盘悬停提示；缺省回落 app_name */
   title: string
+  /**
+   * 打包产物版本（三段数字 `主.次.补丁`，主/次 ≤ 255、补丁 ≤ 65535）。
+   * 打包期由 electron-builder 的 `-c.extraMetadata.version` 覆盖进 package.json，
+   * 决定产物文件名与 exe 版本资源；本字段随 config.json 进 asar 仅作记录 / 展示。
+   * 校验规则与打包解析器 `normalize_version` 逐条对齐。
+   */
+  version: string
   /** 注入给页面的全局对象 `window.web2appExtra` */
   extra: Record<string, unknown>
   /** 应用图标 PNG 的 URL；空 = 用打包时生成的内置图标（本壳在打包期消费，运行期只读不写） */
@@ -121,6 +128,9 @@ export const DEFAULTS: AppConfig = {
   app_url: 'https://www.example.com',
   app_name: 'Web2App',
   title: '',
+  // 打包产物版本：与打包解析器 DEFAULTS["version"] 逐字相同。正常情况下 config.json 由
+  // 解析器规范化生成（必然合法）；这里的默认值服务于「没有 config.json」的开发态 / 兜底模板。
+  version: '0.0.1',
   extra: {},
   icon_url: '',
   proxy_enabled: false,
@@ -178,6 +188,45 @@ export function toDataDir(v: unknown): string {
     )
   }
   return v.trim()
+}
+
+/**
+ * `version`：打包产物版本，规则与打包解析器 `normalize_version` **逐条对齐**：
+ *   · 只接受三段纯数字 `"主.次.补丁"`（不带 v 前缀 / 第四段 / 预发布标签）；
+ *   · 主、次 ≤ 255，补丁 ≤ 65535（Windows MSI ProductVersion 与 exe VERSIONINFO 约束）。
+ *
+ * 缺省 / null / 空串 → 默认值；非字符串或越界 → 硬失败。打包期解析器已挡一道，
+ * 运行期再挡一次是为了让手改 asar 内 config.json 的错误也能在启动时给出可操作提示。
+ */
+const VERSION_RE = /^(\d+)\.(\d+)\.(\d+)$/
+export function toVersion(v: unknown): string {
+  if (v === undefined || v === null) return DEFAULTS.version
+  if (typeof v !== 'string') {
+    throw new ConfigError(
+      `config.json 字段 version 必须是字符串（三段数字版本号），当前是 ${typeof v}：${JSON.stringify(v)}\n` +
+        '  正确："version": "1.2.3"',
+    )
+  }
+  const text = v.trim()
+  if (!text) return DEFAULTS.version
+  const m = VERSION_RE.exec(text)
+  if (!m) {
+    throw new ConfigError(
+      'config.json 字段 version 必须是三段数字版本号 "主.次.补丁"（如 "1.2.3"），' +
+        '不带 v 前缀、不加第四段、不写预发布标签（-beta 等），' +
+        `当前是 ${JSON.stringify(v)}`,
+    )
+  }
+  const major = Number(m[1])
+  const minor = Number(m[2])
+  const patch = Number(m[3])
+  if (major > 255 || minor > 255 || patch > 65535) {
+    throw new ConfigError(
+      'config.json 字段 version 超出 Windows 版本范围（主、次 ≤ 255，补丁 ≤ 65535）：' +
+        `${text}（解析为主=${major} 次=${minor} 补丁=${patch}）`,
+    )
+  }
+  return text
 }
 
 /**
@@ -428,6 +477,7 @@ export function loadConfig(root: string): LoadedConfig {
     app_url: toAppUrl(raw.app_url, publicKey, warnings),
     app_name: appName,
     title: toStr(raw.title),
+    version: toVersion(raw.version),
     extra: toExtra(raw.extra, warnings),
     icon_url: toStr(raw.icon_url),
     proxy_enabled: mustBool(raw.proxy_enabled, 'proxy_enabled', DEFAULTS.proxy_enabled),

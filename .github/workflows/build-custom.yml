@@ -33,6 +33,14 @@ name: 自定义打包
 #                                            //   （与 app_name 分开，便于"安装包叫英文名、界面叫中文名"）
 #                                            //   ⚠️ 旧字段 window_title 已移除，写了会直接报错
 #
+#     "version": "1.2.3",                    // 打包产物版本号（默认 "0.0.1"）：三段数字 "主.次.补丁"，
+#                                            //   不带 v 前缀 / 第四段 / 预发布标签；主次 ≤ 255、补丁 ≤ 65535。
+#                                            //   Windows：MSI/NSIS 包版本（ProductVersion）、exe 文件版本、
+#                                            //     安装包文件名（<app_name>_<version>_x64_zh-CN.msi）；
+#                                            //   Android：versionName（versionCode 由其派生）；
+#                                            //   Electron 绿色版：安装包/产物文件名与 exe 版本资源。
+#                                            //   只影响打包产物，不改仓库内 Cargo.toml / package.json 的开发态版本
+#
 #     "extra": { "k": "v" },                 // 附加参数（默认 {}）：任意 JSON 对象/数组/标量，
 #                                            //   会被注入到被包裹网页，前端 JS 通过
 #                                            //   window.web2appExtra 直接读取
@@ -84,7 +92,7 @@ name: 自定义打包
 # 字段名拼错 / 类型不对 / 写了已移除的字段 ⇒ **直接失败**（不是警告）。
 # 曾经只打 ::warning:: 就跳过，于是「拼错」与「不生效」表现完全一样，只能靠猜。
 #
-# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 17 个字段）
+# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 19 个字段）
 #           electron-app/config.example.json（Electron 绿色版侧，省略仅 Android 用的 android_*）
 #   ⚠️ 两份模板覆盖同一份契约，字段名与类型完全一致；差异只在「本端不用的字段是否列出」。
 #      JSON 标准不支持注释，故模板保持纯 JSON，各字段含义见上面这份说明与 docs/packaging-config.md。
@@ -152,9 +160,12 @@ jobs:
         # 结束并打 ::error::，本步骤随之失败 —— 宁可在打包期挡住，也不要产出行为不对的包。
         run: python "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" --env-out "$GITHUB_ENV"
 
-      - name: 统一安装名称（app_name → productName）
+      - name: 统一安装名称与版本号（app_name → productName，version → tauri.conf.json）
         # 把 app_name 写入 tauri.conf.json 的 productName，统一 Windows 端的"安装名称"：
         #   MSI 安装包文件名 / 开始菜单与桌面快捷方式 / 控制面板"程序和功能"显示名 / 安装目录。
+        # 把 version 写入 tauri.conf.json 的 version（配置未给时解析器已注入默认 0.0.1）：
+        #   MSI/NSIS 的 ProductVersion 与安装包文件名（<productName>_<version>_x64_zh-CN.msi）、
+        #   exe 属性里的文件/产品版本都取它。
         # 同时固定 mainBinaryName=web2app（tauri.conf.json 的【顶层】字段，不是 bundle 下）：
         # 主程序 exe 文件名不随 productName 变化，下方"生成 Windows 单文件版"步骤引用的
         # target/release/web2app.exe 路径保持稳定。
@@ -173,14 +184,20 @@ jobs:
           if not safe:
               safe = "Web2App"
 
+          # 解析器对所有配置都会注入 VERSION（未配置时默认 0.0.1）；`.get(...)` 兜底只为
+          # 本步骤被单独复用时不至于 KeyError。
+          version = (os.environ.get("VERSION", "") or "").strip() or "0.0.1"
+
           with open("tauri.conf.json", encoding="utf-8") as f:
               conf = json.load(f)
           conf["productName"] = safe
+          conf["version"] = version
           conf["mainBinaryName"] = "web2app"
           with open("tauri.conf.json", "w", encoding="utf-8") as f:
               json.dump(conf, f, ensure_ascii=False, indent=2)
               f.write("\n")
           print(f"productName = {safe}（安装包/快捷方式/安装目录使用该名称；主程序文件名固定为 web2app.exe）")
+          print(f"version     = {version}（MSI/NSIS ProductVersion 与 exe 文件版本）")
           PY
 
       - name: Install Rust toolchain
@@ -289,10 +306,14 @@ jobs:
           python3 "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" \
             --env-out "$GITHUB_ENV" --android-keystore
 
-      - name: 统一安装名称与 Android 包名（app_name → productName + identifier，供 android init 烘焙）
+      - name: 统一安装名称、版本号与 Android 包名（app_name → productName + identifier，version → tauri.conf.json）
         # Android 端必须在 `cargo tauri android init` 之前把 app_name 写入
         # tauri.conf.json 的 productName，否则 init 会把默认名 "Web2App"/"web2app"
         # 烘焙进安卓工程（strings.xml / Manifest），后续 strings.xml 补丁只是兜底。
+        #
+        # version 同理且与 app_name 无关：init 会把 tauri.conf.json 的 version 烘焙成
+        # build.gradle 的 versionName（versionCode 由其派生），所以即使 app_name 为空、
+        # 本步骤随后早退，也必须先把 version 写进去（配置未给时解析器已注入默认 0.0.1）。
         #
         # 包名（applicationId）同理：Tauri 2 **没有** bundle.android.package 字段，安卓包名只能
         # 来自 tauri.conf.json 的 identifier ⇒ 必须在 init 之前把 identifier 也改成 app_name 派生值。
@@ -304,6 +325,16 @@ jobs:
           python3 - <<'PY'
           import hashlib, json, os, re, sys
           sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+          # ---- version：无论 app_name 是否配置都先写（早退之前），供 android init 烘焙 ----
+          version = (os.environ.get("VERSION", "") or "").strip() or "0.0.1"
+          with open("tauri.conf.json", encoding="utf-8") as f:
+              conf = json.load(f)
+          conf["version"] = version
+          with open("tauri.conf.json", "w", encoding="utf-8") as f:
+              json.dump(conf, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(f"version     = {version}（android init 将据此烘焙 versionName/versionCode）")
 
           name = os.environ.get("APP_NAME", "").strip()
           if not name:
@@ -730,6 +761,7 @@ jobs:
             APP_URL_VAL="${APP_URL:-}"
             APP_NAME_VAL="${APP_NAME:-Web2App}"
             TITLE_VAL="${TITLE:-$APP_NAME_VAL}"
+            VERSION_VAL="${VERSION:-0.0.1}"
             # ⚠️⚠️ 下面这一串是**同一条命令**的环境变量前缀，靠行尾 `\` 续行。
             #    **不要在续行链中间插注释**：bash 折掉 `\`+换行 之后 `#` 就开始注释，
             #    注释到本行末即结束 ⇒ 续行链被**打断**，注释前后的赋值各自成为独立命令，
@@ -743,6 +775,7 @@ jobs:
             # debug 与其它布尔同理用 `${VAR:-false}` —— 它的空串**没有**额外语义（不像 data_dir）。
             PKG="$PKG" ALIAS="$alias" STORE="$storepass" KS_B64="$ks_b64" \
             APP_URL_VAL="$APP_URL_VAL" APP_NAME_VAL="$APP_NAME_VAL" TITLE_VAL="$TITLE_VAL" \
+            VERSION_VAL="$VERSION_VAL" \
             EXTRA_VAL="${EXTRA:-{}}" ICON_URL_VAL="${ICON_URL:-}" \
             PROXY_ENABLED_VAL="${PROXY_ENABLED:-false}" \
             PROXY_HTTP_VAL="${PROXY_HTTP:-}" PROXY_HTTPS_VAL="${PROXY_HTTPS:-}" \
@@ -766,6 +799,7 @@ jobs:
               "app_url": app_url,
               "app_name": env["APP_NAME_VAL"],
               "title": env["TITLE_VAL"],
+              "version": env["VERSION_VAL"],
               "extra": json.loads(env["EXTRA_VAL"] or "{}"),
               "icon_url": env["ICON_URL_VAL"],
               # 布尔一律真 bool（不是 "false" 字符串）—— 与解析器契约一致，

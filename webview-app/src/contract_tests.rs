@@ -408,6 +408,37 @@ mod capability_contract {
         );
     }
 
+    /// 标题回传只允许来自【主框架】：initialization_script 会被注入所有 frame
+    /// （WebView2 AddScriptToExecuteOnDocumentCreated 无 frame 过滤），跨域广告 iframe
+    /// 自己的 document.title（实测 bilibili 页内为 "Cross Origin Local Storage" →
+    /// "Leader Iframe" → "cm.bilibili.com"）会顶掉标签栏真实标题。两处守卫必须同时存在：
+    ///   1. tab_title.js 读到 label/token 之前先 `window.self !== window.top` 早退；
+    ///   2. tabs.rs 只在主框架挂 __web2appTabLabel / __web2appTabToken（令牌不泄露给
+    ///      第三方 frame，子框架即使被诱导也拿不到令牌）。
+    #[cfg(windows)]
+    #[test]
+    fn tab_title_script_runs_in_top_frame_only() {
+        assert!(
+            TAB_TITLE_JS.contains("window.self !== window.top"),
+            "tab_title.js 必须在子框架早退：初始化脚本会注入所有 frame，跨域广告 iframe 的 \
+             document.title（如 bilibili 的 \"Leader Iframe\"）会顶掉标签栏真实标题"
+        );
+        // 两条注入各出现一次主框架守卫（拆成两个子串断言，避免只改了 label 漏掉 token）。
+        assert!(
+            TABS_RS.contains("window.self === window.top") && {
+                let guards = TABS_RS.matches("window.self === window.top").count();
+                guards >= 2
+            },
+            "tabs.rs 注入 __web2appTabLabel / __web2appTabToken 时必须都带主框架判断，\
+             避免一次性防伪令牌暴露给第三方跨域 iframe"
+        );
+        assert!(
+            TABS_RS.contains("window.__web2appTabLabel")
+                && TABS_RS.contains("window.__web2appTabToken"),
+            "tabs.rs 仍需注入 label/token（仅加上主框架门控，不得误删注入本身）"
+        );
+    }
+
     /// ⑥ tab 首屏重试事件：tabs.rs 常量 ↔ lib.rs 监听 ↔ loading.js 字面量逐字一致；
     ///    loading.js 必须带 label/token（占位文档是本地源，令牌仍是唯一防伪手段）。
     #[cfg(windows)]
@@ -433,6 +464,74 @@ mod capability_contract {
         assert!(
             LOADING_JS.contains("plugin:event|emit"),
             "loading.js 重试必须走核心事件通路"
+        );
+    }
+}
+
+/// 顶部通栏配色的静态契约测试。
+///
+/// 多页签标签栏（`src/shell.html`）与单窗口标题栏（`src/titlebar.js`）是**同一块 UI** 的两种
+/// 形态：前者铺在宿主窗口顶部、后者叠在主窗口顶部。配色/分隔线一旦漂移，两种模式看起来就不像
+/// 同一个应用（使用者 2026-10-08 反馈「多页签顶部通栏风格要与单页签的一致」）。这里把两处共用的
+/// 关键色值钉死 —— 改配色必须两边一起改，否则本测试报错。
+#[cfg(test)]
+mod top_bar_style_contract {
+    /// 多页签顶栏（宿主窗口 decorations(false) + 自绘标签栏）。
+    const SHELL: &str = include_str!("shell.html");
+    /// 单窗口 / 多页签 tab 页的自绘标题栏。
+    const TITLEBAR: &str = include_str!("titlebar.js");
+
+    /// 两处顶栏必须共用同一套关键色：浅底 / 深底 / 正文 / 深色正文 / 浅色分隔线 / 深色分隔线 /
+    /// 按钮 hover 底色。字面量在两份文件里都写成小写、无多余空格，便于逐字比对。
+    #[test]
+    fn tab_bar_palette_matches_titlebar() {
+        const SHARED: &[&str] = &[
+            "#eef0f2",               // 浅色底
+            "#1f2530",               // 深色底
+            "#2c3440",               // 浅色正文
+            "#e6ebf2",               // 深色正文
+            "rgba(0,0,0,.08)",       // 浅色下沿分隔线
+            "rgba(255,255,255,.07)", // 深色下沿分隔线
+            "rgba(120,133,153,.16)", // 按钮 hover 底色
+        ];
+        for lit in SHARED {
+            assert!(
+                TITLEBAR.contains(lit),
+                "titlebar.js 缺少顶栏配色 {lit}（本测试的真源之一）"
+            );
+            assert!(
+                SHELL.contains(lit),
+                "shell.html 缺少与 titlebar.js 一致的顶栏配色 {lit}：\
+                 多页签标签栏与单页签标题栏必须同色（改配色请两份文件一起改）"
+            );
+        }
+    }
+}
+
+/// WebView2 网页密码自动保存开关的静态契约（Windows）。
+///
+/// 背景：WebView2 的 `IsPasswordAutosaveEnabled` **默认 false** —— 不弹「保存/更新密码？」
+/// 气泡、不保存新密码（一般表单自动填充是另一个独立开关、默认 true），与 Electron 壳的
+/// Chromium 默认开启不对齐。`webview_hooks.rs` 必须在每个 CoreWebView2 的钩子注册阶段把它
+/// 显式置 true。COM 调用无法在单测里执行，这里用源码断言把「开关确实接上、且置的是 true」
+/// 钉死，防止误删或误改成 false。
+#[cfg(test)]
+mod webview2_password_autosave {
+    /// 被测真源：Windows WebView2 钩子注册代码本体。
+    const HOOKS_RS: &str = include_str!("webview_hooks.rs");
+
+    #[cfg(windows)]
+    #[test]
+    fn enabled_via_settings4_on_every_webview() {
+        assert!(
+            HOOKS_RS.contains("ICoreWebView2Settings4"),
+            "密码自动保存必须通过 ICoreWebView2Settings4（Runtime 1.0.902+）操作；\
+             不要换成门槛更高的 ICoreWebView2Profile6（1.0.1823+）"
+        );
+        assert!(
+            HOOKS_RS.contains("SetIsPasswordAutosaveEnabled(true)"),
+            "register_webview_hooks 必须显式 SetIsPasswordAutosaveEnabled(true)：\
+             WebView2 该属性默认 false，不写就不会弹「保存密码」"
         );
     }
 }

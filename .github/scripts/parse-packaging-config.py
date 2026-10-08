@@ -19,6 +19,7 @@ r"""打包配置 JSON 的**唯一解析实现**（Tauri / Android / Electron 三
 | app_url                  | string \| string[]   | 必填                                |
 | app_name                 | string                | "Web2App"                           |
 | title                    | string                | "" → 回落 app_name                  |
+| version                  | string                | "0.0.1"（三段数字 x.y.z）           |
 | extra                    | 任意 JSON             | {}                                  |
 | icon_url                 | string                | ""                                  |
 | proxy_enabled            | bool                  | false                               |
@@ -101,6 +102,10 @@ DEFAULTS: dict[str, object] = {
     "app_url": "",
     "app_name": "Web2App",
     "title": "",
+    # 打包产物版本（Tauri 写入 tauri.conf.json 的 version；Electron 经 extraMetadata.version
+    # 覆盖 package.json）。只接受三段纯数字（见 normalize_version）—— Windows MSI
+    # ProductVersion 与 exe VERSIONINFO 都不认 semver 预发布标签 / v 前缀 / 四段。
+    "version": "0.0.1",
     "extra": {},
     "icon_url": "",
     "proxy_enabled": False,
@@ -292,6 +297,42 @@ def normalize_extra(value: object) -> str:
         raise ConfigError(f"extra 无法序列化为 JSON：{e}") from e
 
 
+# 版本号：三段纯数字（semver 的 x.y.z 基础形态，**不接受** v 前缀 / 四段 / 预发布标签）。
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+def normalize_version(value: object) -> str:
+    """打包产物版本。只接受 "主.次.补丁" 三段纯数字字符串。
+
+    为什么比 semver 更严：两条打包链路的 Windows 产物版本最终都要过 Windows 自己的规则 ——
+      · Tauri 的 MSI（WiX ProductVersion）：主、次 ∈ [0,255]，补丁 ∈ [0,65535]，
+        且只认三段数字（"1.2.3-beta" / "v1.2.3" / 四段都会在打包期报错）；
+      · electron-builder 同样把版本归一进 exe 的 VERSIONINFO（16 位字段）。
+    在配置解析处统一挡住，比「同一份配置一个壳能出包、另一个壳炸在 WiX」更容易排查。
+    Tauri 的 Android versionName / versionCode 也由这同一个版本号烘焙派生。
+    """
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"字段 version 必须是字符串（三段数字版本号），当前是 {type(value).__name__}：{value!r}\n"
+            '  正确写法："version": "1.2.3"'
+        )
+    text = value.strip()
+    m = _VERSION_RE.match(text)
+    if not m:
+        raise ConfigError(
+            '字段 version 必须是三段数字版本号 "主.次.补丁"（如 "1.2.3"），'
+            "不带 v 前缀、不加第四段、不写预发布标签（-beta 等），"
+            f"当前是 {value!r}"
+        )
+    major, minor, patch = (int(g) for g in m.groups())
+    if major > 255 or minor > 255 or patch > 65535:
+        raise ConfigError(
+            "字段 version 超出 Windows 版本范围（主、次 ≤ 255，补丁 ≤ 65535）："
+            f"{text}（解析为主={major} 次={minor} 补丁={patch}）"
+        )
+    return text
+
+
 # Windows 上永远非法的目录名字符。`:` 与 `\` `/` 是路径语法的一部分，不在此列。
 _DATA_DIR_BAD = set('<>"|?*')
 
@@ -380,6 +421,9 @@ def build_merged(data: dict) -> dict[str, str]:
     if not title:
         title = str(merged["app_name"])
     merged["title"] = title
+
+    # version 单独按版本规则校验（三段数字 + Windows 取值范围），不能走通用 str() 通道。
+    merged["version"] = normalize_version(merged["version"])
 
     # ⚠️⚠️ 告警的**触发条件**必须对齐「运行期到底哪条路会解密」：
     #    · Tauri：`bootstrap.rs` 里 `parse_domains(APP_URL)` 命中（文本以 `[` 开头）才走
@@ -540,6 +584,21 @@ def _selftest_cases() -> None:
 
     # title 显式给出时不回落
     assert build_merged({"app_url": "https://a.com", "title": "我的应用"})["title"] == "我的应用"
+
+    # ---- version：默认 0.0.1；只认三段数字（Windows MSI/VERSIONINFO 规则）----
+    assert build_merged({"app_url": "https://a.com"})["version"] == "0.0.1", "version 默认 0.0.1"
+    assert build_merged({"app_url": "https://a.com", "version": " 1.2.3 "})["version"] == "1.2.3", \
+        "version 去首尾空白"
+    assert build_merged({"app_url": "https://a.com", "version": "255.255.65535"})["version"] == "255.255.65535"
+    for bad in ("1.2", "v1.2.3", "1.2.3.4", "1.2.3-beta", "1.2.3+build"):
+        _expect_error({"app_url": "https://a.com", "version": bad}, "三段数字版本号")
+    for bad in ("256.0.0", "1.256.0", "0.0.65536"):
+        _expect_error({"app_url": "https://a.com", "version": bad}, "超出 Windows 版本范围")
+    # 数字经通用通道先 str() 成 "1" ⇒ 落在格式校验（bool 不被 str，落在「必须是字符串」）
+    _expect_error({"app_url": "https://a.com", "version": 1}, "三段数字版本号")
+    _expect_error({"app_url": "https://a.com", "version": True}, "必须是字符串")
+    # 显式 null = 用默认值（与其它字段同规则）
+    assert build_merged({"app_url": "https://a.com", "version": None})["version"] == "0.0.1"
 
     # 布尔：真 true 通过
     assert build_merged({"app_url": "https://a.com", "proxy_enabled": True})["proxy_enabled"] == "True"

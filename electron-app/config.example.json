@@ -2,6 +2,7 @@
   "app_url": "https://user:pass@example.com",
   "app_name": "MyDemo",
   "title": "我的演示应用",
+  "version": "0.0.1",
   "extra": { "build": "example", "deploy_env": "prod" },
   "icon_url": "",
   "proxy_enabled": false,

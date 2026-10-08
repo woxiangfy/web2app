@@ -6,6 +6,9 @@ export const DEFAULTS = {
   app_url: '',
   app_name: 'Web2App',
   title: '',
+  // 打包产物版本（Tauri 写 tauri.conf.json.version；Electron 走 extraMetadata.version）。
+  // 只接受三段纯数字 x.y.z（主/次 ≤ 255、补丁 ≤ 65535），见 parser.mjs::normalizeVersion。
+  version: '0.0.1',
   extra: {},
   icon_url: '',
   proxy_enabled: false,

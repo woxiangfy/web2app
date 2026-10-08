@@ -1,7 +1,7 @@
 /**
  * 多页签模式断言组（探针四拆分之四）：`runTabsProbe`，
- * 对应 docs/electron-tabs-design.md §8 的 P1/P2/P4/P6/P7/P7b/P8/P9/P10/P11/P12
- *（P7b = 3 页签邻接选择，2 页签验不出）。
+ * 对应 docs/electron-tabs-design.md §8 的 P1/P2/P4/P6/P7/P7b/P8/P9/P10/P10b/P11/P12
+ *（P7b = 3 页签邻接选择，2 页签验不出；P10b = 新建页签加载完成前即激活）。
  *
  * 与 `runProbe` 分开的原因：单窗口断言组（节 0–17）假设「主窗口自身是远程页面」，
  * 而页签模式下主窗口自身是壳页面（shell.html），没有 titlebar.js 注入的按钮/留白，
@@ -198,9 +198,10 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   const countBeforeOpen = tabs.count
   await tabs.active!.view.webContents.executeJavaScript(
     `window.open('/opened.html', '_blank'); true`, true)
-  // setWindowOpenHandler 用 setImmediate 异步 spawnTab。count 在 spawnTab 一开头就 +1，
-  // 但激活（activate）在 onSpawn（loadURL /opened.html）完成之后 —— 所以「新页签可见」要
-  // 等到 active 换成新 label 且其 URL 已落到 /opened.html，不能只看 count。
+  // setWindowOpenHandler 用 setImmediate 异步 spawnTab。spawnTab 在【发起 loadURL 之前】
+  // 就已 activate（标签栏即时切换），但新页签的 URL 此刻仍是空串，要等导航提交后才落到
+  // /opened.html —— 所以判据仍是「active 换成新 label 且其 URL 已落到 /opened.html」，
+  // 不能只看 count（即时激活回归见下面的 P10b）。
   const openedReady = await waitUntil(async () => {
     if (tabs.count !== countBeforeOpen + 1) return false
     const a = tabs.active
@@ -222,6 +223,60 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   // 收掉 window.open 新开的页签，恢复单一页签稳态（opener），再进后续断言
   if (tabs.active && tabs.active.label !== opener) tabs.closeTab(tabs.active.label)
   tabs.activate(opener)
+
+  // ---------- P10b：新建页签在页面【加载完成前】即激活（标签栏即时切换回归） ----------
+  // 旧实现把 activate 放在 `await onSpawn`（≈ await loadURL 整页加载完成）之后：新页签的
+  // 标签栏条目/激活态和内容切换全被拖到加载结束；加载中新视图默认可见且盖在子视图栈顶，
+  // 用户此时切走，加载结束还会被迟到的 activate 拽回新页签。夹具 /slow.html?ms= 先发响应
+  // 头（导航立即提交）、body 延迟下发，制造确定性的「加载中」窗口。
+  const SLOW_MS = 2500
+  /** 读壳标签栏当前 .active 页签的 label（pushToShell 渲染后的最终呈现）。 */
+  const shellActiveLabel = async (): Promise<string | null> =>
+    (await win.webContents.executeJavaScript(
+      `(() => { const el = document.querySelector('#tabs .tab.active');` +
+        ` return el ? el.dataset.label : null; })()`,
+      true
+    )) as string | null
+  const countBeforeSlow = tabs.count
+  const slowT0 = Date.now()
+  // ⚠️ 刻意不 await：spawnTab 同步跑到 onSpawn 内的 loadURL 才让出事件循环，
+  // 而激活应发生在那之前 —— 调用返回的瞬间激活就应当已完成。
+  const slowP = tabs.spawnTab(`${base}/slow.html?ms=${SLOW_MS}`)
+  // 期望值必须独立于 active 获取：新页签在 spawnTab 同步段就已登记进集合，
+  // 而旧实现的病根恰恰是「此刻 active 还是旧页签」——直接拿 active 当期望值，
+  // 旧实现会让下面的壳态断言与自己比较而假绿（实测踩过）。
+  const slowLabel = tabs.listForIpc().find(([l]) => l !== opener)?.[0]
+  p.check('P10b spawnTab 返回时（页面远未加载完）新页签已在主进程侧激活',
+    !!slowLabel && tabs.active?.label === slowLabel && tabs.count === countBeforeSlow + 1,
+    `active=${tabs.active?.label} 新页签=${slowLabel} opener=${opener} count=${tabs.count}`)
+  // 壳标签栏的 active 同步必须发生在慢页加载完成（SLOW_MS）之前；旧实现这里会轮询超时。
+  const shellSwitched = await waitUntil(async () => (await shellActiveLabel()) === slowLabel, 1000)
+  const switchElapsed = Date.now() - slowT0
+  p.check('P10b 标签栏在页面加载完成前即切到新页签',
+    shellSwitched && switchElapsed < SLOW_MS,
+    `壳active=${await shellActiveLabel()} 用时=${switchElapsed}ms 加载窗口=${SLOW_MS}ms`)
+  let visNow = children().filter((v) => v.getVisible())
+  p.check('P10b 加载中仅新页签内容视图可见（旧页签已同步隐藏，不靠 z-order 盖）',
+    visNow.length === 1 && visNow[0] === tabs.active?.view && tabs.active?.label === slowLabel,
+    `可见视图数=${visNow.length}`)
+  // 加载中手动切回旧页签：必须立即生效（旧实现这一步后视觉上是旧页签，但加载一结束
+  // 又被 spawnTab 尾部迟到的 activate 拽回新页签 —— 用户感知的「切不过去」）。
+  tabs.activate(opener)
+  await sleep(100)
+  visNow = children().filter((v) => v.getVisible())
+  p.check('P10b 加载中切回旧页签立即生效（集合态 / 壳态 / 可见视图三者一致）',
+    tabs.active?.label === opener && (await shellActiveLabel()) === opener &&
+      visNow.length === 1 && visNow[0] === tabs.active?.view,
+    `active=${tabs.active?.label} 壳active=${await shellActiveLabel()} 可见=${visNow.length}`)
+  await slowP // 等慢页加载完成
+  await sleep(150)
+  p.check('P10b 慢页加载完成后激活态不被迟到的激活拽回',
+    tabs.active?.label === opener && (await shellActiveLabel()) === opener,
+    `active=${tabs.active?.label} 壳active=${await shellActiveLabel()}`)
+  // 收尾：关掉后台慢页签（非激活分支），恢复 opener 单页签稳态再进后续断言
+  p.check('P10b 收尾：后台慢页签关闭成功', slowLabel ? tabs.closeTab(slowLabel) : false,
+    `label=${slowLabel}`)
+  await sleep(100)
 
   // ---------- 标签栏「设置」按钮（最小化左侧）→ 打开设置窗 ----------
   // 位置 + 链路成对断言。链路上「三处逐字一致」最容易断：shell.html 的

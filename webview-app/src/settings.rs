@@ -158,13 +158,39 @@ pub fn persist_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
 /// 设置页通过 `settings://localhost/` 自定义协议提供（协议在 Builder 上注册，
 /// HTML 由 Rust 侧编译期内嵌），因此不依赖 devUrl，dev / release 行为一致。
 ///
+/// ⚠️⚠️ 本函数【不能】在调用栈内直接建窗：三条调用路径全部发生在**主线程事件回调栈内**——
+/// ① 标签栏齿轮 → IPC 命令 `open_settings`（tauri 在主线程 `on_message` 里**同步**派发
+///    invoke）；② 自绘标题栏 → `web2app:open-settings` 事件监听；③ 全局快捷键 Shift+F1。
+/// 在回调栈内联 `WebviewWindowBuilder::build()` 等于「事件派发期间再创建一个窗口 + 新的
+/// WebView2 环境」→ 嵌套事件循环，新 WebView2 controller 的初始化消息永远得不到分发：
+/// Win32 窗口建出来了（620×600、任务栏有「设置 - xxx」），但 settings:// 协议从不被请求、
+/// 页面永不渲染 → 用户看到一个纯白无边框窗。
+///
+/// 修法与 [`crate::webview_hooks`] 的 NewWindowRequested 处理同模式：先切到后台线程，
+/// 再 `run_on_main_thread` 把真正的建窗排队到**下一个事件循环轮次**（当前回调退栈后）。
+/// ⚠️ 不能省掉后台线程直接 `run_on_main_thread`——在主线程上调用它会被**同步内联执行**，
+/// 等于没 defer（webview_hooks 里已有同一条踩坑注释）。
+#[cfg(desktop)]
+pub fn open_settings_window(app: &AppHandle) {
+    let app_deferred = app.clone();
+    std::thread::spawn(move || {
+        let app_main = app_deferred.clone();
+        let _ = app_deferred.run_on_main_thread(move || {
+            open_settings_window_on_main(&app_main);
+        });
+    });
+}
+
+/// [`open_settings_window`] 的实际实现：运行在主线程的一个【独立】事件循环轮次
+///（已脱离 IPC / 事件 / 快捷键回调栈），可以安全地创建设置窗口。
+///
 /// ⚠️ 设置窗是**无边框窗**（`decorations(false)`）：用户要求的版式是「没有顶部的窗体、
 /// 面板居中、内容多可滚动」——标题与关闭按钮由 `dist/settings.html` 自绘在面板头部
 /// （拖动靠 `data-tauri-drag-region`，需要 capabilities/settings-window.json 里的
 /// `core:window:allow-start-dragging`；少了它窗口会拖不动且**不会报错**）。
 /// 窗口 `center()` 到屏幕中央，底色取加载层同一个浅灰，盖住 WebView 初始化瞬间的白闪。
 #[cfg(desktop)]
-pub fn open_settings_window(app: &AppHandle) {
+fn open_settings_window_on_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -172,7 +198,9 @@ pub fn open_settings_window(app: &AppHandle) {
         return;
     }
     let url = url::Url::parse("settings://localhost/").expect("构造 settings 协议 URL 失败");
-    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::CustomProtocol(url))
+    // build 失败必须留痕：这类错误此前被 `let _` 静默吞掉，用户侧只表现为「点齿轮没反应 /
+    // 空白窗」，没有任何线索能区分「命令没调到」与「建窗失败」。
+    if let Err(e) = WebviewWindowBuilder::new(app, "settings", WebviewUrl::CustomProtocol(url))
         // 标题用【显示名】TITLE 而不是【安装名】APP_NAME —— 这个标题是给用户看的
         //（无边框窗里系统不画它，但仍会出现在任务栏 / 任务视图与无障碍工具里）。
         .title(format!("设置 - {}", TITLE))
@@ -182,7 +210,10 @@ pub fn open_settings_window(app: &AppHandle) {
         .decorations(false)
         .background_color(crate::bootstrap::SPLASH_BG)
         .center()
-        .build();
+        .build()
+    {
+        dlog!("[settings] 设置窗创建失败：{e}");
+    }
 }
 
 /// settings 自定义协议处理器：编译期把 dist/settings.html 内嵌后经协议返回设置页。

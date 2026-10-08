@@ -8,6 +8,7 @@ import { FatalError, emit } from './diagnostic.mjs'
 import { ELECTRON, ROOT, WEBVIEW, rel } from './paths.mjs'
 import { toConfigJson } from './parser.mjs'
 import {
+  ELECTRON_OUT_DEFAULT,
   have,
   isDeleteBlocked,
   pngToIco,
@@ -110,10 +111,12 @@ export async function doElectron(args, merged, env, name, rr) {
   // 自动换镜像（见 resolveBuilderBinariesMirror）；必须在构造 builder 命令前改好 env。
   await resolveBuilderBinariesMirror(env, dry)
 
-  // 输出目录：本地打包默认落到**仓库根的 `tests/pack/`**。根 `AGENTS.md` §3.2 约定 tests/ 只装本地测试过程的
-  // 临时/中间产物，根 `.gitignore` 的 `/tests/` 整目录忽略 ⇒ 150MB 量级、上千文件的 win-unpacked/ 树
-  // **不会进 git、不污染版本库**。这与 CI 不冲突：CI 工作区一次性，electron-builder.yml 的
-  // directories.output=release 只在 CI / 直接跑 pnpm dist 时生效；本地一律用下面的绝对路径覆盖。
+  // 输出目录：本地打包默认落到**仓库根的 `tests/pack/electron/`**（与 Tauri 的 tests/pack/tauri/
+  // 平级分子目录：两壳绿色版都叫 <name>.exe，混放互相覆盖）。根 `AGENTS.md` §3.2 约定 tests/ 只装
+  // 本地测试过程的临时/中间产物，根 `.gitignore` 的 `/tests/` 整目录忽略 ⇒ 150MB 量级、上千文件的
+  // win-unpacked/ 树**不会进 git、不污染版本库**。这与 CI 不冲突：CI 工作区一次性，
+  // electron-builder.yml 的 directories.output=release 只在 CI / 直接跑 pnpm dist 时生效；本地一律用
+  // 下面的绝对路径覆盖。
   //
   // ⚠️⚠️ 这里**刻意不自己清空输出目录**，而是让 electron-builder 去清（它本来就会做，CI 走的也是这条路）。
   //    「脚本自己先清一遍」的写法两处都吃亏（2026-09-24 实测）：
@@ -125,7 +128,7 @@ export async function doElectron(args, merged, env, name, rr) {
   //      全新目录没有东西可清 ⇒ emptyDir 无事可做 ⇒ 必然能出包；人工依旧不需要做任何事。
   // ⚠️ 显式给的相对 `--out` 以 **electron-app/** 为基准（electron-builder 就在那下面跑）；
   //    想落到根 tests/ 写 `--out ../tests/<名字>`，或直接给绝对路径。
-  const defaultOut = join(ROOT, 'tests', 'pack')
+  const defaultOut = ELECTRON_OUT_DEFAULT
   let outDir = args.out ? resolveElectronOut(args.out) : defaultOut
 
   const builderCmd = (dir) => [
@@ -135,6 +138,9 @@ export async function doElectron(args, merged, env, name, rr) {
     '--win',
     ...forms,
     `-c.productName=${name}`,
+    // 版本来自配置 JSON 的 version（默认 0.0.1）：extraMetadata 合并进打包用的
+    // package.json，产物文件名（zip/portable/setup）与 exe 版本资源都取它。
+    `-c.extraMetadata.version=${merged.version}`,
     // 安装版标记：打进 app.asar 的 package.json，运行时 distribution.ts 据此强制
     // 使用系统默认数据目录（%APPDATA%），忽略 config 的 data_dir。绿色版不带此参数。
     ...(forms.includes('nsis') ? ['-c.extraMetadata.distribution=nsis'] : []),
@@ -155,11 +161,11 @@ export async function doElectron(args, merged, env, name, rr) {
 
   let attempt = await runTee(builderCmd(outDir), ELECTRON, env, dry)
   if (attempt.status !== 0 && !dry && outDir === defaultOut && isDeleteBlocked(attempt.tail)) {
-    const fallback = join(ROOT, 'tests', `pack-local-${stamp()}`)
+    const fallback = join(ROOT, 'tests', 'pack', `electron-local-${stamp()}`)
     emit(
       `\n⚠️ electron-builder 清空 ${rel(outDir)} 时被删除策略拦住了（safe-delete / emptyDir）。\n` +
         `   这台机器不允许它删掉旧产物 ⇒ **自动**改用全新目录重试：${rel(fallback)}\n` +
-        `   （旧产物原样留在 ${rel(defaultOut)}，没被动过；清掉它之后即可恢复用 tests/pack/）`,
+        `   （旧产物原样留在 ${rel(defaultOut)}/，没被动过；清掉它之后即可恢复用 tests/pack/electron/）`,
     )
     outDir = fallback
     attempt = await runTee(builderCmd(outDir), ELECTRON, env, dry)
@@ -167,7 +173,7 @@ export async function doElectron(args, merged, env, name, rr) {
   if (attempt.status !== 0) {
     const hint = isDeleteBlocked(attempt.tail)
       ? '\n  看起来是输出目录删不掉（不是配置/代码问题）：换一个全新目录再试即可，例如\n' +
-        `    node scripts/pack-local.mjs --config <file> --target ${args.target} --out ../tests/pack-local-${stamp()}`
+        `    node scripts/pack-local.mjs --config <file> --target ${args.target} --out ../tests/pack/electron-local-${stamp()}`
       : ''
     throw new FatalError(`electron-builder 失败（退出码 ${attempt.status}）${hint}`)
   }

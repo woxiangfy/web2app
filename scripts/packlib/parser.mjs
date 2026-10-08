@@ -161,6 +161,44 @@ function normalizeExtra(value) {
 }
 
 /**
+ * 打包产物版本：只接受 "主.次.补丁" 三段纯数字字符串。
+ *
+ * 为什么比 semver 更严：两条打包链路的 Windows 产物版本最终都要过 Windows 自己的规则 ——
+ *   · Tauri 的 MSI（WiX ProductVersion）：主、次 ∈ [0,255]，补丁 ∈ [0,65535]，
+ *     只认三段数字（"1.2.3-beta" / "v1.2.3" / 四段都会在打包期报错）；
+ *   · electron-builder 同样把版本归一进 exe 的 VERSIONINFO（16 位字段）。
+ * 与 Python 侧 normalize_version 逐字对应（改规则必须两侧同步 + 跑 --parity）。
+ */
+const VERSION_RE = /^(\d+)\.(\d+)\.(\d+)$/
+function normalizeVersion(value) {
+  if (typeof value !== 'string') {
+    throw new ConfigError(
+      `字段 version 必须是字符串（三段数字版本号），当前是 ${pyTypeName(value)}：${pyRepr(value)}\n` +
+        '  正确写法："version": "1.2.3"',
+    )
+  }
+  const text = value.trim()
+  const m = VERSION_RE.exec(text)
+  if (!m) {
+    throw new ConfigError(
+      '字段 version 必须是三段数字版本号 "主.次.补丁"（如 "1.2.3"），' +
+        '不带 v 前缀、不加第四段、不写预发布标签（-beta 等），' +
+        `当前是 ${pyRepr(value)}`,
+    )
+  }
+  const major = Number(m[1])
+  const minor = Number(m[2])
+  const patch = Number(m[3])
+  if (major > 255 || minor > 255 || patch > 65535) {
+    throw new ConfigError(
+      '字段 version 超出 Windows 版本范围（主、次 ≤ 255，补丁 ≤ 65535）：' +
+        `${text}（解析为主=${major} 次=${minor} 补丁=${patch}）`,
+    )
+  }
+  return text
+}
+
+/**
  * 数据目录。**空串在这里是有含义的取值**（= 系统默认程序目录），不是「未设置」。
  *
  * 三种形态（两壳行为一致，见 docs/packaging-config.md §4.3）：
@@ -252,6 +290,9 @@ export function buildMerged(data) {
   let title = pyStr(merged.title).trim()
   if (!title) title = pyStr(merged.app_name)
   merged.title = title
+
+  // version 单独按版本规则校验（三段数字 + Windows 取值范围），不能走通用 str() 通道。
+  merged.version = normalizeVersion(merged.version)
 
   // ⚠️⚠️ 告警的**触发条件**必须对齐「运行期到底哪条路会解密」：
   //    · Tauri：`bootstrap.rs` 里 `parse_domains(APP_URL)` 命中（文本以 `[` 开头）才走 DNS TXT → 解密；

@@ -8,7 +8,7 @@ import { ConfigError, captureOutput, emit } from './diagnostic.mjs'
 import { buildMerged, toConfigJson } from './parser.mjs'
 import { getCloseMatches } from './pycompat.mjs'
 import { DEFAULTS } from './constants.mjs'
-import { TAURI_OUT_DEFAULT, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
+import { ELECTRON_OUT_DEFAULT, TAURI_OUT_DEFAULT, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
 import { ELECTRON, ROOT, WEBVIEW } from './paths.mjs'
 
 function assertThat(cond, msg) {
@@ -54,11 +54,15 @@ export const PARITY_PAYLOADS = [
   { app_url: 'https://user:pass@a.com/Path' },
   { app_url: 'ftp://a.com' },
   { app_url: 'https://a.com', android_keystore_base64: 'eHh4' },
+  { app_url: 'https://a.com', version: '2.3.4' },
+  { app_url: 'https://a.com', version: ' 255.255.65535 ' },
   // ---- 以下以「必须报错」为主（`app_url: 123` 例外：它只产生 warning，仍会成功）----
   { app_url: 'https://a.com', debug: 'true' },
   { app_url: 'https://a.com', proxy_enabled: 'on' },
   { app_url: 'https://a.com', proxy_enabled: 1 },
   { app_url: 'https://a.com', proxy_enabled: null },
+  { app_url: 'https://a.com', version: '1.0' },
+  { app_url: 'https://a.com', version: 1 },
   { app_url: ['a.com'] },
   { app_url: [] },
   { app_url: '   ' },
@@ -87,6 +91,24 @@ export function selftest() {
     assertThat(m.proxy_bypass === 'localhost;127.0.0.1;<-loopback>', 'proxy_bypass 默认串')
 
     assertThat(buildMerged({ app_url: 'https://a.com', title: '我的应用' }).title === '我的应用', 'title 显式给出不回落')
+
+    // version：默认 0.0.1；只认三段数字（Windows MSI/VERSIONINFO 规则）
+    assertThat(buildMerged({ app_url: 'https://a.com' }).version === '0.0.1', 'version 默认 0.0.1')
+    assertThat(buildMerged({ app_url: 'https://a.com', version: ' 1.2.3 ' }).version === '1.2.3', 'version 去空白')
+    assertThat(
+      buildMerged({ app_url: 'https://a.com', version: '255.255.65535' }).version === '255.255.65535',
+      'version 边界值 255.255.65535',
+    )
+    for (const bad of ['1.2', 'v1.2.3', '1.2.3.4', '1.2.3-beta', '1.2.3+build']) {
+      expectError({ app_url: 'https://a.com', version: bad }, '三段数字版本号')
+    }
+    for (const bad of ['256.0.0', '1.256.0', '0.0.65536']) {
+      expectError({ app_url: 'https://a.com', version: bad }, '超出 Windows 版本范围')
+    }
+    // 数字先经通用通道 str() 成 "1" ⇒ 格式校验；bool 不被 str ⇒ 「必须是字符串」
+    expectError({ app_url: 'https://a.com', version: 1 }, '三段数字版本号')
+    expectError({ app_url: 'https://a.com', version: true }, '必须是字符串')
+    assertThat(buildMerged({ app_url: 'https://a.com', version: null }).version === '0.0.1', 'version 显式 null 回落默认')
 
     assertThat(buildMerged({ app_url: 'https://a.com', proxy_enabled: true }).proxy_enabled === 'True', '真 true 通过')
     assertThat(buildMerged({ app_url: 'https://a.com', debug: true }).debug === 'True', 'debug 真 true 通过')
@@ -183,6 +205,10 @@ export function selftest() {
     assertThat(
       resolveElectronOut(join(ROOT, 'tests', 'pack-local-x')) === join(ROOT, 'tests', 'pack-local-x'),
       '绝对路径原样使用',
+    )
+    assertThat(
+      ELECTRON_OUT_DEFAULT === join(ROOT, 'tests', 'pack', 'electron'),
+      'Electron 默认产物目录是 tests/pack/electron/（与 tests/pack/tauri/ 平级分子目录，绿色版同名混放会互相覆盖）',
     )
 
     // Tauri 侧 --out：相对路径锚定 webview-app/；默认产物目录必须落在 tests/pack/tauri（与 Electron 分子目录）

@@ -162,7 +162,11 @@ jobs:
           NAME=$(printf '%s' "$NAME" | sed -E 's/^[ .]+//; s/[ .]+$//')
           if [ -z "$NAME" ]; then NAME="Web2App"; fi
           echo "PKG_NAME=$NAME" >> "$GITHUB_ENV"
+          # version 由解析器写入 GITHUB_ENV（配置未给时默认 0.0.1）；-c.extraMetadata.version
+          # 合并进本次打包用的 package.json，zip/portable/setup 文件名与 exe 版本资源都取它。
+          APP_VERSION="${VERSION:-0.0.1}"
           echo "productName = $NAME"
+          echo "version     = $APP_VERSION"
 
           EXTRA=()
           if [ -n "${ICON_PNG:-}" ]; then
@@ -178,7 +182,8 @@ jobs:
           if [ -n "$GREEN_TARGETS" ]; then
             echo "绿色版目标：$GREEN_TARGETS"
             # shellcheck disable=SC2086
-            pnpm exec electron-builder --win$GREEN_TARGETS -c.productName="$NAME" "${EXTRA[@]}"
+            pnpm exec electron-builder --win$GREEN_TARGETS -c.productName="$NAME" \
+              -c.extraMetadata.version="$APP_VERSION" "${EXTRA[@]}"
           else
             echo "绿色版 zip / portable 均未勾选，跳过"
           fi
@@ -190,6 +195,7 @@ jobs:
             echo "安装版目标：nsis（标记 distribution=nsis）"
             pnpm exec electron-builder --win nsis \
               -c.productName="$NAME" \
+              -c.extraMetadata.version="$APP_VERSION" \
               -c.extraMetadata.distribution=nsis \
               "${EXTRA[@]}"
           fi

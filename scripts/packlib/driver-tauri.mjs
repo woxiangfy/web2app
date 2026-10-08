@@ -20,17 +20,21 @@ export function doTauri(args, merged, env, name, rr) {
   const dry = args.dryRun
   const conf = join(WEBVIEW, 'tauri.conf.json')
 
-  // 1) 安装名 → productName（与 CI 同一个清洗规则）
+  // 1) 安装名 → productName（与 CI 同一个清洗规则）；version → tauri.conf.json.version
+  //    （MSI/NSIS 包版本与文件名、exe 版本资源、Android versionName 都取它）。
   if (dry) {
-    emit(`\n[1/4] 将改写 ${rel(conf)}：productName = ${name}，mainBinaryName = web2app`)
+    emit(
+      `\n[1/4] 将改写 ${rel(conf)}：productName = ${name}，version = ${merged.version}，mainBinaryName = web2app`,
+    )
   } else {
     rr.file(conf) // tracked，必须备份
     const data = JSON.parse(readFileSync(conf, 'utf8'))
     data.productName = name
+    data.version = merged.version
     // 固定主程序文件名 ⇒ target/release/web2app.exe 路径稳定，单文件版那步可以直接引用
     data.mainBinaryName = 'web2app'
     writeFileSync(conf, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8' })
-    emit(`\n[1/4] 已改写 ${rel(conf)}：productName = ${name}（打包后还原）`)
+    emit(`\n[1/4] 已改写 ${rel(conf)}：productName = ${name}，version = ${merged.version}（打包后还原）`)
   }
 
   // 2) 图标 —— 同样**判据只看 JSON**（CI 那步是 `[ -z "${ICON_URL:-}" ]` 判断后跑 `cargo tauri icon`）
@@ -76,7 +80,7 @@ export function doTauri(args, merged, env, name, rr) {
   //        —— 是复制不是移动：web2app.exe 是增量编译的中间产物，删了下次要全量重编；
   //      · 安装包：bundle/msi/*.msi、bundle/nsis/* **移动**到 <out>/（tauri.conf.json 的
   //        bundle.targets 同时含 msi 与 nsis，本机构建两种都产）。
-  //    默认目录 tests/pack/tauri/ 与 Electron 的 tests/pack/ 分开：两壳绿色版都叫 <name>.exe，混放互相覆盖。
+  //    默认目录 tests/pack/tauri/ 与 Electron 的 tests/pack/electron/ 分开：两壳绿色版都叫 <name>.exe，混放互相覆盖。
   const releaseDir = join(WEBVIEW, 'target', 'release')
   const outDir = args.out ? resolvePackOut(args.out, WEBVIEW) : TAURI_OUT_DEFAULT
 

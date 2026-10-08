@@ -27,6 +27,7 @@ import {
   sanitizeDirName,
   toAppUrl,
   toDataDir,
+  toVersion,
 } from '../src/main/config.ts'
 
 // ---------- mustBool：只认真 bool（历史上字符串宽容规则让两个壳判定相反） ----------
@@ -51,6 +52,31 @@ test('toDataDir：缺省回落默认值；空串原样保留；trim；非字符�
   assert.equal(toDataDir('D:\\app\\store'), 'D:\\app\\store')
   assert.throws(() => toDataDir(true), ConfigError, '布尔不能被宽容转成 "true" 目录名')
   assert.throws(() => toDataDir(1), ConfigError)
+})
+
+// ---------- toVersion：三段数字 + Windows 取值范围（对齐打包解析器 normalize_version） ----------
+
+test('toVersion：缺省/null/空串回落默认；合法版本 trim；边界值放行', () => {
+  assert.equal(toVersion(undefined), DEFAULTS.version)
+  assert.equal(toVersion(null), '0.0.1')
+  assert.equal(toVersion(''), '0.0.1', '空串回落默认（与缺省同）')
+  assert.equal(toVersion('   '), '0.0.1')
+  assert.equal(toVersion('  1.2.3  '), '1.2.3')
+  assert.equal(toVersion('255.255.65535'), '255.255.65535')
+})
+
+test('toVersion：v 前缀 / 四段 / 预发布标签 / 两段一律抛 ConfigError', () => {
+  for (const bad of ['1.2', 'v1.2.3', '1.2.3.4', '1.2.3-beta', '1.2.3+build', 'abc']) {
+    assert.throws(() => toVersion(bad), ConfigError, `${bad} 应报错`)
+  }
+  assert.throws(() => toVersion(123), ConfigError, '数字非字符串，报错')
+  assert.throws(() => toVersion(true), ConfigError)
+})
+
+test('toVersion：超出 Windows 版本范围（主次 ≤ 255、补丁 ≤ 65535）抛 ConfigError', () => {
+  for (const bad of ['256.0.0', '1.256.0', '0.0.65536']) {
+    assert.throws(() => toVersion(bad), /超出 Windows 版本范围/, `${bad} 应报越界`)
+  }
 })
 
 // ---------- toAppUrl：string | string[]，数组必须带 public_key ----------
@@ -259,6 +285,12 @@ test('loadConfig：数组 app_url + public_key 可用；android 字段只告警'
   })
   assert.deepEqual(config.app_url, ['a.com', 'b.com'])
   assert.ok(warnings.some((w) => w.includes('android_key_alias')))
+})
+
+test('loadConfig：version 缺省回落 0.0.1，显式合法值原样穿过解析链', () => {
+  assert.equal(loadFromJson({ app_url: 'https://a.com' }).config.version, '0.0.1')
+  assert.equal(loadFromJson({ app_url: 'https://a.com', version: '3.4.5' }).config.version, '3.4.5')
+  assert.throws(() => loadFromJson({ app_url: 'https://a.com', version: 'v3.4.5' }), ConfigError)
 })
 
 test('loadConfig：文件不是对象 / 字符串布尔 / 未知字段，一律抛 ConfigError', () => {

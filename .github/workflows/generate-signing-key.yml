@@ -130,6 +130,7 @@ jobs:
               "app_url": "https://example.com",   # ← 改成你的真实网址（或域名数组 ["a.com","b.com"]，需配 public_key）
               "app_name": "Web2App",              # ← 改成你的安装名
               "title": "Web2App",                 # ← 改成你的显示名（留空回落 app_name）
+              "version": "0.0.1",                 # ← 打包产物版本：三段数字 主.次.补丁（主次 ≤255、补丁 ≤65535），缺省 0.0.1
               "extra": {},
               "icon_url": "",
               # 布尔一律真 bool（不是 "false" 字符串）—— 与解析器契约一致。

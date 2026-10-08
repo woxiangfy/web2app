@@ -403,9 +403,11 @@ pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.
 // true  = 启用多页签：一个宿主窗口 + 顶部标签栏，每个 tab 是独立 WebView（同账号共享数据目录），
 //         可随时新建/切换/关闭；target="_blank" / window.open() 直接新开一个 tab。
 // false = 单窗口（默认），行为与历史版本一致。
-// 该能力仅在 Windows 实现（依赖多 WebviewWindow 叠放 + WebView2 共享数据目录），
-// 移动端按 target_os 剔除，本常量在移动端也一并保留但由 cfg 门控引用，避免 dead_code 警告。
-pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
+// 该能力仅在 Windows 实现（依赖多 WebviewWindow 叠放 + WebView2 共享数据目录），移动端
+// **显式忽略**：`cfg!(windows) &&` 让非 Windows 恒为 false —— 即使打包链路误注入
+// `TABS_ENABLED=true` 也不会在 Android 上启用多页签（`mod tabs` 本身也是 `#[cfg(windows)]`）。
+// 保留常量定义只为让 `#[cfg(windows)]` 分支的引用有处可依，且避免非 Windows 下的 dead_code 警告。
+pub(crate) const TABS_ENABLED: bool = cfg!(windows) && env_bool!("TABS_ENABLED", false);
 
 // ---------- 诊断日志开关 ----------
 // true  = 每次启动写 `<数据目录>\logs\startup.log`，并把 `dlog!` 的诊断同时打到 stderr；

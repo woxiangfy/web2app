@@ -18,16 +18,20 @@
     <style>
       :root {
         --bar-h: 38px;
-        --bg: #f7f8fa;
-        --bg-dark: #14181f;
+        /* ⚠️⚠️ 配色与单窗口标题栏 titlebar.js 的 CSS **逐字同源**：多页签顶栏与单页签顶栏
+         * 是同一块 UI，配色一旦漂移，两种模式看起来就不像同一个应用。改这里必须同步改
+         * titlebar.js 的 `#__web2app_titlebar__` 样式段（静态契约测试 tab_bar_palette_matches_titlebar 盯着）。 */
+        --bg: #eef0f2;          /* = titlebar.js 标题栏浅色底 */
+        --bg-dark: #1f2530;     /* = 标题栏深色底 */
         --tab-bg: transparent;
         --tab-active: #ffffff;
         --tab-active-dark: #2a3340;
-        --border: #e3e6ea;
-        --border-dark: #2c3440;
+        --border: rgba(0,0,0,.08);          /* = 标题栏下沿分隔线（浅色） */
+        --border-dark: rgba(255,255,255,.07);
         --text: #2c3440;
         --text-dark: #e6ebf2;
         --muted: #8892a0;
+        --hover: rgba(120,133,153,.16);     /* = titlebar.js .w2t-btn:hover（不分深浅色） */
       }
       * { box-sizing: border-box; }
       html, body {
@@ -44,11 +48,24 @@
       @media (prefers-color-scheme: dark) {
         html, body { background: var(--bg-dark); color: var(--text-dark); }
       }
+      /* 顶栏：与单窗口 titlebar.js 同款——左右 8px 内边距、4px 间隔、下沿 1px 分隔线。 */
       .bar {
         display: flex;
         align-items: stretch;
+        gap: 4px;
+        padding: 0 8px;
         height: var(--bar-h);
+        background: var(--bg);
+        color: var(--text);
+        border-bottom: 1px solid var(--border);
         -webkit-app-region: drag; /* 让标签栏空白处可拖动窗口（无边框窗口） */
+      }
+      @media (prefers-color-scheme: dark) {
+        .bar {
+          background: var(--bg-dark);
+          color: var(--text-dark);
+          border-bottom-color: var(--border-dark);
+        }
       }
       .tabs {
         display: flex;
@@ -101,77 +118,44 @@
         flex: none;
       }
       .tab .close:hover {
-        background: rgba(0,0,0,0.08);
+        background: var(--hover);
         color: var(--text);
       }
       @media (prefers-color-scheme: dark) {
-        .tab .close:hover { background: rgba(255,255,255,0.12); color: var(--text-dark); }
+        .tab .close:hover { color: var(--text-dark); }
       }
-      /* 窗口控制按钮（宿主窗口 decorations(false)，标题栏自绘：最小化 / 关闭） */
-      .win {
-        -webkit-app-region: no-drag;
-        display: flex;
-        align-items: stretch;
-        flex: none;
-        border-left: 1px solid var(--border);
-      }
-      @media (prefers-color-scheme: dark) {
-        .win { border-left-color: var(--border-dark); }
-      }
-      .win-btn {
-        -webkit-app-region: no-drag;
-        width: 44px;
-        height: var(--bar-h);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0;
-        border: 0;
-        background: transparent;
-        color: var(--muted);
-        font-family: inherit;
-        cursor: pointer;
-      }
-      .win-btn svg { display: block; }
-      .win-btn:hover { background: rgba(0, 0, 0, 0.07); color: var(--text); }
-      @media (prefers-color-scheme: dark) {
-        .win-btn:hover { background: rgba(255, 255, 255, 0.12); color: var(--text-dark); }
-      }
-      /* 关闭按钮 hover 用系统级红底白字（Windows 习惯），提醒这是个破坏性操作。 */
-      .win-btn.close-win:hover { background: #e81123; color: #ffffff; }
-      /* 前进/后退按钮（标题栏左侧，紧贴标签栏） */
-      .nav {
+      /* 前进/后退（左）与窗口控制（右，宿主窗口 decorations(false)，无系统标题栏）按钮：
+       * 盒模型与单窗口 titlebar.js 的 .w2t-btn **一致**——min-width 34 / 高 28 / 圆角 6 /
+       * 同色 hover（--hover）/ 同字号，两种模式的按钮看起来才是同一套。 */
+      .win, .nav {
         -webkit-app-region: no-drag; /* 按钮可点击，不参与拖动 */
         display: flex;
         align-items: center;
-        gap: 2px;
-        padding: 0 6px;
+        gap: 4px;
         flex: none;
-        border-right: 1px solid var(--border);
       }
-      @media (prefers-color-scheme: dark) {
-        .nav { border-right-color: var(--border-dark); }
-      }
-      .nav-btn {
+      .nav-btn, .win-btn {
         -webkit-app-region: no-drag;
-        width: 28px;
-        height: 26px;
         display: flex;
         align-items: center;
         justify-content: center;
+        min-width: 34px;
+        height: 28px;
+        padding: 0 8px;
         border: 0;
         border-radius: 6px;
         background: transparent;
-        color: var(--muted);
-        font-size: 15px;
-        line-height: 1;
+        color: inherit;
+        font: 13px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
         cursor: pointer;
         flex: none;
       }
-      .nav-btn:hover { background: rgba(0,0,0,0.06); color: var(--text); }
-      @media (prefers-color-scheme: dark) {
-        .nav-btn:hover { background: rgba(255,255,255,0.12); color: var(--text-dark); }
-      }
+      /* 箭头字形比 13px 正文略大一点更好看，与历史一致。 */
+      .nav-btn { font-size: 15px; }
+      .win-btn svg { display: block; }
+      .nav-btn:hover, .win-btn:hover { background: var(--hover); }
+      /* 关闭按钮 hover 用系统级红底白字（Windows 习惯），与单窗口 titlebar.js 的 .w2t-close 一致。 */
+      .win-btn.close-win:hover { background: #e81123; color: #ffffff; }
       /* 悬停提示：与单窗口 titlebar.js 的 data-tip tooltip 同款（纯 CSS，替代原生 title 的
        * 延迟与样式不可控）。按钮需 position:relative，伪元素挂到按钮下沿。 */
       .win-btn, .nav-btn { position: relative; }

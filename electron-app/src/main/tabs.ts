@@ -49,12 +49,17 @@ export interface TabsOptions {
   /** 宿主窗口（壳）。用于拿 getContentBounds 与挂子视图。 */
   host: BrowserWindow
   /**
-   * 新建页签时的回调：index.ts 在这里做「复用 target 缓存 + loadURL」，
+   * 新建页签时的回调：index.ts 在这里做「挂钩子 + 复用 target 缓存 + loadURL」，
    * 而不是让 tabs.ts 反向调 bootstrap()（那会掐掉在服页签的代理，见设计文档必炸点②）。
-   * @param view 刚挂好的内容视图（已 addChildView + setBounds）
+   *
+   * ⚠️ 调用时机：本回调被调用时视图**已挂好（addChildView + setBounds）并已置为激活**
+   * （spawnTab 在调用前先 activate），所以这里只负责挂钩子 + 发起导航；loadURL 可以
+   * 慢慢等整页加载——标签栏与内容视图的切换反馈已经发出，不需要、也不应当由本回调
+   * 来决定何时激活。spawnTab 仍会 await 本回调，仅为捕获建签失败做回滚。
+   * @param view 已挂好并激活的内容视图
    * @param label 页签标识
    * @param url 新建页签时要打开的目标（首屏为 undefined，走默认 target；window.open 时为具体 URL）
-   * 抛异常表示 spawn 失败（如 target 尚未解析），此时本方法会回收刚建的视图。
+   * 抛异常表示 spawn 失败（如 target 尚未解析），此时本方法会回收刚建的视图并回滚激活态。
    */
   onSpawn: (view: WebContentsView, label: string, url?: string) => Promise<void> | void
 }
@@ -95,7 +100,8 @@ export class TabManager {
   }
 
   /**
-   * 新建一个页签并置为激活。
+   * 新建一个页签并**立即**置为激活（标签栏与内容视图当场切换），导航在激活状态下进行，
+   * 不等待页面加载完成 —— 与 Tauri spawn_tab_with_target 的「先发起导航、立刻激活」对齐。
    *
    * @returns 新页签的 label；超限返回 null（上层据此拒绝或提示，绝不静默建窗）。
    */
@@ -119,7 +125,7 @@ export class TabManager {
         backgroundThrottling: true,
       },
     })
-    // 顶住首帧白闪（WebContentsView 默认白底；shell.html 的 --bg 是 #f7f8fa）
+    // 顶住首帧白闪（WebContentsView 默认白底；#f7f8fa 与启动页 / 加载层底色一致）
     view.setBackgroundColor('#f7f8fa')
 
     const tab: Tab = { label, view, title: '' }
@@ -128,6 +134,17 @@ export class TabManager {
     // 先挂进 contentView 再定位：addChildView 之后 setBounds 才能稳定生效
     this.host.contentView.addChildView(view)
     view.setBounds(this.contentBounds())
+
+    // ⚠️⚠️ 必须在 onSpawn（其内部 await loadURL，整页加载完成才 resolve）**之前**激活：
+    //   旧实现把 activate 放在 `await onSpawn` 之后，导致新页签的标签栏条目/激活态
+    //   （pushToShell）和内容视图切换全部拖到页面加载完成才发生——正是「点了标签要等
+    //   页面加载完 UI 才跳过来」的根因（Tauri 侧 spawn_tab_with_target 是建窗后先
+    //   navigate_tab 发起导航、**立刻** activate_tab，不等加载）。
+    //   另一重隐患：新视图 addChildView 后默认可见且位于子视图栈顶，未激活期间会盖住
+    //   旧页签；此时用户点别的页签把它隐藏，加载结束后迟到的 activate 又会把视图拽回
+    //   新页签。先激活则旧页签同步隐藏、且加载结束后不再有二次激活。
+    const previousLabel = this.activeLabel
+    this.activate(label)
 
     try {
       await this.onSpawn(view, label, url)
@@ -140,11 +157,13 @@ export class TabManager {
       } catch {
         /* close 幂等，失败只影响资源回收 */
       }
+      // 回滚激活态：失败页签已在上面对旧页签调过隐藏，这里把它恢复；
+      // 首签失败（无旧页签）时推空列表，由 spawnFirstTab 的失败遮罩接管。
+      if (previousLabel && this.tabs.has(previousLabel)) this.activate(previousLabel)
+      else this.pushToShell()
       throw e
     }
 
-    // 新页签置为激活（旧激活页签隐藏）
-    this.activate(label)
     return label
   }
 

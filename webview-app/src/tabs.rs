@@ -91,6 +91,17 @@ pub(crate) struct TabManager {
     /// 每 tab 的实际网页标题缓存：label -> title（由 tab 页面的 `web2app:tab-title`
     /// 核心事件回传，落地见 [`report_tab_title`]）。
     pub titles: Mutex<HashMap<String, String>>,
+    /// 首屏 bootstrap 是否**已由多页签路径启动**。
+    ///
+    /// 用途（见 [`navigate_tab`]）：导航缓存 `navigation` 为空有两种截然不同的含义，
+    /// 必须区分，否则要么「首个 tab 永远等不到 bootstrap」（30s 超时才回落，用户侧就是
+    /// 首次打开极慢），要么「极早期 window.open 再起一轮 bootstrap 把在用代理 abort 掉」。
+    ///   · `false`（首次置位者）＝还没人启动过 → 由本次建窗拉起完整 bootstrap；
+    ///   · `true`（非首次）＝已有 bootstrap 在途 → 只轮询等缓存，不重复启动。
+    ///
+    /// 只在进程内单次翻转，不做复位：bootstrap 失败时缓存永远写不进来，后续等待方靠
+    /// 超时回落再起一轮（等价于旧行为），无需把标志还原。
+    pub bootstrap_started: AtomicBool,
 }
 
 /// 判断多页签能力是否启用。纯计算，供 lib.rs / webview_hooks 在编译期分支复用。
@@ -277,40 +288,60 @@ fn navigate_tab(app: &tauri::AppHandle, label: &str, start: Option<String>) {
             crate::bootstrap::navigate_window(app, &window, nav);
         }
         None => {
-            // 缓存未就绪（首个 tab 的 bootstrap 仍在途，极早期 window.open 会走到这里）：
-            // ⚠️ 不能直接再起一轮 bootstrap_for_label —— 两个 bootstrap 会互相 abort
-            // 代理（B 成功后掐掉 A 刚给在用 tab 起好的代理，旧 tab 立刻断连）。改成
-            // 后台轮询【等缓存】，就绪后回到本函数走缓存命中分支；超时（首轮 bootstrap
-            // 失败、缓存永远不会写入）才回落完整 bootstrap。
-            let app_wait = app.clone();
-            let label_wait = label.to_string();
-            std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                loop {
-                    let ready = app_wait
-                        .state::<TabManager>()
-                        .navigation
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .is_some();
-                    if ready {
-                        let a = app_wait.clone();
-                        let l = label_wait.clone();
-                        let _ = app_wait.run_on_main_thread(move || {
-                            navigate_tab(&a, &l, None);
-                        });
-                        return;
+            // 缓存未就绪要先区分两种情形（这是「首次打开极慢 / 新 tab 落回首页」的根因，
+            // 见字段 [`TabManager::bootstrap_started`] 的文档）：
+            let first = {
+                let state = app.state::<TabManager>();
+                // swap 返回旧值：旧值 false ⇒ 本调用是第一个来的 ⇒ 由它负责启动 bootstrap。
+                !state.bootstrap_started.swap(true, Ordering::SeqCst)
+            };
+            if first {
+                // 首个 tab：直接起完整 bootstrap（解析真实地址 / 启动本地代理，完成后写入
+                // `navigation` 缓存并在主线程导航本 tab）。旧实现在这里改成「只等缓存」，
+                // 却没有人启动 bootstrap ⇒ 首个 tab 只能空等 30s 超时才回落，用户侧表现为
+                // 「首次打开很慢」。首个 tab 由 lib.rs 以 `start = None` 创建，故无需携带落点。
+                dlog!("[tabs] 首屏导航缓存未就绪，启动完整 bootstrap：{label}");
+                crate::bootstrap::bootstrap_for_label(app.clone(), label.to_string());
+            } else {
+                // 已有 bootstrap 在途（首屏尚未就绪时的极早期 window.open 会走到这里）：
+                // ⚠️ 不能直接再起一轮 bootstrap_for_label —— 两个 bootstrap 会互相 abort
+                // 代理（B 成功后掐掉 A 刚给在用 tab 起好的代理，旧 tab 立刻断连）。改成
+                // 后台轮询【等缓存】，就绪后回到本函数走缓存命中分支；超时（首轮 bootstrap
+                // 失败、缓存永远不会写入）才回落完整 bootstrap。
+                // ⚠️ 轮询期间必须原样保留 `start`（弹窗落点）：历史实现回调时硬编码传 None，
+                // 于是首屏就绪前开出的新 tab 全被改成入口地址（用户反馈的「新标签页都是首页」）。
+                let app_wait = app.clone();
+                let label_wait = label.to_string();
+                let start_wait = start;
+                std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        let ready = app_wait
+                            .state::<TabManager>()
+                            .navigation
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .is_some();
+                        if ready {
+                            let a = app_wait.clone();
+                            let l = label_wait.clone();
+                            let s = start_wait.clone();
+                            let _ = app_wait.run_on_main_thread(move || {
+                                navigate_tab(&a, &l, s);
+                            });
+                            return;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            dlog!(
+                                "[tabs] 等待首屏导航缓存超时（30s），回落完整 bootstrap：{label_wait}"
+                            );
+                            crate::bootstrap::bootstrap_for_label(app_wait.clone(), label_wait);
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
-                    if std::time::Instant::now() >= deadline {
-                        dlog!(
-                            "[tabs] 等待首屏导航缓存超时（30s），回落完整 bootstrap：{label_wait}"
-                        );
-                        crate::bootstrap::bootstrap_for_label(app_wait.clone(), label_wait);
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            });
+                });
+            }
         }
     }
 }
@@ -393,14 +424,18 @@ pub(crate) fn spawn_tab_with_target(
         ))
         // 注入当前 tab 的 label 与一次性令牌，供标题回传脚本（tab_title.js）读取后随事件回传。
         // ⚠️ 令牌只能进初始化脚本（与窗口 1:1），不要写进页面可读的其它共享位置。
+        // ⚠️⚠️ initialization_script（WebView2 AddScriptToExecuteOnDocumentCreated）会注入
+        //【所有 frame】，包括页面内嵌的第三方跨域 iframe；不做框架判断等于把防伪令牌白送给
+        // 任意广告 frame（虽只能伪造本 tab 标题，仍是不必要的暴露）。故 label/token 只挂到
+        // 主框架 window，子框架拿不到；tab_title.js 自身也有同样的主框架早退守卫。
         .initialization_script(format!(
-            "window.__web2appTabLabel = {};",
+            "if (window.self === window.top) {{ window.__web2appTabLabel = {}; }}",
             crate::loading::js_str(&label)
         ))
         // 标题回传：监听 document.title 变化 → emit(TAB_TITLE_EVENT, {label,title,token})
         // → 标签栏显示真实标题。走核心事件而非应用命令的原因见 tab_title.js 头注释。
         .initialization_script(format!(
-            "window.__web2appTabToken = {};",
+            "if (window.self === window.top) {{ window.__web2appTabToken = {}; }}",
             crate::loading::js_str(&token)
         ))
         .initialization_script(include_str!("tab_title.js"));
@@ -979,9 +1014,10 @@ pub(crate) fn retry_tab_bootstrap(app: &tauri::AppHandle, label: String, token: 
 /// 1. 目标与**入口主机**同源（代理模式下即 127.0.0.1:port）→ 取目标的 path/query/fragment
 ///    拼到入口地址上（代理会把所有 path 转发到同一上游，Host 头由代理透传）。
 /// 2. 目标与**上游真实主机**同源（页面里写死的绝对链接）→ 同样映射到入口地址。
-/// 3. 其它跨域外部链接：走本地反向代理时直接打开该外链（代理只对固定上游注入凭据，不会泄漏）；
-///    非代理（直连 + URL 带 userinfo，靠 WebView2 原生钩子注入 Authorization）时返回 None，
-///    维持入口地址，避免把本应用凭据发给外部站点。
+/// 3. 其它跨域外部链接：**直接打开该外链**（与 Electron 壳 `setWindowOpenHandler` →
+///    `spawnTab(opened)` 的行为对齐）。凭据不会因此泄漏：直连模式下 Authorization 注入与
+///    401 自动应答都受 [`crate::bootstrap::is_upstream_request`] 主机白名单约束，外域请求拿不到
+///    入口账号密码；本地反向代理也只对固定上游注入凭据。
 fn resolve_popup_url(app: &tauri::AppHandle, target: Option<&str>) -> Option<String> {
     let nav = app
         .state::<TabManager>()
@@ -997,8 +1033,8 @@ fn resolve_popup_url(app: &tauri::AppHandle, target: Option<&str>) -> Option<Str
 /// 规则见 [`resolve_popup_url`] 的文档注释，这里只做计算：
 ///   1. 目标与入口主机同源 → 把 path/query/fragment 拼到入口地址上（代理会转发同上游）；
 ///   2. 目标与上游真实主机同源 → 同样映射到入口地址；
-///   3. 其它跨域外链：本地反向代理模式直接打开；非代理（直连带 userinfo）返回 None，
-///      避免把本应用凭据发给外部站点。
+///   3. 其它跨域外链：直接打开目标地址（凭据由 [`crate::bootstrap::is_upstream_request`]
+///      主机白名单把关，不会发给外域）。
 fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> Option<String> {
     let target = target?;
     let tu = url::Url::parse(target).ok()?;
@@ -1025,11 +1061,9 @@ fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> Option<Strin
         return Some(joined.to_string());
     }
 
-    // 跨域外部链接：仅在本地反向代理模式下直接打开（无凭据泄漏风险）。
-    if nav.use_local_proxy {
-        return Some(target.to_string());
-    }
-    None
+    // 跨域外部链接：直接打开目标地址（与 Electron 壳一致）。凭据注入受主机白名单约束，
+    // 外域请求拿不到入口账号密码，故不存在「把本应用凭据发给外部站点」的风险。
+    Some(target.to_string())
 }
 
 /// 处理来自 WebView2 `NewWindowRequested` 的新窗口请求（target="_blank" / window.open()）。
@@ -1114,13 +1148,16 @@ mod tests {
     }
 
     #[test]
-    fn popup_cross_domain_plain_mode_returns_none() {
-        // 非代理（直连 + 原生钩子注入凭据）下，跨域外链不放行，避免把本应用凭据发给外部站点。
+    fn popup_cross_domain_plain_mode_opens_external() {
+        // 非代理（直连）模式下，跨域外链同样直接打开目标地址（与 Electron 壳一致）：
+        // 凭据由 `is_upstream_request` 主机白名单把关，外域请求不会拿到入口账号密码。
+        // 历史实现在这里返回 None，导致书签管理器点开外站书签时新 tab 落到入口首页
+        // （用户反馈的「新标签页都是首页，不是指定的页面」）。
         let mut nav = proxy_nav("https://entry.example.com", None);
         nav.use_local_proxy = false;
         assert_eq!(
             resolve_popup_url_for(&nav, Some("https://other.com/x")),
-            None
+            Some("https://other.com/x".into())
         );
         // 同源路径照常拼回入口。
         assert_eq!(
@@ -1174,5 +1211,26 @@ mod tests {
             "宿主窗口与 tab 窗口必须各有一处 additional_browser_args"
         );
         assert!(src.contains("crate::config::build_proxy_args()"));
+    }
+
+    /// 首屏 bootstrap 触发点必须存在，且导航缓存未就绪时的轮询回调不得把弹窗落点丢成 None。
+    ///
+    /// 两个都是「静默降级、只在真机上才现形」的缺陷，各配一条静态断言钉住：
+    /// · 缺 bootstrap 触发点 → 首个 tab 空等 30s 超时才回落（首次打开极慢）；
+    /// · 轮询回调硬编码 None → 首屏就绪前开出的 tab 全落回入口地址（新 tab 都是首页）。
+    ///
+    /// 只统计 #[cfg(test)] 之前的生产代码段（避免与测试里的注释互相引用）。
+    #[test]
+    fn first_tab_triggers_bootstrap_and_poll_keeps_start() {
+        let full = include_str!("tabs.rs");
+        let src = full.split("#[cfg(test)]").next().unwrap_or(full);
+        assert!(
+            src.contains("bootstrap_for_label(app.clone(), label.to_string())"),
+            "首个 tab 必须直接启动完整 bootstrap（否则首次打开要空等 30s）"
+        );
+        assert!(
+            !src.contains("navigate_tab(&a, &l, None)"),
+            "轮询回调必须原样保留弹窗落点 start，不能硬编码 None"
+        );
     }
 }

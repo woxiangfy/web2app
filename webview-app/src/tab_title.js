@@ -29,7 +29,17 @@
 (function () {
   'use strict';
   try {
-    // 当前 tab 的 label / token 由 Rust 在注入本脚本前写入。
+    // ⚠️⚠️ 只允许在【主框架】运行（2026-10-08，别删）：Tauri 的 initialization_script 对应
+    // WebView2 的 ICoreWebView2::AddScriptToExecuteOnDocumentCreated，该 API **没有 frame
+    // 过滤器**——同一份脚本会被注入主框架与【每一个 iframe】（含跨域广告 iframe），
+    // 各 frame 还有独立的 window / document.title 与注入的 label/token。
+    // 实测 bilibili 首页（https://www.bilibili.com/）内嵌的跨域广告/存储框架会依次把它们
+    // 自己文档的 title 设成 "Cross Origin Local Storage" → "Leader Iframe" →
+    // "cm.bilibili.com"；若子框架也上报，标签栏的真实标题（「哔哩哔哩…」）就会被这些
+    // 框架内部标题顶掉。window.top 的身份比较不受同源策略限制，跨域 iframe 也能正确判断。
+    if (window.self !== window.top) return;
+
+    // 当前 tab 的 label / token 由 Rust 在注入本脚本前写入（同样只写入主框架）。
     var label = window.__web2appTabLabel;
     var token = window.__web2appTabToken;
     if (!label || !token) return;

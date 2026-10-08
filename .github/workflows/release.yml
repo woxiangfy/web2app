@@ -180,6 +180,9 @@ jobs:
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
+      # 多页签是 Windows 专属：Android 端不实现（`mod tabs` 为 #[cfg(windows)]，且 config.rs 的
+      # TABS_ENABLED 经 cfg!(windows) 在非 Windows 恒为 false）。这里注入只为两 job 环境变量对称，
+      # 值为 true 也会被 Android 忽略。
       TABS_ENABLED: ${{ vars.TABS_ENABLED }}
       # 诊断日志开关（默认关），与 Windows 版同义。见上面 windows job 的说明。
       DEBUG: ${{ vars.DEBUG }}

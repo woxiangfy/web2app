@@ -94,6 +94,7 @@ if (existsSync(userConfig)) {
     app_url: 'https://www.example.com',
     app_name: 'Web2App',
     title: '',
+    version: '0.0.1',
     extra: {},
     icon_url: '',
     proxy_enabled: false,

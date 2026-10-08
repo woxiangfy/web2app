@@ -34,13 +34,14 @@
 
 ## 2. 字段总表
 
-共 **18 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
+共 **19 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
 
 | 字段 | 类型 | 默认值 | 平台 | 含义 |
 |---|---|---|---|---|
 | `app_url` | **`string` \| `string[]`** | 必填 | 全平台 | 要嵌入的地址。两种形态见 §3.1 |
 | `app_name` | string | `"Web2App"` | 全平台 | **安装名**：安装包名 / 快捷方式 / 安装目录 / "程序和功能"显示名；**同时是数据目录名**，并派生出 **Android 包名**（见 §4.2） |
 | `title` | string | `""` → 回落 `app_name` | 全平台 | **显示名**：窗口标题 / 托盘悬停 / 设置窗标题（Win）；Android 应用名（桌面图标下） |
+| `version` | string | `"0.0.1"` | 全平台（**构建期消费**） | **打包产物版本号**：三段数字 `"主.次.补丁"`，主次 ≤ 255、补丁 ≤ 65535。写入 Tauri 的 `tauri.conf.json.version`（MSI ProductVersion / exe 版本资源 / Android versionName）与 Electron 的 `extraMetadata.version`（产物文件名 / exe 版本资源）。规则与边界见 §3.6 |
 | `extra` | 任意 JSON | `{}` | 全平台 | 注入被包裹网页的附加参数，前端读 `window.web2appExtra` |
 | `icon_url` | string | `""` | 全平台（**构建期消费**） | 应用图标 PNG 的 URL；空 = 沿用仓库默认图标 |
 | `proxy_enabled` | **`bool`** | `false` | 仅 Windows | 启用本地反向代理（统一注入 Basic 鉴权，覆盖 WebSocket） |
@@ -213,7 +214,32 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
   > **根本看不见**（`cannot find macro dlog`，加 `crate::` 全限定也无效 —— 找不到的是宏名本身）。
   > 因此 `crates/proxy-server/src/main.rs` 里自带一个同名宏，且必须声明在 `mod proxy;` **之前**。
 
-### 3.6 日志文件契约（两壳逐字相同）
+### 3.6 `version` —— 打包产物版本号（默认 `0.0.1`）
+
+只接受**三段纯数字** `"主.次.补丁"`（正则 `^\d+\.\d+\.\d+$`），且受 Windows 版本资源约束：
+
+- 主版本、次版本 **≤ 255**，补丁版本 **≤ 65535**（边界值 `255.255.65535` 合法）；
+- **不接受** `v` 前缀（`v1.2.3`）、第四段（`1.2.3.4`）、预发布/构建标签（`1.2.3-beta`）；
+- 类型必须是字符串：JSON 里写数字（`"version": 1`）会在解析期直接失败；
+- 首尾空白会被 trim；trim 后为空串则回落默认值。
+
+比通用 semver 更严是有意的：Windows MSI（WiX ProductVersion）与 exe VERSIONINFO 都不认
+预发布标签 / 四段 / v 前缀，在**解析期统一挡住**比让构建工具报半懂不懂的错更可诊断。
+该校验在四处逐条对齐：Python 解析器 `normalize_version`、Node 复刻 `normalizeVersion`、
+Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证字段不漏。
+
+**打包期落点（两壳）**：
+
+| 壳 | 落点 | 决定什么 |
+|---|---|---|
+| Tauri（Windows / Android） | 构建前改写 `tauri.conf.json` 的 `version`（打包后还原） | MSI/NSIS ProductVersion、安装包文件名（`<productName>_<version>_x64_zh-CN.msi`）、exe 文件/产品版本；Android `versionName`（`versionCode` 由其派生） |
+| Electron 绿色版 | `electron-builder -c.extraMetadata.version=`（合并进打包用 package.json） | zip/portable/setup 产物文件名、exe 文件版本 |
+
+> **不改仓库入库文件的版本**：`webview-app/Cargo.toml` 与 `electron-app/package.json` 里的
+> `0.1.0` 是开发态 / crate 自身版本，`tauri build` 与 electron-builder 都以上述构建期注入值为准。
+> GitHub Release（`release.yml`，按 git tag 发版）目前不经过本字段，仍以 tag 为版本。
+
+### 3.7 日志文件契约（两壳逐字相同）
 
 | 项 | 约定 |
 |---|---|
@@ -352,7 +378,10 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
 | 未知字段 | **硬失败**，附近似名建议（`proxy_enable` → 是否想写 `proxy_enabled`？） |
 | `window_title` / `data_dir_default` | **硬失败**，提示改用 `title` / `data_dir`，并把新旧值对应关系讲清楚 |
 | 布尔写成字符串 | **硬失败**，给出正确/错误写法对照 |
-| `debug` 为 `true` | **不打 warning**，但要清楚：产物会在用户数据目录里留下 `logs\`（§3.5/§3.6）。发布前确认这是有意为之 |
+| `version` 不是字符串（数字 / bool 等） | **硬失败**（JSON 数字会先被字符串化成 `"1"`，再按格式错拦下） |
+| `version` 不符合 `^\d+\.\d+\.\d+$` | **硬失败**：拒绝 v 前缀、第四段、预发布标签（`-beta`）、少于三段 |
+| `version` 主次 > 255 或补丁 > 65535 | **硬失败**（超出 Windows MSI / VERSIONINFO 取值范围） |
+| `debug` 为 `true` | **不打 warning**，但要清楚：产物会在用户数据目录里留下 `logs\`（§3.5/§3.7）。发布前确认这是有意为之 |
 | `data_dir` 不是字符串 | **硬失败**（`true` 若被宽容地转成字符串，会静默建出一个名叫 `True` 的目录） |
 | `data_dir` 含 NUL | **硬失败** |
 | `data_dir` 含 `<>"\|?*` | warning（Windows 上建目录会失败，届时自动回退系统默认目录） |
@@ -490,12 +519,12 @@ node scripts/pack-local.mjs --parity
 - 输出目录：本地打包的**交付产物一律落到仓库根 `tests/` 下** —— 那是根 `AGENTS.md` §3.2 约定的本地测试
   产物目录，根 `.gitignore` 的 `/tests/` 整目录忽略，**不会进版本库**；CI 不受影响（工作区一次性，
   仍走各自默认路径）。两壳默认**分子目录**（绿色版都叫 `<app_name>.exe`，混放会互相覆盖）：
-  - **Electron → `tests/pack/`**：win-unpacked/ 整树、zip/portable 与 NSIS setup exe（单次约 150MB）
+  - **Electron → `tests/pack/electron/`**：win-unpacked/ 整树、zip/portable 与 NSIS setup exe（单次约 150MB）
     由 electron-builder 直接输出到这里；CI 里仍走 `electron-builder.yml` 指定的 `electron-app/release/`。
-    也可在 `electron-app/` 下直接跑 `pnpm run dist:installer`（等价于
-    `--target electron-nsis`，输出同样重定向到 `tests/pack/`）。
+    （在 `electron-app/` 下直接跑 `pnpm run dist:installer` 是不经本脚本的另一条手工入口，
+    其输出仍重定向到 `tests/pack/`。）
     脚本**不自己清空**输出目录，先让 electron-builder 按常规流程清；**只有它因「删不掉」而失败时**，
-    脚本才自动换 `tests/pack-local-<时间戳>/` 重试一次（全新目录没东西可清 ⇒ 必然能出包）。
+    脚本才自动换 `tests/pack/electron-local-<时间戳>/` 重试一次（全新目录没东西可清 ⇒ 必然能出包）。
     ⚠️ 不要改成「脚本先自己清一遍」：本机的删除有配额，清一次上千个文件会把配额烧光，害得
     electron-builder 连自己的中间产物都删不掉 ⇒「产物已出、构建却报失败」（2026-09-24 实测）。
   - **Tauri → `tests/pack/tauri/`**：Tauri 无法配置 cargo 的输出目录，脚本在构建成功后**归集**：
@@ -530,7 +559,7 @@ node scripts/pack-local.mjs --parity
 
 | 文件 | 为什么被改写 | 是否纳管 |
 |---|---|---|
-| `webview-app/tauri.conf.json` | `app_name` → `productName`（安装包/快捷方式/安装目录名）+ 固定 `mainBinaryName` | **tracked** |
+| `webview-app/tauri.conf.json` | `app_name` → `productName`（安装包/快捷方式/安装目录名）+ `version` → `version`（产物版本，默认 0.0.1）+ 固定 `mainBinaryName` | **tracked** |
 | `webview-app/icons/*` | `icon_url` 非空时 `cargo tauri icon` 重新生成整套图标（Electron 侧同步覆盖其中 `icon.png` 供托盘用） | **tracked** |
 | `electron-app/config.json` | 落规范化配置 | 未纳管，但通常是开发者本地调试那一份 ⇒ **同样还原** |
 
@@ -551,6 +580,7 @@ node scripts/pack-local.mjs --parity
 | `app_url` | `APP_URL`（Secret 优先，回落 Variable） |
 | `app_name` | `APP_NAME` |
 | `title` | **`TITLE`**（旧名 `APP_TITLE` / `WINDOW_TITLE` 仅作回落） |
+| `version` | **暂不支持**：Release 路径按 git tag 发版，Tauri 版本取自 Release/tag，本字段不生效（自定义构建 workflow 才消费 `VERSION`） |
 | `extra` | `EXTRA` |
 | `icon_url` | `ICON_URL` |
 | `public_key` | `PUBLIC_KEY`（Secret 优先） |

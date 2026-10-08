@@ -25,14 +25,15 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
 | 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效；2026-09-27 起多页签的宿主与 tab 窗口同样挂载，避免整组页签绕过代理） | Windows |
 | 新窗口拦截 | `target="_blank"` / `window.open()` 强制在当前窗口打开 | Windows |
-| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`） | Windows |
+| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。新 tab 落点：与入口同源（含上游真实主机）的链接映射到入口地址的对应路径，跨域外链**直接打开目标地址**（与 Electron 壳一致，v1.52）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；标题回传与 token 注入**只在主框架生效**（v1.55：WebView2 初始化脚本会注入所有 iframe，子框架（如 bilibili 页内广告 frame，其标题为 "Leader Iframe" 等）曾顶掉标签栏真实标题；契约测试 `tab_title_script_runs_in_top_frame_only` 钉住）；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`）。**顶部标签栏与单窗口标题栏为同一套配色/按钮样式**（v1.54：`shell.html` 复用 `titlebar.js` 的浅/深底色、下沿分隔线、按钮盒模型与 hover 色；静态契约测试 `tab_bar_palette_matches_titlebar` 钉住），且 `shell.html` 是双壳共用的单一真源，Tauri / Electron 表现一致 | Windows |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
-| 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**） | Windows |
+| 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
 | 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
+| 登录密码保存 | 网页登录表单提交后弹出「保存密码？」气泡，保存后下次访问自动填充（v1.59 起显式开启 WebView2 `IsPasswordAutosaveEnabled`——该开关默认 **false**，与 Electron 壳的 Chromium 默认行为对齐；老运行时不支持 `ICoreWebView2Settings4` 时静默跳过，不影响其它钩子）；已保存密码随设置页「清除全部浏览数据」一并清除 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
 | 拖拽修复 | WebView2 拖拽 bug 的 polyfill（用鼠标事件合成完整 HTML5 DnD 序列） | Windows |
 
@@ -67,6 +68,10 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 > `plugin:event|emit`（`capabilities/default.json` 里的 `core:event:allow-emit`），
 > 由 `lib.rs` 的 `web2app:open-settings` 监听落地成开窗。多页签标签栏是本页面（`shell://`），
 > 可以直接 `invoke("open_settings")`。
+> ⚠️ v1.55：三条开窗路径（IPC 命令 / 事件 / Shift+F1 回调）都在主线程事件回调栈内，
+> `settings::open_settings_window` 不能在调用栈里直接 `WebviewWindowBuilder::build()`
+> （嵌套事件循环 → 新 WebView2 永不初始化 → 纯白窗）；函数内统一先切后台线程再
+> `run_on_main_thread` 排队到下一事件循环轮次（与 NewWindowRequested 延迟建 tab 同模式）。
 
 可配置项：
 
@@ -333,7 +338,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-07 v1.50 实测 175 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 102；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-09 v1.59 实测 179 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 106；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -444,7 +449,8 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 - 设为 `true` 后，应用不再是一个单一窗口，而是「一个宿主窗口 + 顶部标签栏」，每个 tab 是独立的 WebView、**共享同一份数据目录**（同账号，cookie / localStorage 天然互通）。
 - tab 可切换、可关闭；新 tab 由网页里的 `target="_blank"` / `window.open()` **直接新开**（标签栏的「+」按钮已有意移除，见 `src/shell.html` 注释；程序化建窗仍可走 `create_tab` 命令）。
-- Android 端忽略此字段（移动端无多页签能力）。
+- **新 tab 落点**（v1.52）：链接与入口**同源**（含上游真实主机）时，取目标的 path/query/fragment 拼到入口地址（本地反向代理会把所有 path 转发到同一上游）；**跨域外链直接打开目标地址**，不再回落首页。首个 tab 就绪后导航信息缓存到 `TabManager`、后续新 tab 复用；首屏未就绪时由首个到达者启动 bootstrap（`bootstrap_started` 标志判定），不再空等 30s 超时。
+- Android 端忽略此字段（移动端无多页签能力）：`mod tabs` 整体 `#[cfg(windows)]`，且编译期常量 `TABS_ENABLED` 以 `cfg!(windows) && …` 在非 Windows **恒为 false**（v1.53 起），打包链路即使误注入 `TABS_ENABLED=true` 也不会在 Android 上启用多页签。
 - 该开关等价于编译期环境变量 `TABS_ENABLED`；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。打包解析器写入环境变量的是 Python 风格 `True` / `False`（首字母大写），Rust 侧 `env_bool!` 按 ASCII 大小写不敏感识别（v1.50 起；此前只认小写，`True` 会静默回落 `false` —— 配置写了多页签、产物仍是单窗口）。
 - ⚠️ 字符串形式（`"true"`）会被打包解析器直接拒绝（布尔字段只认真 `bool`，见 `docs/packaging-config.md`）。
 

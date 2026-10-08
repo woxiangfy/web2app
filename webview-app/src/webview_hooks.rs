@@ -1,4 +1,5 @@
-//! Windows 专属：直接调用 WebView2 原生 API 处理 Basic 鉴权、新窗口请求与右键菜单定制。
+//! Windows 专属：直接调用 WebView2 原生 API 处理 Basic 鉴权、新窗口请求、右键菜单定制、
+//! 下载接管以及网页密码自动保存开关。
 //!
 //! 注意：Tauri 的 `on_web_resource_request` 只支持 tauri:// 协议，对外部 https 网址不触发，
 //! 所以鉴权必须走 WebView2 原生事件。
@@ -17,9 +18,9 @@
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection,
-    ICoreWebView2Deferral, ICoreWebView2Environment9, ICoreWebView2_11, ICoreWebView2_13,
-    ICoreWebView2_2, ICoreWebView2_4, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    ICoreWebView2Deferral, ICoreWebView2Environment9, ICoreWebView2Settings4, ICoreWebView2_11,
+    ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2_4,
+    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{
     BasicAuthenticationRequestedEventHandler, ContextMenuRequestedEventHandler,
@@ -344,6 +345,25 @@ fn register_webview_hooks(
         if let Ok(settings) = unsafe { core.Settings() } {
             unsafe {
                 let _ = settings.SetAreDevToolsEnabled(true);
+            }
+        }
+    }
+
+    // --- 0b) 网页登录密码自动保存（对齐 Electron 壳的 Chromium 默认行为）---
+    // WebView2 的 IsPasswordAutosaveEnabled【默认 false】：既不弹「保存/更新密码？」气泡，
+    // 也不保存新密码（MSDN：默认值 false；一般表单自动填充是另一个独立开关、默认 true）。
+    // 这里显式置 true 后：登录表单提交会询问是否保存，已保存凭据下次访问自动填充。
+    // 所有窗口共用同一个 WebView2 用户数据目录（见 config::data_dir），故多页签下每个 tab
+    // 保存的密码互通；设置页「清除全部浏览数据」（ClearBrowsingDataAll）会把密码一并清掉。
+    //
+    // 接口门槛：ICoreWebView2Settings4 需要 WebView2 Runtime 1.0.902.49+（2021 年起随
+    // 系统分发，现存机器基本都满足）。cast 失败的极老运行时静默跳过、保持默认行为 ——
+    // 与下载（ICoreWebView2_4）、右键菜单（ICoreWebView2_11）钩子同口径：单项不可用绝不
+    // 影响其它钩子注册。该属性是 per-webview 的，所以每个窗口注册钩子时各设一次。
+    if let Ok(settings) = unsafe { core.Settings() } {
+        if let Ok(settings4) = settings.cast::<ICoreWebView2Settings4>() {
+            unsafe {
+                let _ = settings4.SetIsPasswordAutosaveEnabled(true);
             }
         }
     }

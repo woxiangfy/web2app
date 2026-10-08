@@ -137,11 +137,11 @@ export function safeName(raw) {
 }
 
 /**
- * Tauri 本地打包的默认产物目录：仓库根 `tests/pack/tauri/`。
- * 与 Electron 的 `tests/pack/` 平级但**刻意分子目录** —— 两壳的绿色版都叫 `<name>.exe`
- * （electron-builder portable 同样产出 `<name>.exe`），混放会互相覆盖。
- * 整棵 `/tests/` 被根 .gitignore 忽略，产物不进版本库。
+ * 两壳本地打包的默认产物目录：仓库根 `tests/pack/electron/` 与 `tests/pack/tauri/`。
+ * **刻意分子目录** —— 两壳的绿色版都叫 `<name>.exe`（electron-builder portable 同样产出
+ * `<name>.exe`），混放会互相覆盖。整棵 `/tests/` 被根 .gitignore 忽略，产物不进版本库。
  */
+export const ELECTRON_OUT_DEFAULT = join(ROOT, 'tests', 'pack', 'electron')
 export const TAURI_OUT_DEFAULT = join(ROOT, 'tests', 'pack', 'tauri')
 
 /**

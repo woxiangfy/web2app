@@ -30,7 +30,7 @@ const RETRY_PATH: &str = "/retry";
 
 const SPLASH_TEMPLATE: &str = include_str!("splash.html");
 const LOADING_JS: &str = include_str!("loading.js");
-/// 自绘标题栏脚本（仅单窗口模式有意义）。启动页需要内联它，原因见 `splash_html`。
+/// 自绘标题栏脚本（**Windows 专属**，仅单窗口模式有意义）。启动页需要内联它，原因见 `splash_html`。
 const TITLEBAR_JS: &str = include_str!("titlebar.js");
 
 /// 启动页模板里的三个占位符。
@@ -66,9 +66,14 @@ pub fn splash_url() -> Url {
 /// 靠 `titlebar.js` 的 `__web2appTitlebar` 防重。（旧注释声称「首个文档拿不到
 /// initialization_script」——该说法已被 `examples/probe_new_window.rs` 实测推翻，别再引用。）
 pub fn splash_html(title: &str) -> String {
+    // 自绘标题栏（顶部通栏）是 **Windows 专属**：Android 有系统标题栏，再内联一条自绘通栏就会
+    // 叠成「双标题栏」，且加载层会依 `__web2appChromeH` 在顶部空出 38px。非 Windows 一律替换为
+    // 空串 —— 占位符仍照常消费（模板与 `splash_template_has_no_token_in_comments` 都按「恰好出现
+    // 一次」约束，不能直接删掉占位符）。
+    let titlebar_js = if cfg!(windows) { TITLEBAR_JS } else { "" };
     SPLASH_TEMPLATE
         .replace(TOKEN_TITLE, &html_escape(title))
-        .replace(TOKEN_TITLEBAR_JS, TITLEBAR_JS)
+        .replace(TOKEN_TITLEBAR_JS, titlebar_js)
         .replace(TOKEN_LOADING_JS, LOADING_JS)
 }
 
@@ -169,10 +174,19 @@ mod tests {
         assert!(html.contains("Tom&#39;s &lt;App&gt; &amp; \\Co"));
         assert!(html.contains("__web2appLoadingMode = 'splash'"));
         assert!(html.contains("w2l-ring"), "应内联加载层脚本");
-        assert!(
-            html.contains("__web2app_titlebar__"),
-            "启动页应内联自绘标题栏（首个文档拿不到 initialization_script）"
-        );
+        // 自绘标题栏（顶部通栏）是 Windows 专属：Windows 内联；非 Windows（Android）替换为空串，
+        // 避免与系统标题栏叠成双通栏（`__web2app_titlebar__` 是 titlebar.js 里的 DOM id / 选择器）。
+        if cfg!(windows) {
+            assert!(
+                html.contains("__web2app_titlebar__"),
+                "Windows 启动页应内联自绘标题栏（让窗口一出现就有顶部栏）"
+            );
+        } else {
+            assert!(
+                !html.contains("__web2app_titlebar__"),
+                "非 Windows（Android）启动页不应内联自绘标题栏"
+            );
+        }
     }
 
     /// 启动页模板里，占位符**只能**出现在预期的两个 `<script>` 与 `<title>` 里。
