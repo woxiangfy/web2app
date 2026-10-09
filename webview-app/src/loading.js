@@ -59,6 +59,17 @@
 
   var state = 'loading'; // loading | slow | failed | done
   var t0 = Date.now();
+  // 壳侧在加载层【挂载前】推来的调用（失败 / 慢提示 / 补充信息）：先缓冲，挂载后回放。
+  // ⚠️⚠️ 旧实现这里挂的是一份**纯 no-op 桩**（fail 是空实现），于是「壳在挂载前推来的
+  // 错误」被静默吃掉，用户只看到 40s 的「启动超时」兜底卡，真因就此丢失。而直连配置的启动流程
+  // 只需毫秒级就完成（无域名解析、无本地代理），它的失败推送**必然**落在挂载之前 ——
+  // 也就是说这条通路是 Tauri 侧唯一的错误出口（Electron 侧另有烤进 HTML 的
+  // `__web2appPendingFail`，见下方 applyPendingFail）。
+  var pending = [];
+  // 壳侧在挂载【后】推来的补充信息行（各阶段进度 / 可达性探测结论）：随失败卡一起渲染。
+  // 兜底卡 40s 才出现，而探测结论可能 8s 就到了；若只写进 detail，会被后来的兜底卡覆盖掉，
+  // 所以单独存一份，由 toFail 统一拼出来（见 pushNote）。
+  var notes = [];
   var root, styleHandle, elRing, elBar, elTitle, elDetail, elActions, elBtn;
 
   // 最近一条页面侧错误（脚本异常 / 资源加载失败）：失败卡诊断行里带上，便于定位
@@ -116,6 +127,17 @@
     '#__web2app_loading__ .w2l-title{font-size:14px!important;letter-spacing:.02em!important;}',
     '#__web2app_loading__ .w2l-detail{font-size:12px!important;opacity:.62!important;text-align:center!important;',
     'max-width:min(420px,84vw)!important;white-space:pre-wrap!important;word-break:break-word!important;}',
+    /* 失败态的布局：⚠️⚠️ 这一条是「诊断能不能被看见」的成败所在，别删。
+     * 失败卡的内容可能很长（四条阶段进度 + 地址 / 状态 / HTTP / 整条 UA / 脚本错误），
+     * 窄屏手机上光是 UA 一行就能折成四五行，总高度轻易超过视口。而本层是
+     * `display:flex + justify-content:center`：内容一旦高于 100vh，**顶部的元素会被推出
+     * 屏幕上方**，而 splash 页的 html/body 是 overflow:hidden ⇒ 既看不见、也滚不回来
+     *（「地址」行恰好在 detail 最上面，正是最容易被裁掉的位置）。
+     * 所以失败态改为**顶部对齐 + 整层可滚动**；同时放开文本选择（根规则里的
+     * user-select:none 会让用户选不中、复制不了 —— 而设计意图正是「把下面的信息反馈给打包者」）。 */
+    '#__web2app_loading__.w2l-failed{',
+    'justify-content:flex-start!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch!important;',
+    'padding:22px 14px!important;-webkit-user-select:text!important;user-select:text!important;}',
     /* 失败态：停掉转圈与进度条，换成警示图标 + 重试按钮 */
     '#__web2app_loading__.w2l-failed .w2l-ring,#__web2app_loading__.w2l-failed .w2l-bar{display:none!important;}',
     '#__web2app_loading__ .w2l-warn{display:none!important;width:40px!important;height:40px!important;',
@@ -341,10 +363,26 @@
    *   · 脚本错误 —— document-start 起捕获到的最后一条页面错误（如有）。
    * 只展示在用户自己的屏幕上，不上报、不外发。
    */
+  /// 抹掉地址里的凭据再显示。
+  ///
+  /// 为什么必须做：启用本地反向代理时，WebView 实际加载的入口形如
+  /// `http://127.0.0.1:<port>/auth.html?w2a_key=<门禁密钥>`，而这张诊断卡的设计用途
+  /// 恰恰是「**截图发给打包者**排障」—— 密钥会随截图一起外发。诊断本身只需要知道
+  /// 「是 127.0.0.1 还是目标域名」，值毫无用处，因此统一把这类查询参数的值换成 `***`。
+  function redact(u) {
+    try {
+      return String(u).replace(
+        /([?&](?:w2a_key|key|token|access_token)=)[^&#]*/gi,
+        function (_m, p1) { return p1 + '***'; });
+    } catch (e) {
+      return String(u);
+    }
+  }
+
   function diagText() {
     try {
       var L = [];
-      L.push('地址: ' + location.href);
+      L.push('地址: ' + redact(location.href));
       var els = document.body ? document.body.getElementsByTagName('*').length : 0;
       L.push('状态: ' + document.readyState + '，元素 ' + els);
       try {
@@ -384,13 +422,55 @@
     elDetail.textContent = text;
   }
 
+  /**
+   * 追加一条壳侧补充信息（阶段进度 / 可达性探测结论 / 后到的失败结论）。
+   *
+   * ⚠️ 这些行**必须单独存一份**（`notes`）：兜底卡是 40s 才渲染的，而壳侧结论常在几秒内就到；
+   * 只写进 detail 会被后来的 toFail 整体覆盖 —— 卡片上就只剩通用文案了（真机取证时正是如此：
+   * 一张「启动超时」卡上没有任何现场信息，完全无从判断卡在哪一步）。
+   */
+  function pushNote(line) {
+    if (!line) return;
+    try {
+      if (notes.indexOf(line) >= 0) return; // 幂等：重试 / 多次探测不重复堆同一行
+      notes.push(line);
+      if (state === 'done') return;
+      elDetail.textContent = elDetail.textContent ? elDetail.textContent + '\n' + line : line;
+    } catch (e) { /* noop */ }
+  }
+
   /** 加载失败/超时的容错态：Rust 侧也可调用 window.__web2appLoading.fail(t, d)。 */
   function toFail(title, detail) {
     if (state === 'done' || state === 'failed') return;
     state = 'failed';
     root.className = 'w2l-failed';
     elTitle.textContent = title || '加载失败';
-    elDetail.textContent = detail || '请检查网络连接后重试。';
+    var d = detail || '请检查网络连接后重试。';
+    // 壳侧补充信息一并渲染（它们比兜底卡先到，且不能被兜底卡覆盖掉）。
+    // ⚠️ 放在**最前面**而不是末尾：这几行是「走到哪一步」的分诊线索 —— 尤其「已发起导航」，
+    // 它是区分「根本没导航」与「导航了但没提交」的**唯一**线索；而 diagText 的地址 / UA
+    // 属于技术细节，是第二步才看的。末尾拼接会让它们随长诊断一起沉到滚动区最底部。
+    if (notes.length) d = notes.join('\n') + '\n' + d;
+    elDetail.textContent = d;
+  }
+
+  /**
+   * 失败卡统一入口（壳侧 `fail` 与「挂载前缓冲」的回放共用）：
+   *   · `soft` 为真时只在页面正文仍空白才接管 —— 供壳侧可达性探测使用，避免探测假阴性
+   *     （探测端不认可的企业根证书等）把其实已经渲染成功的页面盖成失败卡；
+   *   · 接管时附上现场诊断（地址 / readyState / HTTP / UA / 脚本错误）；
+   *   · **已经有过卡片**（多为 40s 兜底卡）时不再静默丢弃，而是把结论追加成一行 ——
+   *     否则「兜底卡先出现」这一个时序差别就会把可达性探测结论整个吃掉。
+   */
+  function failCard(title, detail, soft) {
+    if (soft) {
+      try { if (!bodyEmpty()) return; } catch (e) { /* 判定失败则正常接管 */ }
+    }
+    if (state === 'failed') {
+      pushNote('【' + (title || '加载失败') + '】' + (detail || ''));
+      return;
+    }
+    toFail(title, (detail || '请检查网络连接后重试。') + '\n' + diagText());
   }
 
   function emitTauriEvent(evt, payload) {
@@ -517,13 +597,30 @@
     } catch (e) { /* noop */ }
   }
 
-  // 先挂一份 no-op API：壳侧可能在任何时刻 eval
-  // `window.__web2appLoading.fail/hide`（解析失败、代理启动失败等），挂载完成前调用必须无害。
+  /// 回放「挂载前」缓冲的壳侧调用（失败 / 慢提示 / 补充信息）——见文件上方 `pending` 的说明。
+  /// 挂载前 `window.__web2appLoading` 是缓冲桩，桩里的每次调用都记在 `pending` 里，这里补上。
+  function drainPending() {
+    var list = pending;
+    pending = [];
+    for (var i = 0; i < list.length; i++) {
+      try {
+        var c = list[i];
+        if (c[0] === 'fail') failCard(c[1], c[2], c[3]);
+        else if (c[0] === 'slow') toSlow(c[1]);
+        else pushNote(c[1]);
+      } catch (e) { /* 单条回放失败不影响其余 */ }
+    }
+  }
+
+  // 先挂一份**缓冲**API：壳侧可能在任何时刻 eval
+  // `window.__web2appLoading.fail/slow/note`（解析失败、代理启动失败、阶段进度、导航已发起…），
+  // 挂载完成前调用必须无害 —— 但**绝不能丢掉**（细节见文件上方 `pending` 的说明）。
   window.__web2appLoading = {
     state: function () { return state; },
     hide: function () {},
-    slow: function () {},
-    fail: function () {}
+    slow: function (t) { pending.push(['slow', t]); },
+    fail: function (t, d, soft) { pending.push(['fail', t, d, soft]); },
+    note: function (l) { pending.push(['note', l]); }
   };
 
   whenHostReady(function () {
@@ -549,24 +646,32 @@
       state: function () { return state; },
       hide: function () { done(); },
       slow: function (t) { toSlow(t || '网络较慢，仍在努力加载…'); },
-      fail: function (t, d, soft) {
-        if (soft) {
-          try { if (!bodyEmpty()) return; } catch (e) { /* 判定失败则正常接管 */ }
-        }
-        // 接管失败态时同样附现场诊断（与 CAP 失败卡同源信息），方便凭截图定位。
-        toFail(t, (d || '请检查网络连接后重试。') + '\n' + diagText());
-      }
+      // 壳侧补充信息（各阶段进度 / 可达性探测结论）：不改卡片状态，只往详情里加行。
+      note: function (l) { pushNote(l); },
+      // fail(t, d, soft)：语义见上面的 failCard。
+      fail: function (t, d, soft) { failCard(t, d, soft); }
     };
 
+    // 先回放「挂载前」缓冲的壳侧调用，再取走壳侧烤进 HTML 的失败态 —— 两者都是最后一手，
+    // 后到的会覆盖先到的（说明见各自函数内）。
+    drainPending();
     applyPendingFail();
 
     setTimeout(function () {
       toSlow(IS_SPLASH ? '正在准备应用环境…' : '网络较慢，仍在努力加载…');
     }, SLOW_MS);
     setTimeout(function () {
+      // ⚠️ 这张兜底卡以前是**唯一不带现场诊断**的失败卡（CAP 卡与 fail API 卡都带），于是真机上
+      // 只有一句「应用初始化耗时过长」，完全看不出卡在哪一步。现在带上 diagText()，其中
+      // 「地址」行是最短判据：
+      //   · 仍是 splash.localhost ⇒ 目标地址的导航**根本没提交**（Android 上 navigate 恒返回 Ok，
+      //     且 wry 不向壳层透出 onReceivedError，壳侧无从得知，只能靠这里自证）；
+      //   · 已是目标域名 ⇒ 文档层问题（HTTP 状态 / UA 版本 / 脚本错误三行分流）。
       toFail(
         IS_SPLASH ? '启动超时' : '加载超时',
-        IS_SPLASH ? '应用初始化耗时过长，请检查网络后重试。' : '页面响应超时，请检查网络连接后重试。'
+        (IS_SPLASH ? '应用初始化耗时过长，请检查网络后重试。' : '页面响应超时，请检查网络连接后重试。') +
+          (isSplashDoc() ? '\n仍停在启动页：目标地址的导航没有提交。' : '') +
+          '\n' + diagText()
       );
     }, FAIL_MS);
 

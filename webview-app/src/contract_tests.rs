@@ -586,3 +586,75 @@ mod loading_mode_contract {
         );
     }
 }
+
+/// 启动期「壳侧信息必须真的落到卡片上」的静态契约（跨平台）。
+///
+/// 背景（2026-10-09 真机取证第二轮）：真机只拿到一张「启动超时」兜底卡，卡上**零现场信息**。
+/// 追下来是两条独立的信息黑洞，且都不报错、clippy 与 CI 全绿：
+///   ① `loading.js` 在挂载完成前挂的是**纯 no-op 桩** ⇒ 而直连配置的启动只需毫秒级完成
+///      （无域名解析、无本地代理）⇒ 它的失败推送**必然**落在挂载之前 ⇒ 被静默吃掉；
+///   ② 壳侧根本没有「阶段进度」这条通路 ⇒ 40s 兜底卡出现时，没人知道卡在解析、代理还是导航。
+/// 更狠的一层：Android 上 `navigate()` 与 `eval()` **恒返回 Ok**（wry 只是把消息投给
+/// main pipe），且 wry **不向壳层透出 `onReceivedError`** ⇒ 主框架加载失败时壳侧完全无从
+/// 得知，WebView 就把启动页一直留在屏幕上（`bootstrap.rs` 的 `Err(e) => show_error` 分支在
+/// Android 上是**死代码**）。所以卡片上的信息是唯一的现场，这里把两侧的落点钉住。
+#[cfg(test)]
+mod startup_visibility_contract {
+    const LOADING_RS: &str = include_str!("loading.rs");
+    const BOOTSTRAP_RS: &str = include_str!("bootstrap.rs");
+
+    /// `loading.rs` 必须提供往卡片追加信息的通路（`note`），且与 JS 侧 API 同名。
+    #[test]
+    fn loading_rs_exposes_note_channel() {
+        assert!(
+            LOADING_RS.contains("pub fn show_note(app: &AppHandle, label: &str, line: &str)"),
+            "loading.rs 必须提供 show_note —— 没有它，壳侧无法把阶段进度 / 探测结论送到卡片上"
+        );
+        assert!(
+            LOADING_RS.contains("window.__web2appLoading.note({l})"),
+            "show_note 必须调用加载层对外暴露的 note API（改名会让通路静默失效）"
+        );
+    }
+
+    /// 启动流程必须在关键节点留下进度，否则兜底卡无法判读。
+    #[test]
+    fn bootstrap_pushes_phase_progress() {
+        for (needle, why) in [
+            (
+                "正在解析目标地址（{} 个域名）…",
+                "域名数组配置必须报出「正在解析」并带域名个数",
+            ),
+            ("正在打开 {}…", "导航前必须报出「正在打开 <host>」"),
+            (
+                "正在启动本地反向代理…",
+                "启用本地代理时必须报出「正在启动代理」",
+            ),
+            (
+                "已发起导航，等待页面响应…",
+                "导航发起后必须留痕 —— 这是区分「根本没导航」与「导航了但没提交」的唯一线索",
+            ),
+        ] {
+            assert!(
+                BOOTSTRAP_RS.contains(needle),
+                "{why}（bootstrap.rs 缺 {needle}）"
+            );
+        }
+        assert!(
+            BOOTSTRAP_RS.contains("crate::loading::show_note(&a, &l, &s)"),
+            "阶段进度必须经 loading::show_note 在【主线程】推送（eval 不允许从后台线程直接调）"
+        );
+    }
+
+    /// 解析失败必须保留具体原因（旧实现统一吞成「服务器连接失败」，把唯一线索丢了）。
+    #[test]
+    fn resolve_failure_keeps_reason() {
+        assert!(
+            BOOTSTRAP_RS.contains("解析目标地址失败：{e}"),
+            "解析失败必须把具体原因带进用户可见文案（读系统 DNS 配置失败 / 查询失败 / 预算超时…）"
+        );
+        assert!(
+            BOOTSTRAP_RS.contains("RESOLVE_BUDGET_SECS"),
+            "解析阶段必须设总预算：域名是串行查的，最坏可超过启动页 40s 的兜底卡"
+        );
+    }
+}

@@ -193,7 +193,7 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
         // 比显式报错更糟（项目约定：环境级故障也要可见）。AssertUnwindSafe：这里没有
         // 跨 catch 的借用不变量需要维护。
         let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            prepare_navigation(use_local_proxy)
+            prepare_navigation(&app, &label, use_local_proxy)
         }));
         let outcome = match prepared {
             Ok(r) => r,
@@ -238,8 +238,35 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
     });
 }
 
+/// 启动期「解析目标地址」阶段的**总预算**（秒）。
+///
+/// 背景（2026-10-09 真机取证）：启动页的兜底卡是 40s（`loading.js` 的 `FAIL_MS`）。域名数组
+/// 配置下解析是**串行**遍历域名的，每个域名的 hickory 默认 `attempts=2 × timeout=5s ×
+/// 每个 nameserver` ⇒ 3 个域名最坏可到 30s+；一旦某个 nameserver 不可达，启动就会长时间停在
+/// "卡住"状态（既无进度也无报错）。取值需**明显小于** 40s（给渲染与推送留时间），同时给弱网
+/// 留足余量：整个解析阶段（含多域名 failover）超过它即判定失败，把「静默卡住」变成明确报错。
+const RESOLVE_BUDGET_SECS: u64 = 25;
+
+/// 从启动期后台线程往加载层推一行进度。
+///
+/// ⚠️ `eval` 必须回主线程（Tauri 的 WebView 操作都要求主线程），所以这里统一转一手 ——
+/// 调用方（`prepare_navigation` 跑在 `std::thread::spawn` 里）不能直接调 `loading::show_note`。
+fn note(app: &tauri::AppHandle, label: &str, line: &str) {
+    let a = app.clone();
+    let l = label.to_string();
+    let s = line.to_string();
+    let _ = app.run_on_main_thread(move || crate::loading::show_note(&a, &l, &s));
+}
+
 /// 解析真实地址并按需启动本地反向代理（在后台线程执行，可能耗时）。
-fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
+///
+/// `app` / `label` 只用于把各阶段进度推给启动页上的加载层（[`crate::loading::show_note`]）——
+/// 启动期一旦偏慢或卡住，卡片上就留有「卡在哪一步」的记录，不必依赖 adb / logcat。
+fn prepare_navigation(
+    app: &tauri::AppHandle,
+    label: &str,
+    use_local_proxy: bool,
+) -> Result<Navigation, String> {
     // 若 APP_URL 是【域名数组】，则依次对这些域名做 DNS TXT 查询 + Ed25519 验签
     // + AES-GCM 解密得到真实 URL；全部失败时返回可展示的错误文案。
     // ⚠️ `resolve_url_from_domains` 是 async（该模块刻意不依赖 Tauri，见 resolve.rs 头注释），
@@ -249,10 +276,33 @@ fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
             .into_iter()
             .map(|d| crate::resolve::normalize_domain(&d))
             .collect();
-        tauri::async_runtime::block_on(crate::resolve::resolve_url_from_domains(
-            &domains, PUBLIC_KEY,
-        ))
-        .map_err(|_| "服务器连接失败，请检查网络后重试".to_string())?
+        note(
+            app,
+            label,
+            &format!("正在解析目标地址（{} 个域名）…", domains.len()),
+        );
+        // ⚠️⚠️ 必须设**总预算**：解析是**串行**遍历域名的，每个域名 hickory 默认
+        // `attempts=2 × timeout=5s × 每个 nameserver`，3 个域名最坏可达 30s+ ——
+        // 一旦某个 nameserver 不可达，启动就会长时间"卡住"（既无进度也无报错），
+        // 用户只看到启动页那张 40s 兜底卡。超时即给出可看懂的失败，而不是一直挂着。
+        tauri::async_runtime::block_on(async {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(RESOLVE_BUDGET_SECS),
+                crate::resolve::resolve_url_from_domains(&domains, PUBLIC_KEY),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => Err(format!(
+                    "解析目标地址超过 {} 秒仍未完成（网络受限或 DNS 不可达），请切换网络后重试",
+                    RESOLVE_BUDGET_SECS
+                )),
+            }
+        })
+        // ⚠️ 不要把具体原因（`_`）丢掉只留一句「服务器连接失败」：启动期故障的具体成因
+        //（读系统 DNS 配置失败 / 查询某域名失败 / 全部密文解不开 / 预算超时）是唯一能指导
+        // 下一步的信息（项目约定：环境级故障也要可见）。
+        .map_err(|e| format!("解析目标地址失败：{e}"))?
     } else {
         APP_URL.to_string()
     };
@@ -272,7 +322,15 @@ fn prepare_navigation(use_local_proxy: bool) -> Result<Navigation, String> {
         }
     }
 
+    // 地址已被接受：下面每一步都推给卡片 —— 启动期一旦偏慢或卡住，卡片上就留有「卡在哪一步」。
+    note(
+        app,
+        label,
+        &format!("正在打开 {}…", parsed.host_str().unwrap_or("目标站点")),
+    );
+
     let (url, proxy_abort) = if use_local_proxy {
+        note(app, label, "正在启动本地反向代理…");
         // 自身实现的本地反向代理：给每个请求（含 WebSocket 握手）注入 Authorization。
         let (u, abort) = tauri::async_runtime::block_on(crate::proxy::start_proxy(&parsed))
             .map_err(|e| format!("本地代理启动失败：{e}"))?;
@@ -340,10 +398,18 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
             Ok(url) => {
                 match window.navigate(url) {
                     Ok(()) => {
-                        // 导航已提交：并发一次轻量可达性探测。Android WebView 网络失败时
-                        // 停在「空白错误文档」（桌面端浏览器那种带错误码的页面在 WebView 上
-                        // 不渲染），仅靠加载层固定超时只能给通用文案；探测可在数秒内把
-                        // DNS / 连接 / 超时 / TLS 的具体原因推给失败卡。
+                        // ⚠️⚠️ `Ok(())` 在这里**不代表导航成功**：wry 在 Android 上把
+                        // `load_url` 实现成「投一条 main-pipe 消息后直接 `Ok(())`」
+                        //（`wry/src/android/mod.rs`），且 `RustWebViewClient.onReceivedError`
+                        // 只对 `ERROR_CONNECT` 做协议重定向特例、**不向壳层透出任何网络错误**
+                        // ⇒ 主框架加载失败时壳侧完全无从得知，WebView 会把启动页留在屏幕上，
+                        // 最终只剩加载层那张 40s 兜底卡（真机取证：2026-10-09）。所以这里
+                        // ①必须留下「已发起导航」的痕迹 —— 这是区分「根本没导航」与
+                        // 「导航了但没提交」的唯一线索；②并发一次可达性探测，把结论写回卡片。
+                        note(app, label, "已发起导航，等待页面响应…");
+                        // 探测本身：Android WebView 网络失败时停在「空白错误文档」（桌面端浏览器
+                        // 那种带错误码的页面在 WebView 上不渲染），仅靠加载层固定超时只能给通用
+                        // 文案；探测可在数秒内把 DNS / 连接 / 超时 / TLS 的具体原因推给失败卡。
                         spawn_reachability_probe(app.clone(), label, nav.url.clone());
                     }
                     Err(e) => crate::loading::show_error(
@@ -468,9 +534,35 @@ fn probe_failure_message(kind: ProbeFailure, host: &str) -> (String, String) {
     }
 }
 
-/// 导航提交后发起可达性探测；失败时在主线程把具体原因 eval 给加载层失败卡。
+/// 可达性探测**成功**时给卡片的一行结论（纯函数，跨平台可单测）。
 ///
-/// `url` 即 WebView 实际导航的地址（直连模式已剥离 userinfo；代理模式是 127.0.0.1）。
+/// 为什么成功也要报：先前只把**失败**推给卡片、成功时静默 —— 于是最需要的那条判据恰好丢了。
+/// 真机取证（2026-10-09）中「壳内页面不渲染、而 Rust 侧 reqwest 能拿到响应」正是这种组合：
+/// 两条信息合在一起才能把「网络不通」与「内核不渲染」分开；只报失败时，用户看到的是一张
+/// 没有任何结论的兜底卡，完全无从下手。
+///
+/// `host` 只放主机名（理由同 [`probe_failure_message`]）；`status` 为 `None` 表示内核没给出
+/// 状态码。
+fn probe_ok_message(host: &str, status: Option<u16>, ms: u128) -> String {
+    let st = match status {
+        Some(code) => format!("HTTP {code}"),
+        None => "已收到响应".to_string(),
+    };
+    format!(
+        "可达性探测：{host} 已连通（{st}，{ms}ms），但页面未渲染 —— \
+         问题多半在本机 WebView 内核（版本过旧 / TLS 协商 / 渲染），不在网络。\
+         可先升级系统「Android System WebView」，或换一台设备比对同一网址。"
+    )
+}
+
+/// 导航提交后发起可达性探测；把结论（**成功 / 失败分类**）在主线程 eval 给加载层卡片。
+///
+/// ⚠️ 成败**都要报**：成功时给一行「已连通但未渲染」的结论（见 [`probe_ok_message`]），失败时
+/// 按类别给出带主机的具体原因（见 [`probe_failure_message`]）。只报失败会让「壳内不渲染」这类
+/// 故障只剩一张零信息的兜底卡 —— 而那恰恰是最需要判据的情形。
+///
+/// `url` 即 WebView 实际导航的地址。⚠️ 已知局限：代理模式下它是 `127.0.0.1:<port>`，探到的是
+/// **本地代理自身**（只能证明代理进程活着，证明不了上游），要修需改成探测真实上游。
 /// `AppHandle` 按值传入：探测跑在 `'static` 的 Tokio 任务里，不能借用调用方的引用。
 #[cfg(not(windows))]
 fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String) {
@@ -482,30 +574,49 @@ fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String) {
     let label = label.to_string();
 
     tauri::async_runtime::spawn(async move {
-        let Some(kind) = probe_once(&url).await else {
-            return;
-        };
-        let (title, detail) = probe_failure_message(kind, &host);
-        let a = app.clone();
-        // eval 必须回主线程（Tauri 的 WebView 操作都要求主线程）。
-        let _ = app.run_on_main_thread(move || {
-            let Some(w) = a.get_webview_window(&label) else {
-                return;
-            };
-            // 第三个参数 1 = soft：页面若已渲染出正文，loading.js 会忽略本次结论。
-            let js = format!(
-                "try{{window.__web2appLoading&&window.__web2appLoading.fail({t},{d},1);}}catch(e){{}}",
-                t = crate::loading::js_str(&title),
-                d = crate::loading::js_str(&detail)
-            );
-            let _ = w.eval(js.as_str());
-        });
+        match probe_once(&url).await {
+            ProbeOutcome::Failed(kind) => {
+                let (title, detail) = probe_failure_message(kind, &host);
+                let a = app.clone();
+                let l = label.clone();
+                // eval 必须回主线程（Tauri 的 WebView 操作都要求主线程）。
+                let _ = app.run_on_main_thread(move || {
+                    let Some(w) = a.get_webview_window(&l) else {
+                        return;
+                    };
+                    // 第三个参数 1 = soft：页面若已渲染出正文，loading.js 会忽略本次结论。
+                    let js = format!(
+                        "try{{window.__web2appLoading&&window.__web2appLoading.fail({t},{d},1);}}catch(e){{}}",
+                        t = crate::loading::js_str(&title),
+                        d = crate::loading::js_str(&detail)
+                    );
+                    let _ = w.eval(js.as_str());
+                });
+            }
+            ProbeOutcome::Reachable { status, ms } => {
+                let line = probe_ok_message(&host, status, ms);
+                let a = app.clone();
+                let l = label.clone();
+                let _ = app.run_on_main_thread(move || crate::loading::show_note(&a, &l, &line));
+            }
+        }
     });
 }
 
-/// 发起一次轻量探测，返回失败类别；收到任意 HTTP 响应（含 4xx/5xx）即视为可达。
+/// 探测的两种结果：可达（拿到任意 HTTP 响应，含 4xx/5xx）或按类别失败。
 #[cfg(not(windows))]
-async fn probe_once(url: &str) -> Option<ProbeFailure> {
+enum ProbeOutcome {
+    /// 收到了响应；`status` 为 `None` 表示内核未提供状态码（读不出来也不影响判读）。
+    Reachable {
+        status: Option<u16>,
+        ms: u128,
+    },
+    Failed(ProbeFailure),
+}
+
+/// 发起一次轻量探测；收到任意 HTTP 响应（含 4xx/5xx）即视为传输层可达。
+#[cfg(not(windows))]
+async fn probe_once(url: &str) -> ProbeOutcome {
     use std::time::Duration;
 
     let client = match reqwest::Client::builder()
@@ -516,13 +627,17 @@ async fn probe_once(url: &str) -> Option<ProbeFailure> {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return Some(ProbeFailure::Other),
+        Err(_) => return ProbeOutcome::Failed(ProbeFailure::Other),
     };
 
-    // 只取响应头、不读正文（不额外消耗用户流量，也不关心正文内容）。
+    // 只取响应头、不读正文（不额外消耗用户流量，也不关心正文内容）。耗时用于判读弱网。
+    let t0 = std::time::Instant::now();
     match client.get(url).send().await {
-        Ok(_) => None,
-        Err(e) => Some(classify_probe_error(&e)),
+        Ok(resp) => ProbeOutcome::Reachable {
+            status: Some(resp.status().as_u16()),
+            ms: t0.elapsed().as_millis(),
+        },
+        Err(e) => ProbeOutcome::Failed(classify_probe_error(&e)),
     }
 }
 
@@ -652,5 +767,26 @@ mod tests {
         let (_t, d) = probe_failure_message(ProbeFailure::Connect, "127.0.0.1:59123");
         assert!(d.contains("127.0.0.1:59123"));
         assert!(!d.contains("token="));
+    }
+
+    #[test]
+    fn probe_ok_message_reports_reachability_and_points_at_webview() {
+        // 成功路径也必须给出结论：只报失败会让「Rust 侧能连通、壳内却不渲染」这类故障
+        // 只剩一张零信息的兜底卡 —— 而那正是真机取证（2026-10-09）遇到的实际情况。
+        let m = probe_ok_message("ai260926.osfipin.com", Some(200), 812);
+        assert!(m.contains("ai260926.osfipin.com"), "应含主机名：{m}");
+        assert!(m.contains("HTTP 200"), "应含状态码：{m}");
+        assert!(m.contains("812ms"), "应含耗时：{m}");
+        assert!(
+            m.contains("WebView"),
+            "结论必须指向「本机 WebView 内核」，否则用户会继续往网络上找：{m}"
+        );
+        // 老内核 / 重定向后拿不到状态码时，不得把 Option 的 Debug 形态漏到用户文案里。
+        let m2 = probe_ok_message("h.example", None, 5);
+        assert!(m2.contains("已收到响应"), "无状态码时应给中性表述：{m2}");
+        assert!(
+            !m2.contains("None"),
+            "不得把 Option 的 Debug 形态漏进用户文案：{m2}"
+        );
     }
 }

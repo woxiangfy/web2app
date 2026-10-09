@@ -122,16 +122,39 @@ pub fn handle_splash(
 /// 用 `eval` 而不是 IPC：加载层可能被注入到任意第三方页面，走 eval 不依赖任何权限配置。
 /// 整个表达式包在 try/catch 里，页面尚未就绪时静默失败即可。
 ///
+/// ⚠️⚠️ 注意「页面尚未就绪」这条：加载层在**挂载完成前**装的是**缓冲桩**（`loading.js` 的
+/// `pending`），挂载后回放 —— 所以启动期过早推来的错误**不会**再被静默吃掉。直连配置的启动
+/// 流程只需毫秒级（无域名解析、无本地代理），失败推送必然落在挂载之前，这条通路是 Tauri 侧
+/// 唯一的错误出口；旧实现挂的是纯 no-op 桩，真机上表现为「只有 40s 兜底卡、看不到真因」。
+///
 /// `label`：目标窗口 label（单窗口为 `"main"`，多页签为 `tab-N`）。
 pub fn show_error(app: &AppHandle, label: &str, title: &str, detail: &str) {
-    let Some(w) = app.get_webview_window(label) else {
-        return;
-    };
-    let js = format!(
-        "try{{window.__web2appLoading&&window.__web2appLoading.fail({t},{d});}}catch(e){{}}",
+    let call = format!(
+        "window.__web2appLoading.fail({t},{d})",
         t = js_str(title),
         d = js_str(detail)
     );
+    eval_on_loading(app, label, &call);
+}
+
+/// 往当前卡片追加一行补充信息（启动各阶段进度 / 可达性探测结论）。
+///
+/// 与 [`show_error`] 同一条通路，但**不改变卡片状态**：这些行会被失败卡一并渲染
+/// （`loading.js::pushNote` 的 notes 会拼进 `toFail` 的详情），是 40s 兜底卡的唯一现场。
+///
+/// 为什么要单独一条 API 而不是复用 `fail`：`fail` 会把卡片切成失败态并覆盖详情，
+/// 而「导航已发起」「服务器已连通」这类信息是**正向**进度，不该被当成失败。
+pub fn show_note(app: &AppHandle, label: &str, line: &str) {
+    let call = format!("window.__web2appLoading.note({l})", l = js_str(line));
+    eval_on_loading(app, label, &call);
+}
+
+/// 在加载层上 eval 一句调用（统一包 try/catch，并容忍窗口已关闭）。
+fn eval_on_loading(app: &AppHandle, label: &str, call: &str) {
+    let Some(w) = app.get_webview_window(label) else {
+        return;
+    };
+    let js = format!("try{{window.__web2appLoading&&{call};}}catch(e){{}}");
     let _ = w.eval(js.as_str());
 }
 
@@ -326,9 +349,12 @@ mod tests {
     fn overlay_failure_card_carries_on_screen_diagnostics() {
         let js = OVERLAY_SCRIPT;
         // 地址 + readyState/元素数
+        // ⚠️ 地址必须**经 redact()**：本地代理入口形如
+        // `http://127.0.0.1:<port>/auth.html?w2a_key=<门禁密钥>`，而这张卡的用途就是截图外发。
+        //（脱敏本身另有专门守卫 diag_address_is_redacted_before_display，这里只钉「地址行存在」。）
         assert!(
-            js.contains("地址: ' + location.href"),
-            "诊断应包含当前文档地址"
+            js.contains("'地址: ' + redact(location.href)"),
+            "诊断应包含当前文档地址，且必须经 redact 抹掉 query 里的凭据"
         );
         // 导航时序：HTTP 状态（Chromium 123+ 才有 responseStatus，老 WebView 显示 ?）
         assert!(
@@ -348,6 +374,122 @@ mod tests {
         );
         // CAP 分支与壳侧 fail API 两条路径都要附上诊断
         assert!(js.contains("diagText()"), "失败卡文案应拼接 diagText()");
+    }
+
+    /// 壳侧调用在加载层**挂载前**到达时不得被静默丢弃。
+    ///
+    /// 背景（2026-10-09 真机取证）：挂载前挂的是纯 no-op 桩（`fail: function () {}`），而
+    /// **直连配置**的启动流程只需毫秒级就完成（无域名解析、无本地代理）⇒ 它的失败推送必然
+    /// 落在挂载之前 ⇒ 被静默吃掉，用户只看到 40s 的「启动超时」兜底卡。现在改为缓冲 + 回放。
+    #[test]
+    fn loading_layer_buffers_shell_calls_before_mount() {
+        let js = OVERLAY_SCRIPT;
+        assert!(js.contains("var pending = []"), "必须有挂载前的缓冲队列");
+        assert!(
+            js.contains("function drainPending()"),
+            "挂载后必须回放缓冲调用"
+        );
+        assert!(
+            js.contains("drainPending();"),
+            "安装完成后必须调用 drainPending()"
+        );
+        assert!(
+            js.contains("if (c[0] === 'fail') failCard(c[1], c[2], c[3])"),
+            "回放必须真的把失败态推上去，不能只回放慢提示"
+        );
+        // 用**正向**断言而不是「不得出现某个字符串」：空实现（旧桩）会让它直接失败，而反向断言
+        // 容易被文件里任何一句说明注释里的字面量干扰（本项目在守卫上已踩过两次这个坑）。
+        assert!(
+            js.contains("fail: function (t, d, soft) { pending.push(['fail', t, d, soft]); }"),
+            "挂载前的桩必须把调用**缓冲**进 pending —— 退回空实现会静默吞掉壳侧的错误"
+        );
+    }
+
+    /// 壳侧补充信息（阶段进度 / 可达性探测结论）不得被兜底卡覆盖。
+    ///
+    /// 兜底卡 40s 才渲染，而探测结论常在几秒内到达；若只写进 detail，会被后来的 `toFail`
+    /// 整体覆盖 ⇒ 卡片上只剩通用文案。故必须单独存进 `notes` 并在 `toFail` 里拼出来。
+    #[test]
+    fn shell_notes_survive_fallback_card() {
+        let js = OVERLAY_SCRIPT;
+        assert!(js.contains("var notes = []"), "必须有 notes 容器");
+        // ⚠️ 必须**前置**（`d = notes…` 而不是 `d += notes…`）：这几行是「走到哪一步」的分诊
+        // 线索（尤其「已发起导航」——区分「根本没导航」与「导航了但没提交」的唯一线索），而
+        // diagText 的地址 / UA 属技术细节。拼在末尾时它们会随长诊断一起沉到滚动区最底部。
+        assert!(
+            js.contains(r"if (notes.length) d = notes.join('\n') + '\n' + d"),
+            "toFail 必须把 notes **前置**拼进详情，否则分诊线索会沉到长诊断底下"
+        );
+        assert!(
+            js.contains("note: function (l) { pushNote(l); }"),
+            "对外 API 必须暴露 note（壳侧阶段进度 / 探测结论走它）"
+        );
+        assert!(
+            js.contains("pushNote('【'"),
+            "已有卡片时，后到的失败结论应追加而不是丢弃"
+        );
+    }
+
+    /// 启动页 40s 兜底卡必须带现场诊断 + 「仍停在启动页」的判读提示。
+    ///
+    /// 它以前是**唯一不带诊断**的失败卡（CAP 卡与 fail API 卡都带 `diagText()`），真机上就
+    /// 只能给出一句「应用初始化耗时过长」——无从判断卡在哪一步。
+    #[test]
+    fn splash_fallback_card_carries_diagnostics() {
+        let js = OVERLAY_SCRIPT;
+        let i = js.find("'启动超时'").expect("splash 兜底卡文案应存在");
+        let seg = &js[i..(i + 420).min(js.len())];
+        assert!(seg.contains("diagText()"), "启动超时卡必须带现场诊断");
+        assert!(
+            seg.contains("仍停在启动页"),
+            "地址仍是 splash 时应给出「导航没有提交」的判读提示"
+        );
+    }
+
+    /// 失败卡必须**可滚动**，否则长诊断在窄屏上既看不见、也滚不到。
+    ///
+    /// 背景（2026-10-09，第三次踩到「拼进去了但用户看不见」）：失败卡内容含四条阶段进度
+    /// ＋ 地址 / 状态 / HTTP / 整条 UA / 脚本错误，窄屏手机上总高度轻易超过视口；而本层是
+    /// `display:flex; justify-content:center` 且启动页 `html,body{overflow:hidden}` —— 内容
+    /// 一超高，**顶部（「地址」行所在处）就被推出屏幕上方，且滚不回来**。
+    /// 本守卫钉住「失败态顶部对齐 + 整层可滚动 + 放开文本选择」这组修复不被回退。
+    #[test]
+    fn failed_card_must_be_scrollable_and_selectable() {
+        let js = OVERLAY_SCRIPT;
+        assert!(
+            js.contains("justify-content:flex-start!important;overflow-y:auto!important;"),
+            "失败态必须顶部对齐且整层可滚动 —— 否则长诊断会被推出屏幕且滚不回来"
+        );
+        assert!(
+            js.contains("#__web2app_loading__.w2l-failed{"),
+            "上述布局必须只挂在失败态选择器上（写到常态会让加载中的居中布局变形）"
+        );
+        assert!(
+            js.contains("-webkit-user-select:text!important;user-select:text!important;}"),
+            "失败态必须放开文本选择 —— 卡片用途就是「把信息反馈给打包者」，选不中等于没给"
+        );
+    }
+
+    /// 诊断卡上的地址必须**先脱敏**再显示。
+    ///
+    /// 背景：启用本地反向代理时 WebView 入口是
+    /// `http://127.0.0.1:<port>/auth.html?w2a_key=<门禁密钥>`，而这张卡的用途就是
+    /// **截图外发给打包者** —— 不脱敏等于把门禁密钥随截图泄漏出去。
+    #[test]
+    fn diag_address_is_redacted_before_display() {
+        let js = OVERLAY_SCRIPT;
+        assert!(
+            js.contains("'地址: ' + redact(location.href)"),
+            "诊断行的地址必须经 redact() 处理（直接拼 location.href 会把 w2a_key 显示出来）"
+        );
+        assert!(
+            js.contains("function redact(u)"),
+            "redact 实现必须存在，不得被内联成空操作"
+        );
+        assert!(
+            js.contains("w2a_key|key|token|access_token"),
+            "redact 至少要覆盖 w2a_key —— 它是本壳唯一会出现在 URL 里的凭据"
+        );
     }
 
     /// 启动页「重试」必须走**相对路径** + 改写后的 hostname 判定。

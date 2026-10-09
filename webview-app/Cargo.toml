@@ -44,7 +44,9 @@ bytes = "1"
 http = "1"
 # 代理入口门禁令牌的随机源（OS CSPRNG，见 proxy.rs::generate_access_token）。
 getrandom = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
+# time：`bootstrap.rs` 用 `tokio::time::timeout` 给启动期「解析目标地址」加总预算
+#（域名数组配置下 hickory 会串行遍历域名，最坏可超过启动页兜底卡的 40s ⇒ 必须显式设界）。
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
 
 # 动态解析真实 URL（app_url 为域名数组时）：DNS TXT 查询 + Ed25519 验签 + AEAD 解密。
 # DNS 查询在本 crate（依赖 tauri 异步运行时），加解密/验签逻辑在 resolve-core（纯 Rust）。

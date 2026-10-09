@@ -338,7 +338,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-09 v1.62 实测 186 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 113；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-09 v1.63.1 实测 195 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 122；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -638,6 +638,16 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
 - **v1.62 修正的两条「必然」路径（与网络无关，出问题时可据此排除）**：
   1. **启动页的加载层语义**：启动页必须走 splash 语义（SLOW 5s / FAIL 40s 的「启动超时 + 重试」、不装就绪监听）。模式标记 `window.__web2appLoadingMode` 由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入；漏掉它不会报错，只会让启动页装上 overlay 的空白文档硬上限（CAP 15s；启动页 body 只有 `<script>`，`bodyEmpty()` 恒真）⇒ 一次正常但偏慢的启动被判「页面长时间为空白」。静态守卫 `contract_tests::loading_mode_contract`。
   2. **启动页「重试」的落点**：wry 在 Windows/Android 上把 `splash://localhost/` 改写成 `http://splash.localhost/`，页内 `location.protocol` 是 `http:` ⇒ 判定必须看 hostname（`splash.localhost`），跳转必须用**相对路径** `/retry`（绝对 URL 的 scheme 内核不认）。判错时的表象是「点重试只刷新启动页、永远起不来」。契约测试 `loading::tests::retry_uses_relative_path_and_rewritten_hostname`。
+- **v1.63 让启动期「自己把现场说清」（排查 Android 启动问题时先看这里）**：
+  1. **壳层对主框架加载失败是「必然失明」的**：wry 在 Android 上把 `load_url` / `eval` 实现成「投递 main-pipe 消息后直接 `Ok(())`」⇒ `window.navigate()` / `wv.eval()` **恒返回 Ok、永不报错**（`bootstrap.rs::navigate_main` 里那条 `Err(e) => show_error` 在 Android 上是死代码），且 `RustWebViewClient.onReceivedError` 只对 `ERROR_CONNECT` 做协议重定向特例、**不向壳层透出任何网络错误**。后果：主框架加载失败时 WebView 把启动页留在屏幕上，壳侧一无所知，最后只剩 40s 兜底卡。根因在 wry 上游，本版改为**让卡片自己说清**。
+  2. **兜底卡现在带现场**：40s 的「启动超时」卡补了 `diagText()`，并在仍停在 splash 时提示「目标地址的导航没有提交」——配合新增的进度行 `正在解析目标地址（N 个域名）…` / `正在打开 <host>…` / `正在启动本地反向代理…` / **`已发起导航，等待页面响应…`**，一眼即可区分「根本没导航」「导航了但没提交」「网络不通」「内核不渲染」四类。⚠️ 判读：卡上**没有**「已发起导航」⇒ `prepare_navigation` 还没走到导航（解析 / 代理阶段）；有这一行却仍停在 splash ⇒ 导航已发出但文档未提交（多半落在 WebView 内核层）。
+  3. **可达性探测成功时也会上报**：卡上出现「可达性探测：<域名> 已连通（HTTP 200，xxxms），但页面未渲染」时，说明 Rust 侧（reqwest + rustls/webpki-roots）能通而 WebView 不能 ⇒ 问题在**内核**（版本 / TLS 协商 / 渲染），不在网络，优先升级系统「Android System WebView」或换机比对；反过来显示「无法连接服务器 / 连接超时 / 安全连接失败」时才是传输层问题。（此前探测成功时**什么都不推**，最需要的那条判据恰好被丢掉。）
+  4. **启动期错误不再被静默吃掉**：加载层在挂载完成前是**缓冲队列**（挂载后回放），壳侧在启动早期推来的失败会照常显示，不必再靠「等一下看会不会卡」来判断。另：解析阶段有 25s 总预算（`RESOLVE_BUDGET_SECS`，超时给明确文案而不是一直挂着），解析失败文案保留具体原因（读系统 DNS 配置失败 / 查询某域名失败 / 全部密文解不开 / 预算超时）。
+- **v1.63.1 让诊断「真的看得见」（v1.63 的补丁，同样是排查前必读）**：v1.63 把现场**拼进**了卡片，但「拼进去」≠「看得见」——这类形态本项目已经栽过三次，故补三处并各配静态守卫（`loading::tests::failed_card_must_be_scrollable_and_selectable` / `diag_address_is_redacted_before_display`）：
+  1. **进度行前置**（实测生效）：`toFail` 里 notes 由「追加到末尾」改为「置于最前」。分诊靠的就是「已发起导航」这类行，地址 / UA 属第二步才看的技术细节；拼在末尾时它们会随长诊断一起沉到滚动区最底下。
+  2. **失败态可滚动 + 可选中**：失败态改为 `justify-content:flex-start` + `overflow-y:auto`，并放开 `user-select`（根规则是 `none` ⇒ 用户选不中、复制不了，而卡片用途恰恰是「把信息反馈给打包者」）。⚠️ **实测 360×640 / 320×480 下内容并未溢出（`overflowPx=0`）**，故滚动是**防御性**修复（极端小屏 / 更多进度行才触发）；「可选中复制」是当场生效的改进。
+  3. **地址脱敏**（实测生效）：诊断行的地址经 `redact()` 处理，把 `w2a_key` / `key` / `token` 等查询参数值换成 `***`。启用本地代理时入口形如 `http://127.0.0.1:<port>/auth.html?w2a_key=<门禁密钥>`，而这张卡的用途就是**截图外发**——不脱敏等于把门禁密钥一起发出去。
+  取证脚本：`electron-app/scripts/diag/splash-fail-card.cjs` —— 按真实窗口尺寸渲染同一份 `splash.html` + `loading.js`（把 40s 兜底卡提前到 1.4s，其余逻辑逐字不动），客观测「进度行是否在最前 / 地址是否脱敏 / 能否滚动 / 关键行在首屏的 y」并出 PNG。
 - **Android 端应用的数据存在哪？**（下文中 `<pkg>` = 构建时的应用包名，即打包工作流在 `android init` 前
   由 `app_name` 清洗后写入 `tauri.conf.json` 的 `identifier` = **`com.web2app.<app_name 清洗值>`**
   （仓库里 `tauri.conf.json` 的静态值只是占位；本地不跑工作流直接 `cargo tauri android` 构建时才会用到它）；
