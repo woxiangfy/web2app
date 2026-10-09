@@ -311,6 +311,26 @@ pub fn run() {
             .min_inner_size(400.0, 300.0)
             // 窗口/WebView 的默认底色取加载层的底色：盖住 WebView 初始化与导航提交瞬间的白闪。
             .background_color(bootstrap::SPLASH_BG)
+            // ⚠️⚠️ 模式标记必须排在 OVERLAY_SCRIPT【之前】（初始化脚本按注册顺序执行），
+            // 与 `tabs.rs::create_tab_window` 同一条契约（那里钉的是 tauri.localhost）。
+            //
+            // 首个文档是启动页：`splash://localhost/` —— 会被 wry 的 custom_protocol_workaround
+            // 改写成 `http://splash.localhost/`（Windows 与 Android 都是；`use_https_scheme`
+            // 默认 false，本项目未开）。它必须让 loading.js 以 **splash** 语义运行：
+            //   · splash 语义：SLOW 5s / FAIL 40s 的「启动超时 + 重试」，**不装就绪监听**；
+            //   · overlay 语义：SLOW 8s / FAIL 30s，且 startReadyWatch() 会装空白文档硬上限
+            //     （CAP_MS=15s）—— 启动页 body 里只有 <script>，`bodyEmpty()` 恒真，
+            //     于是【15 秒必然】弹出「页面长时间为空白」失败卡，把一次正常但偏慢的
+            //     启动（DNS/TXT 往返 + 代理起停可能十几秒）误报成加载失败。
+            //
+            // ⚠️ 不能指望 `splash.html` 里内联的那行 `__web2appLoadingMode = 'splash'`：
+            // 它在 <body> 里，永远晚于 document-start 注入的这段脚本。Electron 侧之所以
+            // 一直没事，是因为它的 preload 对内部页面**整体跳过注入**、启动页只跑内联脚本，
+            // 内联顺序才恰好成立（见 electron-app/src/renderer/preload.ts 的 isInternalPage）。
+            .initialization_script(
+                "window.__web2appLoadingMode = (location.hostname === 'splash.localhost' \
+                 || location.protocol === 'splash:') ? 'splash' : 'overlay';",
+            )
             // 加载层：在每个新文档的 document-created 阶段铺满视口，页面渲染出内容后淡出。
             .initialization_script(loading::OVERLAY_SCRIPT)
             // 注入打包配置 JSON 里的 `extra`：以 `window.web2appExtra = <JSON>;` 定义在页面全局。

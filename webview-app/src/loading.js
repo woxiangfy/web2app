@@ -10,6 +10,12 @@
  *                   因此能盖住目标页从空白到渲染出内容之间的白屏，内容就绪后淡出。
  *
  * 模式由注入方在脚本执行前设置 window.__web2appLoadingMode 决定，缺省为 overlay。
+ * ⚠️⚠️ 「脚本执行前」必须是**真的更早**：本脚本经 document-start 注入（WebView2 的
+ *   AddScriptToExecuteOnDocumentCreated / Electron preload）⇒ 写在页面 <body> 里的内联标记
+ *   一定晚于本脚本、**来不及生效**。启动页在 Tauri 侧因此曾被当成目标页跑（overlay 语义），
+ *   命中 15s 空白硬上限而误报失败 —— 现在由建窗时的初始化脚本在 OVERLAY_SCRIPT【之前】
+ *   注入标记（lib.rs::build_main_window / tabs.rs::create_tab_window），静态守卫在
+ *   contract_tests.rs::loading_mode_contract。
  *
  * 状态机：loading（转圈 + 进度条）→ slow（慢提示，仍可自动完成）→ done（淡出移除）
  *                                                              ↘ failed（错误 + 重试）
@@ -31,13 +37,20 @@
   // splash 阶段可能包含域名解析等网络操作，阈值放宽；overlay 阶段是真实页面加载，收紧。
   var SLOW_MS = IS_SPLASH ? 5000 : 8000; // 超过则提示“仍在加载”，不阻断
   var FAIL_MS = IS_SPLASH ? 40000 : 30000; // 超过则判定失败，给出重试入口
-  var CAP_MS = 15000; // 目标页：内容迟迟检测不到时的硬上限，防止永远卡住
+  // 目标页：文档到达但正文【持续空白】的失败硬上限。注意只对“空白文档”生效——
+  // 有任何正文内容都会在检测到的那一拍立即完成，不受此限。
+  var CAP_MS = 15000;
   var MIN_MS = 220; // 最短展示时长：内容秒开时避免“闪一下”造成突兀
   var FADE_MS = 280; // 淡出时长（与 CSS transition 保持一致）
   var POLL_MS = 120; // 内容就绪检测间隔
   var DCL_DELAY = 240; // DOMContentLoaded 后给浏览器留出首帧绘制时间
 
-  var RETRY_URL = 'splash://localhost/retry';
+  // 启动页「重试」的落点。⚠️ 必须用**相对路径**，不能写 `splash://` 开头的绝对 URL：
+  // wry/tauri 在 Windows 与 Android 上会把自定义协议改写成 `http://splash.localhost/`
+  //（custom_protocol_workaround），此时内核根本不认识 `splash:` 这个 scheme，导航直接失败。
+  // 相对路径按当前文档 origin 解析，两种形态都落到 `<origin>/retry`，两侧处理器
+  //（Tauri `loading.rs::handle_splash`、Electron `protocols.ts`）都按 pathname 判 `/retry`。
+  var RETRY_URL = '/retry';
   // tab 首屏占位文档（本地资产页，被 tabs.rs 的模式标记强制为 splash 语义）上的
   // 重试事件。该页不是 splash: 协议页，不能导航 RETRY_URL；改由 Rust 监听此事件
   // 为对应 tab 重走 bootstrap（见 tabs::retry_tab_bootstrap）。
@@ -47,6 +60,22 @@
   var state = 'loading'; // loading | slow | failed | done
   var t0 = Date.now();
   var root, styleHandle, elRing, elBar, elTitle, elDetail, elActions, elBtn;
+
+  // 最近一条页面侧错误（脚本异常 / 资源加载失败）：失败卡诊断行里带上，便于定位
+  // 「文档到了但页面脚本在老版本 WebView 上崩掉」这类问题。document-start 立刻挂，
+  // 才能赶在宿主页面脚本之前捕获。全部 try/catch，不影响宿主页面。
+  var lastErr = '';
+  try {
+    window.addEventListener('error', function (ev) {
+      try {
+        var m = ev && (ev.message || (ev.target && (ev.target.src || ev.target.href)));
+        if (m) lastErr = String(m).slice(0, 160);
+      } catch (e) { /* noop */ }
+    }, true);
+    window.addEventListener('unhandledrejection', function (ev) {
+      try { if (ev && ev.reason) lastErr = String(ev.reason).slice(0, 160); } catch (e) { /* noop */ }
+    });
+  } catch (e) { /* noop */ }
 
   // ---------------------------------------------------------------------
   // 样式：ID 选择器 + !important，抵御宿主页面样式污染
@@ -86,7 +115,7 @@
     '@keyframes w2l-slide{0%{transform:translateX(-105%)}100%{transform:translateX(268%)}}',
     '#__web2app_loading__ .w2l-title{font-size:14px!important;letter-spacing:.02em!important;}',
     '#__web2app_loading__ .w2l-detail{font-size:12px!important;opacity:.62!important;text-align:center!important;',
-    'max-width:min(420px,84vw)!important;}',
+    'max-width:min(420px,84vw)!important;white-space:pre-wrap!important;word-break:break-word!important;}',
     /* 失败态：停掉转圈与进度条，换成警示图标 + 重试按钮 */
     '#__web2app_loading__.w2l-failed .w2l-ring,#__web2app_loading__.w2l-failed .w2l-bar{display:none!important;}',
     '#__web2app_loading__ .w2l-warn{display:none!important;width:40px!important;height:40px!important;',
@@ -299,6 +328,39 @@
     return txt.trim().length === 0;
   }
 
+  /**
+   * 失败卡「现场诊断」：把决定故障层级的关键事实直接显示在屏幕上，免去 adb/logcat。
+   * 各行含义：
+   *   · 地址    —— 仍是 splash.localhost = 导航根本没提交/没离开启动页；
+   *                已是目标域名 = 外链文档已开始加载，问题在网络/TLS/渲染；
+   *   · 状态    —— document.readyState + body 内元素数（页面正文是否真的解析出来）；
+   *   · HTTP    —— PerformanceNavigationTiming.responseStatus（Chromium 123+ 支持，
+   *                老版本 WebView 显示 ?；net 错误时为 0）+ 子资源数 + 导航耗时；
+   *   · UA      —— Android System WebView 的真实版本（老版本 WebView 是「浏览器正常、
+   *                壳内白屏」的高发原因：TLS 证书链 / HTTP2 不兼容）；
+   *   · 脚本错误 —— document-start 起捕获到的最后一条页面错误（如有）。
+   * 只展示在用户自己的屏幕上，不上报、不外发。
+   */
+  function diagText() {
+    try {
+      var L = [];
+      L.push('地址: ' + location.href);
+      var els = document.body ? document.body.getElementsByTagName('*').length : 0;
+      L.push('状态: ' + document.readyState + '，元素 ' + els);
+      try {
+        var nav = performance.getEntriesByType('navigation')[0];
+        var res = performance.getEntriesByType('resource').length;
+        var st = nav ? (('responseStatus' in nav) ? nav.responseStatus : '?') : '无记录';
+        L.push('HTTP: ' + st + '，资源 ' + res + (nav ? '，' + Math.round(nav.duration) + 'ms' : ''));
+      } catch (e2) { L.push('HTTP: 时序不可用'); }
+      L.push('UA: ' + navigator.userAgent);
+      if (lastErr) L.push('脚本错误: ' + lastErr);
+      return L.join('\n');
+    } catch (e) {
+      return '诊断信息不可用: ' + e;
+    }
+  }
+
   /** 内容已就绪 → 平滑淡出并移除，避免画面突兀跳变。 */
   function done() {
     if (state === 'done' || state === 'failed') return;
@@ -350,6 +412,21 @@
     return false;
   }
 
+  // 是否【单窗口启动页】（自定义协议 splash://localhost/）。
+  //
+  // ⚠️ 不能只看 `location.protocol === 'splash:'`：wry/tauri 在 Windows 与 Android 上会把
+  // 自定义协议改写成 `http://splash.localhost/`（wry `custom_protocol_workaround::
+  // apply_uri_work_around`，`use_https_scheme` 默认 false），页面里读到的 protocol 是 `http:`。
+  // 只按 protocol 判定 ⇒ 下面的重试分支永不成立、落到 location.reload()，而启动页的
+  // `handle_splash` / `protocols.ts` 只有命中 `/retry` 才重新走 bootstrap ⇒ 「重试」退化成
+  // 无限重载启动页，永远起不来（Windows 同样中招；Electron 侧 scheme 未被改写，protocol
+  // 仍是 `splash:`，两条判据都成立）。
+  function isSplashDoc() {
+    try {
+      return location.protocol === 'splash:' || location.hostname === 'splash.localhost';
+    } catch (e) { return false; }
+  }
+
   // 是否 Tauri【本地资产页】（tab 首屏占位文档；区别于远程目标页与 splash: 协议启动页）。
   function isTauriLocalAssetDoc() {
     try {
@@ -361,8 +438,8 @@
 
   function onRetry() {
     try {
-      if (IS_SPLASH && location.protocol === 'splash:') {
-        // 单窗口启动页：回到 /retry，由 Rust 重新走完整启动流程
+      if (IS_SPLASH && isSplashDoc()) {
+        // 单窗口启动页：回到 /retry，由壳侧重新走完整启动流程
         //（重新解析地址、重启本地代理、再导航）。
         window.location.href = RETRY_URL;
       } else if (IS_SPLASH && isTauriLocalAssetDoc()) {
@@ -391,7 +468,23 @@
       if (state === 'done' || state === 'failed') return;
       ensureHost();
       if (!bodyEmpty()) return done();
-      if (Date.now() - t0 > CAP_MS) return done(); // 硬上限，避免极端页面把用户永久挡住
+      // 正文持续空白超过硬上限：按【加载失败】处理而不是无条件淡出。
+      // 关键背景：Android WebView 网络失败时停在一个“空白错误文档”（不像桌面端
+      // Chromium / WebView2 会画出带错误码的页面）——旧实现到点 done() 淡出后，
+      // 用户只看到纯白，且 30s 的 FAIL_MS 失败卡还会因 state==='done' 被静默吞掉，
+      // 表现为「转圈十几秒 → 白屏，没有原因也没有重试」。改成失败卡后可直接点重试；
+      // 内容在这之后才到达的极端慢页，bodyEmpty() 会在之前任一拍提前 done()，不受影响。
+      if (Date.now() - t0 > CAP_MS) {
+        // 诊断行直接拼在卡片上：用户截图即可判断「停在启动页 / 外链空白错误文档 /
+        // 页面脚本崩溃」哪一种，无需 adb。文案不再把锅单方面推给网络——手机浏览器
+        // 能打开而壳内空白时，常见根因是系统内置 WebView 版本过旧（见 UA 行）。
+        toFail(
+          '加载失败',
+          '页面长时间为空白。若手机浏览器能打开同一网址，请把下方信息反馈给打包者：\n' +
+          diagText()
+        );
+        return;
+      }
       setTimeout(tick, POLL_MS);
     }
     function onDcl() {
@@ -449,11 +542,20 @@
 
     // 对外 API：壳通过 window.eval 驱动异常态展示（Tauri），
     // 或经 IPC 转交（Electron 真实页面：加载层与 preload 同在隔离世界）。
+    // fail(t, d, soft)：soft 为真时，仅当页面正文仍为空白才接管 —— 供 Rust 侧
+    // 可达性探测使用，避免探测假阴性（如系统信任库认可但探测端不信任的企业根证书）
+    // 把其实已经渲染成功的页面盖成失败卡。
     window.__web2appLoading = {
       state: function () { return state; },
       hide: function () { done(); },
       slow: function (t) { toSlow(t || '网络较慢，仍在努力加载…'); },
-      fail: function (t, d) { toFail(t, d); }
+      fail: function (t, d, soft) {
+        if (soft) {
+          try { if (!bodyEmpty()) return; } catch (e) { /* 判定失败则正常接管 */ }
+        }
+        // 接管失败态时同样附现场诊断（与 CAP 失败卡同源信息），方便凭截图定位。
+        toFail(t, (d || '请检查网络连接后重试。') + '\n' + diagText());
+      }
     };
 
     applyPendingFail();

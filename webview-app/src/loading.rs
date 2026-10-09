@@ -15,8 +15,10 @@
 //! 容错：
 //!   · 慢 / 超时：由 JS 侧计时器自行降级（慢提示 → 超时错误 + 重试）。
 //!   · 解析失败 / 代理启动失败：Rust 侧通过 `show_error` 把错误态推给当前页面。
-//!   · 重试：splash 阶段跳 `splash://localhost/retry`（重新走一遍完整启动流程），
+//!   · 重试：splash 阶段跳**相对路径** `/retry`（重新走一遍完整启动流程），
 //!     overlay 阶段直接刷新当前地址。
+//!     ⚠️ 必须是相对路径：页面里的协议已被 wry 改写成 `http://splash.localhost/`，
+//!     绝对 URL `splash://localhost/retry` 在内核里是不认识的 scheme，导航会直接失败。
 
 use std::borrow::Cow;
 use tauri::{http::Request, http::Response, AppHandle, Manager, UriSchemeContext};
@@ -45,6 +47,17 @@ pub const TOKEN_LOADING_JS: &str = "__WEB2APP_LOADING_JS__";
 ///
 /// 通过 `WebviewWindowBuilder::initialization_script` 注册，在 document-created 阶段执行，
 /// 早于页面自身脚本与首次绘制 —— 这是它能盖住白屏、又不会让页面"闪一下再被遮住"的关键。
+///
+/// ⚠️⚠️ 注册方**必须**在本脚本【之前】再注册一条模式标记脚本（初始化脚本按注册顺序执行），
+/// 否则启动页会被当成目标页跑（overlay 语义），命中 15s 空白文档硬上限：
+/// ```text
+/// .initialization_script("window.__web2appLoadingMode = (location.hostname === \
+///     'splash.localhost' || location.protocol === 'splash:') ? 'splash' : 'overlay';")
+/// .initialization_script(loading::OVERLAY_SCRIPT)
+/// ```
+/// 单窗口见 `lib.rs::build_main_window`（实为 `run()` 内的闭包），多页签见
+/// `tabs.rs::create_tab_window`（那里钉的是 `tauri.localhost`）。
+/// 静态守卫：`contract_tests.rs::loading_mode_contract`。
 pub const OVERLAY_SCRIPT: &str = LOADING_JS;
 
 /// 启动页地址。
@@ -269,5 +282,101 @@ mod tests {
         let s = OVERLAY_SCRIPT.trim();
         assert!(s.starts_with("/*"), "脚本应以注释开头");
         assert!(s.ends_with("})();"), "脚本应以 IIFE 闭合结束");
+    }
+
+    /// overlay 空白文档超时：必须进入失败卡，而不是无条件淡出露出空白错误文档。
+    ///
+    /// 背景（Android 真机问题）：WebView 网络失败停在空白错误文档，旧实现在 CAP_MS
+    /// 到点时无条件 `done()`，淡出后只剩纯白，30s 的失败卡又被 `state==='done'` 吞掉。
+    #[test]
+    fn overlay_empty_body_cap_shows_failure_card_not_blank() {
+        let js = OVERLAY_SCRIPT;
+        assert!(
+            !js.contains("> CAP_MS) return done()"),
+            "空白文档到点不能再无条件 done()，否则 Android 网络失败时淡出露出纯白页"
+        );
+        // 新实现：CAP 分支调用 toFail 给出失败态（含重试按钮）。
+        assert!(
+            js.contains("页面长时间为空白"),
+            "CAP 空白文档应给出可识别的失败文案"
+        );
+    }
+
+    /// Rust 侧可达性探测以 soft 方式调用 fail：页面已有正文时探测假阴性必须让位。
+    #[test]
+    fn overlay_fail_api_supports_soft_mode() {
+        let js = OVERLAY_SCRIPT;
+        assert!(
+            js.contains("fail: function (t, d, soft)"),
+            "fail API 必须支持第三个 soft 参数"
+        );
+        assert!(
+            js.contains("if (!bodyEmpty()) return"),
+            "soft 模式下页面已有正文时应忽略探测失败，避免盖住真实页面"
+        );
+    }
+
+    /// 失败卡必须携带「现场诊断」：用户凭一张截图即可区分故障层级，无需 adb/logcat。
+    ///
+    /// 真机问题（浏览器能开、壳内白屏）排查中确认：仅靠笼统的「请检查网络」文案会把
+    /// 排查方向带偏。诊断至少要能回答三件事：①当前文档地址（是否仍停在 splash）；
+    /// ②导航的 HTTP 状态 / 资源数；③WebView 真实 UA（系统内置 WebView 过旧是
+    /// 「浏览器正常、壳内 TLS/渲染失败」的高发根因）。
+    #[test]
+    fn overlay_failure_card_carries_on_screen_diagnostics() {
+        let js = OVERLAY_SCRIPT;
+        // 地址 + readyState/元素数
+        assert!(
+            js.contains("地址: ' + location.href"),
+            "诊断应包含当前文档地址"
+        );
+        // 导航时序：HTTP 状态（Chromium 123+ 才有 responseStatus，老 WebView 显示 ?）
+        assert!(
+            js.contains("getEntriesByType('navigation')"),
+            "诊断应读取 PerformanceNavigationTiming"
+        );
+        assert!(js.contains("responseStatus"), "诊断应包含导航 HTTP 状态");
+        // WebView 真实版本
+        assert!(
+            js.contains("UA: ' + navigator.userAgent"),
+            "诊断应包含 navigator.userAgent（识别系统 WebView 版本）"
+        );
+        // 多行文本必须能换行显示，否则诊断挤成一行不可读
+        assert!(
+            js.contains("white-space:pre-wrap"),
+            "失败卡详情样式必须保留换行"
+        );
+        // CAP 分支与壳侧 fail API 两条路径都要附上诊断
+        assert!(js.contains("diagText()"), "失败卡文案应拼接 diagText()");
+    }
+
+    /// 启动页「重试」必须走**相对路径** + 改写后的 hostname 判定。
+    ///
+    /// 背景（2026-10-09 排查 Android 白色启动页时定位的第二条必然路径）：wry 的
+    /// `custom_protocol_workaround` 在 Windows 与 Android 上把 `splash://localhost/` 改写成
+    /// `http://splash.localhost/`（`use_https_scheme` 默认 false），页面里 `location.protocol`
+    /// 是 `http:` ⇒ 旧写法 `location.protocol === 'splash:'` **恒不成立**，重试落到
+    /// `location.reload()`（只重载 `/`）；而 `/retry` 才是唯一触发 bootstrap 的路径
+    /// （`handle_splash` / Electron `protocols.ts` 都按 pathname 判）⇒ 「停在启动页时点重试
+    /// 永远起不来」。Windows 同样中招；Electron 侧 scheme 未被改写才一直看似正常。
+    #[test]
+    fn retry_uses_relative_path_and_rewritten_hostname() {
+        let js = OVERLAY_SCRIPT;
+        assert!(
+            js.contains("var RETRY_URL = '/retry'"),
+            "重试落点必须是相对路径 '/retry'（协议被改写后绝对 URL 导航必失败）"
+        );
+        assert!(
+            !js.contains("splash://localhost/retry"),
+            "不得再出现绝对 URL splash://localhost/retry —— 内核不认识该 scheme"
+        );
+        assert!(
+            js.contains("location.hostname === 'splash.localhost'"),
+            "启动页判定必须包含改写后的 hostname（http://splash.localhost/）"
+        );
+        assert!(
+            js.contains("function isSplashDoc()") && js.contains("if (IS_SPLASH && isSplashDoc())"),
+            "onRetry 必须走 isSplashDoc()，不得退回 `location.protocol === 'splash:'` 单一判据"
+        );
     }
 }

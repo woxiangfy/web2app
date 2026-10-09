@@ -338,13 +338,20 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
         let _ = (&nav.user, &nav.pass, &nav.use_local_proxy);
         match Url::parse(&nav.url) {
             Ok(url) => {
-                if let Err(e) = window.navigate(url) {
-                    crate::loading::show_error(
+                match window.navigate(url) {
+                    Ok(()) => {
+                        // 导航已提交：并发一次轻量可达性探测。Android WebView 网络失败时
+                        // 停在「空白错误文档」（桌面端浏览器那种带错误码的页面在 WebView 上
+                        // 不渲染），仅靠加载层固定超时只能给通用文案；探测可在数秒内把
+                        // DNS / 连接 / 超时 / TLS 的具体原因推给失败卡。
+                        spawn_reachability_probe(app.clone(), label, nav.url.clone());
+                    }
+                    Err(e) => crate::loading::show_error(
                         app,
                         label,
                         "加载失败",
                         &format!("无法打开页面：{e}"),
-                    );
+                    ),
                 }
             }
             Err(_) => crate::loading::show_error(app, label, "加载失败", "应用配置的地址不合法"),
@@ -379,6 +386,169 @@ pub(crate) fn navigate_window(
     // —— 也就是用户看到的『弹窗新 tab 永远停在 app_url』。
     if let Ok(parsed) = url::Url::parse(&nav.url) {
         let _ = window.navigate(parsed);
+    }
+}
+
+// ===========================================================================
+// 非 Windows（Android 等）导航后的可达性探测
+// ===========================================================================
+//
+// 为什么需要：Android WebView 加载失败（DNS 失败 / 连接被拒 / 超时 / TLS 握手失败）时
+// 既不触发应用可订阅的错误回调，也不像桌面端 Chromium 那样画出带错误码的页面 ——
+// 文档停在一个【空白错误文档】上，用户只能看到加载层转十几秒后淡出成纯白。
+// 导航提交后并发一次 Rust 侧轻量 HTTP 探测（reqwest + rustls 是非 Windows 既有的
+// 代理依赖，零新增 crate），在数秒内判定失败类别，把可看懂的原因推给加载层失败卡。
+//
+// 设计要点：
+//   · 探测与导航【并发】，不阻塞、不延迟真实页面加载；
+//   · 收到任意 HTTP 响应（含 4xx/5xx）即视为传输层可达 —— 白屏与网络无关，不插手；
+//   · 推给加载层时带 soft 标记（loading.js `fail(t,d,soft)`）：页面若已渲染出正文，
+//     探测结论让位（防止企业根证书等场景下 rustls 与系统信任库判定不一致的假阴性）。
+
+/// 探测使用的移动端浏览器 UA：与 Android WebView 的 UA 形态保持一致，
+/// 避免个别按 UA 分流 / 挑战的网关（WAF、反爬）对探测与真实页面给出不同响应。
+#[cfg(not(windows))]
+const PROBE_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 \
+(KHTML, like Gecko) Version/4.0 Chrome/126.0.0.0 Mobile Safari/537.36";
+
+/// 连接超时：给移动网络（弱网 / 丢包）留余量，但要早于加载层 30s 失败超时，
+/// 保证探测结论能先于通用超时文案到达。
+#[cfg(not(windows))]
+const PROBE_CONNECT_TIMEOUT_SECS: u64 = 8;
+
+/// 整个请求（拿到响应头）的总超时。
+#[cfg(not(windows))]
+const PROBE_TOTAL_TIMEOUT_SECS: u64 = 20;
+
+/// 可达性探测的失败类别。
+///
+/// 刻意与 reqwest 的具体错误类型解耦：`probe_failure_message` 是纯函数，
+/// 在【所有平台】（含 Windows 宿主 `cargo test`）都可单测；只有错误归类与
+/// HTTP 探测本体依赖 reqwest，gate 在 `#[cfg(not(windows))]`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailure {
+    /// TCP 连接建立失败（含 DNS 解析失败、端口不可达）。
+    Connect,
+    /// 连接 / 等待响应超时（弱网或站点不可达）。
+    Timeout,
+    /// TLS 握手 / 证书校验失败。
+    Tls,
+    /// 请求构造本身不合法（正常不会出现：URL 已在 prepare_navigation 校验过）。
+    BadRequest,
+    /// 其它未细分错误。
+    Other,
+}
+
+/// 把失败类别 + 主机名映射为可展示的「标题 + 详情」。
+///
+/// `host` 只放主机名，绝不放完整 URL（直连地址已剥离 userinfo，代理地址可能带入口令牌，
+/// 都不应出现在面向用户的文案里）。
+fn probe_failure_message(kind: ProbeFailure, host: &str) -> (String, String) {
+    match kind {
+        ProbeFailure::Connect => (
+            "无法连接服务器".to_string(),
+            format!("无法与 {host} 建立连接（域名解析失败或网络不可达），请检查网络，或切换 Wi-Fi / 移动网络后重试。"),
+        ),
+        ProbeFailure::Timeout => (
+            "连接超时".to_string(),
+            format!("连接 {host} 超时，当前网络可能无法访问该站点，请切换网络后重试。"),
+        ),
+        ProbeFailure::Tls => (
+            "安全连接失败".to_string(),
+            format!("与 {host} 的加密连接未能建立（证书或 TLS 握手失败），请检查网络环境后重试。"),
+        ),
+        ProbeFailure::BadRequest => (
+            "地址有误".to_string(),
+            format!("无法向 {host} 发起请求，应用配置的地址可能不正确，请联系打包者检查。"),
+        ),
+        ProbeFailure::Other => (
+            "页面无法打开".to_string(),
+            format!("访问 {host} 失败，请检查网络连接后重试。"),
+        ),
+    }
+}
+
+/// 导航提交后发起可达性探测；失败时在主线程把具体原因 eval 给加载层失败卡。
+///
+/// `url` 即 WebView 实际导航的地址（直连模式已剥离 userinfo；代理模式是 127.0.0.1）。
+/// `AppHandle` 按值传入：探测跑在 `'static` 的 Tokio 任务里，不能借用调用方的引用。
+#[cfg(not(windows))]
+fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String) {
+    let host = Url::parse(&url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "目标服务器".to_string());
+    // label 是调用方的 &str（非 'static），spawn 任务要求 'static 捕获，故先转成 owned。
+    let label = label.to_string();
+
+    tauri::async_runtime::spawn(async move {
+        let Some(kind) = probe_once(&url).await else {
+            return;
+        };
+        let (title, detail) = probe_failure_message(kind, &host);
+        let a = app.clone();
+        // eval 必须回主线程（Tauri 的 WebView 操作都要求主线程）。
+        let _ = app.run_on_main_thread(move || {
+            let Some(w) = a.get_webview_window(&label) else {
+                return;
+            };
+            // 第三个参数 1 = soft：页面若已渲染出正文，loading.js 会忽略本次结论。
+            let js = format!(
+                "try{{window.__web2appLoading&&window.__web2appLoading.fail({t},{d},1);}}catch(e){{}}",
+                t = crate::loading::js_str(&title),
+                d = crate::loading::js_str(&detail)
+            );
+            let _ = w.eval(js.as_str());
+        });
+    });
+}
+
+/// 发起一次轻量探测，返回失败类别；收到任意 HTTP 响应（含 4xx/5xx）即视为可达。
+#[cfg(not(windows))]
+async fn probe_once(url: &str) -> Option<ProbeFailure> {
+    use std::time::Duration;
+
+    let client = match reqwest::Client::builder()
+        .user_agent(PROBE_USER_AGENT)
+        .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PROBE_TOTAL_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Some(ProbeFailure::Other),
+    };
+
+    // 只取响应头、不读正文（不额外消耗用户流量，也不关心正文内容）。
+    match client.get(url).send().await {
+        Ok(_) => None,
+        Err(e) => Some(classify_probe_error(&e)),
+    }
+}
+
+/// 把 reqwest 错误归类为 [`ProbeFailure`]。
+///
+/// reqwest/rustls 的 TLS 错误通常也挂在 connect 阶段下，因此对 connect 错误
+/// 再沿错误源链找证书 / TLS / 握手关键字做一次细分。
+#[cfg(not(windows))]
+fn classify_probe_error(e: &reqwest::Error) -> ProbeFailure {
+    if e.is_timeout() {
+        ProbeFailure::Timeout
+    } else if e.is_connect() {
+        let mut source: Option<&(dyn std::error::Error + 'static)> =
+            Some(e as &(dyn std::error::Error + 'static));
+        while let Some(err) = source {
+            let msg = err.to_string().to_ascii_lowercase();
+            if msg.contains("certificate") || msg.contains("tls") || msg.contains("handshake") {
+                return ProbeFailure::Tls;
+            }
+            source = err.source();
+        }
+        ProbeFailure::Connect
+    } else if e.is_request() {
+        ProbeFailure::BadRequest
+    } else {
+        ProbeFailure::Other
     }
 }
 
@@ -452,5 +622,35 @@ mod tests {
         // scheme 判定与 sidecar 同源（match http|https）——这里钉住 origin/白名单对
         // 非 http(s) 输入的行为，真正的端到端报错由 sidecar 的 --help 探针覆盖。
         assert_eq!(origin_of(&Url::parse("file:///c:/x").unwrap()), None);
+    }
+
+    #[test]
+    fn probe_failure_messages_include_host_and_distinct_reason() {
+        // 每种类别给出不同标题、且详情必须包含主机名（方便用户判断是哪个站点不通）。
+        let host = "ai260926.osfipin.com";
+        let cases = [
+            (ProbeFailure::Connect, "无法连接服务器", "域名解析"),
+            (ProbeFailure::Timeout, "连接超时", "超时"),
+            (ProbeFailure::Tls, "安全连接失败", "TLS"),
+            (ProbeFailure::BadRequest, "地址有误", "ai260926.osfipin.com"),
+            (ProbeFailure::Other, "页面无法打开", "ai260926.osfipin.com"),
+        ];
+        let mut titles = std::collections::HashSet::new();
+        for (kind, title, detail_kw) in cases {
+            let (t, d) = probe_failure_message(kind, host);
+            assert_eq!(t, title);
+            assert!(d.contains(host), "{t:?} 详情应包含主机名：{d}");
+            assert!(d.contains(detail_kw), "{t:?} 详情应含 {detail_kw:?}：{d}");
+            assert!(titles.insert(t.clone()), "失败标题不能重复：{t}");
+        }
+    }
+
+    #[test]
+    fn probe_failure_message_never_embeds_credentials_or_full_url() {
+        // 防护：即便调用方误把带 userinfo / 令牌的完整 URL 传进来，文案映射只接收 host。
+        // 这里钉住函数签名语义：host 原样出现，而 userinfo 这类内容不会被函数自行引入。
+        let (_t, d) = probe_failure_message(ProbeFailure::Connect, "127.0.0.1:59123");
+        assert!(d.contains("127.0.0.1:59123"));
+        assert!(!d.contains("token="));
     }
 }

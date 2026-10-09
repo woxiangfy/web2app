@@ -31,7 +31,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
 | 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
-| 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏 | Windows / Android |
+| 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏；目标页加载失败时加载层转失败卡（含「重试」）。**Android 导航后另发一次 Rust 侧可达性探测**（v1.60），把 DNS/连接/超时/TLS 的具体原因提前显示在失败卡上；**v1.61 起失败卡自带「现场诊断」**（当前地址 / readyState / HTTP 状态 / 资源数 / WebView UA / 页面脚本错误），截图即可区分「没离开启动页」与「外链没渲染」，无需 adb；**v1.62 修正启动页的加载层语义与重试落点**：①模式标记改由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入（`lib.rs::build_main_window`，此前只有 `tabs.rs` 有）——启动页不再被当成目标页跑，正常偏慢的启动不会被 overlay 的 15s 空白硬上限误报成失败；②启动页判定加改写后的 hostname（`splash.localhost`），重试改用**相对路径** `/retry`（此前 `location.protocol === 'splash:'` 在 wry 把协议改写成 `http://splash.localhost/` 后恒不成立，重试退化为只刷新 `/` 的死循环） | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 登录密码保存 | 网页登录表单提交后弹出「保存密码？」气泡，保存后下次访问自动填充（v1.59 起显式开启 WebView2 `IsPasswordAutosaveEnabled`——该开关默认 **false**，与 Electron 壳的 Chromium 默认行为对齐；老运行时不支持 `ICoreWebView2Settings4` 时静默跳过，不影响其它钩子）；已保存密码随设置页「清除全部浏览数据」一并清除 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
@@ -145,7 +145,7 @@ webview-app/
 ├── src/
 │   ├── main.rs             # 桌面入口（薄壳，装配在 lib.rs）
 │   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
-│   ├── contract_tests.rs   # 静态契约测试（IPC 命令注册表 / capabilities 与事件名字面量；仅 cargo test 编译）
+│   ├── contract_tests.rs   # 静态契约测试（IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 加载层模式标记；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
 │   ├── bootstrap.rs        # 后台解析真实地址 → 就绪后导航
 │   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
@@ -338,7 +338,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-09 v1.59 实测 179 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 106；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-09 v1.62 实测 186 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 113；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -630,6 +630,14 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
 - **全局快捷键没反应**：先在设置页（Shift+F1）确认唤醒快捷键**已配置**（默认不启用）；若已配置，
   再排查是否与其他软件冲突（代码只在「按下」那一刻触发）。
 - **Android 上访问 http 本地代理被拦**：移动端已配置 `INTERNET` 权限并允许 localhost 明文，正常可用。
+- **Android 打开后转圈十几秒 → 白屏 / 失败卡**：**不能直接断定是设备网络不通**（v1.60 曾这样误判，被真机反馈纠正：手机浏览器访问同一网址完全正常）。v1.61 起失败卡自带「现场诊断」（当前地址 / readyState / HTTP 状态 / 子资源数 / WebView UA / 页面脚本错误），凭一张截图即可分层定位：
+  1. 「地址」仍是 `http://splash.localhost/`：导航根本没离开启动页 → 壳内导航链问题（不是网络）；已是目标域名：外链文档已开始加载但没渲染出正文 → 网络 / TLS / WebView 内核层。
+  2. 「HTTP」为 0 / 无记录且手机浏览器能打开同一网址：先看「UA」行的 WebView 版本——无 GMS 的国产 ROM 上 **Android System WebView 可能长期不更新**，过旧内核在新证书链（TLS 1.3 / 现代根证书）或 HTTP/2 上会失败，而手机自带浏览器多为独立更新的内核，二者不矛盾；可到「设置 → 应用 → Android System WebView」更新或启用后重试。
+  3. 失败卡上「无法连接服务器 / 连接超时 / 安全连接失败」是 v1.60 Rust 侧 reqwest 探测的**独立**结论（与 WebView 不是同一网络栈），仅作参考；浏览器能打开时以诊断卡为准。
+  4. 仍需逐字网络错误时再抓 `adb logcat | findstr /i "chromium net::"`（或 Android Studio Logcat 过滤 `chromium` / `net::`）；旧打包产物不含诊断卡，必须用当前代码**重新打包**。
+- **v1.62 修正的两条「必然」路径（与网络无关，出问题时可据此排除）**：
+  1. **启动页的加载层语义**：启动页必须走 splash 语义（SLOW 5s / FAIL 40s 的「启动超时 + 重试」、不装就绪监听）。模式标记 `window.__web2appLoadingMode` 由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入；漏掉它不会报错，只会让启动页装上 overlay 的空白文档硬上限（CAP 15s；启动页 body 只有 `<script>`，`bodyEmpty()` 恒真）⇒ 一次正常但偏慢的启动被判「页面长时间为空白」。静态守卫 `contract_tests::loading_mode_contract`。
+  2. **启动页「重试」的落点**：wry 在 Windows/Android 上把 `splash://localhost/` 改写成 `http://splash.localhost/`，页内 `location.protocol` 是 `http:` ⇒ 判定必须看 hostname（`splash.localhost`），跳转必须用**相对路径** `/retry`（绝对 URL 的 scheme 内核不认）。判错时的表象是「点重试只刷新启动页、永远起不来」。契约测试 `loading::tests::retry_uses_relative_path_and_rewritten_hostname`。
 - **Android 端应用的数据存在哪？**（下文中 `<pkg>` = 构建时的应用包名，即打包工作流在 `android init` 前
   由 `app_name` 清洗后写入 `tauri.conf.json` 的 `identifier` = **`com.web2app.<app_name 清洗值>`**
   （仓库里 `tauri.conf.json` 的静态值只是占位；本地不跑工作流直接 `cargo tauri android` 构建时才会用到它）；
