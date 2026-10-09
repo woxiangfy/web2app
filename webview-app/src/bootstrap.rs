@@ -48,6 +48,202 @@ impl Default for ProxyTask {
     }
 }
 
+/// 「首个文档是否已加载完成」的登记表（label → 已完成过一次页面加载）。
+///
+/// ⚠️⚠️ **这是 Android 启动期一切壳侧动作的前置条件**（2026-10-09 第二次真机取证定到的根因）。
+///
+/// Android 上壳侧对 WebView 的操作全部走 wry 的 main-pipe 消息队列
+///（`wry/src/android/main_pipe.rs`），而队列里两条关键消息在**目标未就绪时被静默丢弃**：
+///   · `WebViewMessage::LoadUrl` 与 `WebViewMessage::Eval` 的处理体都是
+///     `if let Some(webview) = get_webview(activity_id) { … }` —— 取不到就什么也不做，
+///     既不报错也不重试；
+///   · 那个 webview 只在 `CreateWebView`（建窗时发出）**处理完之后**才写入登记表。
+///
+/// 更关键的是**初始 splash 导航是异步排队的**：`CreateWebView` 内部走
+/// `load_url(…, main_thread = true)` → Kotlin `loadUrlMainThread`（`RustWebView.kt` 里是
+/// `post { loadUrl(url) }`，排到视图消息队列尾）；而之后的 `navigate` 走的是**同步** `loadUrl`。
+/// 直连配置下 `prepare_navigation` 只需毫秒级（无域名解析、无本地代理），于是「导航」几乎必然
+/// **先于**那条 post 出去的 splash 加载执行 —— 随后 splash 加载把导航**整体覆盖**，页面永远停在
+/// 启动页。真机截图与之逐条吻合：`地址: http://splash.localhost/`、`元素 3`、HTTP 200。
+/// 同一时刻那几条进度 `eval` 落在 splash 文档 document-start 脚本**之前**，
+/// `window.__web2appLoading` 尚未定义 ⇒ `try{window.__web2appLoading&&…}` 静默短路
+///（真机证据：40s 卡上四条阶段进度**一条都没有**）。
+///
+/// 因此非 Windows（Android）启动期必须先等**首个文档加载完成**，再做解析 / 推送 / 导航。
+/// Windows 不需要也不该加：WebView2 路径的脚本注入与导航时序由 wry 自己保证，凭空加等待只会
+/// 推迟启动，还引入一个新的时序假设。
+#[cfg(not(windows))]
+#[derive(Default)]
+pub(crate) struct BootReady(std::sync::Mutex<std::collections::HashSet<String>>);
+
+#[cfg(not(windows))]
+impl BootReady {
+    fn mark(&self, label: &str) {
+        if let Ok(mut g) = self.0.lock() {
+            g.insert(label.to_string());
+        }
+    }
+
+    /// ⚠️ `Started` 必须清标记：`/retry` 会**重新加载启动页**，若沿用第一次的就绪标记，
+    /// 重试时又会把导航发在 splash 之前 —— 变成「首启修好了、重试仍然卡死」。
+    fn clear(&self, label: &str) {
+        if let Ok(mut g) = self.0.lock() {
+            g.remove(label);
+        }
+    }
+
+    fn is_ready(&self, label: &str) -> bool {
+        self.0.lock().map(|g| g.contains(label)).unwrap_or(false)
+    }
+}
+
+/// 页面加载事件的落点（由建窗时注册的 `on_page_load` 调用；非 Windows 才有意义）。
+///
+/// wry Android 的 `ON_LOAD_HANDLER` 由 `RustWebViewClient.onPageStarted / onPageFinished`
+/// 驱动（`tauri-runtime-wry` 里是**无条件** `with_on_page_load_handler`），所以 Android 上这个
+/// 信号真实可用 —— 这是本项目在 Android 侧唯一可靠的「文档已就绪」判据（轮询 URL 不行：
+/// `GetUrl` 同样走 main-pipe，webview 未就绪时拿不到结果）。
+#[cfg(not(windows))]
+pub(crate) fn on_page_load(app: &tauri::AppHandle, label: &str, finished: bool) {
+    let ready = app.state::<BootReady>();
+    if finished {
+        ready.mark(label);
+    } else {
+        ready.clear(label);
+    }
+}
+
+/// 启动期等待「首个文档加载完成」的预算（毫秒）。
+///
+/// 启动页是本地自定义协议页（真机实测 HTTP 200 / 125ms），正常几十毫秒即完成；5s 是给冷启动的
+/// WebView 留余量。**超时不致命**：继续按原流程走（退化成「不等待」的旧行为），只在卡片上留一行
+/// 说明 —— 绝不因为拿不到页面加载事件就把启动彻底卡死。
+///
+/// 分支口径沿用本模块既有约定（`not(windows)`，与可达性探测那部分一致）：本项目实际发布的
+/// 非 Windows 目标就是 Android；若将来跑桌面 Linux 而 wry 不上报 page load，最坏也只是每次启动
+/// 多等这个预算，仍然能正常启动。
+#[cfg(not(windows))]
+const SPLASH_READY_BUDGET_MS: u64 = 5000;
+
+/// 在后台线程等待首个文档加载完成（仅非 Windows；理由见 [`BootReady`] 的长注释）。
+///
+/// 返回 `true` = 拿到了加载完成事件；`false` = 预算内没拿到（页面加载事件缺失）。
+#[cfg(not(windows))]
+fn wait_first_page_ready(app: &tauri::AppHandle, label: &str) -> bool {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(SPLASH_READY_BUDGET_MS);
+    while std::time::Instant::now() < deadline {
+        if app.state::<BootReady>().is_ready(label) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    false
+}
+
+// ===========================================================================
+// 非 Windows（Android 等）：导航后的「落点校验 + 有限重试」
+// ===========================================================================
+//
+// 为什么需要：即使启动期已经等了首个文档就绪（见 [`BootReady`]），Android 上「导航是否
+// 真的落到目标地址」**仍然没有可靠信号** —— wry 的 `navigate()` 恒返回 `Ok(())`（它只是
+// 往 main-pipe 投一条消息），`onReceivedError` 也不向壳层透出任何网络错误。真机因此出现过
+// 「导航确实发起了、地址却永远停在 `splash.localhost`」。
+//
+// 与其继续推断「启动页的异步加载与导航谁先谁后」，这里直接看**结果**：导航后隔一小段
+// 读一次 WebView 的真实地址，若仍停在启动页就重发导航。这条判据不依赖任何时序假设，
+// 也不依赖页面加载事件是否送达 —— 它是「导航到底有没有生效」的终局检验。
+//
+// 重发是安全的：`loadUrl` 语义上是「加载这个地址」的幂等操作，重复发起只会以最后一次为准，
+// 不会叠加副作用；而真出问题时（导航被启动页挤掉）重发正是所需的那一次。
+
+/// 导航发起后隔多久校验一次落点（毫秒）。
+///
+/// 取值理由：启动页是本地页面（真机实测 125ms 完成），而目标地址的 `loadUrl` 一旦被 WebView
+/// 接受，`getUrl()` 会**立即**返回新地址（不等加载完成）。500ms 足够区分「已提交」与「没提交」，
+/// 又不会让正常启动多等。
+#[cfg(not(windows))]
+const NAV_COMMIT_CHECK_MS: u64 = 500;
+
+/// 落点仍在启动页时最多重发几次导航。
+///
+/// 只重发 2 次：第一次命中「导航被启动页挤掉」这一根因；第二次兜住「重发时启动页又抢了一次」
+/// 的极端情形。再多没有新增覆盖面，只会拖长失败时的等待。
+#[cfg(not(windows))]
+const NAV_COMMIT_MAX_RETRY: u32 = 2;
+
+/// 该地址是否仍是本地启动页。
+///
+/// ⚠️ **两种形态都要认**：`splash://localhost/`（`loading::splash_url()` 构造的）与
+/// `http://splash.localhost/` —— wry 的 `custom_protocol_workaround` 在 Windows/Android 都会
+/// 把前者改写成后者（`use_https_scheme` 默认 false，本项目未开），所以 WebView 里**真实存在**的
+/// 地址是后者。只认自定义协议会在真机上漏判（这正是 v1.62 修过的那类判据坑）。
+#[cfg(not(windows))]
+fn is_splash_url(url: &Url) -> bool {
+    url.scheme() == "splash" || url.host_str() == Some("splash.localhost")
+}
+
+/// 导航后校验落点；仍停在启动页则重发导航（仅非 Windows）。
+///
+/// ⚠️ **必须跑在独立线程**：调用方 `navigate_main` 在主线程执行，而这里要 sleep 且读地址 ——
+/// `WebviewWindow::url()` 在 Android 上走 main-pipe（`GetUrl` 消息由主线程 Looper 消费），
+/// 放在主线程会把 UI 冻住。
+///
+/// 正常启动（导航生效）时它只是一次 500ms 后的读地址 + 返回，零副作用；只有异常路径才会重发。
+#[cfg(not(windows))]
+fn ensure_navigation_committed(app: &tauri::AppHandle, label: &str, target: &Url) {
+    let app = app.clone();
+    let label = label.to_string();
+    let target = target.clone();
+    std::thread::spawn(move || {
+        for attempt in 1..=NAV_COMMIT_MAX_RETRY {
+            std::thread::sleep(std::time::Duration::from_millis(NAV_COMMIT_CHECK_MS));
+            let Some(window) = app.get_webview_window(&label) else {
+                return;
+            };
+            match window.url() {
+                // 已离开启动页 = 导航提交成功，正常启动走这条分支。
+                Ok(cur) if !is_splash_url(&cur) => {
+                    if attempt > 1 {
+                        note(&app, &label, &format!("重发导航已生效（第 {attempt} 次）"));
+                    }
+                    return;
+                }
+                Ok(_) => note(
+                    &app,
+                    &label,
+                    &format!(
+                        "导航未落到目标地址（仍停在启动页），正在重发（第 {attempt}/{NAV_COMMIT_MAX_RETRY} 次）…"
+                    ),
+                ),
+                // 读不到地址不是重发的理由，但也不该吞掉 —— 写进卡片供真机判读。
+                Err(e) => note(
+                    &app,
+                    &label,
+                    &format!("读取当前地址失败（{e}），仍尝试重发导航"),
+                ),
+            }
+            let a = app.clone();
+            let l = label.clone();
+            let u = target.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(w) = a.get_webview_window(&l) {
+                    let _ = w.navigate(u);
+                }
+            });
+        }
+        // 走到这里 = 每一轮校验都还停在启动页。把「重发也没用」说清楚 —— 它的分诊含义
+        // 与「导航根本没发出去」不同：地址是对的、导航也发了，是 WebView 没提交。
+        note(
+            &app,
+            &label,
+            &format!(
+                "重发导航 {NAV_COMMIT_MAX_RETRY} 次后仍未离开启动页（导航未提交，与网络无关）"
+            ),
+        );
+    });
+}
+
 /// 是否启用【本地反向代理】。
 ///
 /// Windows：需“启用代理且没有配置外部代理”（有外部代理时走 `--proxy-server`）。
@@ -177,6 +373,24 @@ pub(crate) fn bootstrap_for_label(app: tauri::AppHandle, label: String) {
 fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool) {
     let use_local_proxy = local_proxy_enabled();
     std::thread::spawn(move || {
+        // ⚠️⚠️ Android：先等首个文档（启动页）加载完成，再解析 / 推送 / 导航。
+        // 不等它就会「导航被 post 出去的 splash 加载覆盖 + 进度 eval 落在 document-start 之前
+        // 被静默丢弃」——根因、上游代码位置与真机证据见 [`BootReady`] 的长注释。
+        // Windows 不加此等待（WebView2 的注入/导航时序由 wry 自己保证）。
+        #[cfg(not(windows))]
+        if !wait_first_page_ready(&app, &label) {
+            // 拿不到加载事件**本身就是一个可判读的事实**，但绝不阻断启动：继续按原流程走
+            //（退化成旧的「不等待」行为），只是把这件事写在卡片上。
+            note(
+                &app,
+                &label,
+                &format!(
+                    "启动页未在 {}ms 内报告加载完成（页面加载事件缺失），按原流程继续",
+                    SPLASH_READY_BUDGET_MS
+                ),
+            );
+        }
+
         // 重试场景：清掉上一轮可能仍在监听的代理任务。
         let stale = app
             .state::<ProxyTask>()
@@ -396,7 +610,8 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
         let _ = (&nav.user, &nav.pass, &nav.use_local_proxy);
         match Url::parse(&nav.url) {
             Ok(url) => {
-                match window.navigate(url) {
+                // ⚠️ `clone()`：`navigate` 拿走所有权，而下面的落点校验还要用同一份目标地址。
+                match window.navigate(url.clone()) {
                     Ok(()) => {
                         // ⚠️⚠️ `Ok(())` 在这里**不代表导航成功**：wry 在 Android 上把
                         // `load_url` 实现成「投一条 main-pipe 消息后直接 `Ok(())`」
@@ -411,6 +626,9 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
                         // 那种带错误码的页面在 WebView 上不渲染），仅靠加载层固定超时只能给通用
                         // 文案；探测可在数秒内把 DNS / 连接 / 超时 / TLS 的具体原因推给失败卡。
                         spawn_reachability_probe(app.clone(), label, nav.url.clone());
+                        // 落点校验：探测管「网络通不通」，这里管「导航到底有没有生效」。
+                        // 两者互补 —— 真机上这两件事曾经都只能靠猜。见 `ensure_navigation_committed`。
+                        ensure_navigation_committed(app, label, &url);
                     }
                     Err(e) => crate::loading::show_error(
                         app,

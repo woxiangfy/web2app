@@ -156,6 +156,12 @@ pub fn run() {
         .register_uri_scheme_protocol(tabs::SHELL_SCHEME, tabs::handle_shell)
         .manage(tabs::TabManager::default());
 
+    // 首个文档「加载完成」登记表：非 Windows（Android）启动期必须等它再导航 ——
+    // 不等就会被 wry「post 出去的 splash 加载」覆盖掉导航（根因见 `bootstrap::BootReady` 长注释）。
+    // Windows 不加此等待，故把状态一起 cfg 掉（留着会变成无人使用的死代码）。
+    #[cfg(not(windows))]
+    let builder = builder.manage(bootstrap::BootReady::default());
+
     #[cfg(desktop)]
     let settings_open = settings::settings_open_shortcut();
     #[cfg(desktop)]
@@ -377,6 +383,20 @@ pub fn run() {
                 Some(dir) => wb.data_directory(dir),
                 None => wb,
             };
+
+            // ⚠️⚠️ 非 Windows（Android）：注册**首个文档加载完成**信号 —— 启动期必须先等它
+            // 再解析 / 推送 / 导航（根因与真机证据见 `bootstrap::BootReady` 的长注释）。
+            // 为什么用 `on_page_load` 而不是别的判据：wry Android 的 `ON_LOAD_HANDLER` 正是由
+            // `RustWebViewClient.onPageStarted / onPageFinished` 驱动的，这是 Android 侧唯一
+            // 可靠的「文档已就绪」信号；而 `GetUrl` 之类同样走 main-pipe，webview 未就绪时拿不到结果。
+            #[cfg(not(windows))]
+            let wb = wb.on_page_load(|window, payload| {
+                bootstrap::on_page_load(
+                    window.app_handle(),
+                    window.label(),
+                    matches!(payload.event(), tauri::webview::PageLoadEvent::Finished),
+                );
+            });
 
             wb.build().expect("创建主窗口失败")
         };

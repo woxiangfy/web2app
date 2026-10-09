@@ -31,7 +31,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
 | 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
-| 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏；目标页加载失败时加载层转失败卡（含「重试」）。**Android 导航后另发一次 Rust 侧可达性探测**（v1.60），把 DNS/连接/超时/TLS 的具体原因提前显示在失败卡上；**v1.61 起失败卡自带「现场诊断」**（当前地址 / readyState / HTTP 状态 / 资源数 / WebView UA / 页面脚本错误），截图即可区分「没离开启动页」与「外链没渲染」，无需 adb；**v1.62 修正启动页的加载层语义与重试落点**：①模式标记改由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入（`lib.rs::build_main_window`，此前只有 `tabs.rs` 有）——启动页不再被当成目标页跑，正常偏慢的启动不会被 overlay 的 15s 空白硬上限误报成失败；②启动页判定加改写后的 hostname（`splash.localhost`），重试改用**相对路径** `/retry`（此前 `location.protocol === 'splash:'` 在 wry 把协议改写成 `http://splash.localhost/` 后恒不成立，重试退化为只刷新 `/` 的死循环） | Windows / Android |
+| 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏；目标页加载失败时加载层转失败卡（含「重试」）。**Android 导航后另发一次 Rust 侧可达性探测**（v1.60），把 DNS/连接/超时/TLS 的具体原因提前显示在失败卡上；**v1.61 起失败卡自带「现场诊断」**（当前地址 / readyState / HTTP 状态 / 资源数 / WebView UA / 页面脚本错误），截图即可区分「没离开启动页」与「外链没渲染」，无需 adb；**v1.62 修正启动页的加载层语义与重试落点**：①模式标记改由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入（`lib.rs::build_main_window`，此前只有 `tabs.rs` 有）——启动页不再被当成目标页跑，正常偏慢的启动不会被 overlay 的 15s 空白硬上限误报成失败；②启动页判定加改写后的 hostname（`splash.localhost`），重试改用**相对路径** `/retry`（此前 `location.protocol === 'splash:'` 在 wry 把协议改写成 `http://splash.localhost/` 后恒不成立，重试退化为只刷新 `/` 的死循环）；**v1.64 修启动期「发得太早」**：Android 上壳侧操作走 wry main-pipe，而 `LoadUrl` / `Eval` 在 webview 未就绪时**静默丢弃**，且初始 splash 导航是 `post{}` 异步、后续 `navigate` 是同步 ⇒ 直连配置下导航先发、随后**被那条 post 出去的 splash 加载覆盖**，同期进度 `eval` 又落在 document-start 之前被短路（真机表象：地址仍是 `splash.localhost` **且**零进度行，同一机制）；改为非 Windows 启动期**先等首个文档加载完成**（`bootstrap::BootReady`，就绪信号来自建窗时注册的 `on_page_load`）再解析 / 推送 / 导航；**v1.65 再加「落点校验 + 有限重发」**：`navigate()` 恒返回 `Ok(())`、返回值不能证明导航生效，故导航后隔 500ms 读一次真实地址（`is_splash_url` 同时认 `splash://` 与改写后的 `http://splash.localhost/`），仍停在启动页就重发（最多 2 次）—— v1.64 是预防、v1.65 是检验与自愈 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 登录密码保存 | 网页登录表单提交后弹出「保存密码？」气泡，保存后下次访问自动填充（v1.59 起显式开启 WebView2 `IsPasswordAutosaveEnabled`——该开关默认 **false**，与 Electron 壳的 Chromium 默认行为对齐；老运行时不支持 `ICoreWebView2Settings4` 时静默跳过，不影响其它钩子）；已保存密码随设置页「清除全部浏览数据」一并清除 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
@@ -338,7 +338,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-09 v1.63.1 实测 195 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 122；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-09 v1.65 实测 198 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 125；另有 6 条 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -648,6 +648,17 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
   2. **失败态可滚动 + 可选中**：失败态改为 `justify-content:flex-start` + `overflow-y:auto`，并放开 `user-select`（根规则是 `none` ⇒ 用户选不中、复制不了，而卡片用途恰恰是「把信息反馈给打包者」）。⚠️ **实测 360×640 / 320×480 下内容并未溢出（`overflowPx=0`）**，故滚动是**防御性**修复（极端小屏 / 更多进度行才触发）；「可选中复制」是当场生效的改进。
   3. **地址脱敏**（实测生效）：诊断行的地址经 `redact()` 处理，把 `w2a_key` / `key` / `token` 等查询参数值换成 `***`。启用本地代理时入口形如 `http://127.0.0.1:<port>/auth.html?w2a_key=<门禁密钥>`，而这张卡的用途就是**截图外发**——不脱敏等于把门禁密钥一起发出去。
   取证脚本：`electron-app/scripts/diag/splash-fail-card.cjs` —— 按真实窗口尺寸渲染同一份 `splash.html` + `loading.js`（把 40s 兜底卡提前到 1.4s，其余逻辑逐字不动），客观测「进度行是否在最前 / 地址是否脱敏 / 能否滚动 / 关键行在首屏的 y」并出 PNG。
+- **v1.64 启动期「发得太早」（真机取证定到的根因，改 Android 启动流程前必读）**：
+  1. **根因不是「导航没发」，而是「导航被覆盖」**：Android 上壳侧对 WebView 的一切操作都走 wry 的 main-pipe（`wry/src/android/main_pipe.rs`），而 `WebViewMessage::LoadUrl` / `WebViewMessage::Eval` 的处理体都是 `if let Some(webview) = get_webview(activity_id) { … }` —— **取不到就静默丢弃**（那个 webview 只在 `CreateWebView` 处理完才写入）。更要命的是**初始 splash 导航是异步排队的**：`CreateWebView` 内走 `load_url(…, main_thread = true)` → Kotlin `loadUrlMainThread`（`RustWebView.kt` 里是 `post { loadUrl(url) }`，排到 UI 队列尾），而之后的 `navigate` 走**同步** `loadUrl`。直连配置下 `prepare_navigation` 只需毫秒级 ⇒ 导航先执行、随后被那条 post 出去的 splash 加载**整体覆盖**；同期那几条进度 `eval` 又落在 splash 文档 document-start **之前**（`window.__web2appLoading` 还没定义）被 `&&` 短路吃掉。⇒ 真机卡上「地址仍是 `splash.localhost`」+「零进度行」是**同一个机制**。
+  2. **修复：非 Windows 启动期先等首个文档加载完成**，再做解析 / 推送 / 导航（`bootstrap::BootReady` + `wait_first_page_ready`，预算 `SPLASH_READY_BUDGET_MS = 5000`）。就绪信号来自建窗时注册的 `on_page_load`（wry Android 的 `ON_LOAD_HANDLER` ← `RustWebViewClient.onPageStarted / onPageFinished`，`tauri-runtime-wry` 无条件接线）—— 这是本壳在 Android 侧唯一可靠的「文档就绪」判据（轮询 URL 不行，`GetUrl` 同样走 main-pipe）。⚠️ `Started` 必须**清**标记，否则 `/retry` 重载启动页后会沿用旧标记、变成「首启修好、重试仍卡死」；⚠️ 超时**不阻断启动**（退化成旧行为），但会在卡片上留一行「启动页未在 5000ms 内报告加载完成（页面加载事件缺失）」—— 这一行本身即判据。Windows 完全不加（WebView2 时序由 wry 保证），故新增代码全部 `#[cfg(not(windows))]`。
+  3. **判读下一版真机结果**：卡上出现进度行 ⇒ 修复生效（再按 v1.63 的判读表分层定因）；连进度行都没有、且出现上面那句「页面加载事件缺失」 ⇒ `on_page_load` 在真机没送达，问题回到 wry 上游。
+  4. 静态守卫：`contract_tests::startup_visibility_contract::android_boot_waits_for_first_page_load` / `page_load_event_is_wired_on_main_window`（均做过反向对照）。⚠️ 本版新增代码全在 `#[cfg(not(windows))]` 下、**本机是盲区**，已用 cfg 互换强制编译验证（8 处翻成 `#[cfg(all())]` 后 `cargo check --all-targets` 退出码 0，随后逐字节还原）。
+- **v1.65 导航「落点校验 + 有限重发」（v1.64 的检验与自愈，两者互补）**：
+  1. **为什么还需要它**：v1.64 做的是「等首个文档就绪再导航」，那是**时序预防**；而 Android 上**没有任何返回值能证明导航生效** —— `navigate()` 恒返回 `Ok(())`（它只是往 main-pipe 投一条消息）。所以真机上仍可能出现「导航确实发起了、地址却停在 `splash.localhost`」。v1.65 改为**直接检验结果**：导航后隔 `NAV_COMMIT_CHECK_MS = 500` 读一次真实地址，仍停在启动页就**重发导航**（最多 `NAV_COMMIT_MAX_RETRY = 2` 次）。`loadUrl` 语义幂等、重发只以最后一次为准，无副作用；正常启动只是一次「读地址 + 返回」。
+  2. ⚠️ **判据必须同时认两种形态**：`splash://`（`loading::splash_url()` 构造的）与 `http://splash.localhost/` —— wry 的 `custom_protocol_workaround` 会把前者改写掉，**WebView 里真实存在的地址是后者**，只认自定义协议会在真机漏判（v1.62 栽过同类坑）。`is_splash_url()` 两个都认。
+  3. ⚠️ **必须跑在独立线程**：`navigate_main` 在主线程，而读地址走 main-pipe（webview 未就绪时最长阻塞 `MAIN_PIPE_TIMEOUT` = 10s），放主线程会冻 UI。
+  4. **下一版真机怎么读这张卡**：出现「重发导航已生效（第 N 次）」⇒ 根因确实是导航被挤掉、重发救回来了；出现「重发导航 2 次后仍未离开启动页（导航未提交，与网络无关）」⇒ 与网络无关，要往 wry 上游走；两条都没有且页面正常 ⇒ 走的正常启动路径。
+  5. 静态守卫 `android_navigation_is_verified_and_retried`（4 条断言：判据双形态 / 调用点 / 重发上限 / 独立线程）。⚠️ **反向对照抓出守卫自身的盲区**：第一版用裸 `contains("ensure_navigation_committed(app, label, &url);")`，把调用点改成**注释**（`// …`）后守卫**仍然通过** —— 注释里含同样文字，`contains` 被满足；改为 `has_code_line()`（排除 `//`、`*` 开头的行）后，同样的改坏方式**如期 FAILED**。这是本项目「守卫的针被注释满足」的**第四种形态**（前三：注释里写裸 hostname、说明文字含同一字面量、反向断言被自身注释干扰）。
 - **Android 端应用的数据存在哪？**（下文中 `<pkg>` = 构建时的应用包名，即打包工作流在 `android init` 前
   由 `app_name` 清洗后写入 `tauri.conf.json` 的 `identifier` = **`com.web2app.<app_name 清洗值>`**
   （仓库里 `tauri.conf.json` 的静态值只是占位；本地不跑工作流直接 `cargo tauri android` 构建时才会用到它）；
