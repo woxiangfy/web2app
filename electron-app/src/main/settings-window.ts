@@ -84,16 +84,19 @@ label{display:flex;gap:10px;align-items:center;margin:10px 0}
 <p>未能读到设置页资源（settings.html），以下为精简版设置。</p>
 <label><input type="checkbox" id="tray"/> 启用系统托盘图标</label>
 <label><input type="checkbox" id="min"/> 关闭窗口时最小化到托盘</label>
+<label><input type="checkbox" id="float"/> 启用桌面悬浮图标</label>
 <button id="save">保存</button>
 <div id="s"></div>
 <script>
 var inv=function(c,a){return window.__TAURI_INTERNALS__.invoke(c,a)};
 inv('get_settings').then(function(s){document.getElementById('tray').checked=s.tray_enabled;
-document.getElementById('min').checked=s.minimize_on_close}).catch(function(e){document.getElementById('s').textContent='读取失败：'+e});
+document.getElementById('min').checked=s.minimize_on_close;
+document.getElementById('float').checked=!!s.float_enabled}).catch(function(e){document.getElementById('s').textContent='读取失败：'+e});
 document.getElementById('save').onclick=function(){
  inv('save_settings',{newSettings:{wake_hotkey:{ctrl:false,alt:false,shift:false,key:''},
  tray_enabled:document.getElementById('tray').checked,
- minimize_on_close:document.getElementById('min').checked}})
+ minimize_on_close:document.getElementById('min').checked,
+ float_enabled:document.getElementById('float').checked}})
  .then(function(){document.getElementById('s').textContent='已保存'})
  .catch(function(e){document.getElementById('s').textContent='保存失败：'+e})};
 </script></body></html>`
@@ -111,6 +114,14 @@ export interface SettingsWindowDeps {
    * 抛异常表示失败。实现见 `web-data.ts` —— 与 Tauri 版的 `clear_web_data` 对齐。
    */
   clearWebData: () => Promise<string>
+  /** 显示桌面悬浮球（设置页「立即显示悬浮图标」按钮；不支持的平台由实现侧置空操作）。 */
+  showFloat: () => void
+  /**
+   * 退出应用（设置页「退出程序」按钮，v1.75）。
+   * 实现必须走「先置退出标志、再 `app.quit()`」那一条（入口的 `requestQuit`）——
+   * 直接 `app.quit()` 会被本窗口 close 处理里的「驻留」分支拦下，表现是「点了退出没反应」。
+   */
+  quitApp: () => void
   /** 设置窗用的 preload 绝对路径 */
   preloadPath: string
   /** 设置页 HTML 源码；null 时用兜底页 */
@@ -164,6 +175,23 @@ export function registerSettingsIpc(deps: SettingsWindowDeps): void {
     closeSettingsWindow()
     return null
   })
+
+  // 设置页「立即显示悬浮图标」：命令名与 settings.html 的 invoke 字面量逐字一致，
+  // 同时也在 settings-preload.ts 的 ALLOWED 白名单里（三处漏一即点了没反应）。
+  ipcMain.handle('tauri:show_float_window', (e) => {
+    assertSettingsSender(e.sender)
+    deps.showFloat()
+    return null
+  })
+
+  // 设置页「退出程序」（v1.75）：同样三处逐字一致（settings.html 的 invoke 字面量 /
+  // 本处理器 / settings-preload 的 ALLOWED）。⚠️ 命令体调用后进程即开始退出，
+  // 不会有第二个响应；页面靠 `await` 拿到 resolve 或 reject（reject 只在链路断时发生）。
+  ipcMain.handle('tauri:quit_app', (e) => {
+    assertSettingsSender(e.sender)
+    deps.quitApp()
+    return null
+  })
 }
 
 /**
@@ -184,6 +212,7 @@ function normalizeIncoming(o: Record<string, unknown>): Settings {
     },
     tray_enabled: bool(o.tray_enabled),
     minimize_on_close: bool(o.minimize_on_close),
+    float_enabled: bool(o.float_enabled),
   }
 }
 
@@ -234,6 +263,29 @@ export function openSettingsWindow(deps: Pick<SettingsWindowDeps, 'preloadPath' 
   void win.loadURL(SETTINGS_URL).catch((e: Error) => {
     console.error(`[web2app] 设置窗加载失败：${e.message}`)
   })
+}
+
+/**
+ * 把「启用桌面悬浮图标」的最新值推给**已打开的**设置页（没有设置窗时静默）。
+ *
+ * 为什么必须推（v1.76）：设置页只在**加载时**读一次 `get_settings`，而球上右键关功能
+ * 发生在页面之外 —— 不同步的话复选框还打着勾，用户随手一点「保存」就会把 `float_enabled`
+ * 推回 true（球自己跑回来）。与 Tauri 侧 `settings.rs::push_float_enabled_to_settings_window`
+ * 逐条对齐；`#floatEnabled` 这个 id 是 dist/settings.html 的接口，改名要连同脚本一起改。
+ */
+export function updateSettingsWindowFloat(enabled: boolean): void {
+  const w = settingsWin
+  if (!w || w.isDestroyed()) return
+  void w.webContents
+    .executeJavaScript(
+      `try{var c=document.getElementById('floatEnabled');if(c)c.checked=${
+        enabled ? 'true' : 'false'
+      };}catch(e){}`,
+      true
+    )
+    .catch(() => {
+      /* 文档尚未就绪：忽略（用户下次打开设置页会读到已落盘的值） */
+    })
 }
 
 /** 关闭设置窗（幂等）。 */

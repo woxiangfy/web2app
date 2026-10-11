@@ -8,12 +8,15 @@
  *   "wake_hotkey": { "ctrl": false, "alt": true, "shift": false, "key": "Digit4" },
  *   "tray_enabled": true,
  *   "minimize_on_close": false,
- *   "window": { "x": 100, "y": 200, "width": 1100, "height": 650, "maximized": false }
+ *   "float_enabled": false,
+ *   "window": { "x": 100, "y": 200, "width": 1100, "height": 650, "maximized": false },
+ *   "float_window": { "x": 12, "y": 240, "width": 84, "height": 84, "edge": "left" }
  * }
  * ```
  *
  * 契约四要素（改动任何一项都等于破坏双壳兼容，见 docs/electron-plan.md §3）：
- *   1. **字段名与嵌套结构**：`{ wake_hotkey: { ctrl, alt, shift, key }, tray_enabled, minimize_on_close }`；
+ *   1. **字段名与嵌套结构**：`{ wake_hotkey: { ctrl, alt, shift, key }, tray_enabled,
+ *      minimize_on_close, float_enabled }`；
  *      `key` 是 JS `KeyboardEvent.code`（`"Digit4"` / `"F1"` / `"KeyA"`）。
  *   2. **文件路径**：`<data_dir>\settings.json` —— **与 Tauri 版同一个规则、同一个位置**
  *      （`portable.ts` 已按 `config.json` 的 `data_dir` 解析出 `dataDir`，这里只拼文件名；
@@ -22,8 +25,8 @@
  *      ⚠️ `data_dir = ""`（系统默认目录）时两壳的「系统默认」不是同一个磁盘位置
  *      （Tauri `%LOCALAPPDATA%` / Electron `%APPDATA%`，见 `docs/packaging-config.md` §4.3 要点 4）
  *      ⇒ 该模式下这个文件各自落在自己那份数据目录里，属数据目录既有的、已文档化的差异。
- *   3. **默认值全关**：不设唤醒快捷键、不启用托盘、关闭即退出。
- *   4. **键序**：设置三键在前、`window` 在后（与 serde 的字段序一致），
+ *   3. **默认值全关**：不设唤醒快捷键、不启用托盘、关闭即退出、不启用悬浮窗。
+ *   4. **键序**：设置四键在前、`window`、`float_window` 在后（与 serde 的字段序一致），
  *      两壳写出来的字节形态必须一样（`writeDocument()` 统一规范化）。
  *
  * **2026-09-23 合并**：此前窗口几何单独占一个 `window-state.json`。现在只剩这一个文件，
@@ -58,6 +61,8 @@ export const SETTINGS_FILE = 'settings.json'
 
 /** 文档里「窗口几何」那一段的键名（Tauri 侧 `store.rs` 的 `window` 字段）。 */
 const WINDOW_KEY = 'window'
+/** 文档里「悬浮小窗几何」那一段的键名（Tauri 侧 `store.rs` 的 `float_window` 字段）。 */
+export const FLOAT_WINDOW_KEY = 'float_window'
 
 export interface Settings {
   /** 显示 / 隐藏主窗口的全局快捷键 */
@@ -66,6 +71,8 @@ export interface Settings {
   tray_enabled: boolean
   /** 点关闭按钮时隐藏到托盘（需同时启用托盘，否则关闭即退出） */
   minimize_on_close: boolean
+  /** 是否创建桌面悬浮小窗（仅 Windows 生效，其他平台持久化但无行为） */
+  float_enabled: boolean
 }
 
 /** 与 `settings.rs::Settings::default()` 逐字段一致。 */
@@ -73,6 +80,7 @@ export const DEFAULT_SETTINGS: Settings = {
   wake_hotkey: { ...DEFAULT_HOTKEY },
   tray_enabled: false,
   minimize_on_close: false,
+  float_enabled: false,
 }
 
 /**
@@ -151,6 +159,7 @@ export function parseSettings(v: unknown): Settings {
     wake_hotkey: parseHotkey(o.wake_hotkey),
     tray_enabled: toBool(o.tray_enabled, DEFAULT_SETTINGS.tray_enabled),
     minimize_on_close: toBool(o.minimize_on_close, DEFAULT_SETTINGS.minimize_on_close),
+    float_enabled: toBool(o.float_enabled, DEFAULT_SETTINGS.float_enabled),
   }
 }
 
@@ -169,10 +178,19 @@ export interface LoadedDocument extends LoadedSettings {
    * 这里只负责「原样取出来 / 原样写回去」，免得两个模块各有一份几何校验。
    */
   window: unknown
+  /**
+   * `float_window` 段的原始值（没写过时为 undefined）。语义解释归 `float-window.ts`
+   * （`parseFloatGeometry`），这里同样只做「原样取出 / 原样写回」。
+   */
+  floatWindow: unknown
 }
 
-function defaultDoc(): { settings: Settings; window: undefined } {
-  return { settings: { ...DEFAULT_SETTINGS, wake_hotkey: { ...DEFAULT_HOTKEY } }, window: undefined }
+function defaultDoc(): { settings: Settings; window: undefined; floatWindow: undefined } {
+  return {
+    settings: { ...DEFAULT_SETTINGS, wake_hotkey: { ...DEFAULT_HOTKEY } },
+    window: undefined,
+    floatWindow: undefined,
+  }
 }
 
 /**
@@ -200,9 +218,16 @@ export function loadDocument(loc: StoreLocation): LoadedDocument {
       return { ...defaultDoc(), source: p, warnings }
     }
     const o = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
-    // ⚠️ 两段各自独立解释：`window` 段坏掉（比如手改成字符串）不该把三个开关一起打回默认；
-    //    反之亦然 —— 这是 `parseSettings` / `parseWindowState` 各自宽容解析的意义。
-    return { settings: parseSettings(parsed), window: o[WINDOW_KEY], source: p, warnings }
+    // ⚠️ 三段各自独立解释：`window` / `float_window` 段坏掉（比如手改成字符串）不该把四个
+    //    开关一起打回默认；反之亦然 —— 这是 `parseSettings` / `parseWindowState` /
+    //    `parseFloatGeometry` 各自宽容解析的意义。
+    return {
+      settings: parseSettings(parsed),
+      window: o[WINDOW_KEY],
+      floatWindow: o[FLOAT_WINDOW_KEY],
+      source: p,
+      warnings,
+    }
   }
   return { ...defaultDoc(), source: null, warnings }
 }
@@ -242,18 +267,23 @@ function readRawDocument(path: string): Record<string, unknown> {
 /**
  * 写整份文档。返回实际写入路径；写失败时抛出（调用方负责转成给用户看的错误）。
  *
- * ⚠️ 键序固定为「设置三键 → window」，与 Tauri 侧 `store.rs` 的 `DocOut` 字段序一致；
- *    格式对齐 `serde_json::to_string_pretty`（2 空格缩进），让两个壳写出来的文件
- *    在 diff / 人工查看时长得一样 —— 否则「同一个文件两版写出来的东西不同」会被当成 bug 排查。
- * ⚠️ 传入的 `window` 原样写回（不在这里校验），`undefined` / `null` 时不写这一段。
+ * ⚠️ 键序固定为「设置四键 → window → float_window」，与 Tauri 侧 `store.rs` 的 `DocOut`
+ *    字段序一致；格式对齐 `serde_json::to_string_pretty`（2 空格缩进），让两个壳写出来的
+ *    文件在 diff / 人工查看时长得一样 —— 否则「同一个文件两版写出来的东西不同」会被当成
+ *    bug 排查。
+ * ⚠️ 传入的 `window` / `float_window` 原样写回（不在这里校验），`undefined` / `null`
+ *    时不写这一段。
  */
 export function writeDocument(
   loc: StoreLocation,
-  doc: { settings: Settings; window?: unknown }
+  doc: { settings: Settings; window?: unknown; float_window?: unknown }
 ): string {
   // parseSettings 顺带做规范化：缺字段补默认、布尔写成字符串这类脏值也一并纠正。
   const out: Record<string, unknown> = { ...parseSettings(doc.settings) }
   if (doc.window !== undefined && doc.window !== null) out[WINDOW_KEY] = doc.window
+  if (doc.float_window !== undefined && doc.float_window !== null) {
+    out[FLOAT_WINDOW_KEY] = doc.float_window
+  }
   mkdirSync(dirname(loc.write), { recursive: true })
   // **原子替换**：先写同目录临时文件（flush 落盘）再 rename（Windows 上
   // libuv 用 MOVEFILE_REPLACE_EXISTING，目标存在也能整体替换）。直接覆盖写的风险是
@@ -281,5 +311,10 @@ export function writeDocument(
  */
 export function saveSettings(loc: StoreLocation, s: Settings): string {
   const cur = readRawForUpdate(loc)
-  return writeDocument(loc, { settings: s, window: cur[WINDOW_KEY] })
+  // 两段几何都原样保留：保存设置不能把主窗口 / 悬浮窗几何抹掉。
+  return writeDocument(loc, {
+    settings: s,
+    window: cur[WINDOW_KEY],
+    float_window: cur[FLOAT_WINDOW_KEY],
+  })
 }

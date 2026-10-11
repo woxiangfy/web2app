@@ -86,6 +86,15 @@ mod save_dialog;
 #[cfg(windows)]
 mod tabs;
 
+// 桌面悬浮球（仅 Windows）：透明置顶小球，点击调出主窗 / 可拖动 / 靠边半隐藏 / 悬停展开。
+#[cfg(windows)]
+mod floatwin;
+
+// 悬浮球**真机合成指针 harness**（仅 Windows；只有 `cargo run -- --float-probe` 会跑到）。
+// 平时只是多一个不参与编译的模块（Windows 上编译进二进制但不被调用），不建窗、不联网。
+#[cfg(windows)]
+mod floatprobe;
+
 // 系统托盘 / 设置命令 / 窗口切换（仅桌面端）。
 #[cfg(desktop)]
 mod tray;
@@ -95,6 +104,58 @@ mod tray;
 mod window_state;
 
 use settings::SettingsState;
+
+/// 设置页「立即显示悬浮图标」按钮调用的命令。
+///
+/// ⚠️ 刻意做成【跨平台注册】的命令：`dist/settings.html` 是跨平台资源，契约测试
+/// `every_frontend_invoked_command_is_registered` 在所有编译目标上都会扫描它 invoke 的命令名，
+/// 若把本命令标成 `#[cfg(windows)]`，非 Windows 目标的契约测试 / IPC 表就会缺项。实际行为只在
+/// Windows 存在（悬浮球模块整体 `#[cfg(windows)]`），其他平台调用是空操作——该开关在那些平台
+/// 只是一个被持久化的布尔值。
+#[tauri::command]
+fn show_float_window(app: tauri::AppHandle) {
+    #[cfg(windows)]
+    floatwin::show_float_window(&app);
+}
+
+/// 设置页「退出程序」按钮调用的命令（v1.75）。
+///
+/// 为什么需要它：启用托盘或悬浮图标后，「关闭窗口」按设计只等于**隐藏**（应用继续驻留），
+/// 而唯一的退出入口一直是托盘的「退出」菜单项 —— 没启用托盘的用户于是**根本没有退出路径**
+/// （2026-10-11 使用者实测：只启用悬浮图标时，关窗后球还在、点球又不回窗口）。
+/// Shift+F1 能随时打开设置页，把退出入口放在那里最稳。
+///
+/// ⚠️ 与托盘「退出」（`tray.rs` 的 `"quit"` 分支）走**同一条路径** `app.exit(0)`：
+///    `AppHandle::exit` → `RunEvent::ExitRequested` → `RunEvent::Exit`，**不经过任何窗口的
+///    `CloseRequested`** ⇒ 上面 `handle_main_close` 的「驻留」分支不会把退出吞掉。
+///    （这正是本仓库 v1.68 缺陷②在 Electron 侧的形态：close 被 preventDefault 会取消
+///    整个 `app.quit()`。Tauri 侧走 exit 天然免疫，但必须写下来，免得将来有人改成
+///    `window.close()`。）窗口几何 / 悬浮球几何照常落盘、代理任务照常收尾 ——
+///    这些都挂在 `RunEvent::ExitRequested` 上。
+///
+/// ⚠️ 必须【跨平台注册】：`dist/settings.html` 是跨平台资源，契约测试
+///    `every_frontend_invoked_command_is_registered` 在任何编译目标上都会扫描其中的 invoke
+///    命令名。移动端没有设置窗（`open_settings` 是 `cfg(desktop)`），故端上行为无实际影响。
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// 是否以「悬浮球真机探针」模式启动（`--float-probe`；实现见 [`floatprobe`]）。
+///
+/// ⚠️ 刻意做成**函数**而不是 `run()` 里的一个 `bool` 变量：那个变量在非 Windows / 非桌面上
+/// 会变成「未使用变量」，在 `-D warnings` 下直接编译失败（历史上踩过同款 cfg-only 陷阱）。
+/// 函数只在有调用点的地方被引用，Android 上它只是一个被 `#![allow(dead_code)]` 放过的死函数。
+fn probe_mode() -> bool {
+    #[cfg(windows)]
+    {
+        floatprobe::is_probe_mode()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 
 // 移动端（Android/iOS）入口：tauri::mobile_entry_point 会生成 JNI/extern 绑定，
 // 供移动端原生壳调用；桌面端该属性为空操作，等价于一个普通 pub fn。
@@ -146,15 +207,25 @@ pub fn run() {
             #[cfg(windows)]
             tabs::minimize_host,
             #[cfg(windows)]
-            tabs::close_host
+            tabs::close_host,
+            // 设置页「立即显示悬浮图标」按钮。⚠️ 必须【跨平台注册】：dist/settings.html 是
+            // 跨平台资源，契约测试 every_frontend_invoked_command_is_registered 会在所有目标上
+            // 扫描其中的 invoke 名；命令体在非 Windows 是空操作（见下方 show_float_window）。
+            show_float_window,
+            // 设置页「退出程序」按钮（v1.75）：常驻后台（托盘 / 悬浮图标）时唯一稳当的退出入口。
+            // 同样跨平台注册，理由同上。
+            quit_app
         ]);
 
     // 多页签模式（仅 Windows）：注册 shell 标签栏协议 + TabManager 状态。
+    // 悬浮球（仅 Windows）：注册 floaticon 内置球页协议 + FloatState（拖动 / 吸附 / 令牌）。
     // ⚠️ IPC 命令已并入上面**唯一一次** `invoke_handler`（见那段注释），别再在这里开第二次。
     #[cfg(windows)]
     let builder = builder
         .register_uri_scheme_protocol(tabs::SHELL_SCHEME, tabs::handle_shell)
-        .manage(tabs::TabManager::default());
+        .register_uri_scheme_protocol(floatwin::FLOATICON_SCHEME, floatwin::handle_floaticon)
+        .manage(tabs::TabManager::default())
+        .manage(floatwin::FloatState::default());
 
     // 首个文档「加载完成」登记表：非 Windows（Android）启动期必须等它再导航 ——
     // 不等就会被 wry「post 出去的 splash 加载」覆盖掉导航（根因见 `bootstrap::BootReady` 长注释）。
@@ -162,59 +233,76 @@ pub fn run() {
     #[cfg(not(windows))]
     let builder = builder.manage(bootstrap::BootReady::default());
 
+    // 桌面插件（全局快捷键 / 单实例）。
+    // ⚠️ 探针模式（`--float-probe`）**必须**跳过这两个插件，尤其是单实例：本机已有实例在跑
+    //    时，单实例插件会把启动参数转交给那个实例并让**本进程直接退出** —— 探针于是「零输出、
+    //    退出码 0」，从外面看像全部通过，实际一条断言都没跑（假绿，最坏的一种失败）。
+    //    全局快捷键同理无意义：探针不建托盘、不建主窗、也不需要唤醒键。
     #[cfg(desktop)]
-    let settings_open = settings::settings_open_shortcut();
-    #[cfg(desktop)]
-    let builder = builder.plugin(
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(move |app, shortcut, event| {
-                // 只在“按下”那一刻触发一次。若忽略 event.state，按键的「按下」和「松开」
-                // 会各自触发一次回调 → toggle 两次相互抵消，表现就是“按了没反应 / 乱跳”。
-                if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    return;
+    let builder = if probe_mode() {
+        builder
+    } else {
+        let settings_open = settings::settings_open_shortcut();
+        builder
+            .plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(move |app, shortcut, event| {
+                        // 只在“按下”那一刻触发一次。若忽略 event.state，按键的「按下」和「松开」
+                        // 会各自触发一次回调 → toggle 两次相互抵消，表现就是“按了没反应 / 乱跳”。
+                        if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                            return;
+                        }
+                        // 打开设置界面：Shift+F1（固定不可改）
+                        if shortcut.to_string() == settings_open.to_string() {
+                            settings::open_settings_window(app);
+                            return;
+                        }
+                        // 唤醒主窗口：使用当前设置中的快捷键
+                        let hk = app
+                            .state::<SettingsState>()
+                            .0
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .wake_hotkey
+                            .clone();
+                        if let Some(sc) = settings::hotkey_to_shortcut(&hk) {
+                            if shortcut.to_string() == sc.to_string() {
+                                tray::toggle_window(app);
+                            }
+                        }
+                    })
+                    .build(),
+            )
+            // 单实例：第二个实例启动时不再新开窗口，而是把已存在的窗口带到前台。
+            // （仅桌面端；Android 无此概念，故按 target_os 剔除。）
+            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                // 多页签模式聚焦宿主窗口，单窗口模式聚焦 "main"。
+                let label = bootstrap::main_window_label();
+                if let Some(w) = app.get_webview_window(label) {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
                 }
-                // 打开设置界面：Shift+F1（固定不可改）
-                if shortcut.to_string() == settings_open.to_string() {
-                    settings::open_settings_window(app);
-                    return;
-                }
-                // 唤醒主窗口：使用当前设置中的快捷键
-                let hk = app
-                    .state::<SettingsState>()
-                    .0
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .wake_hotkey
-                    .clone();
-                if let Some(sc) = settings::hotkey_to_shortcut(&hk) {
-                    if shortcut.to_string() == sc.to_string() {
-                        tray::toggle_window(app);
-                    }
-                }
-            })
-            .build(),
-    );
-
-    // 单实例：第二个实例启动时不再新开窗口，而是把已存在的窗口带到前台。
-    // （仅桌面端；Android 无此概念，故按 target_os 剔除。）
-    #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        // 多页签模式聚焦宿主窗口，单窗口模式聚焦 "main"。
-        let label = bootstrap::main_window_label();
-        if let Some(w) = app.get_webview_window(label) {
-            let _ = w.unminimize();
-            let _ = w.show();
-            let _ = w.set_focus();
-        }
-        // 多页签模式：tab 窗口是独立顶层窗口，宿主恢复显示时要一并把当前 tab 显示出来
-        // （否则只看到标签栏，内容区是空的）。
-        bootstrap::sync_tabs_visibility(app, true);
-    }));
+                // 多页签模式：tab 窗口是独立顶层窗口，宿主恢复显示时要一并把当前 tab 显示出来
+                // （否则只看到标签栏，内容区是空的）。
+                bootstrap::sync_tabs_visibility(app, true);
+            }))
+    };
 
     let builder = builder.setup(move |app| {
         // ⚠️ 诊断日志要**尽早**初始化：越早越能捕获启动早期的日志。
         //    默认（debug=false）时它是空操作 —— 不建目录、不落文件、也不打印任何东西。
         debug_log::init(app.handle());
+
+        // ---------- 悬浮球真机探针模式（`--float-probe`，仅 Windows）----------
+        // 只跑悬浮球 harness，其余一律不建：不建主窗（探针自己建一个 label="main" 的假主窗
+        // 作为 toggle 断言的观察点）、不启 bootstrap（不解析域名 / 不起本地代理 / 不联网）、
+        // 不建托盘、不注册快捷键。见 [`floatprobe`] 模块文档。
+        #[cfg(windows)]
+        if probe_mode() {
+            floatprobe::run(app.handle().clone());
+            return Ok(());
+        }
 
         // ---------- 「打开设置」事件（自绘标题栏的「设置」按钮） ----------
         // 为什么不是一条 IPC 命令：单窗口模式的主窗加载的是**远程页面**，Tauri 2 对非本地
@@ -439,6 +527,17 @@ pub fn run() {
             bootstrap::bootstrap(app.handle().clone());
         }
 
+        // ---------- 桌面悬浮球（仅 Windows）----------
+        // 注册内置球页 → Rust 的核心事件（点击调出主窗 / 拖动 / 拖动结束 / 悬停进出 / 隐藏），
+        // 并在设置勾选时建球。悬浮球只加载本地内置页，不参与 bootstrap / 导航 / 本地代理。
+        #[cfg(windows)]
+        {
+            floatwin::register_float_listeners(app.handle());
+            if initial_settings.float_enabled {
+                floatwin::show_float_window(app.handle());
+            }
+        }
+
         // ---------- 系统托盘与全局快捷键（仅桌面端；Android 无）----------
         #[cfg(desktop)]
         {
@@ -484,6 +583,18 @@ pub fn run() {
                     event: WindowEvent::CloseRequested { api, .. },
                     ..
                 } => {
+                    // 悬浮球（仅 Windows）：Alt+F4 / 系统关闭不销毁，改成隐藏（可再从设置页 /
+                    // 托盘显示），并顺手落盘当前几何。
+                    // ⚠️ 球上**右键**不走这里（v1.76 起：右键走球页事件 float-hide →
+                    //    `floatwin::disable_float_from_icon`，语义是「关功能 + 销毁球窗 + 唤回主窗」）。
+                    //    这里保持「只隐藏」是因为它还有别的入口，且都发生在用户主动收起球的场景。
+                    #[cfg(windows)]
+                    if label == floatwin::FLOAT_LABEL {
+                        api.prevent_close();
+                        floatwin::hide_float_window(app_handle);
+                        return;
+                    }
+
                     // 多页签模式（仅 Windows）：区分宿主窗口 / tab 窗口 / 主窗口三种关闭语义。
                     #[cfg(windows)]
                     if tabs::tabs_enabled() {
@@ -514,6 +625,9 @@ pub fn run() {
                         // 多页签模式持久化宿主窗口几何，单窗口模式持久化 "main"。
                         window_state::persist_label(app_handle, bootstrap::main_window_label());
                     }
+                    // 悬浮球几何（吸附边 + 展开态坐标），仅 Windows 有该窗口。
+                    #[cfg(windows)]
+                    floatwin::persist_float_geometry(app_handle);
                     if let Some(abort) = app_handle
                         .state::<ProxyTask>()
                         .0
@@ -655,8 +769,20 @@ fn describe_tabs() -> &'static str {
     "未启用"
 }
 
-/// 处理「主窗口关闭」：若“启用托盘 + 关闭时最小化到托盘”同时满足 → 隐藏到托盘；
-/// 否则允许关闭（最后一个窗口关闭后应用退出）。
+/// 处理「主窗口关闭」：满足任一**驻留理由** → 隐藏窗口、应用继续驻留；否则允许关闭
+/// （最后一个窗口关闭后应用退出）。
+///
+/// 两个驻留理由（v1.75 起并列）：
+///   1. `tray_enabled && minimize_on_close` —— 隐藏到托盘；
+///   2. `float_enabled`（仅 Windows）—— 隐藏到悬浮图标。
+///
+/// ⚠️⚠️ 第 2 条不是「锦上添花」而是**修一个真机缺陷**（2026-10-11 使用者实测）：
+///   只启用悬浮图标（未启用托盘）时，关闭窗口走的是 `else` 分支 ⇒ 主窗被**真销毁**，
+///   而悬浮球窗仍活着 —— 于是 ① 球挡住了「所有窗口关闭 ⇒ 退出」，进程留成一个既无界面、
+///   也退不掉的僵尸；② 点球时 `tray::toggle_window` 里 `get_webview_window("main")`
+///   返回 `None`，**一个动作都不做**，用户看到的是「点了悬浮图标不回窗口」。
+///   球在产品语义上就是「唤回主窗」的入口（`floaticon.html` 的 aria-label 亦如此写），
+///   故「球在 ⇒ 应用驻留」必须成立，与托盘驻留同一条纪律。
 ///
 /// `target_label` 由调用方决定：单窗口模式为 `"main"`，多页签模式为宿主窗口 label。
 /// 这样 `window_state::persist_label` 记录的也是正确窗口的几何。
@@ -672,11 +798,16 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
     window_state::persist_label(app_handle, &target_label);
 
     let st = app_handle.state::<SettingsState>();
-    let (tray, min) = {
+    let (tray, min, float_icon) = {
         let s = st.0.lock().unwrap_or_else(|p| p.into_inner());
-        (s.tray_enabled, s.minimize_on_close)
+        (s.tray_enabled, s.minimize_on_close, s.float_enabled)
     };
-    if tray && min {
+    // 驻留理由：托盘（两个开关都要）或悬浮图标（仅 Windows 有球）。
+    // ⚠️ 用 `cfg!` 布尔而**不是** `#[cfg]` 分叉：非 Windows 上 `float_icon` 同样要被用到，
+    //    分叉会把它变成「未使用的变量」⇒ `-D warnings` 直接编译失败
+    //    （本仓库踩过同款 cfg-only 陷阱，见 contract_tests 的 frontend_sources 注释）。
+    let stay_resident = (tray && min) || (cfg!(windows) && float_icon);
+    if stay_resident {
         api.prevent_close();
         if let Some(w) = app_handle.get_webview_window(&target_label) {
             let _ = w.hide();
@@ -694,14 +825,40 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
     }
 }
 
+/// 后退守卫脚本（注入目标 webview 执行）：仅当相邻的上一条历史是【真实网页】时才执行
+/// `history.back()`。应用启动时内置 splash 页是第一条历史，直接后退会退到它，
+/// 故先用 Navigation API 检查上一条目 URL；没有 Navigation API（极老内核）时宁可不退。
+/// 规则与注入脚本 `titlebar.js` 的 navDirections() 完全一致（电脑端 / 移动端同规则）。
+const HISTORY_BACK_SCRIPT: &str = r#"(function(){try{
+var n=window.navigation;
+if(!n||!n.currentEntry||typeof n.currentEntry.index!=='number')return;
+var i=n.currentEntry.index;
+if(i<=0)return;
+var e=n.entries()[i-1];
+var u=e&&e.url?String(e.url):'';
+if(/^splash:/i.test(u)||/^https?:\/\/splash\.localhost(?:[/?#]|$)/i.test(u))return;
+window.history.back();
+}catch(x){}})();"#;
+
+/// 前进守卫脚本：同理，下一条目不存在或落点是内置 splash 页时不触发 `history.forward()`。
+const HISTORY_FWD_SCRIPT: &str = r#"(function(){try{
+var n=window.navigation;
+if(!n||!n.currentEntry||typeof n.currentEntry.index!=='number')return;
+var e=n.entries()[n.currentEntry.index+1];
+if(!e)return;
+var u=e.url?String(e.url):'';
+if(/^splash:/i.test(u)||/^https?:\/\/splash\.localhost(?:[/?#]|$)/i.test(u))return;
+window.history.forward();
+}catch(x){}})();"#;
+
 /// 标题栏「后退 / 前进」命令：对【当前】窗体对应的 webview 执行历史导航。
 ///
 /// 目标窗体的确定：
 /// - 多页签模式（仅 Windows）：当前激活的 tab 窗口（标题栏按钮在宿主标签栏左侧）。
 /// - 单窗口模式：主窗 "main"（自绘标题栏注入到主窗每个文档）。
 ///
-/// 统一用 [`tauri::WebviewWindow::eval`] 在目标 webview 内执行 `window.history.back()` /
-/// `window.history.forward()`，命中 WebView 自己的会话历史（SPA 路由 / 前进后退均有效）。
+/// 注意不是裸执行 `window.history.back()`：脚本 [`HISTORY_BACK_SCRIPT`] 会先用
+/// Navigation API 判定后退落点，没有真实上一页（或落点是内置 splash）时静默不动作。
 #[tauri::command]
 fn history_nav(app: tauri::AppHandle, direction: String) -> Result<(), String> {
     // 确定目标 webview label。
@@ -728,10 +885,10 @@ fn history_nav(app: tauri::AppHandle, direction: String) -> Result<(), String> {
         return Err(format!("历史导航失败：窗口 {target_label} 不存在"));
     };
 
-    // 仅接受 'back' / 'forward' 两个方向，防误传。
+    // 仅接受 'back' / 'forward' 两个方向，防误传；脚本本身带落点守卫。
     let script = match direction.as_str() {
-        "back" => "try{window.history.back();}catch(e){}",
-        "forward" => "try{window.history.forward();}catch(e){}",
+        "back" => HISTORY_BACK_SCRIPT,
+        "forward" => HISTORY_FWD_SCRIPT,
         _ => return Err("无效的历史导航方向（仅支持 back / forward）".to_string()),
     };
 

@@ -13,7 +13,7 @@ Tauri 版继续维护（同时负责 Android），两者共用同一份 `config.
 |---|---|---|
 | M0 工程脚手架 / M1 窗口 + 注入 + 探针 | ✅ | 无边框窗口 + 注入脚本 + 探针骨架（探针 39 条起家，现已 138 条） |
 | M2 sidecar（本地反向代理 + 加密解析） | ✅ | 复用 Rust `proxy.rs` / `resolve.rs`，零重写 |
-| M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 | ✅ | 与 Tauri 版文件级互通 |
+| M3 托盘 / 全局快捷键 / 设置窗 / 窗口几何 / 桌面悬浮球（v1.67 引入、v1.69 纠正形态、v1.71 单击 toggle） | ✅ | 与 Tauri 版文件级互通 |
 | M6 出包（dir / zip / portable） | ✅ | `pack` / `dist`。三形态实测出包；**启动日志**已落地 `data\logs\startup.log`（**仅 `debug` 打开时才有**，见「日志目录」一节）；**版本信息**（`VERSIONINFO`）由 electron-builder 从 `package.json` 的 `version` / `description` / `author` 与 `electron-builder.yml` 的 `copyright` 自动写入，实测已落地（取证命令见「日志目录」一节）；首次运行的 SmartScreen 提示见「首次运行与 SmartScreen」 |
 | **M4 页面行为（下载接管 / 右键菜单 / F12）** | ✅ **已完成** | 实现落在 `src/main/page-behavior.ts`：①**下载接管** `will-download` → `pause` → 系统「另存为」（`dialog.showSaveDialog`，默认落点=系统下载目录、按后缀收敛过滤器、开覆盖确认）→ `setSavePath` + `resume`；用户取消走 `cancel()`，**绝不**静默存到别处（对标 `save_dialog.rs`）；②**右键菜单**自建（Electron 不暴露 Chromium 原生菜单），取舍与 Tauri 一致——不给打印 / 另存为 / 更多工具，**带「设置」项**（与 Shift+F1 / 托盘同一入口）；③**F12** `before-input-event` → `openDevTools({ mode: 'detach' })`，开关为 `devtoolsEnabled()` = `!isPackaged \|\| debug`（对齐 Tauri 的 `DEVTOOLS_ENABLED`；打包版可用配置 `debug: true` 打开，这是本壳与 Tauri 的**有意**差异——绿色版没有 debug 构建分发）。⚠️ 两个坑：①`item.pause()` 不可省，否则 `showSaveDialog` 异步返回后 Electron 会再弹**它自己**的保存对话框（两个抢注意力）；②多页签模式只给内容视图挂右键菜单（挂到壳窗口会在标签栏上弹出「返回 / 前进」这类错位项） |
 | **M5 多页签** | ✅ **已完成（T0–T4）** | `tabs_enabled=true` → 多页签模式（`BrowserWindow` 当壳 + 子 `WebContentsView`，与 Tauri 侧同构，窗口类不变）。**选型依据与决策记录**见 `docs/electron-tabs-design.md`；**真机验收清单与实测结论**见 `docs/electron-tabs-test-steps.md`。收口状态：探针 **39/39**（2026-09-27 补 P7c 关后台页签壳 DOM 即时刷新 2 条，旧实现在非活动分支漏 `pushToShell` 会留幽灵页签；2026-10-08 v1.58 补 P10b「新建页签加载完成前即激活」6 条 + `/slow.html` 慢响应夹具，旧时序反向对照 4 条如期 FAIL）、单窗口 **138/138**（2026-09-27 第 16 节新增子框架桥梁隔离 4 条）零回归；2026-09-18 真机目视 **V1–V4 全部关闭**（多页签 8/8 正常、跨 DPI 正常；仅「代理 / 域名解析」留待后续单独测试，属 sidecar 链路）。⚠️ 两条别踩：①**探针的起窗模式只由命令行决定**，`tabs_enabled` 不参与——否则页签配置下跑 `--probe`，单窗口那批断言会往壳页面注入脚本而必失败，报错只是 `Script failed to execute`，完全不指向根因；②新页签**不得**调 `bootstrap()`（它会掐掉在服页签的代理并把壳页面导航走），走 `resolveInitialTarget()` 复用 target 缓存 |
@@ -363,14 +363,15 @@ Get-Content .\data\logs\startup.log -Tail 40
 
 | 文件 | 内容 | 写在哪 |
 |---|---|---|
-| `settings.json` | 唤醒快捷键、是否启用托盘、关闭是否最小化到托盘，**以及 `window` 段的窗口几何**（坐标 / 尺寸为**物理像素** + 是否最大化） | **与数据目录同位置**：`<data_dir>\settings.json`（默认 `data\settings.json`，跟着 exe 走）；旧位置 `%APPDATA%\<app_name>\` 仅作**读取兜底**（升级兼容，不迁移不删除） |
+| `settings.json` | 唤醒快捷键、是否启用托盘、关闭是否最小化到托盘、**是否启用桌面悬浮球**（`float_enabled`），**以及 `window` 段主窗几何与 `float_window` 段悬浮球几何**（坐标 / 尺寸均为**物理像素**；主窗另有是否最大化，悬浮球另有吸附边 `edge: none/left/right`） | **与数据目录同位置**：`<data_dir>\settings.json`（默认 `data\settings.json`，跟着 exe 走）；旧位置 `%APPDATA%\<app_name>\` 仅作**读取兜底**（升级兼容，不迁移不删除） |
 
 ⚠️ 2026-09-23 起窗口几何不再单独占一个 `window-state.json`，而是并进 `settings.json` 的
 `window` 段（设置字段仍平铺在顶层）—— 用户侧「只需要一个 JSON」。旧的 `window-state.json`
 **不再读也不再写**：升级后窗口会回一次默认尺寸 / 位置，那个文件可以手工删掉。
-⚠️ 因此**两个写入方都必须走读-改-写**（`saveSettings` / `saveWindowState`）：拿内存里的整份
-文档直接落盘，会在「挪了下窗口 + 改了设置」同时发生时静默吃掉其中一方。探针两条断言
-（`写几何不吃掉设置` / `写设置不吃掉窗口几何`）专门钉这件事。
+⚠️ 因此**所有写入方都必须走读-改-写**（`saveSettings` / `saveWindowState` / 悬浮球的
+`persistGeometry`）：拿内存里的整份文档直接落盘，会在「挪了下窗口 + 改了设置 + 拖了悬浮球」
+同时发生时静默吃掉其它段。探针断言（`写几何不吃掉设置` / `写设置不吃掉窗口几何` /
+`写设置/写主窗几何不吃掉 float_window 段`）专门钉这件事。
 
 ⚠️ **落点 = 数据目录**（2026-09-23 使用者指出）：此前它固定放 `%APPDATA%\<app_name>\`，于是选了绿色版
 （`data_dir = "data"`）之后 cookie / 缓存 / 日志都跟着 exe 走，**唯独设置文件留在系统盘** ——
@@ -388,9 +389,10 @@ Get-Content .\data\logs\startup.log -Tail 40
 | 唤醒快捷键 | 显示 / 隐藏主窗口。默认**未设置**；可在设置窗捕获或从下拉选择。存的是 JS `KeyboardEvent.code`（如 `Digit4`） |
 | 设置快捷键 | `Shift + F1`，**固定不可改** |
 | 隐藏 / 恢复语义 | 可见且非最小化 → 隐藏；其余（隐藏 / 最小化）→ 恢复并聚焦。⚠️ 不能只看可见性，否则最小化状态下第一次按快捷键会「没反应」 |
-| 托盘 | 默认**不启用**。菜单四项：显示窗口 / 设置 / 隐藏到托盘 / 退出。左键单击托盘图标 = 切换显隐（右键才弹菜单） |
-| 关闭按钮 | 需**同时**勾选「启用托盘」+「关闭时最小化到托盘」才隐藏到托盘；否则关闭即退出 |
+| 托盘 | 默认**不启用**。Windows 菜单五项：显示窗口 / 设置 / 悬浮图标 / 隐藏到托盘 / 退出（其它平台四项，无悬浮图标）。左键单击托盘图标 = 切换显隐（右键才弹菜单） |
+| 关闭按钮 | **任一「驻留理由」成立即隐藏、不退出**：①勾选「启用托盘」+「关闭时最小化到托盘」→ 隐藏到托盘；②勾选「启用桌面悬浮球」（仅 Windows，v1.75）→ 隐藏到球（点球即唤回）。两者都不满足 → 关闭即退出。⚠️ 理由②不可省：少了它，只启用悬浮球时关窗走 `else` 分支 ⇒ 主窗被**真销毁**、球窗却还活着 ⇒ ①球窗挡住 `window-all-closed`，进程留成既无界面也退不掉的僵尸；②点球时 `presentMainWindow` 的 `isDestroyed()` 早退 ⇒「点了悬浮图标不回窗口」（2026-10-11 真机实测，策略 `tray_enabled:false/minimize_on_close:false/float_enabled:true`） |
 | 窗口几何 | 上次最大化 → 直接最大化；位置已在屏幕外 / 尺寸过小 → 丢弃几何并最大化（**保证窗口一定可见**）；否则原位恢复 |
+| 桌面悬浮球（v1.67 引入，v1.69 纠正形态，v1.70 修复交互，v1.71 单击改 toggle + 几何漂移纠正，仅 Windows） | 设置开关 `float_enabled` 创建 / 销毁（含保存失败的成组回滚）；一个 **56×56 透明 / 无边框（`thickFrame:false`，否则隐形缩放边框使外框实测 59×58）/ 置顶 / 不占任务栏的小球**，`loadFile` 内置本地球页 `floaticon.html`（双壳单一真源，由 `stage-assets.cjs` 拷入 `out/inject/`；球内图标即软件自身 `icon.png`，同目录 stage），**不加载任何网页、不导航、不 bootstrap、不碰 sidecar / session**；**单击球 = 经 `deps.toggleMainWindow()` 切换原来的主窗口显隐**（v1.71：可见且非最小化 → 隐藏，否则显示聚焦；此前调 `showMainWindow` 只显示，主窗可见时点击无反应）；v1.70 拖动协议：页面 rAF 上报**屏幕绝对坐标**、pointerdown 先报 `down` 存按下点（首帧 move 先展开吸附态再算锚点，1:1 跟手）、pointercancel 未拖动只复位；拖动中软钳制（至少留 16 逻辑像素）、自由态松手钳回显示器；悬停展开 / 离开延迟 300ms 缩回（到期真实光标校验）、**右键 = 关闭悬浮图标功能 + 唤回主窗口**（v1.76：入口 `hideFloatFromIcon` 把 `float_enabled` 置 false 并落盘 + 销毁球窗 + `presentMainWindow()`（含多页签空壳自愈），且同步已打开设置页的 `#floatEnabled`；与 Tauri `floatwin::disable_float_from_icon` 逐条对齐 —— 只把球藏起来会留下「进程还在跑、桌面上却再也唤不出窗口」的死局），经 `float-preload.ts` 的七条白名单 IPC（`web2app:float-click/-down/-move/-drag-end/-cancel/-peek/-hide`）驱动，主进程逐条校验 sender；几何纯逻辑在 `float-layout.ts`（DIP 空间，常量与 Tauri `floatwin.rs` 对齐：窗 56 / PEEK 28 半球 / SNAP 28 / MARGIN 12 / MIN_VISIBLE 16 / 延迟 300ms），落盘经 `screen.dipToScreenRect` 转**物理像素**写 `float_window` 段；v1.71：出屏 / 负坐标移动后 `getBounds()` 的宽会逐次漂移（实测 56→58→60），`placeFloat` 是**唯一**定位入口且始终带完整固定 56×56，其余几何一律不读 `b.width`；隐藏建窗、`ready-to-show` 后显现（+1s 兜底）；close 默认转隐藏，`isQuitting()` 放行退出（否则 app.quit 被取消）；**v1.72**：建窗后用 `win.setShape(circleShapeRects(56))` 把**系统区域**裁成圆（四角**穿透**、不再吃桌面点击；`@experimental`，失败只降级不致命）、单击加 **250ms 双击去抖**（`floaticon.html` 的 `CLICK_DEBOUNCE_MS`）；**v1.73**：球页**不再挂原生提示**（原 `title` 改 `role="button"` + `aria-label`）—— 球窗 `alwaysOnTop` 会把原生提示条（独立非置顶窗口）压到球窗之后、只从透明环带漏出浅色残片，`float-contract.test.ts` 有同款守卫；**v1.75**：关窗驻留判据纳入 `float_enabled`（「球在 ⇒ 应用驻留」，见上表「关闭按钮」行），设置页新增「退出程序」并接到入口的 `requestQuit`（常驻后台时唯一的退出入口）；**v1.77：本壳无需改动，但它是本次「仅限 Tauri」症状的对照组** —— Tauri 侧实测球窗是**带着任务栏按钮**被显示的（`WS_EX_APPWINDOW`，`.skip_taskbar(true)` 挡不住）⇒ 任务栏按钮的原生提示条被置顶球窗压在身后、从透明环带漏出残片；而本壳 `skipTaskbar: true` 是**真移除**（自有窗口类写 `WS_EX_TOOLWINDOW`，球窗根本不在任务栏里 ⇒ 没有承载提示条的载体）。⚠️ 注意本壳球窗**是带标题的**（`title: deps.title`），照样没症状 ⇒ 反证根因是 `APPWINDOW` 而不是标题文本，别照搬 Tauri 侧「置空标题」那条；**v1.77b**：本壳与 Tauri 共用同一份 `floaticon.html`，故同源守卫一并钉死「球径 == `DEFAULT_FLOAT_W`（= 区域圆直径）」「球块不得 `scale(`」「collapsed 块不得 `opacity`」—— Tauri 侧把球从 46 改成 56 之后，本壳由 `circleShapeRects(56)` 裁出的圆与球严格重合，环带在两侧都不再存在 |
 
 ### 设置窗
 
@@ -405,10 +407,16 @@ Get-Content .\data\logs\startup.log -Tail 40
 多页签模式经标签栏的 `tabs:open_settings`）。
 
 它靠 `src/renderer/settings-preload.ts` 提供的 `window.__TAURI_INTERNALS__.invoke` 垫片工作，
-垫片只放行四个命令（`get_settings` / `save_settings` / `close_settings_window` / `clear_web_data`），其余一律拒绝。
+垫片放行六个命令（`get_settings` / `save_settings` / `close_settings_window` / `clear_web_data` /
+`show_float_window` / `quit_app`），其余一律拒绝。
+⚠️ 命令名是**三处逐字一致**的契约：`dist/settings.html` 的 `invoke` 字面量 / 本壳的
+`settings-window.ts` 处理器 / `settings-preload.ts` 的 `ALLOWED` 白名单 —— 漏一处就是
+「按钮点了没反应」（`float-contract.test.ts` 有守卫钉这三处）。
+`quit_app`（v1.75，设置页「退出程序」）必须接到入口的 `requestQuit`：它是「**先置 `quitting`
+再 `app.quit()`**」的唯一实现，直接用裸 `app.quit()` 会被上面的「驻留」分支拦下。
 好处是设置页永远不会分叉：改一次两个壳同时生效。
 
-> 找不到 `settings.html` 时会退到一个内置精简页（只保留两个复选框），不会出现空白窗。
+> 找不到 `settings.html` 时会退到一个内置精简页（托盘 / 关闭行为 / 悬浮图标三个复选框），不会出现空白窗。
 
 ## 自绘标题栏与页面滚动条（`html` 不滚、**`body` 滚**）
 
@@ -551,8 +559,16 @@ M3 之后还覆盖**系统集成**（**61 条，即第 11–14 节**；第 15 �
 * `settings.json` 的**序列化字节形态**必须与 `serde_json` 写出来的一致（字段名 / 嵌套 / 布尔类型 /
   **键序**）—— 这是「与 Tauri 版可互相读取」的硬保证，反向由 `webview-app` 侧的
   `store::tests::parse_accepts_electron_written_document` 盯着；
-* **设置与窗口几何同住一个文件**后，两个写入方互不吃掉对方（`写几何不吃掉设置` /
-  `写设置不吃掉窗口几何`）—— 合并的唯一真风险，两条方向都钉住；
+* **设置与窗口几何同住一个文件**后，各写入方互不吃掉对方（`写几何不吃掉设置` /
+  `写设置不吃掉窗口几何` / `float_window` 段在三个写入方下都不丢）—— 合并的唯一真风险，每个方向都钉住；
+* 悬浮球：`float-layout.ts` 纯几何单测（吸附边判定 / 展开缩回 x / y clamp / 多显示器负原点 /
+  物理像素最小尺寸，常量 56 / PEEK 28）+ `float-contract.test.ts` 静态契约（floaticon.html↔preload↔主进程
+  七通道 IPC 名一致（v1.70 增 down / cancel）、float-click 接 showMainWindow、sender 校验、主框架门控、
+  `thickFrame:false` 与透明窗属性、屏幕绝对坐标拖动协议 + 悬停延迟、
+  只 loadFile 本地页（无 loadURL / bootstrap / sidecar / target 缓存）、stage 登记 floaticon.html、
+  旧 floatbar.js / float-remote.json 已删、Tauri capability 只授权 float 窗 event emit 且无 remote 段、
+  **`win.setShape(circleShapeRects(...))` 必须存在且必须包 try/catch**（v1.72 四角穿透，反向对照时发现
+  裸 `includes` 会被注释行骗过 ⇒ 改为先剥注释再匹配））；
 * 存储位置规则：写入一律 `<data_dir>\settings.json`（= 数据目录，与 `data_dir` 字段一致），
   读取候选为「数据目录 → `%APPDATA%\<app_name>\`」（后者的 `window` 段也会被一并搬到新位置）；
 * 窗口几何的**DIP ↔ 物理像素**换算（跨 DPI 不错位）与四种恢复策略（含「位置在屏外 → 最大化」）；
@@ -613,6 +629,7 @@ M3 之后还覆盖**系统集成**（**61 条，即第 11–14 节**；第 15 �
 | `titlebar.js` / `loading.js` / `splash.html`（**两壳共用的单一真源**） | `probe` | 这两个脚本是「错了也静默」的重灾区：顶部栏没挂上、38px 没让位，界面看起来都「差不多」 |
 | `proxy.rs` / `resolve.rs`、sidecar 契约 | `probe`（内含 sidecar 三连断言）+ `cargo test` | 代理是两壳共用的 Rust 源码，改一处两个壳一起变 |
 | 设置 / 托盘 / 快捷键 / 窗口几何链路 | `probe` | 探针走的是与设置窗**完全相同**的那批函数，不是复刻实现 |
+| `float-window.ts` / `float-layout.ts` / 设置开关接线 | `unit`（含 `float-contract` 静态守卫）+ `probe` + **真机四步** | 悬浮球是「少接一根线就静默」的多文件拼装（球页方法名 / IPC 通道 / sender 校验 / 资源清单），静态守卫只能钉字面量；**冷启动副作用、退出放行、销毁语义、单击调出主窗**四件事探针覆盖不到（`probe` 走的是 `%TEMP%` 隔离配置且不建真窗），必须在真机上看：① 勾选启用悬浮球 → 重启 → 球照旧出现；② 开着球点托盘「退出」→ 进程真的没了；③ 设置里取消勾选 → 球真的消失（不是只藏起来）；④ **单击球 → 原来的主窗口被调出并聚焦**；⑤（v1.75）**只**勾「启用悬浮球」不勾托盘 → 点关闭按钮 → 窗口应当只是**隐藏**（不销毁）、点球能唤回，且设置页（Shift+F1）的「退出程序」二连点后进程真的没了 —— 少了这条，只启用悬浮球时关窗会真销毁主窗 ⇒ 球点不动 + 进程退不掉（`probe` 的 14b 段已覆盖窗口那一半，「退出程序」那一半只能真机点）；拖动 1:1 跟手不半速、靠边半隐藏 / 悬停展开不抖（v1.70 起另可先用 `tests/float-v170-harness/` 合成指针 harness 做 **17** 项自动取证（v1.70 交付时 15 项，v1.72 起第 ⑥ 组扩为双击去抖三态）；⚠️ 必须带 `--no-sandbox --in-process-gpu` 并剥掉 `ELECTRON_RUN_AS_NODE`，与 `pnpm run probe` 同一条既有禁令）、右键 = 关闭悬浮图标并唤回主窗口目视正常（球消失 + 主窗回来 + 重启后球不再出现，v1.76） |
 | `config.ts`、路径装配（`portable.ts`） | `smoke` | 绿色版路径与配置解析全是「错了也静默」，`smoke` 会把生效路径打出来 |
 | 启动日志（`startup-log.ts`）、`data\logs` 落点、`debug` 开关与 `silenceConsole()` | `smoke` | 「日志没写出来」同样是静默故障，而它是用户侧唯一的证据来源；`smoke` 断言文件已含 `[web2app] 启动信息`（冒烟内部强制 `debug=true`）。⚠️ 改 `debug` 默认值或静默逻辑时必须连带看探针 —— `--probe` 同样强制开，**一旦把 `console` 永久静默就会让所有自检一起变哑** |
 | 打包配置 / 出包前后 | `probe` + 在**真机**双击产物 | 打包产物没有 stdout，只能靠窗口标题、`data\` 与缓存取证 |
@@ -628,6 +645,11 @@ M3 之后还覆盖**系统集成**（**61 条，即第 11–14 节**；第 15 �
 
 | 版本 | 日期 | 变更说明 |
 |---|---|---|
+| 0.1.0 | 2026-10-11 | **v1.75 只启用悬浮图标时「关闭窗口 → 点球不回窗口」（对应根 `docs/changes/2026-10-11.md`）**：使用者真机「启用悬浮图标后，关闭窗口，点击悬浮图标，不会显示窗口」。根因两条链：①`win.on('close')` 的驻留判据只有 `tray_enabled && minimize_on_close` ⇒ 只启用悬浮球时关窗走 `else`、主窗被**真销毁**；②球窗挡住了 `window-all-closed`（只在**所有**窗口关闭时才发）⇒ 进程留成僵尸，而点球时 `presentMainWindow → showMainWindow` 开头 `isDestroyed()` 早退 ⇒ 一个动作都不做。修法（与 Tauri `handle_main_close` 同语义）：驻留判据并列两条理由 —— 托盘（两开关都要）**或** Windows 且 `float_enabled`（与建球的前置条件同一判据）；并把「先置 `quitting` 再 `app.quit()`」抽成入口唯一的 `requestQuit`，供托盘与设置页共用。设置页（双壳单一真源）新增「退出程序」：常驻后台时**唯一**的退出入口（没启用托盘时托盘的「退出」菜单项并不存在），链路 = `settings.html` 的 `invoke("quit_app")` → `settings-preload` 的 ALLOWED → `settings-window` 的 `tauri:quit_app` → 入口 `requestQuit`；`smoke.ts` 的命令契约清单补齐 `show_float_window` / `quit_app`（曾长期缺席）。守卫：`float-contract` 新增 2 组（关窗判据**限定在 close 处理块内**再匹配 —— 对全文 `includes` 会被启动日志里的 `runtimeSettings.float_enabled` 满足，是自我满足的假守卫；以及命令四处同改 + 从 ALLOWED 反查 smoke 清单），`probe` 第 14b 段 +4 条真实窗口语义断言。门禁：单测 **94/94**、typecheck / build 通过、单窗探针 **145/145**、页签探针 **39/39**、`smoke` 退出码 0（命令契约「齐全」）；⚠️ 本机受限会话里 GPU 进程起不来（改动前的旧包 `--probe` 同样退 1），所有 Electron 运行期探针都带 `--no-sandbox --in-process-gpu`。⚠️ 旧打包产物需重打 |
+| 0.1.0 | 2026-10-11 | **v1.72 悬浮球 Electron 侧两项（对应根 `docs/changes/2026-10-11.md`）**：①**四角「看得见但点得着」**——`transparent:true` 只让四角**看不见**，四角在系统看来仍属窗口、仍吃鼠标（layered window 的完全透明像素**不会**自动穿透）⇒ `float-layout.ts` 新增纯函数 `circleShapeRects(d)`（`setShape` 只接受 `Rectangle[]`、无椭圆入口，故用扫描线逐行 1 像素高矩形逼近圆；按「像素中心是否落在圆内」定左右端，阶梯与真圆偏差 <1px），`float-window.ts` 建窗后 `win.setShape(circleShapeRects(DEFAULT_FLOAT_W))` 并**包 try/catch**（`setShape` 在 Electron 里标记 `@experimental` win32/linux ⇒ 失败只降级成「四角挡点击」的旧行为，**绝不让球不可用**；区域只决定**命中**，视觉仍由 CSS 圆 + `transparent` 负责 ⇒ 阶梯边缘看不见，与 Tauri 侧 `CreateEllipticRgn` 真椭圆视觉一致）；②**双击去抖**（共享球页）——`floaticon.html` 加 `CLICK_DEBOUNCE_MS = 250` + `lastClickAt` + 两段式 `endPointer`（系统双击 ~100ms 内送来两次 `pointerup`、旧实现两次都发 `click` ⇒ toggle 相互抵消、主窗「闪现」；`pointercancel` 未拖动走 `cancel`、**从不**发 `click`），真机 harness 第 ⑥ 组随之改三态（首次生效 / 250ms 内第二次被丢弃 / 窗口外再次生效）+ 钉住 `pointercancel` 不触发。守卫：`float-contract` 新增 1 组（`setShape(...)` 必须存在**且必须包在 try/catch 里**；⚠️ **反向对照时发现第一版裸 `includes` 会被注释行骗过** —— 把调用改成 `// win.setShape(...)` 后守卫**仍然通过**，改为**先剥注释再匹配**后才真咬人）、`float-layout` 新增 `circleShapeRects` 用例。门禁：单测 **91/91**、`typecheck` / `build` / `smoke` 通过、单窗探针 **141/141**、页签探针 **39/39**、真机交互 harness **17/17 ALL PASS**（v1.70 交付时 15 项，本次第 ⑥ 组 3→5 项；⚠️ 必须带 `--no-sandbox --in-process-gpu` 并剥掉 `ELECTRON_RUN_AS_NODE`）。⚠️ 旧打包产物需重打 |
+| 0.1.0 | 2026-10-10 | **v1.70 悬浮球「几乎不可用」综合修复（对应根 `docs/changes/2026-10-10.md`）**：①拖动协议重写——v1.69 上报 clientX 增量被窗口每帧自身位移抵消（半速跟手），改屏幕绝对坐标 + pointerdown 发 `down` 暂存按下点（首帧 move 先展开吸附态后算锚点，harness 实锤旧法首帧纹丝不动），新增 `cancel`（pointercancel 未拖动只复位不弹主窗），IPC 五→七、`clearDragRuntime` 统一清按压残留；②悬停抖动——离开延迟 300ms（`peekGen` 代际 + 到期 `screen.getCursorScreenPoint` 真实光标校验），任何 enter（含已展开态）都作废排队缩回；③边界——`clampVisible` 软钳制留 16 逻辑像素、`clampFreeInside` 自由态钳回；④`thickFrame:false` 修隐形缩放边框（球窗实测 59×58→56×56）；⑤隐藏建窗 + ready-to-show 显现 + 1s 兜底。守卫：float-contract 新增 3 组、float-layout 新增 4 组用例，单测 **84/84**、typecheck / smoke 通过，合成指针真机 harness **15/15**（含两组反向对照）。⚠️ 旧打包产物需重打 |
+| 0.1.0 | 2026-10-10 | **v1.69 悬浮形态纠正：悬浮「小窗」→ 悬浮图标（悬浮球）（对应根 `docs/changes/2026-10-10.md`）**：使用者明确否定 v1.67「320×460 小窗加载同一站点」的方向——悬浮的应是**图标**，**单击图标显示原来的主窗口**。重写：`float-window.ts` 改 56×56 透明无边框置顶窗，`loadFile` 内置本地球页 `floaticon.html`（双壳单一真源，stage 已改登记），**删除** target 缓存轮询 / `loadURL` / `float-bootstrap` 同步取脚本 / webFrame 注入 / session 共享；新增 `web2app:float-click` IPC → `deps.showMainWindow()`（入口接托盘同款 `showMainWindow(mainWindow)`）；`float-preload.ts` 简化为五条白名单（含 floatClick、仅主框架、不再 import webFrame）；`float-layout.ts` 常量对齐 Tauri（窗 56 / PEEK 28 半球 / SNAP 28 / MIN_PHYS 40）；托盘菜单「悬浮窗」→「悬浮图标」。v1.68 的三条修复（destroy 语义在 Tauri 侧、isQuitting 放行、applyInitialSettings）全部保留。守卫：`float-contract.test.ts` 整段重写 + `float-layout.test.ts` 常量改值，单测 **77/77**、typecheck 通过、单窗探针 **141/141**、页签探针 **39/39**。⚠️ 旧打包产物需重打 |
+| 0.1.0 | 2026-10-10 | **v1.68 悬浮窗两条 Electron 侧「静默失败」缺陷（对应根 `docs/changes/2026-10-10.md`）**：①**开着悬浮窗退不掉程序**——悬浮窗 `close` 默认 `e.preventDefault()` 转隐藏，而 Electron 里「close 被 prevent」会**取消正在进行的 `app.quit()`**（实测：主窗已关、悬浮窗只剩隐藏、进程仍活着）⇒ `FloatWindowDeps` 新增 `isQuitting`（入口接 `quitting`，由 `before-quit` / `requestQuit()` 置位），退出路径放行；②**冷启动不建立进程级副作用**——入口冷启动调 `applySettings(loadedSettings.settings, …)`，而 `runtimeSettings` 初始化时已等于**同一份** `loadedSettings.settings`，托盘 / 悬浮窗的「变化才动」diff **恒为 false**（实测副作用调用数 `calls=[]`，修后 `calls=["showFloat"]`）⇒ 控制器新增 `applyInitialSettings`（prev 固定 `DEFAULT_SETTINGS`），重启后悬浮窗（与托盘图标）才会照常出现；另 `hideFloatWindow()` 补清 `moving`（拖动途中被隐藏会让悬停展开永久失效）。守卫：`test/float-contract.test.ts` +2 组（含反向对照），单测 73→**75**、`typecheck` / `build` 通过。⚠️ 旧打包产物需重打 |
 | 0.1.0 | 2026-10-08 | **v1.58 修复多页签切换不即时（标签栏/内容要等页面加载完才跳）**：根因是 `tabs.ts::spawnTab` 把 `activate()` 放在 `await onSpawn`（index.ts 内 `await loadURL`，等整页 `did-finish-load`）之后——加载期新页签不进标签栏、新视图默认可见盖在子视图栈顶，加载结束的迟到激活还会把用户手动切走的页签拽回。改为 `addChildView + setBounds` 后**立即激活**（对齐 Tauri `spawn_tab_with_target` 的「发起导航不等加载、立刻 `activate_tab`」），spawn 失败回滚旧激活页签（首签失败推空列表交失败遮罩）。`probe-server.ts` 新增 `/slow.html?ms=` 慢响应夹具；`probe-tabs.ts` 新增 P10b 6 条（页签组 33 → **39**）：同步返回即激活、壳 active 先于加载翻转（期望值独立于 active 读取防假绿）、加载中仅新视图可见、加载中切回即时生效、加载完不被拽回、收尾。反向对照：旧时序 4 条如期 FAIL（35/39），修复后 39/39；typecheck + 51 单测通过。默认组 138 条未改（本地既有的 sidecar 握手 1 条失败在改动前工作区同样复现，与本次无关） |
 | 0.1.0 | 2026-09-27 | **第五轮审计闭环（6 项 P1 + P2，对应根 README v1.37）**：①修启动失败后的**无限自动重试**循环（失败重载 splash 会再次自动 bootstrap；新增 `splashAutoBootConsumed`，自动启动一生一次，失败只等用户点重试）；②修关闭**后台页签**后标签栏残留幽灵页签（`closeTab` 非活动分支补 `pushToShell`，探针新增 P7c 2 条，31 → **33**，含反向对照「撤推送 → 壳=3 集合=2 FAIL」）；③设置保存失败时**被销毁的托盘对称回滚**（best-effort 重建，旧实现只回滚新建侧）；④preload 整个运行时主体收进 `window.self === window.top` 分支——子框架不 `sendSync` bootstrap、不暴露 `web2app` / `web2appExtra`、不注册 overlay 监听（探针新增第 16 节 4 条，134 → **138**；实测 Electron 44 默认不向子框架注入 preload，本改动为纵深防御+前向兼容）；⑤`config.ts` 新增 `normalizePublicKey`（字面量 `\n`/`\r` 归一，与打包解析器同源——PEM 公钥域名模式此前在本壳必败）；`sanitizeDirName` 补齐连续空白压缩与首尾句点剥离，与 Rust `sanitize_dir_name` 完全对齐；`debugFlagTruthy` 让 `WEB2APP_DEBUG` 接受 1/true/yes（与 Rust 逐字一致，旧实现只认 `'1'`）；⑥P2：设置 IPC 四个 handler 补 sender 校验（纵深防御）；`stopSidecar` 用 WeakSet 幂等（重复调用不再叠加定时器/监听器）；sidecar 握手成功后异常退出写进日志（旧实现静默）；删不可达的「同地址短路」分支；订正探针头「12 条契约」、分段 0–15、注入脚本 49KB、backgroundThrottling 等过期注释；⑦独立审查（R1）后补：正常 `stop()` 不再误报「异常退出」（WeakSet 区分主动停止）、目录名清洗空白集精确对齐 Rust White_Space（NEL 压空格 / BOM 保留，新增 1 条单测）。门禁：`typecheck` 通过、单测 **40/40**（+5：清洗 2、public_key 2、debug 真值 1）、探针 **138/138** 与 **33/33** 全绿 |
 | 0.1.0 | 2026-09-26 | **注入资源随 app.asar 分发 + 三类清单审计修复**：①打包形态调整 —— 注入资源（`titlebar.js` / `loading.js` / `splash.html` / `settings.html`）改由 `stage-assets.cjs` 铺到 `out/inject/`，随 `files: out/**/*` **进 `app.asar`**，删除 asar 外的 `resources/inject/`（`electron-builder.yml`、`index.ts`、`settings-window.ts`、`check-asar-config.cjs` 同步）；②两壳共用真源的 UI 打磨：`titlebar.js` 与 `shell.html` 的按钮悬停提示从原生 `title` 换成自绘 CSS tooltip（随深浅色主题、无系统延迟），按钮光标 `default → pointer`；`settings.html` 压缩两行低价值文案；③**审计修复**：修多页签 `closeTab` 邻接选择 bug（删除后才算索引恒为 -1，关中间 / 关末尾都跳回第一个幸存页签，与 Tauri `close_tab_inner` 分叉）——纯规则抽到无 Electron 依赖的 `tab-order.ts` 并新增 `test/tabs.test.ts` 6 条单测，探针补 3 页签邻接断言（多页签 26 → **31**，单测 29 → **35**）；首个页签创建失败时壳页面注入**可见错误遮罩 + 重试按钮**（新增 `tabs:retry_first_tab`，治空白壳 + debug=false 静默）；sidecar 握手成功行校验 `proxyUrl` 合法、stdin 异步 error 加监听；设置保存失败时回滚本次新建的托盘；`tabs-v4.cjs` 修 node 下必崩（改为自动 spawn electron 承载）；清理死代码（`currentWakeAccelerator`、sidecar 死字段、托盘死候选）与一批过期注释；④文档：三个 README 与 docs 计数 / 路径 / workflow 条数全面对齐（根 README v1.35） |

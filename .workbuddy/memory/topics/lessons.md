@@ -114,3 +114,144 @@
 - ⚠️⚠️ **文档里的「计数」是最容易漂的第二处**（第一处是代码）：本次 `docs/changes/2026-10-07.md` 里
   改完断言数后**仍留一处 `PASS=31`**（前一轮 `sed` 只替换到了另一句）。⇒ 订正计数后必须
   `grep -rn "PASS=\|条断言"` 把**所有**出现点扫一遍，别信单次 sed。
+
+## 2026-10-10（v1.68）：「销毁/退出/冷启动」三条静默失败——都不是本仓库发明的坑，而是框架语义没对
+
+三条都在**编译零警告 + 单测全绿 + 探针全过**的情况下只在真机现形，共同特征是
+「我们写的那句 API 名字看着对，但它在框架里走的不是同一条通路」。排查手法可复用：
+
+- ⚠️⚠️ **Tauri：`close()` ≠ 销毁，`destroy()` 才是**。`WindowMessage::Close` 在
+  `tauri-runtime-wry` 里**直接**交给 `on_close_requested`（与 Alt+F4 同一入口）⇒ 任何
+  `RunEvent::WindowEvent { CloseRequested }` 里的 `api.prevent_close()` 都会把它吞掉。
+  **凡「自己拦截了某类窗口的 CloseRequested → 转隐藏」，同文件里的销毁路径就必须用 `destroy()`**
+  （`tabs::close_tab_inner` 是既有正例）。判断 API 语义的可靠来源：tauri 源码里
+  `pub fn close` / `pub fn destroy` 的 doc + runtime 的 `Message::Window(...)` 分支，
+  **不要**凭「close 听起来就是关掉」推断。
+- ⚠️⚠️ **Electron：窗口 `close` 里 `preventDefault()` 会取消整个 `app.quit()`**。
+  「关窗转隐藏」这种常见设计必须同时放行退出路径（本项目 = 注入 `isQuitting: () => quitting`，
+  由 `before-quit` / `requestQuit()` 置位），否则表现是「开了某窗口就退不掉应用」，
+  而且**没有报错**。取证方式很便宜：两个 `BrowserWindow`，一个 prevent、一个不 prevent，
+  `app.quit()` 后等 1.5s 看进程是否还在（本次即这样拿到「abort」实证）。
+- ⚠️⚠️ **「变化才动」（diff）的冷启动陷阱**：`applySettings(next, {persist:false})` 里
+  `prev = deps.getSettings()`，而入口在调用前已把内存态初始化成**同一份** `loadedSettings.settings`
+  ⇒ 所有 diff 恒为 false，**启动时一个副作用都不会建立**。凡「只在变化时创建」的副作用
+  （托盘 / 悬浮窗 / 快捷键…），冷启动必须显式用「从默认态切换」的语义（本项目 =
+  `applyInitialSettings`，prev 固定 `DEFAULT_SETTINGS`），且**diff 基准要统一改成函数开头的 `prev`**，
+  否则 override 会被 `deps.getSettings()` 悄悄绕过。
+  ⚠️ 这类缺陷**探针很难发现**：`probe` 把配置整体挪到 `%TEMP%` 隔离目录（读不到「已启用」的配置）
+  且只走「设置页勾选 → 保存」这条**变化**路径。⇒ 「探针全过」不等于「冷启动路径也过」，
+  凡改启动链路，务必单独写一条一次性脚本或加真机清单。
+- ⚠️ 顺带两条小结论：①拖动/指针类状态（本项目的 `moving`）必须在「窗口被隐藏」时清零 ——
+  拖动途中隐藏会让 `pointerup` 永远不来，之后该状态机**永久卡死**且无任何日志；
+  ②跑这类一次性取证脚本要 `unset ELECTRON_RUN_AS_NODE`、且 `createTray` 之类**必须在
+  `app.whenReady()` 之后**调用（ready 前抛 `Cannot create Tray before app is ready`，
+  容易被误读成「图标路径不对」）。
+
+## 2026-10-11（v1.74）：失败分类器「漏一类」= 静默降级 —— 自动兜底与排错提示会**同时**失效
+
+`pack-local.mjs` 设计上写着「默认目录清不掉 ⇒ **自动**换全新目录重试一次，始终能出包、不需要人工介入」。
+这次真撞上「清不掉」，三条承诺**一条也没兑现**：不重试、不提示，用户只看到 `✗ … 失败（退出码 1）`。
+
+- ⚠️⚠️ **兜底分支的判据必须与「会失败的真实形状」逐条对齐，不能只按「设计时想到的那一种」写**。
+  本项目 `isDeleteBlocked()` 只认 `safe-delete|emptyDir|trash operation`（本机删除垫片的形状），
+  而真正发生的是 `EBUSY: resource busy or locked, unlink '<path>'`（**文件被别的进程占着**）。
+  ⇒ **凡「按错误文案分类 → 走不同恢复路径」的代码，判据都要写成「可枚举的失败形状清单 + 逐条反向对照」**；
+  「删不掉」这一类至少三种形状：本机策略拦删、**文件被占（EBUSY）**、权限拒删（EPERM/EACCES）。
+  本次的具体形状：`<CODE>: …, unlink|rmdir '<path>'`，CODE ∈ `EBUSY|EPERM|EACCES`。
+- ⚠️⚠️ **判据要锚在「系统调用」上，不是锚在错误码上**：受限网络下 electron-builder 下工具集会在
+  重试约 8 分钟后以**裸 `EPERM`**（rename/copyfile）失败 —— 那**不是**「删不掉」。
+  用裸 `EPERM` 当判据 ⇒ 白等一次重试 **+ 给出「换目录」的错误建议**。
+- ⚠️⚠️ **「能不能打开」≠「能不能删」**：Node/libuv 打开文件默认带
+  `FILE_SHARE_READ|WRITE|DELETE` ⇒ 被别的进程独占的文件**照样 `openSync(p,'r')` / `openSync(p,'r+')` 成功**
+  （本次两例都实测成功）。⇒ 检测「被占」的可靠代理：**同名 `renameSync(p, p)`**（被占时抛 EBUSY，且非破坏性）、
+  或 Windows **Restart Manager**（`rstrtmgr.dll`，问「谁注册了这个资源」）。
+  **任何「先探测再决定」的写法都必须先过这一关**，否则会得到一台**恒假阴性**的探测器（而它看起来还挺合理）。
+- ⚠️⚠️ **持锁者可能是「正在运行我们的宿主进程」，而不是被测程序**：`app.asar` 的锁来自 WorkBuddy 自己
+  （`daemon-app-server-entry.js`）。⇒ 见 `EBUSY` **先问「谁持锁」再动手**（Restart Manager / 同名 rename），
+  别默认「上一次的产物还在跑」。并且要用**受控对照**区分「通用行为」与「路径相关」：
+  本次写 120 KB `dummy-probe.asar`（+同尺寸 `.txt` 对照）三个时点都没被占、回退后新目录的**同名** `.asar`
+  也没被占 ⇒ 是**那两条具体路径**的残留句柄，不是「见到 `.asar` 就抓」。
+- ⚠️ `EBUSY` 不等于完全不可用 —— 本次 `FileShare.ReadWrite` 打开**成功**，只有 `unlink` 失败
+  ⇒「**读得动、删不掉**」：下载/校验/护栏类步骤照常全绿，只有清理步骤炸。绿的地方不代表没病。
+- ⚠️⚠️ **「关窗即退出」不是一条独立规则，而是「没有别的窗口活着」的推论**：任何在主窗之外
+  还存活着的窗口（悬浮球是独立窗、多页签在 Tauri 是独立顶层窗）都会挡住 `window-all-closed`
+  ⇒ 用户点 ✕ 之后：主窗被真销毁、进程却活着、球还在但点它没反应（**僵尸 + 孤儿**，v1.75 真机）。
+  ⇒ **凡是要「关窗后还能被唤回」的东西，都必须在关窗那一刻显式列出「驻留理由」**，
+  并且那份理由要与「该窗口真的存在」用**同一判据**（球：`platform==win32 && float_enabled`）。
+- ⚠️⚠️ **守卫的匹配范围必须限定在被测代码块内**：本次要钉 `win.on('close')` 里的
+  `runtimeSettings.float_enabled`，而同一个文件（`index.ts`）的启动日志里也有这个表达式
+  ⇒ 直接对全文 `includes` 的话，**把 close 判据整段删掉守卫照样绿**（自我满足的假守卫）。
+  取块（按行收到块尾）+ 剥注释后再匹配，才是真咬人的写法。反向对照时**要专门验证这一点**。
+- ⚠️ 环境类：**受限会话里 Electron 的 GPU 进程起不来**（`gpu_process_host.cc:1035`，
+  `exit_code=-1073741819` = 0xC0000005）⇒ 裸 `pnpm run probe` 在 `splash://` 处 `ERR_FAILED` 退 1，
+  看起来像自己改坏了。**区分办法：拿「改动之前打的产物」跑同一条命令**（本次旧 portable exe 同样退 1），
+  再给运行期探针加 `--no-sandbox --in-process-gpu` 即全绿。
+- ⚠️⚠️ **手改 Windows 窗口样式（`GWL_EXSTYLE`）必须写在每次 `show()` / `unminimize()` 之后，并读回校验**
+  （tao 0.35）：`set_visible`/`set_minimized` → `WindowState::apply_diff`（`window_state.rs`）会用**缓存的
+  tao 窗口标志**重新拼 `style_ex` 并整体 `SetWindowLongW(GWL_EXSTYLE, …)` ⇒ 写在 `show()` 之前的那一次
+  **被静默擦掉**（缓存里没有的位被抹、`ON_TASKBAR` 把 `WS_EX_APPWINDOW` 写回；实测读回恒 `0x40118`）。
+  判据只有**读回**：`SetWindowLongPtrW` 失败只回报 0，而 0 也是合法旧样式值。
+  ⇒ 本项目落法：`show_ball()` = `show → unminimize → apply_ball_window_styles → delete_taskbar_tab`，
+  顺序钉进契约守卫（v1.77）。
+- ⚠️ **框架「有这个 API」≠「它做了这件事」**：`.skip_taskbar(true)` 名字看着就是「不进任务栏」，
+  实际只额外调一次 `ITaskbarList::DeleteTab`、**既不清 `APPWINDOW` 又是在窗口还没显示时调的**
+  ⇒ 完全无效。凡「用一个高层 API 满足一条硬需求」，都要**读它的实现 + 运行时读回效果**再算数
+  （本次反例：Electron 同名选项是真的 ⇒ 症状「仅限 Tauri」）。
+- ⚠️ **同名症状 ≠ 同一根因**：v1.73 修「球元素 `title` 提示条」与 v1.77 修「任务栏按钮浮层」，
+  真机现象几乎一模一样（都是「图标背景有异样浅色图形」）。第二次动手前**先证明第一次的修复确实生效**
+  （对产物做字符串取证：`title="单击`=0 / `aria-label="单击`=1），否则会在错误方向上反复。
+- ⚠️ **取证前先确认「被测对象真的被创建了」**：本机默认 `settings.json` 里没有 `float_enabled` ⇒ 球根本不建，
+  枚举结果里看不到球窗，一度误判成「修复没生效」（本次为此多跑一轮）。
+  另：受限会话下球窗 WebView2 初始化慢，`run_on_main_thread` 的 1s 兜底回调被推迟 ⇒ 等 16s 仍 `vis=False`、
+  **20s** 才稳定可见（环境等待，不是产品行为）。
+- ⚠️ 环境类：`.ps1` 里写中文必须配 **UTF-8 BOM**。无 BOM 时 PS 5.1 按 GBK 解析，
+  报 `TerminatorExpectedAtEndOfString`（看着像语法错误，其实是编码问题）。
+  仓库既有脚本里就有「无 BOM + 含非 ASCII」的（如 `tests/float-tauri-diag/click-diag2.ps1`），属同类隐患。
+
+## 2026-10-11（v1.77b）：**取证脚本自身也会假绿** —— 反向对照脚本必须先自证「真的跑了那个测试」
+
+一次「四项反向对照全绿」的假象，连踩三个坑（同一份脚本，逐轮修）：
+
+1. ⚠️⚠️ **`cargo test --all <叶子名> -- --exact` 一个测试都匹配不到**。
+   Rust 测试的**完整路径带模块前缀**（本例 `contract_tests::float_window_contract::<名字>`），
+   `--exact` 要求全路径精确相等 ⇒ 输出是 `0 passed; 169 filtered out`，
+   退出码仍是 **0**。脚本把「没跑」当成了「通过」。
+2. ⚠️⚠️ **`finally` 里的 `return` 会覆盖 `try` 里的 `return`**（Python 语义）。
+   脚本两头都 `return` ⇒ 实际返回的永远是「还原是否成功」，与「守卫是否抓住」无关 ⇒ 四项全绿。
+3. ⚠️ **`error:` 不等于「编译失败」**。cargo 在**测试失败**时也会打印
+   `error: test failed, to rerun pass ...` ⇒ 用 `^error:` 判「编译失败」会把断言失败**误标**成
+   「编译器拦下的（弱对照）」，看起来像抓到了、其实没证明是**断言**抓到的。
+   真正的编译失败特征：`error[E0xxx]` 或 `error: could not compile`。
+
+⇒ **判据**：解析 `test result: <status>. <n> passed; <m> failed` 行，**必须 `n+m > 0`** 才算真的跑了；
+再按 `failed > 0 && passed == 0` 判「被抓住」。并**先判「跑没跑」再判「编译错」**（顺序反了就会重演坑 3）。
+
+**推广**：任何「自动判定通过/失败」的取证脚本，都是被测对象之外的第二套系统 ——
+它自己需要一条 **self-check**（本例 = 结果行里的 `passed+failed>0`）。
+「没跑」和「通过」在文本上可能只差一行，但结论完全相反。
+
+## 2026-10-11（v1.77b）：环境坑三条（都会伪装成「代码坏了」）
+
+- ⚠️ **本机 Electron GUI 起不来**：脚本里 `app.whenReady().then()` 打点能写到文件，之后进程直接死、
+  退出码 **127**。`file://` / `data:` / `pathToFileURL()` 三种加载方式全部 `ERR_FAILED (-2)`。
+  ⇒ 凡「靠 Electron 渲染同一份共享 HTML 再做像素比对」的 A/B 取证，**本机不可行**；
+  改走**不依赖渲染**的两条路：①对使用者真机截图做逐像素几何拟合；②对使用者**现场运行实例**
+  做**只读** Win32 探针。
+- ⚠️⚠️ **对「使用者现场实例」做只读取证**，比对本地起进程可靠得多：本地起 debug 实例常被
+  **单实例互斥**挡掉（用户桌面正跑着生产实例 ⇒ 新实例启动即退出 ⇒ 枚举不到球窗，看着像「没建出来」），
+  而且本机受限会话里 WebView2 根本不渲染。只读探针（`EnumWindows` + `GetWindowRect` /
+  `GetWindowLongPtrW` / `GetWindowRgn` + `PtInRegion` 网格）零副作用、拿到的还是**真实产品状态**。
+- ⚠️ **PowerShell 探针用 Python + ctypes 写**：PS 5.1 按 ANSI 读 `.ps1` ⇒ 中文注释/字符串乱码
+  （`宽` → `¿í`），且 `-f` 格式化里带 `-`/`+` 的表达式要加括号（不加会被解析成对上个命令结果做算术）。
+  ctypes 没有编码问题，`GetRgnBox` 还能配 `PtInRegion` 网格直接**重建出区域形状**（判断「是不是圆」），
+  比只看包围盒强得多。
+
+## 2026-10-11（v1.77b）：量「形状」要用能重建形状的判据
+
+- 判断残片是不是**圆环**：不要只看包围盒（矩形包围盒对圆和方块是一样的）。
+  用「逐行列出该行被点亮的 x 区段」，再把每个区段端点**换算成到某参考点的距离**：
+  内边界距离 ≈ 球半径、外边界距离 ≈ 常数 ⇒ 圆环；两条直线边 ⇒ 矩形。
+  本例正是靠这个把「浅灰圆角块」判成了「以球心为圆心的一圈环带」。
+- ⚠️ **分类阈值会骗人**：第一版把「亮」定为 `lum>=140`，结果把球自己的**浅蓝高光**（`#6a9bff`，
+  lum≈152）当成残片、把残片当成球的一部分。改为「亮 **且** 低饱和（`b-r<60`）」才把两者分开。
+  ⇒ 颜色分类必须**同时**用亮度和色相两个维度，并且要**先看一眼真实像素值**再定阈值。

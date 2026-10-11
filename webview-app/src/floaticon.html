@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<!--
+  web2app 桌面悬浮图标（悬浮球）页面 —— 双壳单一真源（Tauri + Electron 共用）
+  ---------------------------------------------------------------------------
+  这是悬浮球窗口（Tauri label "float" / Electron 独立 BrowserWindow）加载的**唯一**
+  本地内置页面：一个 56×56 透明活柱里的圆形球（Tauri 宿主窗被 WebView2 最小宽度撑宽，
+  靠 SetWindowRgn 裁成活柱内的圆形区域，本页按主进程下发的 anchor 把球摆到活柱内）。它本身**不加载
+  任何网页**，职责只有四个：
+
+  ⚠️⚠️ 球的直径**必须等于活柱边长**（56 = ICON_SIZE_LOGICAL），不能留边 —— 详见
+  `#w2f-ball` 的 width/height 处那段说明（球比区域圆小 ⇒ 中间那圈透明环带会把窗口
+  后面的东西透出来；Tauri 侧表现为「不选中时背景异样」，2026-10-11 v1.77b 真机定位）。
+    1. 单击（没有发生拖动的 pointerup）→ 通知主进程「切换【原来的主窗口】显隐」
+       （v1.71：由「只显示」改为 toggle —— 可见则隐藏、隐藏则显示并聚焦）；
+    2. 按住拖动 → 上报指针的**屏幕绝对坐标**（screenX/screenY，CSS 像素），窗口位置由主进程
+       按「光标 − 抓取点偏移」计算（v1.70 修正：旧实现上报相对本窗视口的 clientX 增量，
+       而窗口每帧都在移动，下一帧增量被窗口自身位移抵消，球只有半速跟手且抖动）；
+    3. 松手报 dragend → 主进程判定左 / 右缘吸附并半隐藏（只露半球），悬停展开、移开缩回；
+    4. 右键 → **关闭悬浮图标功能**并唤回主窗口（v1.76）：页面只发 `hide` 事件，主进程
+       把设置里的 `float_enabled` 置 false 并落盘、**销毁**球窗、并把主窗口显示出来
+       （若此前被隐藏）。⚠️ 不能再做成「只隐藏球」——球窗一藏，若用户没启用托盘、
+       主窗又是关窗驻留隐藏着的，桌面上就再也没有任何入口（进程还在跑却唤不出窗口，
+       2026-10-11 使用者实测）。托盘菜单的「悬浮图标」项仍是临时显隐 toggle，
+       Alt+F4 关球窗仍只隐藏，两者都不改设置。
+
+  球内图标是**软件自己的图标**（v1.71，不再是统一的硬编码图形）：相对路径 icon.png
+  —— 两壳都经 floaticon://localhost/icon.png 分发同一份 icons/icon.png：Tauri 返回
+  编译期内嵌字节（打包时按配置替换），Electron 开发态直接读 webview-app/icons/、打包态
+  由 stage-assets.cjs 把同一份文件铺到 out/inject/ 后由协议处理器读出。
+
+  ⚠️ 球上**不挂原生提示**（不给球写 title，v1.73）：球窗是 always-on-top，而 Chromium /
+  系统的原生提示条是**独立的非置顶窗口** ⇒ 提示条只会被画在球窗**之后**，从球窗的透明环带
+  （圆内、球本体之外的区域）漏出一块浅色残片，看起来就像「图标背景上有异样图形」。
+  2026-10-11 真机截图 + Electron 复刻本页（同一份 floaticon.html）双重取证坐实。
+  作用说明改由 aria-label 承载（读屏可见）；守卫见 `contract_tests::float_window_contract`
+  的 `float_ball_has_no_native_tooltip` 与 Electron 侧 `test/float-contract.test.ts` 同款。
+
+  ⚠️ 它是「切换主窗口显隐的快捷入口」，不是第二个浏览器窗：窗口透明、无导航、无远程内容。
+
+  两壳都经 floaticon://localhost/ 自定义协议提供本页（本地 origin；Tauri 只发核心事件，
+  权限见 capabilities/float-icon.json）。桥接方式：Electron 探测 window.web2app 白名单
+  方法，Tauri 走 __TAURI_INTERNALS__ 的 plugin:event|emit；事件 payload 带建窗时注入
+  主框架的一次性令牌 window.__web2appFloatToken。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    /* 球在活柱内居中；窗口本身透明，半隐藏时被平移到屏外的一半接不到指针。 */
+  }
+  #w2f-ball {
+    position: absolute;
+    /* 默认活柱贴宿主窗左边：球心在左起 28px = ICON_SIZE_LOGICAL/2（活柱中心；Electron 窗恰好
+       56 宽时即视觉居中）。⚠️ 这个 28 与 PEEK_LOGICAL=28 数值相同但含义无关，两壳契约守卫
+       按 ICON/2 钉住，改 ICON_SIZE_LOGICAL 必须同步这里。 */
+    left: 28px;
+    top: 50%;
+    /* ⚠️⚠️ 球必须**铺满整个活柱**（= ICON_SIZE_LOGICAL），不能比它小（v1.77b 真机根因）。
+       主进程把窗口的可视 / 命中区域裁成「活柱内的**圆**」，球比这个圆小 ⇒ 两者之间留出一圈
+       **透明的环带**，而窗口是 transparent 的 ⇒ 这圈环带会把窗口后面的东西透出来：
+         · Electron：透明是真透明，环带透出的是桌面，通常看不出问题；
+         · Tauri（WebView2）：底层不是真透明，环带会**露出一圈浅色残片**（真机现象
+           「不选中时 悬浮图标背景异样」，2026-10-11 使用者两次报告；实测残片的外边界
+           正是以球心为圆心、半径恒定的一个圆 —— 即被区域裁出来的那一圈）。
+       球直径与本窗口区域圆的直径都取 ICON_SIZE_LOGICAL ⇒ 两者严格重合，环带不存在。
+       守见 `contract_tests::float_window_contract::float_page_ball_fills_the_live_pillar`。
+
+       实测两半证据（2026-10-11）：
+         · 真机截图：残片的内边界 = 球的边缘（拟合半径 ≈ 球半径），外边界与球同心且
+           半径 ≈ 球半径 × 56/46 —— 就是一个以球心为圆心、外径 = 活柱边长的**圆环**；
+           环带只在左上 / 右侧可见，是因为球自己的深色 box-shadow 把其余部分压到看不出。
+         · 用户现场实例的**窗口区域**（只读 GetWindowRgn + PtInRegion 网格）：
+           `GetRgnBox=(0,0)..(55,56)`，每行宽度两端递减、y=28 处最宽 55 ⇒ 内接于 56×56
+           活柱的圆。区域圆 Ø56 而球只有 46 ⇒ 环带宽度 5 逻辑像素。
+       取证脚本：tests/float-frag-rc/region-probe.py（区域）、analyze-frag.py（截图）。 */
+    width: 56px;
+    height: 56px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    background: radial-gradient(circle at 34% 30%, #6a9bff 0%, #3a6dea 62%, #274db8 100%);
+    box-shadow: 0 2px 9px rgba(20, 40, 100, .45), inset 0 1px 2px rgba(255, 255, 255, .45);
+    /* ⚠️ 过渡里**不含 transform**：悬停/拖动反馈不能再靠放大（见下）。 */
+    transition: filter .12s ease, box-shadow .12s ease;
+  }
+  /* Tauri 右吸附：活柱贴宿主窗右边（宿主窗被 WebView2 撑宽，见文件头说明）。
+     Electron 窗宽正好 56，两种 anchor 计算结果相同，不会有视觉差异。 */
+  html[data-anchor="r"] #w2f-ball {
+    left: calc(100% - 28px);
+  }
+  /* 半隐藏态：球稍微压暗一点点，提示「这是吸附在边上的球，鼠标移来会展开」。
+     ⚠️ 用 `filter: brightness()` 而**不是** `opacity`：opacity 会让整颗球变成半透明，
+     连窗口底色都透出来（v1.77b：球已铺满活柱，再叠一层全局半透明等于自毁这层保护）。 */
+  html.w2f-collapsed #w2f-ball {
+    filter: brightness(.92);
+  }
+  /* 悬停 / 拖动反馈：⚠️ **不能再靠 scale 放大** —— 球已经铺满活柱，任何 scale>1 都会立刻
+     被窗口区域裁掉，等于「没有反馈」（且放大出的那一圈仍是透明环带，问题会回来）。
+     改为提亮 + 加强外发光：视觉上依旧是「鼠标压上去亮了一下」。 */
+  html #w2f-ball:hover {
+    filter: brightness(1.12);
+    box-shadow: 0 3px 12px rgba(20, 40, 100, .6), inset 0 1px 2px rgba(255, 255, 255, .55);
+  }
+  html #w2f-ball.w2f-grabbing {
+    cursor: grabbing;
+    filter: brightness(1.06);
+  }
+  /* 软件自己的图标（同目录 icon.png，双壳各自分发同一份文件）。
+     尺寸随球一起放大（球 46→56 是 ×1.217）：30px 时代图标占球径 65%，36px 维持同一比例。 */
+  #w2f-ball img {
+    width: 36px;
+    height: 36px;
+    object-fit: contain;
+    pointer-events: none; /* 让指针事件始终落在球本体，拖拽 / 点击判定不被图片打断 */
+    -webkit-user-drag: none;
+  }
+</style>
+</head>
+<body>
+<!-- ⚠️ 球上**不挂原生提示**（不给球写 title）：球窗是 always-on-top，而原生提示条是**独立的
+     非置顶窗口** ⇒ 提示条只会被画在球窗**之后**，从球窗的透明环带（圆内、球本体之外）漏出一
+     块浅色残片，看起来就像「图标背景上有异样图形」（2026-10-11 真机 + Electron 复刻本页双重
+     取证）。作用说明改由 aria-label 承载（读屏可见，且不会产生原生提示）。 -->
+<div id="w2f-ball" role="button" aria-label="单击显示 / 隐藏主窗口（拖动可移动，拖到屏幕边缘可吸附，右键关闭悬浮图标并显示主窗口）">
+  <!-- 软件自己的图标：两壳统一走 floaticon://localhost/icon.png（见文件头说明）。 -->
+  <img src="icon.png" alt="" draggable="false"/>
+</div>
+<script>
+(function () {
+  'use strict';
+  try {
+    if (window.__web2appFloatIcon) return; // 同文档防重
+    window.__web2appFloatIcon = true;
+
+    var token = window.__web2appFloatToken || '';
+
+    // 事件名与 Rust（floatwin.rs）/ Electron（float-window.ts）逐字一致。
+    var EV_DOWN = 'web2app:float-down';
+    var EV_MOVE = 'web2app:float-move';
+    var EV_CANCEL = 'web2app:float-cancel';
+    var EV_DRAG_END = 'web2app:float-drag-end';
+    var EV_PEEK_ENTER = 'web2app:float-peek-enter';
+    var EV_PEEK_LEAVE = 'web2app:float-peek-leave';
+    var EV_HIDE = 'web2app:float-hide';
+    var EV_CLICK = 'web2app:float-click';
+
+    // Rust 在主框架 eval window.__web2appFloat.setState({edge,collapsed,anchor}) 驱动
+    // 吸附样式；anchor='r'（右吸附活柱贴宿主右边）时球在视口右侧 28px，其余在左侧 28px。
+    var current = { edge: 'none', collapsed: false, anchor: 'l' };
+    window.__web2appFloat = {
+      setState: function (s) {
+        try {
+          if (!s) return;
+          current.edge = s.edge === 'left' || s.edge === 'right' ? s.edge : 'none';
+          current.collapsed = !!s.collapsed;
+          current.anchor = s.anchor === 'r' ? 'r' : 'l';
+          var root = document.documentElement;
+          if (root) {
+            root.setAttribute('data-anchor', current.anchor);
+            root.classList.toggle('w2f-dock-left', current.edge === 'left');
+            root.classList.toggle('w2f-dock-right', current.edge === 'right');
+            root.classList.toggle('w2f-collapsed', current.collapsed && current.edge !== 'none');
+          }
+        } catch (e) { /* 忽略 */ }
+      }
+    };
+
+    // ---- 桥接：Electron 走 window.web2app 白名单；Tauri 走核心事件 ----
+    function electronApi() {
+      try {
+        var E = window.web2app;
+        if (E && E.isElectron && typeof E.floatMove === 'function' && typeof E.floatClick === 'function') {
+          return E;
+        }
+      } catch (e) { /* noop */ }
+      return null;
+    }
+    function tauriEmit(name, payload) {
+      try {
+        var T = window.__TAURI__;
+        if (T && T.event && typeof T.event.emit === 'function') {
+          var r = T.event.emit(name, payload);
+          if (r && r.then) r.then(null, function () {});
+          return;
+        }
+        var I = window.__TAURI_INTERNALS__;
+        if (I && typeof I.invoke === 'function') {
+          I.invoke('plugin:event|emit', { event: name, payload: payload });
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+    // kind: down | move | cancel | dragend | click | peekenter | peekleave | hide
+    // down / move 携带指针的【屏幕绝对坐标】(sx, sy)（CSS 像素），不是相对球窗的增量 ——
+    // 主进程每帧都在 set_position，窗口自身位移会污染 clientX 增量（见文件头说明）。
+    // down 在 pointerdown 立即发：主进程只暂存「按下点」，第一帧 move 时才据此算抓取偏移
+    // （不能在第一帧 move 才算 —— 那时光标已经离开按下点，首帧窗口会纹丝不动）。
+    function send(kind, sx, sy) {
+      try {
+        var E = electronApi();
+        if (E) {
+          if (kind === 'click') E.floatClick();
+          else if (kind === 'down') E.floatDown(sx || 0, sy || 0);
+          else if (kind === 'move') E.floatMove(sx || 0, sy || 0);
+          else if (kind === 'cancel') E.floatCancel();
+          else if (kind === 'dragend') E.floatDragEnd();
+          else if (kind === 'peekenter') E.floatPeek(true);
+          else if (kind === 'peekleave') E.floatPeek(false);
+          else if (kind === 'hide') E.floatHide();
+          return;
+        }
+        if (kind === 'down') tauriEmit(EV_DOWN, { token: token, sx: sx || 0, sy: sy || 0 });
+        else if (kind === 'move') tauriEmit(EV_MOVE, { token: token, sx: sx || 0, sy: sy || 0 });
+        else if (kind === 'cancel') tauriEmit(EV_CANCEL, { token: token });
+        else if (kind === 'dragend') tauriEmit(EV_DRAG_END, { token: token });
+        else if (kind === 'peekenter') tauriEmit(EV_PEEK_ENTER, { token: token });
+        else if (kind === 'peekleave') tauriEmit(EV_PEEK_LEAVE, { token: token });
+        else if (kind === 'hide') tauriEmit(EV_HIDE, { token: token });
+        else if (kind === 'click') tauriEmit(EV_CLICK, { token: token });
+      } catch (e) { /* 忽略 */ }
+    }
+
+    var ball = document.getElementById('w2f-ball');
+    if (!ball) return;
+
+    // ---- 点击 vs 拖动：屏幕位移超过阈值才算拖动；否则松手即「点击 → 显示主窗」----
+    // 全程用 screenX/screenY（屏幕绝对坐标，CSS 像素）：主进程移动窗口不会改变它，
+    // 因此既不会被窗口自身位移抵消（v1.69 旧实现用 clientX 增量导致半速跟手 / 抖动），
+    // 吸附态起拖时窗口的 28px 展开平移也不会被误算成一次跳动。
+    var DRAG_THRESHOLD = 5;
+    // 双击去抖窗口（毫秒）：双击会送来两次 pointerup（两次 click），两次 toggle 相互抵消，
+    // 用户只看到主窗「闪现」一下。见 endPointer 里的说明。
+    var CLICK_DEBOUNCE_MS = 250;
+    var lastClickAt = 0;
+    var down = false;
+    var moved = false;
+    var startSX = 0, startSY = 0;
+    var latestSX = 0, latestSY = 0, scheduled = false;
+
+    ball.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return; // 仅主键；右键走 contextmenu
+      down = true;
+      moved = false;
+      startSX = latestSX = e.screenX;
+      startSY = latestSY = e.screenY;
+      // 立即把按下点报给主进程暂存（第一帧 move 才展开吸附态并计算抓取偏移）。
+      send('down', e.screenX, e.screenY);
+      try { ball.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      e.preventDefault();
+    });
+    ball.addEventListener('pointermove', function (e) {
+      if (!down) return;
+      if (!moved) {
+        if (Math.abs(e.screenX - startSX) + Math.abs(e.screenY - startSY) < DRAG_THRESHOLD) return;
+        moved = true;
+        ball.classList.add('w2f-grabbing');
+      }
+      // 只缓存最新屏幕坐标：主进程按绝对坐标摆放，丢几帧 / 晚几帧都能自愈，不累积误差。
+      latestSX = e.screenX;
+      latestSY = e.screenY;
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(function () {
+        scheduled = false;
+        if (!down || !moved) return;
+        send('move', latestSX, latestSY);
+      });
+    });
+    function endPointer(e, canceled) {
+      if (!down) return;
+      down = false;
+      ball.classList.remove('w2f-grabbing');
+      try { ball.releasePointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      if (canceled) {
+        // 系统打断（窗口被隐藏 / 手势被抢占）：已拖动则报 dragend 让主进程重新吸附 / 落盘；
+        // 没拖动只发 cancel 清掉主进程暂存的按下点（绝不当成单击 —— 否则一次意外取消会
+        // 莫名把主窗口弹出来，也不能留下按下点污染下一次拖动的锚点）。
+        send(moved ? 'dragend' : 'cancel');
+        return;
+      }
+      // 越过拖动阈值 = 拖动：松手报 dragend，让主进程判吸附 / 落盘。
+      if (moved) { send('dragend'); return; }
+      // 没越过阈值 = 单击：切换【原来的主窗口】显隐（v1.71 起为 toggle）。
+      // ⚠️ 去抖：系统双击在 ~100ms 内送来两次 pointerup，即两次 click —— 两次 toggle 相互
+      //    抵消，只剩主窗一瞬的「闪现」。窗口期内的后续点击一律丢弃（双击只认第一次）；
+      //    两次独立单击只要间隔超过阈值仍各算一次。
+      var now = Date.now();
+      if (now - lastClickAt < CLICK_DEBOUNCE_MS) return;
+      lastClickAt = now;
+      send('click');
+    }
+    ball.addEventListener('pointerup', function (e) { endPointer(e, false); });
+    ball.addEventListener('pointercancel', function (e) { endPointer(e, true); });
+
+    // 右键 = 关闭悬浮图标功能并唤回主窗口（v1.76）。页面只管发 hide 事件，
+    // 三件事都由主进程做：置 float_enabled=false 并落盘、销毁球窗、显示主窗口。
+    // ⚠️ 不能再退回「只隐藏球」：球一藏、而用户没启用托盘、主窗又是关窗驻留隐藏着的，
+    //    桌面上就再无任何入口（进程在跑却唤不出窗口，见文件头第 4 条）。
+    ball.addEventListener('contextmenu', function (e) {
+      e.preventDefault();
+      send('hide');
+    });
+    // 双击不做任何事，浏览器默认的文本选择 / 拖动也要挡掉。
+    ball.addEventListener('dblclick', function (e) { e.preventDefault(); });
+    ball.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
+    // ---- 鼠标进入 / 离开窗口客户区 → 悬停展开 / 移开缩回（主进程只在吸附态响应）----
+    document.addEventListener('mouseout', function (e) {
+      if (!e.relatedTarget) send('peekleave');
+    }, true);
+    document.addEventListener('mouseover', function (e) {
+      if (!e.relatedTarget) send('peekenter');
+    }, true);
+
+    window.__web2appFloat.setState(current);
+  } catch (e) { /* 内置页面任何异常都静默，不影响主进程 */ }
+})();
+</script>
+</body>
+</html>

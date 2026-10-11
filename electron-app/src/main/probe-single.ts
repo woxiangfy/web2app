@@ -305,11 +305,25 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   try {
     side = await ctx.startSidecar({ url: authUrl, noProxy: false })
     // proxyUrl 自带一次性随机门禁密钥（256-bit → 43 字符 URL-safe base64）。
-    p.check(
-      'sidecar 启动并完成握手（入口 URL 带 w2a_key 门禁密钥）',
-      /^http:\/\/127\.0\.0\.1:\d+\/\?w2a_key=[A-Za-z0-9_-]{43}$/.test(side.proxyUrl),
-      `proxyUrl=${side.proxyUrl}`
-    )
+    // v1.39 起入口 URL **保留上游路径**（不再一律回退到 /），故这里断言 pathname
+    // 与上游 /auth.html 逐字一致，而不是历史上的根路径。
+    {
+      const pu = (() => {
+        try {
+          return new URL(side.proxyUrl)
+        } catch {
+          return null
+        }
+      })()
+      p.check(
+        'sidecar 启动并完成握手（入口 URL 保留上游路径 + 带 w2a_key 门禁密钥）',
+        !!pu &&
+          /^http:\/\/127\.0\.0\.1:\d+$/.test(pu.origin) &&
+          pu.pathname === '/auth.html' &&
+          /^[A-Za-z0-9_-]{43}$/.test(pu.searchParams.get('w2a_key') ?? ''),
+        `proxyUrl=${side.proxyUrl}`
+      )
+    }
   } catch (e) {
     p.check('sidecar 启动并完成握手', false, `启动失败：${(e as Error).message}`)
   }
@@ -464,16 +478,17 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     '序列化输出为规范 JSON（旧版 serde_json 必须能原样读回）',
     JSON.stringify(tolerant) ===
       '{"wake_hotkey":{"ctrl":false,"alt":true,"shift":false,"key":"Digit4"},' +
-        '"tray_enabled":true,"minimize_on_close":true}',
+        '"tray_enabled":true,"minimize_on_close":true,"float_enabled":false}',
     JSON.stringify(tolerant)
   )
   const emptySt = parseSettings(null)
   p.check(
-    '设置全缺失 → 默认值（不设快捷键 / 不启用托盘 / 关闭即退出，与旧版一致）',
+    '设置全缺失 → 默认值（不设快捷键 / 不启用托盘 / 关闭即退出 / 不启用悬浮窗，与旧版一致）',
     emptySt.wake_hotkey.key === '' &&
       !emptySt.wake_hotkey.alt &&
       !emptySt.tray_enabled &&
-      !emptySt.minimize_on_close,
+      !emptySt.minimize_on_close &&
+      !emptySt.float_enabled,
     JSON.stringify(emptySt)
   )
   const partial = parseSettings({ wake_hotkey: { key: 'F1' } })
@@ -514,6 +529,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
       wake_hotkey: { ctrl: false, alt: true, shift: false, key: 'Digit4' },
       tray_enabled: true,
       minimize_on_close: true,
+      float_enabled: false,
     }
     saveSettings(loc, want)
     const back = loadSettings(loc)
@@ -552,10 +568,34 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     // 否则「同一个文件两版写出来的东西不同」会被当成 bug 排查。
     const text = readFileSync(loc.write, 'utf8')
     p.check(
-      '文档键序规范（设置三键 → window，两空格缩进）',
+      '文档键序规范（设置四键 → window → float_window，两空格缩进）',
       text.indexOf('"wake_hotkey"') < text.indexOf('"window"') &&
         text.includes('\n  "window": {'),
       text.replace(/\s+/g, ' ').slice(0, 140)
+    )
+
+    // float_window 段（悬浮窗几何，物理像素 + edge 小写）与 window 段一样是「同住一个 JSON、
+    // 两个写入方互不覆盖」契约的一部分：设置保存 / 主窗几何保存都不得把它抹掉，键序在 window 之后。
+    const fseg = { x: 12, y: 240, width: 320, height: 460, edge: 'left' }
+    writeDocument(loc, { settings: want2, window: geom, float_window: fseg })
+    const floatText = readFileSync(loc.write, 'utf8')
+    p.check(
+      'float_window 段：键序在 window 之后、edge 小写、两空格缩进（与 Tauri serde 同形）',
+      floatText.indexOf('"window"') < floatText.indexOf('"float_window"') &&
+        floatText.includes('"edge": "left"'),
+      floatText.replace(/\s+/g, ' ').slice(0, 220)
+    )
+    saveSettings(loc, want2)
+    p.check(
+      '写设置不吃掉 float_window 段（同一文件读-改-写）',
+      readFileSync(loc.write, 'utf8').includes('"float_window"'),
+      'float_window 段丢失'
+    )
+    saveWindowState(loc, geom)
+    p.check(
+      '写主窗几何不吃掉 float_window 段（同一文件读-改-写）',
+      readFileSync(loc.write, 'utf8').includes('"float_window"'),
+      'float_window 段丢失'
     )
 
     // ⚠️⚠️ 落点搬家的守卫（2026-09-23）：老位置（`%APPDATA%\<app_name>\`）里还有用户设置时，
@@ -798,7 +838,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     const savedFromPage = (await swin.webContents.executeJavaScript(
       'window.__TAURI_INTERNALS__.invoke("save_settings",{newSettings:{' +
         'wake_hotkey:{ctrl:false,alt:true,shift:false,key:"Digit9"},' +
-        'tray_enabled:true,minimize_on_close:false}})' +
+        'tray_enabled:true,minimize_on_close:false,float_enabled:false}})' +
         '.then(function(){return "ok"}).catch(function(e){return "err:"+String(e)})',
       true
     )) as string
@@ -857,6 +897,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
     wake_hotkey: HK({}),
     tray_enabled: true,
     minimize_on_close: true,
+    float_enabled: false,
   })
   win.close()
   await sleep(500)
@@ -865,13 +906,62 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   ctx.m3.toggleMainWindow()
   await sleep(400)
   p.check('显隐切换语义正确（隐藏后再切 → 显示）', win.isVisible(), '窗口仍处于隐藏')
+
+  // ---- 14b. 只启用悬浮图标（无托盘）时的关窗语义（v1.75）----
+  // 真机缺陷（2026-10-11 使用者实测，策略 tray_enabled:false / minimize_on_close:false /
+  // float_enabled:true）：关闭窗口走 else 分支 ⇒ 主窗被**真销毁**，而球窗还活着 —— 于是
+  // ① 球窗挡住 window-all-closed（只在**所有**窗口关闭时才发）⇒ 进程变僵尸；
+  // ② 点球时 presentMainWindow 的 `win.isDestroyed()` 早退 ⇒ 用户看到「点了悬浮图标不回窗口」。
+  // 球的产品语义就是「唤回主窗的入口」，故「球在 ⇒ 应用驻留」必须成立。
+  ctx.m3.saveSettings({
+    wake_hotkey: HK({}),
+    tray_enabled: false,
+    minimize_on_close: false,
+    float_enabled: true,
+  })
+  await sleep(300)
+  win.close()
+  await sleep(500)
+  p.check(
+    '只启用悬浮图标时点关闭：窗口未被销毁（球才是驻留入口）',
+    !win.isDestroyed(),
+    '窗口被销毁了 —— 球将变成点不动的孤儿、进程也退不掉'
+  )
+  p.check('只启用悬浮图标时点关闭：窗口被隐藏', !win.isVisible(), '窗口仍然可见')
+  ctx.m3.toggleMainWindow()
+  await sleep(400)
+  p.check('悬浮驻留下显隐切换正确（隐藏后再切 → 显示）', win.isVisible(), '窗口仍处于隐藏')
+
+  // ---- 14c. 球上右键 = 关闭悬浮图标功能 + 唤回主窗口（v1.76）----
+  // 真机缺陷：右键原来只把球藏起来 —— 没启用托盘时桌面上再无入口，而进程因 float_enabled
+  // 仍为 true 继续驻留（2026-10-11 使用者实测）。新语义把三件事一次做完：
+  // 关功能（并落盘）+ 销毁球窗 + 唤回主窗。走的是 index.ts::hideFloatFromIcon 这条真机路径。
+  p.check('前置：球窗存活（右键链路有观察对象）', ctx.m3.hasFloat(), 'hasFloat() = false')
+  win.hide()
+  await sleep(300)
+  p.check('前置：主窗已隐藏（让「唤回」那条断言有区分度）', !win.isVisible(), '窗口仍然可见')
+  ctx.m3.hideFloatFromIcon()
+  // hideFloatFromIcon 内部走 setImmediate（不在球窗自己的 IPC 栈里同步销毁事件源窗口）
+  await sleep(700)
+  p.check(
+    '右键球 → float_enabled 已置 false（应用不再靠球驻留）',
+    !ctx.m3.getSettings().float_enabled,
+    'float_enabled 仍为 true'
+  )
+  p.check('右键球 → 球窗已销毁', !ctx.m3.hasFloat(), 'hasFloat() = true')
+  p.check('右键球 → 主窗口被唤回并显示', win.isVisible(), '窗口仍处于隐藏')
+
   // 复原成「关闭即退出」，否则下一步的关闭按钮断言会被拦下来
   ctx.m3.saveSettings({
     wake_hotkey: HK({}),
     tray_enabled: false,
     minimize_on_close: false,
+    float_enabled: false,
   })
   p.check('关闭托盘开关后图标已销毁（复原）', !ctx.m3.hasTray(), 'hasTray() = true')
+  // ⚠️ 悬浮球是**真实窗口**（always-on-top），必须确认已随开关关闭而销毁，别留在使用者桌面上。
+  await sleep(200)
+  p.check('关闭悬浮开关后球窗已销毁（复原，不留痕）', !ctx.m3.hasFloat(), 'hasFloat() = true')
 
   // ---------- 15. M4 页面行为：F12 / 右键菜单 / 下载接管 ----------
   // 探针在这里只验「挂上了 + F12 真能开」这类**集成**事实；

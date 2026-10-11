@@ -25,8 +25,13 @@ export interface ProtocolDeps {
   onSplashRetry: () => void
   /** 读取设置页 HTML（单一真源 webview-app/dist/settings.html），缺失给 null。 */
   readSettingsHtml: () => string | null
-  /** 读取注入资产（shell.html 等），缺失给 null。 */
+  /** 读取注入资产（shell.html / floaticon.html 等），缺失给 null。 */
   readInject: (name: string) => string | null
+  /**
+   * 读取悬浮球内的**软件图标** PNG 字节（与 Tauri floaticon 协议的 /icon.png 对齐）。
+   * 打包态来自 out/inject/icon.png（stage 同源拷贝），开发态直接读 webview-app/icons/。
+   */
+  readFloatIcon: () => Uint8Array | null
 }
 
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
@@ -65,5 +70,31 @@ export function registerProtocols(deps: ProtocolDeps): void {
         '<!doctype html><meta charset="utf-8"><body style="background:#f7f8fa">标签栏资源缺失</body>',
       { headers: HTML_HEADERS }
     )
+  })
+
+  // floaticon:// → 悬浮球本地页与软件图标（与 Tauri 侧 handle_floaticon 逐条对齐）：
+  //   /          → floaticon.html（双壳单一真源）
+  //   /icon.png  → 软件图标（打包配置 icon_url 替换后的那一份）
+  //   其它路径   → 404（本协议只暴露这两个内置资源）
+  protocol.handle('floaticon', (req) => {
+    const path = new URL(req.url).pathname
+    if (path === '/icon.png') {
+      const png = deps.readFloatIcon()
+      if (!png) {
+        console.warn('[web2app] 未找到 icon.png，悬浮球图标缺失')
+        return new Response(null, { status: 404 })
+      }
+      // Blob 携带 image/png 类型。TS 5.7 的 Uint8Array 是 Uint8Array<ArrayBufferLike>，
+      // 不能直接做 BlobPart（SharedArrayBuffer 不在联合内），这里拷到独立 ArrayBuffer。
+      const ab = new ArrayBuffer(png.length)
+      new Uint8Array(ab).set(png)
+      return new Response(new Blob([ab], { type: 'image/png' }), {
+        headers: { 'cache-control': 'no-store' },
+      })
+    }
+    if (path === '/' || path === '') {
+      return new Response(deps.readInject('floaticon.html') ?? '', { headers: HTML_HEADERS })
+    }
+    return new Response(null, { status: 404 })
   })
 }

@@ -1,14 +1,16 @@
 //! 运行期配置文档：`<数据目录>/settings.json` —— **全应用唯一的一份持久化 JSON**。
 //!
 //! 形态：设置字段**平铺在顶层**（与旧 `settings.json` 逐字节兼容，老文件直接可读），
-//! 窗口几何整体放在 `window` 段：
+//! 窗口几何整体放在 `window` 段、悬浮球几何放在 `float_window` 段：
 //!
 //! ```json
 //! {
 //!   "wake_hotkey": { "ctrl": false, "alt": true, "shift": false, "key": "Digit4" },
 //!   "tray_enabled": true,
 //!   "minimize_on_close": false,
-//!   "window": { "x": 100, "y": 200, "width": 1100, "height": 650, "maximized": false }
+//!   "float_enabled": false,
+//!   "window": { "x": 100, "y": 200, "width": 1100, "height": 650, "maximized": false },
+//!   "float_window": { "x": 12, "y": 240, "width": 56, "height": 56, "edge": "left" }
 //! }
 //! ```
 //!
@@ -62,21 +64,53 @@ pub struct WindowGeom {
     pub maximized: bool,
 }
 
-/// 完整文档：设置 + 窗口几何。
+/// 悬浮球当前吸附的屏幕边（仅 Windows 桌面端产生该段）。序列化为小写字符串
+/// （`"none"` / `"left"` / `"right"`），与 Electron 侧 `float-window.ts` 逐字一致。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DockEdge {
+    /// 未吸附：窗口是自由摆放的普通矩形，`x/y` 即其左上角。
+    #[default]
+    None,
+    /// 吸附左边（半隐藏时只在屏幕左缘露一条）。
+    Left,
+    /// 吸附右边。
+    Right,
+}
+
+/// 悬浮球几何快照。语义同 [`WindowGeom`]（物理像素 outer 矩形），额外记一条吸附边：
+/// `edge != none` 时 `x/y` 存的是【展开态】左上角，半隐藏的偏移由宽度 + 所在显示器边界
+/// 在运行期算出，无需落盘。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FloatWinGeom {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// 旧版文件没有该字段：缺省按 none 解析（自由摆放）。
+    #[serde(default)]
+    pub edge: DockEdge,
+}
+
+/// 完整文档：设置 + 主窗口几何 + 悬浮球几何。
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     pub settings: Settings,
     pub window: Option<WindowGeom>,
+    pub float_window: Option<FloatWinGeom>,
 }
 
 /// 写盘用的视图：`flatten` 让设置字段平铺在顶层，键序由字段声明顺序决定
-/// （设置三键 → `window`），与 Electron 侧的规范化输出一致，两个壳写出来的文件长得一样。
+/// （设置四键 → `window` → `float_window`），与 Electron 侧的规范化输出一致，
+/// 两个壳写出来的文件长得一样。
 #[derive(Serialize)]
 struct DocOut<'a> {
     #[serde(flatten)]
     settings: &'a Settings,
     #[serde(skip_serializing_if = "Option::is_none")]
     window: Option<&'a WindowGeom>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    float_window: Option<&'a FloatWinGeom>,
 }
 
 /// 文档落点：目录统一走 `crate::config::store_dir`（Windows = 数据目录，即 `data_dir`
@@ -251,7 +285,23 @@ fn parse_document(text: &str) -> Result<Document, String> {
         },
     };
 
-    Ok(Document { settings, window })
+    // 悬浮球几何段：与 window 段完全独立解析，坏了只等于「悬浮球回默认位置」。
+    let float_window = match v.get("float_window") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(f) => match serde_json::from_value::<FloatWinGeom>(f.clone()) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                dlog!("[store] float_window 段解析失败，本次悬浮球用默认位置（{e}）");
+                None
+            }
+        },
+    };
+
+    Ok(Document {
+        settings,
+        window,
+        float_window,
+    })
 }
 
 /// 序列化为两空格缩进的规范 JSON（与 `serde_json::to_string_pretty` 的 Electron 侧对齐）。
@@ -259,6 +309,7 @@ fn serialize_document(doc: &Document) -> Result<String, String> {
     let out = DocOut {
         settings: &doc.settings,
         window: doc.window.as_ref(),
+        float_window: doc.float_window.as_ref(),
     };
     serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
 }
@@ -278,6 +329,7 @@ mod tests {
             },
             tray_enabled: true,
             minimize_on_close: false,
+            float_enabled: false,
         }
     }
 
@@ -291,6 +343,7 @@ mod tests {
             },
             tray_enabled: false,
             minimize_on_close: true,
+            float_enabled: true,
         }
     }
 
@@ -301,6 +354,16 @@ mod tests {
             width: 1657,
             height: 986,
             maximized: false,
+        }
+    }
+
+    fn float_geom() -> FloatWinGeom {
+        FloatWinGeom {
+            x: 12,
+            y: 240,
+            width: 56,
+            height: 56,
+            edge: DockEdge::Left,
         }
     }
 
@@ -324,6 +387,7 @@ mod tests {
             let doc = Document {
                 settings: settings_a(),
                 window: Some(geom()),
+                float_window: Some(float_geom()),
             };
             save_at(p, &doc).unwrap();
             let back = load_at(p);
@@ -331,6 +395,7 @@ mod tests {
             assert!(back.settings.tray_enabled);
             assert!(!back.settings.minimize_on_close);
             assert_eq!(back.window, Some(geom()));
+            assert_eq!(back.float_window, Some(float_geom()));
         });
     }
 
@@ -343,6 +408,7 @@ mod tests {
                 &Document {
                     settings: settings_a(),
                     window: Some(geom()),
+                    float_window: None,
                 },
             )
             .unwrap();
@@ -368,6 +434,7 @@ mod tests {
                 &Document {
                     settings: settings_a(),
                     window: None,
+                    float_window: None,
                 },
             )
             .unwrap();
@@ -418,6 +485,9 @@ mod tests {
         assert_eq!(doc.settings.wake_hotkey.key, "Digit4");
         assert!(doc.settings.tray_enabled);
         assert_eq!(doc.window, None);
+        // 旧版没有 float_enabled / float_window：前者由 serde default 兜成 false，后者缺省 None。
+        assert!(!doc.settings.float_enabled);
+        assert_eq!(doc.float_window, None);
     }
 
     /// ⚠️⚠️ **双壳互通契约**（electron-app/src/main/settings.ts）。
@@ -438,19 +508,29 @@ mod tests {
   },
   "tray_enabled": true,
   "minimize_on_close": false,
+  "float_enabled": true,
   "window": {
     "x": 455,
     "y": 179,
     "width": 1657,
     "height": 986,
     "maximized": false
+  },
+  "float_window": {
+    "x": 12,
+    "y": 240,
+    "width": 56,
+    "height": 56,
+    "edge": "left"
   }
 }"#;
         let doc = parse_document(json).expect("必须能读 Electron 壳写的 settings.json");
         assert_eq!(doc.settings.wake_hotkey.key, "Digit4");
         assert!(doc.settings.wake_hotkey.alt);
         assert!(doc.settings.tray_enabled);
+        assert!(doc.settings.float_enabled);
         assert_eq!(doc.window, Some(geom()));
+        assert_eq!(doc.float_window, Some(float_geom()));
     }
 
     /// 反方向：我们写出来的字节形态必须能被 Electron 侧解析 —— 键序、缩进、布尔类型都钉死。
@@ -459,6 +539,7 @@ mod tests {
         let doc = Document {
             settings: settings_a(),
             window: Some(geom()),
+            float_window: Some(float_geom()),
         };
         let json = serialize_document(&doc).unwrap();
         assert_eq!(
@@ -472,31 +553,45 @@ mod tests {
   },
   "tray_enabled": true,
   "minimize_on_close": false,
+  "float_enabled": false,
   "window": {
     "x": 455,
     "y": 179,
     "width": 1657,
     "height": 986,
     "maximized": false
+  },
+  "float_window": {
+    "x": 12,
+    "y": 240,
+    "width": 56,
+    "height": 56,
+    "edge": "left"
   }
 }"#,
             "写出的字节形态变了：Electron 侧的解析与探针都按这个字面量对齐"
         );
 
-        // 无几何时不该出现 `window` 键（首次启动的文件里没有这一段）。
+        // 无几何时不该出现 `window` / `float_window` 键（首次启动的文件里没有这两段）。
         let no_geom = Document {
             settings: settings_a(),
             window: None,
+            float_window: None,
         };
         let json = serialize_document(&no_geom).unwrap();
         assert!(
             !json.contains("\"window\""),
             "没有几何时不该写 window 段：{json}"
         );
+        assert!(
+            !json.contains("\"float_window\""),
+            "没有悬浮球几何时不该写 float_window 段：{json}"
+        );
 
         // 布尔必须是 JSON 布尔，不能是字符串。
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["tray_enabled"].is_boolean());
+        assert!(v["float_enabled"].is_boolean());
     }
 
     /// 一段坏掉不该拖垮另一段：`window` 段是垃圾时，三个开关照常读出。
@@ -539,6 +634,7 @@ mod tests {
                 &Document {
                     settings: settings_a(),
                     window: Some(geom()),
+                    float_window: None,
                 },
             )
             .expect("写盘应成功");
@@ -590,6 +686,7 @@ mod tests {
             &Document {
                 settings: settings_a(),
                 window: Some(geom()),
+                float_window: None,
             },
         )
         .unwrap();
@@ -614,6 +711,7 @@ mod tests {
             &Document {
                 settings: settings_a(),
                 window: None,
+                float_window: None,
             },
         )
         .unwrap();
@@ -622,6 +720,7 @@ mod tests {
             &Document {
                 settings: settings_b(),
                 window: None,
+                float_window: None,
             },
         )
         .unwrap();
@@ -643,6 +742,7 @@ mod tests {
             &Document {
                 settings: settings_a(),
                 window: Some(geom()),
+                float_window: None,
             },
         )
         .unwrap();

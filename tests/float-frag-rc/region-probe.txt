@@ -1,0 +1,30 @@
+=== 顶层窗口（EnumWindows 顺序 = Z 序，从上到下）===
+hwnd=0x1e05fe pid=9864 vis=True rect=1383,74 136x56 ex=0x8000198 [TOOLWINDOW|TOPMOST|NOACTIVATE] cls=[Tauri Window] title=[]
+hwnd=0x19a0528 pid=9864 vis=True rect=172,180 1100x613 ex=0x110 [] cls=[Tauri Window] title=[Mark]
+hwnd=0x97035e pid=9864 vis=True rect=172,142 1100x650 ex=0x40110 [APPWINDOW] cls=[Tauri Window] title=[Mark]
+hwnd=0x3290360 pid=9864 vis=True rect=0,0 14x14 ex=0x80800a0 [TOOLWINDOW|NOACTIVATE] cls=[com.example.web2app-sic] title=[com.example.web2app-siw]
+hwnd=0x326054c pid=9864 vis=False rect=179,179 1278x646 ex=0x80801a0 [TOOLWINDOW|NOACTIVATE] cls=[global_hotkey_app] title=[]
+hwnd=0x192072c pid=9864 vis=True rect=0,0 14x14 ex=0x80800a0 [TOOLWINDOW|NOACTIVATE] cls=[Tao Thread Event Target] title=[]
+hwnd=0xec042a pid=9864 vis=False rect=0,0 0x0 ex=0x0 [] cls=[MSCTFIME UI] title=[MSCTFIME UI]
+hwnd=0x870672 pid=9864 vis=False rect=0,0 0x0 ex=0x0 [] cls=[IME] title=[Default IME]
+
+=== 区域取证 hwnd=0x1e05fe rect=1383,74 136x56 ===
+GetWindowRgn kind=3 (COMPLEXREGION)
+GetRgnBox = (0,0)..(55,56) => 区域 55x56（**含端**：x 取到 right-1）
+PtInRegion 网格（每 4 行一条）：每行 x 起止 + 宽度 —— 圆的话中间行最宽、两端递减
+y=   0  x=26..29  宽=4
+y=   4  x=13..42  宽=30
+y=   8  x=8..46  宽=39
+y=  12  x=5..50  宽=46
+y=  16  x=3..52  宽=50
+y=  20  x=2..53  宽=52
+y=  24  x=1..54  宽=54
+y=  28  x=0..54  宽=55
+y=  32  x=1..54  宽=54
+y=  36  x=2..53  宽=52
+y=  40  x=3..51  宽=49
+y=  44  x=6..49  宽=44
+y=  48  x=9..46  宽=38
+y=  52  x=15..40  宽=26
+y=  56  -
+最宽行宽 = 55（圆 ⇒ ≈ 区域直径）

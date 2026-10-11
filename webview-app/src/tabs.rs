@@ -830,6 +830,21 @@ pub(crate) fn create_host_window(app: &tauri::AppHandle) -> Result<WebviewWindow
         builder = builder.additional_browser_args(proxy_args.as_str());
     }
 
+    // 数据目录：与主窗口（lib.rs）/ tab 窗口（本文件 spawn_tab_with_target）**同一个** WebView2
+    // 数据目录。
+    //
+    // ⚠️⚠️ 宿主窗原来漏设了这一句，而它恰是多页签模式下**最先创建 WebView2 环境**的窗口 ——
+    //   后果有两条，都是静默的：
+    //   ① 宿主的 WebView2 数据落到**系统默认目录**（`%LOCALAPPDATA%\<identifier>\EBWebView`），
+    //      绿色版「不写程序目录之外」的承诺被破坏（tab / 主窗都写在 exe 同级 `data/`）；
+    //   ② 上面那条注释的前提（「宿主是同 user-data-folder 下第一个创建环境的窗口，所以
+    //      proxy 参数必须挂在它身上」）**不再成立**：宿主在默认 UDF、tab 在共享 UDF，
+    //      二者分裂成两个环境，`--proxy-server` 的「同一 UDF 首个环境生效」推理失去落点。
+    let builder = match crate::config::data_dir(app) {
+        Some(dir) => builder.data_directory(dir),
+        None => builder,
+    };
+
     let host = builder
         .build()
         .map_err(|e| format!("创建宿主窗口失败：{e}"))?;

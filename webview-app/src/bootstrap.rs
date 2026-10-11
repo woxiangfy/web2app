@@ -425,8 +425,9 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
 
         match outcome {
             Ok(nav) => {
-                // 解析成功：缓存导航信息供后续新 tab 复用（仅 Windows 多页签模式有 TabManager）。
-                // 重试场景覆盖旧缓存也是正确的——重试后端口/地址可能已变，缓存必须跟着更新。
+                // 解析成功：缓存导航信息供后续复用。重试场景覆盖旧缓存也是正确的——
+                // 重试后端口/地址可能已变，缓存必须跟着更新。多页签模式额外写一份
+                // TabManager.navigation（页签新建路径复用）；单窗口模式无后续复用方。
                 #[cfg(windows)]
                 if cache_navigation && crate::tabs::tabs_enabled() {
                     if let Ok(mut cache) = app.state::<crate::tabs::TabManager>().navigation.lock()

@@ -1,0 +1,28 @@
+=== pid=9864 name=osfipin.mark path=C:\dev\rust\web-app\tests\pack\tauri\osfipin.mark.exe
+target pids: 9864
+
+--- windows of target process (own=true), Z order ---
+z=  14 hwnd=0x1E05FE vis=True  rect=1383,74 136x56 st=0x14CB0000 ex=0x8000198 [TOOLWINDOW|TOPMOST|NOACTIVATE] title=[] cls=Tauri Window
+z=  25 hwnd=0x19A0528 vis=True  rect=172,180 1100x613 st=0x94CB0000 ex=0x110 [(none)] title=[Mark] cls=Tauri Window
+z=  26 hwnd=0x97035E vis=True  rect=172,142 1100x650 st=0x14CB0000 ex=0x40110 [APPWINDOW] title=[Mark] cls=Tauri Window
+z=  28 hwnd=0x3290360 vis=True  rect=0,0 14x14 st=0x94000000 ex=0x80800A0 [TOOLWINDOW|NOACTIVATE] title=[com.example.web2app-siw] cls=com.example.web2app-sic
+z=  29 hwnd=0x326054C vis=False rect=179,179 1278x646 st=0x4C00000 ex=0x80801A0 [TOOLWINDOW|NOACTIVATE] title=[] cls=global_hotkey_app
+z=  30 hwnd=0x192072C vis=True  rect=0,0 14x14 st=0x94000000 ex=0x80800A0 [TOOLWINDOW|NOACTIVATE] title=[] cls=Tao Thread Event Target
+z= 127 hwnd=0xEC042A vis=False rect=0,0 0x0 st=0x8C000000 ex=0x0 [(none)] title=[MSCTFIME UI] cls=MSCTFIME UI
+z= 128 hwnd=0x870672 vis=False rect=0,0 0x0 st=0x8C000000 ex=0x0 [(none)] title=[Default IME] cls=IME
+
+--- windows immediately BELOW each ball candidate (Z order) ---
+BALL z=14 hwnd=0x1E05FE rect=1383,74 136x56
+   below z=  15 hwnd=0x10104 pid=3664 vis=False rect=1518,788 70x20 [TOOLWINDOW|TOPMOST] cls=tooltips_class32 title=[] no-overlap
+   below z=  16 hwnd=0x100E4 pid=3664 vis=False rect=1502,808 80x80 [TOOLWINDOW|TOPMOST] cls=NotifyIconOverflowWindow title=[] no-overlap
+   below z=  17 hwnd=0x50B07D0 pid=11304 vis=False rect=636,214 714x240 [TOOLWINDOW|TOPMOST] cls=Auto-Suggest Dropdown title=[] no-overlap
+   below z=  18 hwnd=0x101BA pid=3664 vis=False rect=0,0 13x13 [TOOLWINDOW|TOPMOST] cls=SystemTray_Main title=[电池指示器] no-overlap
+   below z=  19 hwnd=0x101C4 pid=3664 vis=False rect=0,0 0x0 [TOOLWINDOW|TOPMOST] cls=ATL:00007FF90F81B280 title=[] no-overlap
+   below z=  20 hwnd=0x101DA pid=3664 vis=False rect=0,0 0x0 [TOPMOST] cls=ATL:00007FF9079AD230 title=[Network Flyout] no-overlap
+   below z=  21 hwnd=0x101D8 pid=3664 vis=False rect=0,0 136x38 [TOPMOST] cls=PNIHiddenWnd title=[] no-overlap
+   below z=  22 hwnd=0x2011E pid=3664 vis=False rect=38,249 190x20 [TOOLWINDOW|TOPMOST] cls=tooltips_class32 title=[] no-overlap
+
+--- ALL visible windows overlapping a ball rect (any process) ---
+   z=  27 hwnd=0x1CD031E pid=2516 rect=-7,-7 1718x902 cls=Chrome_WidgetWin_1 title=[WorkBuddy]
+   z=  42 hwnd=0x1E06AE pid=3664 rect=0,0 1704x888 cls=ApplicationFrameWindow title=[]
+   z= 117 hwnd=0x10120 pid=3664 rect=0,0 1704x928 cls=Progman title=[Program Manager]

@@ -26,6 +26,10 @@ pub struct Settings {
     pub tray_enabled: bool,
     /// 关闭窗口时是否最小化到托盘（需同时启用托盘图标，否则关闭即退出）。
     pub minimize_on_close: bool,
+    /// 是否启用桌面悬浮小窗（仅 Windows 桌面端有实际行为；其他平台只持久化该开关）。
+    /// `#[serde(default)]`：旧版 settings.json 没有这一字段时按 false 解析，不至于整份失效。
+    #[serde(default)]
+    pub float_enabled: bool,
 }
 
 /// 唤醒快捷键结构。key 为 JS KeyboardEvent.code（如 "Digit4" / "F1" / "KeyA"），
@@ -53,6 +57,8 @@ impl Default for Settings {
             tray_enabled: false,
             // 默认【关闭窗口即退出程序】，而非最小化到托盘（无托盘时本也无从最小化）。
             minimize_on_close: false,
+            // 默认【不启用】桌面悬浮小窗。
+            float_enabled: false,
         }
     }
 }
@@ -152,6 +158,57 @@ pub fn load_settings(app: &AppHandle) -> Settings {
 pub fn persist_settings(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let s = s.clone();
     crate::store::update(app, |doc| doc.settings = s)
+}
+
+/// 进程内翻转「启用桌面悬浮图标」这一个开关（v1.76，球上**右键**调用）。
+///
+/// 为什么不是复用 `save_settings` 命令：右键发生在 Rust 的事件回调里，那里没有前端调用栈、
+/// 也就没有整份 `Settings` 载荷可传；而自行拼一份新 `Settings` 会把用户刚在设置页改的
+/// 快捷键 / 托盘开关一起覆盖掉。所以这里只翻转**一个**布尔：
+/// 读当前内存态 → 改这一位 → 落盘 → 写回内存态 → 同步已打开的设置页。
+///
+/// ⚠️ 顺序照搬 `save_settings` 的纪律：**落盘成功才写内存态**（任一步失败都不写内存态），
+///    否则会出现「界面 / 运行期已改、文件没写成、重启又回来」的自相矛盾。
+///
+/// ⚠️ 必须同步设置页 UI（[`push_float_enabled_to_settings_window`]）：设置窗若正开着，
+///    它的复选框还打着勾，用户随手一点「保存」就会把 `float_enabled` 推回 true（球自己跑回来）。
+///
+/// 仅 Windows 需要（悬浮球只在 Windows 存在 ⇒ 唯一调用方 `floatwin`）；
+/// 其它平台没有调用方，写成无条件函数会因 `dead_code` 在 `-D warnings` 下编译失败。
+#[cfg(windows)]
+pub(crate) fn set_float_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let mut next = app
+        .state::<SettingsState>()
+        .0
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if next.float_enabled != enabled {
+        next.float_enabled = enabled;
+        persist_settings(app, &next)?;
+        // ⚠️ 先把 State 绑到局部变量再取锁：`app.state::<T>().0.lock()` 一行写会因
+        //    临时值在语句末尾被 drop 而借不到（E0716）。
+        let st = app.state::<SettingsState>();
+        let mut guard = st.0.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = next;
+    }
+    push_float_enabled_to_settings_window(app, enabled);
+    Ok(())
+}
+
+/// 把「启用桌面悬浮图标」的最新值直接推给**已打开的**设置页（没有设置窗时静默）。
+///
+/// 为什么必须推：设置页只在**加载时**读一次 `get_settings`，而球上右键关功能发生在页面
+/// 之外 —— 不同步的话复选框还打着勾，用户随手一点「保存」就会把 `float_enabled` 推回 true。
+/// `#floatEnabled` 这个 id 与 dist/settings.html、探针三处同源，改名要一起改。
+#[cfg(windows)]
+fn push_float_enabled_to_settings_window(app: &AppHandle, enabled: bool) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let js = format!(
+            "try{{var c=document.getElementById('floatEnabled');if(c)c.checked={enabled};}}catch(e){{}}"
+        );
+        let _ = w.eval(&js);
+    }
 }
 
 /// 打开（或聚焦已存在的）设置窗口。仅桌面端使用。
@@ -303,6 +360,16 @@ pub(crate) fn save_settings(
                 app.remove_tray_by_id("main-tray");
             }
         }
+        // 桌面悬浮小窗开关：勾选 → 立即建窗显示；取消勾选 → 立即销毁（几何保留在 settings.json，
+        // 下次勾选时恢复）。仅 Windows 有实现；其他桌面平台该开关只是一个被持久化的布尔值。
+        #[cfg(windows)]
+        if new_settings.float_enabled != old.float_enabled {
+            if new_settings.float_enabled {
+                crate::floatwin::show_float_window(&app);
+            } else {
+                crate::floatwin::destroy_float_window(&app);
+            }
+        }
     }
 
     // 3) 持久化（锁外执行：磁盘 I/O 是最耗时的一步，不应阻塞其它读设置的线程）。
@@ -367,6 +434,7 @@ mod tests {
             },
             tray_enabled: true,
             minimize_on_close: true,
+            float_enabled: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
@@ -374,6 +442,17 @@ mod tests {
         assert!(back.wake_hotkey.ctrl);
         assert!(back.tray_enabled);
         assert!(back.minimize_on_close);
+        assert!(back.float_enabled);
+    }
+
+    // 旧版 settings.json 没有 float_enabled 字段：#[serde(default)] 必须兜成 false，
+    // 否则升级后老用户的整份配置会因为缺字段而解析失败。
+    #[test]
+    fn settings_without_float_enabled_defaults_false() {
+        let json = r#"{"wake_hotkey":{"ctrl":false,"alt":false,"shift":false,"key":""},"tray_enabled":true,"minimize_on_close":false}"#;
+        let back: Settings = serde_json::from_str(json).unwrap();
+        assert!(back.tray_enabled);
+        assert!(!back.float_enabled);
     }
 
     // ⚠️ 「双壳互通契约」（字段名 / 嵌套 / 字节形态）的断言已随文件合并挪到

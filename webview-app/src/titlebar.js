@@ -16,7 +16,10 @@
  *       · Electron：靠 CSS 的 `-webkit-app-region: drag`（Chromium 原生支持无边框窗口的自绘
  *         拖动区），双击最大化由 Chromium 把拖动区当作 caption 交给系统处理 —— 所以两个壳都
  *         【不要】自绑 dblclick：一次双击会触发两次切换，看起来像「点了没反应」。
- *   - 前进/后退直接驱动当前文档的 window.history（单窗口模式下与 Rust 的 history_nav 等价）。
+ *   - 前进/后退直接驱动当前文档的 window.history（单窗口模式下与 Rust 的 history_nav 等价），
+ *     但【先判定落点】：借助 Navigation API（window.navigation）检查上一条/下一条历史，
+ *     没有可退的真实页面（或落点是内置启动页 splash）时一律不触发，并把按钮置灰。
+ *     规则在电脑端与移动端一致；移动端绝不允许退回到内置页面。
  *   - 最小化/最大化/关闭经能力探测拿到的窗口控制器原生执行：
  *       · Electron：`window.web2app`（preload 白名单 API，minimize / toggleMaximize / close）
  *       · Tauri   ：`window.__TAURI__.window.getCurrentWindow()`
@@ -174,6 +177,10 @@
     'position:relative!important;',
     '}',
     '#__web2app_titlebar__ .w2t-btn:hover{background:rgba(120,133,153,.16)!important;}',
+    /* 无历史可走时按钮置灰：disabled 属性由 wire() 里的落点状态刷新控制；
+     * hover 背景也要一并压掉，否则灰态按钮仍会亮起。 */
+    '#__web2app_titlebar__ .w2t-btn:disabled{',
+    'opacity:.35!important;cursor:default!important;background:transparent!important;}',
     /* 悬停提示：用 CSS 伪元素自绘 tooltip，替代原生 title（原生 title 有 1~2 秒延迟、
      * 样式随系统、暗色下常看不清，且无法跟着主题走）。文案走 data-tip，纯 CSS 实现：
      * 不新增任何 JS、不触达 CSP（伪元素内容属于样式表，已由 adoptedStyleSheets 承载）。
@@ -872,6 +879,38 @@
     } catch (e) { /* noop */ }
   }
 
+  // 内置页面判定：启动页 splash 有两种 URL 形态 —— 原生 `splash://` scheme，与 wry 在
+  // Windows/Android 改写后的 `http://splash.localhost/`（custom_protocol_workaround，
+  // 见 bootstrap.rs）。内置页永远不该成为前进/后退的落点。
+  function isBuiltinUrl(u) {
+    if (!u) return false;
+    try {
+      return /^splash:/i.test(u) ||
+        /^https?:\/\/splash\.localhost(?:[/?#]|$)/i.test(u);
+    } catch (e) { return false; }
+  }
+
+  // 读取前进/后退落点状态：{ back: 上一条是否真实页面, fwd: 下一条是否真实页面 }。
+  // 通过 Chromium Navigation API（window.navigation）查看相邻历史条目的 URL ——
+  // 应用启动时 splash 是第一条历史，直接 history.back() 会退回到它，故必须逐落点判定。
+  // 没有 Navigation API（极老内核）时无法证明落点不是内置页 ⇒ 两个方向一律按「不可走」
+  // 处理：宁可按钮失效，也不退回启动页（使用者规则：移动端不允许返回到内置页面）。
+  function navDirections() {
+    try {
+      var n = window.navigation;
+      if (n && n.currentEntry && typeof n.currentEntry.index === 'number') {
+        var i = n.currentEntry.index;
+        var entries = n.entries();
+        function realAt(j) {
+          var e = entries[j];
+          return !!e && !isBuiltinUrl(e.url);
+        }
+        return { back: i > 0 && realAt(i - 1), fwd: realAt(i + 1) };
+      }
+    } catch (e) { /* noop */ }
+    return { back: false, fwd: false };
+  }
+
   function wire(bar) {
     // ⚠️ 前进/后退【直接】驱动当前文档的历史，不要改回 invoke 自定义命令：
     // 主窗加载的是远程页面（非 local origin），Tauri 2 会强制走 ACL 校验，而应用自定义命令
@@ -888,16 +927,35 @@
     //      https://域名（443 默认端口）时按钮才是好的，代理模式下按钮全废。
     function onNav(direction) {
       try {
+        // 先看落点：没有真实的上一条/下一条（或落点是内置 splash 页）时【不触发】。
+        var dirs = navDirections();
         if (direction === 'back') {
-          window.history.back();
+          if (dirs.back) window.history.back();
         } else {
-          window.history.forward();
+          if (dirs.fwd) window.history.forward();
         }
       } catch (e) { /* noop */ }
     }
 
-    bar.querySelector('.w2t-back').addEventListener('click', function () { onNav('back'); });
-    bar.querySelector('.w2t-fwd').addEventListener('click', function () { onNav('forward'); });
+    var backBtn = bar.querySelector('.w2t-back');
+    var fwdBtn = bar.querySelector('.w2t-fwd');
+    backBtn.addEventListener('click', function () { onNav('back'); });
+    fwdBtn.addEventListener('click', function () { onNav('forward'); });
+    // 按落点状态置灰按钮：挂载时先刷一次，SPA 同文档导航（会增删历史条目）后再刷；
+    // 跨文档导航会重新注入本脚本，无需在这里处理。
+    function refreshNavState() {
+      var d = navDirections();
+      backBtn.disabled = !d.back;
+      fwdBtn.disabled = !d.fwd;
+    }
+    refreshNavState();
+    try {
+      var navApi = window.navigation;
+      if (navApi && typeof navApi.addEventListener === 'function') {
+        navApi.addEventListener('navigatesuccess', refreshNavState);
+        navApi.addEventListener('navigateerror', refreshNavState);
+      }
+    } catch (e) { /* 不影响按钮点击本身 */ }
     bar.querySelector('.w2t-min').addEventListener('click', function () { callWindow('minimize'); });
     // 设置按钮：紧挨最小化按钮**左侧**（与多页签标签栏 shell.html 的同名按钮位置一致）。
     bar.querySelector('.w2t-settings').addEventListener('click', function () { openSettings(); });

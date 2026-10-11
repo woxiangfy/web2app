@@ -32,6 +32,7 @@ import {
 import { runProbe, runTabsProbe, startProbeServer, type ProbeServer } from './probe'
 import {
   loadSettings,
+  saveSettings,
   SETTINGS_FILE,
   storeLocation,
   type Settings,
@@ -61,6 +62,7 @@ import {
   openSettingsWindow,
   readSettingsHtml,
   registerSettingsIpc,
+  updateSettingsWindowFloat,
 } from './settings-window'
 import { MAX_TABS, TAB_BAR_HEIGHT, TabManager } from './tabs'
 import { hideShellStartupError, showShellStartupError } from './shell-overlay'
@@ -75,6 +77,14 @@ import {
   devtoolsEnabled,
 } from './page-behavior'
 import { clearWebData } from './web-data'
+import {
+  destroyFloatWindow,
+  isFloatAlive,
+  persistFloatGeometry,
+  registerFloatWindow,
+  showFloatWindow,
+  toggleFloatWindow,
+} from './float-window'
 
 /** 命令行开关。
  *
@@ -127,6 +137,16 @@ if (PROBE || process.env.WEB2APP_NO_GPU === '1' || hasFlag('--disable-gpu')) {
 function injectDir(): string {
   if (app.isPackaged) return join(app.getAppPath(), 'out', 'inject')
   return join(__dirname, '..', '..', '..', 'webview-app', 'src')
+}
+
+/**
+ * 悬浮球内软件图标（icon.png）的路径：打包态在 out/inject/（stage 同源拷贝），
+ * 开发态直接读单一真源 webview-app/icons/icon.png（floaticon.html 在 src/，
+ * 两目录不同级，故不能靠 loadFile 的相对路径，必须走 floaticon:// 协议分发）。
+ */
+function floatIconPath(): string {
+  if (app.isPackaged) return join(app.getAppPath(), 'out', 'inject', 'icon.png')
+  return join(__dirname, '..', '..', '..', 'webview-app', 'icons', 'icon.png')
 }
 
 const injectCache = new Map<string, string | null>()
@@ -254,6 +274,8 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'splash', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: 'settings', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: 'shell', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  // 悬浮球页 / 球内软件图标（与 Tauri floaticon:// 完全同 URL、同语义）。
+  { scheme: 'floaticon', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ])
 
 /**
@@ -522,20 +544,36 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   registerWindowOpenHandler(win)
 
   /**
-   * 关闭按钮语义（对齐 `lib.rs` 的 `handle_main_close`）：
-   *   「启用托盘」+「关闭时最小化到托盘」→ 隐藏窗口，应用继续驻留托盘；
-   *   否则正常关闭（最后一个窗口关闭后退出）。
+   * 关闭按钮语义（对齐 `lib.rs` 的 `handle_main_close`）——两个**驻留理由**并列：
+   *   1. 「启用托盘」+「关闭时最小化到托盘」→ 隐藏窗口，应用继续驻留托盘；
+   *   2. 「启用悬浮图标」（仅 Windows，球窗只在那时才存在）→ 隐藏窗口，应用继续驻留悬浮球；
+   *   两者都不满足 → 正常关闭（最后一个窗口关闭后退出）。
+   *
+   * ⚠️⚠️ 第 2 条是**修一个真机缺陷**，不是锦上添花（2026-10-11 使用者实测：策略
+   *    `tray_enabled:false, minimize_on_close:false, float_enabled:true`）：
+   *     关闭窗口 → 主窗被**真销毁**，但球窗还活着 ⇒ ① 球窗挡住了
+   *     `window-all-closed`（它只在**所有**窗口关闭时才发）⇒ 进程留成一个既看不见界面、
+   *     也退不掉的僵尸；② 点球时 `toggleMainWindow → presentMainWindow → showMainWindow`
+   *     开头就 `if (!win || win.isDestroyed()) return` ⇒ **一个动作都不做**，
+   *     用户看到的就是「点了悬浮图标不回窗口」。球的产品语义就是「唤回主窗的入口」
+   *     （见 floaticon.html 的 aria-label），故「球在 ⇒ 应用驻留」必须成立。
    *
    * ⚠️ `quitting` 标志不可省：托盘菜单「退出」走的是 `app.quit()`，
    *    它会触发窗口的 close 事件 —— 没有这个标志就会「点了退出，窗口只是藏起来了」。
+   *    （设置页「退出程序」走同一条 `requestQuit`，见下方 registerSettingsIpc。）
    */
   win.on('close', (e) => {
     persistGeometry(win)
     if (quitting) return
-    if (runtimeSettings.tray_enabled && runtimeSettings.minimize_on_close) {
+    const trayResident = runtimeSettings.tray_enabled && runtimeSettings.minimize_on_close
+    // 与 float-window.ts 建球的前置条件同一个判据（非 Windows 永远不建球 ⇒ 不得驻留）。
+    const floatResident = process.platform === 'win32' && runtimeSettings.float_enabled
+    if (trayResident || floatResident) {
       e.preventDefault()
       win.hide()
-      console.log('[web2app] 关闭按钮 → 隐藏到托盘（设置里已启用「关闭时最小化到托盘」）')
+      console.log(
+        `[web2app] 关闭按钮 → 隐藏（驻留理由：${trayResident ? '托盘' : ''}${trayResident && floatResident ? ' + ' : ''}${floatResident ? '悬浮图标' : ''}）`,
+      )
     }
   })
 
@@ -650,6 +688,11 @@ function settingsPreloadPath(): string {
   return join(__dirname, '..', 'renderer', 'settings-preload.js')
 }
 
+/** 悬浮窗专用 preload 的绝对路径 */
+function floatPreloadPath(): string {
+  return join(__dirname, '..', 'renderer', 'float-preload.js')
+}
+
 function readSettingsPageHtml(): string | null {
   return readSettingsHtml(app.getAppPath())
 }
@@ -709,6 +752,56 @@ function presentMainWindow(): void {
 }
 
 /**
+ * 请求退出应用：**先置 `quitting`**，再 `app.quit()`。
+ *
+ * ⚠️⚠️ 顺序不可交换：`app.quit()` 触发的窗口 close 事件会被 `win.on('close')` 的
+ *    「驻留」分支（托盘 / 悬浮图标）拦下 —— 表现就是「点了退出，窗口只是藏起来、进程还在」。
+ *    置位后那条分支直接放行（悬浮球窗的 close 也认 `isQuitting`，见 float-window.ts）。
+ *
+ * 托盘菜单「退出」与设置页「退出程序」（v1.75，常驻后台时唯一稳当的退出入口）共用这一条路径。
+ */
+function requestQuit(): void {
+  quitting = true
+  app.quit()
+}
+
+/**
+ * 球上**右键**（v1.76）= 关闭悬浮图标功能 + 唤回主窗口，与 Tauri 侧
+ * `floatwin::disable_float_from_icon` 逐条对齐：
+ *   ① `float_enabled` 置 false 并落盘 —— **只动这一位**，刻意不经 `settingsCtl.applySettings`：
+ *      后者第一步会重新注册唤醒快捷键，快捷键恰好被占用时会整条抛错、把「关功能」一起放弃；
+ *   ② 销毁球窗；③ 把主窗口显示出来（presentMainWindow 含多页签空壳自愈）。
+ *
+ * 真机缺陷（2026-10-11 使用者实测，策略 tray_enabled:false / minimize_on_close:false /
+ * float_enabled:true）：主窗「关闭」只等于隐藏到球，球成了桌面上**唯一**的可见入口；
+ * 此刻右键把球一藏 —— 进程因 `float_enabled` 仍为 true 继续驻留，桌面上却再也唤不出窗口。
+ * 右键在用户直觉里就是「我不要这个球了」，正确语义是回到主窗口。
+ *
+ * ⚠️ 延后一拍再执行：调用栈来自**球窗自己的** IPC 派发（`web2app:float-hide`），而这里要
+ *    close 掉那个球窗 —— 等于在事件源窗口的回调栈里同步销毁它自己（Electron 会告警，
+ *    页面也拿不到响应）。
+ * ⚠️ 落盘失败**不阻断**后两步：先把窗口还给用户，再让日志留痕（与 Tauri 侧同一条纪律）。
+ *
+ * 探针经 m3 钩子 `hideFloatFromIcon` 调的就是本函数 —— 断言与真机同源。
+ */
+function hideFloatFromIcon(): void {
+  setImmediate(() => {
+    try {
+      runtimeSettings = { ...runtimeSettings, float_enabled: false }
+      saveSettings(storeLoc, runtimeSettings)
+    } catch (e) {
+      console.error(
+        `[web2app] 右键关闭悬浮图标功能：写入设置失败（仍继续销毁球窗并唤回主窗）：${(e as Error).message}`
+      )
+    }
+    // 设置页若开着，把复选框拉齐 —— 否则用户随手一点「保存」会把球推回 true。
+    updateSettingsWindowFloat(false)
+    destroyFloatWindow()
+    presentMainWindow()
+  })
+}
+
+/**
  * 设置应用控制器：唤醒快捷键 / 托盘的创建销毁 / 持久化，以及失败时对**进程级副作用**
  * （快捷键 + 托盘）的成组回滚。启动时与设置窗保存共用这同一个入口（对齐旧版
  * `settings.rs::save_settings`：快捷键 → 托盘 → 持久化，任一步失败都不写内存态）。
@@ -727,13 +820,12 @@ const settingsCtl = createSettingsController({
   presentMainWindow: () => presentMainWindow(),
   hideMainWindow: () => hideMainWindow(mainWindow),
   toggleMainWindow: () => toggleMainWindow(mainWindow),
-  requestQuit: () => {
-    // ⚠️ 必须先置 quitting：否则 app.quit() 触发的 close 事件会被「关闭到托盘」分支拦下，
-    //    表现就是「点了退出，窗口只是藏进托盘、进程还在」。
-    quitting = true
-    app.quit()
-  },
+  requestQuit,
   trayIconPath: () => locateTrayIcon(app.getAppPath(), process.resourcesPath),
+  // 悬浮窗开关（仅 Windows 有行为；float-window 内部对其它平台空操作）。
+  showFloatWindow,
+  destroyFloatWindow,
+  toggleFloatWindow,
 })
 
 if (!gotLock) {
@@ -765,6 +857,13 @@ if (!gotLock) {
       },
       readSettingsHtml: readSettingsPageHtml,
       readInject,
+      readFloatIcon: () => {
+        try {
+          return readFileSync(floatIconPath())
+        } catch {
+          return null
+        }
+      },
     })
 
     // 探针模式：起夹具站点、覆盖 app_url，并把导航节奏交给 runProbe
@@ -811,6 +910,40 @@ if (!gotLock) {
             return 1
           },
         }),
+      showFloat: () => showFloatWindow(),
+      // 设置页「退出程序」（v1.75）：与托盘「退出」同一条 requestQuit。
+      // ⚠️ 这条不是可选装饰：启用托盘 / 悬浮图标后关闭窗口只等于隐藏，而没启用托盘时
+      //    托盘菜单并不存在 ⇒ 这是那种状态下**唯一**的退出入口（见 settings.html 的说明）。
+      quitApp: requestQuit,
+    })
+
+    // 悬浮球：注册白名单 IPC + 内置球页 / 主窗切换接线（仅 Windows 会真正建球）。
+    // 球窗只加载 floaticon://localhost/ 本地协议页，不导航、不 bootstrap、不碰 sidecar。
+    registerFloatWindow({
+      title: cfg.title,
+      preloadPath: floatPreloadPath(),
+      getStoreLoc: () => storeLoc,
+      // 单击球 = 切换【原来的主窗口】显隐（与托盘左键 / 唤醒快捷键同语义）：
+      // 可见且非最小化 → 隐藏；隐藏中 / 最小化 → 经 presentMainWindow 恢复并聚焦，
+      // 多页签空壳时还会自愈补建首个页签（不能直接调 toggleMainWindow，会漏掉自愈）。
+      toggleMainWindow: () => {
+        if (
+          mainWindow &&
+          !mainWindow.isDestroyed() &&
+          mainWindow.isVisible() &&
+          !mainWindow.isMinimized()
+        ) {
+          mainWindow.hide()
+        } else {
+          presentMainWindow()
+        }
+      },
+      // 右键球（v1.76）= 关闭悬浮图标功能 + 唤回主窗口。实现见 hideFloatFromIcon ——
+      // 与 Tauri 侧 `floatwin::disable_float_from_icon` 逐条对齐，且**同一个函数**也经
+      // m3 钩子交给探针，保证探针断言的就是真机走的那条路径。
+      onHideRequest: hideFloatFromIcon,
+      // 退出路径必须放行悬浮球的 close（否则 preventDefault 会把 app.quit() 整个取消）。
+      isQuitting: () => quitting,
     })
 
     // 窗口几何：必须在 ready 之后读（planRestore 要用 screen 模块，它在 ready 前不可用）
@@ -830,7 +963,12 @@ if (!gotLock) {
     //    真实副作用，见 probe.ts M3 段落；断言语境下的创建/抢占是被显式验证并收尾的）。
     if (!PROBE) {
       try {
-        settingsCtl.applySettings(loadedSettings.settings, { persist: false })
+        // ⚠️⚠️ 必须走 `applyInitialSettings`（语义 = 从默认态切换）而不是 `applySettings`：
+        //    `runtimeSettings` 在上面就被初始化成同一份 `loadedSettings.settings`，而托盘 /
+        //    悬浮窗都是「变化才动」的 diff ⇒ 用 applySettings 时 diff 恒为 false，两个副作用
+        //    一个都不会建立（2026-10-10 实测副作用调用数为 0），表现是「勾了启用托盘 /
+        //    悬浮窗，重启后图标与悬浮窗都不再出现」。与 Tauri 侧 setup 的显式建窗同语义。
+        settingsCtl.applyInitialSettings(loadedSettings.settings)
       } catch (e) {
         // 启动期失败只记日志：托盘图标缺失 / 快捷键被占用都不该让应用打不开
         console.error(`[web2app] 应用设置时出错（已降级继续启动）：${(e as Error).message}`)
@@ -883,6 +1021,9 @@ if (!gotLock) {
           hasTray: () => hasTray(),
           destroyTray: () => destroyTray(),
           trayIconPath: () => locateTrayIcon(app.getAppPath(), process.resourcesPath),
+          hasFloat: () => isFloatAlive(),
+          // 球上右键的真机路径（v1.76）：探针断言「关闭功能 + 销毁球窗 + 唤回主窗」三件事。
+          hideFloatFromIcon: () => hideFloatFromIcon(),
         },
       })
       probeServer?.close()
@@ -955,6 +1096,8 @@ if (!gotLock) {
   app.on('will-quit', () => {
     releaseShortcuts()
     destroyTray()
+    // 悬浮窗几何（吸附态展开坐标 / 尺寸）随退出落盘；随后其 BrowserWindow 随进程一起回收。
+    persistFloatGeometry()
     stopActiveSidecar()
     // 多页签：显式回收所有内容视图（官方明示视图不随窗口销毁自动回收）
     tabManager?.destroyAllTabs()
@@ -1006,6 +1149,9 @@ function logStartup(): void {
   console.log(
     `  托盘 / 关闭行为: ${runtimeSettings.tray_enabled ? '已启用' : '未启用'}` +
       ` / ${runtimeSettings.tray_enabled && runtimeSettings.minimize_on_close ? '关闭时隐藏到托盘' : '关闭即退出'}`
+  )
+  console.log(
+    `  悬浮图标      : ${runtimeSettings.float_enabled && process.platform === 'win32' ? '已启用' : '未启用'}`
   )
   // 需要 sidecar 时把它的位置和存在性写进日志：这一步「找不到」是最常见的配置类故障，
   // 而失败文案是收敛过的（不暴露路径），所以启动日志是唯一能直接看到原因的地方。

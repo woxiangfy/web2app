@@ -163,8 +163,8 @@ export async function doElectron(args, merged, env, name, rr) {
   if (attempt.status !== 0 && !dry && outDir === defaultOut && isDeleteBlocked(attempt.tail)) {
     const fallback = join(ROOT, 'tests', 'pack', `electron-local-${stamp()}`)
     emit(
-      `\n⚠️ electron-builder 清空 ${rel(outDir)} 时被删除策略拦住了（safe-delete / emptyDir）。\n` +
-        `   这台机器不允许它删掉旧产物 ⇒ **自动**改用全新目录重试：${rel(fallback)}\n` +
+      `\n⚠️ electron-builder 清空 ${rel(outDir)} 时被机器拦住了（删除策略，或旧产物里还有文件被别的进程占着）。\n` +
+        `   总之它删不掉旧产物 ⇒ **自动**改用全新目录重试：${rel(fallback)}\n` +
         `   （旧产物原样留在 ${rel(defaultOut)}/，没被动过；清掉它之后即可恢复用 tests/pack/electron/）`,
     )
     outDir = fallback
@@ -172,7 +172,10 @@ export async function doElectron(args, merged, env, name, rr) {
   }
   if (attempt.status !== 0) {
     const hint = isDeleteBlocked(attempt.tail)
-      ? '\n  看起来是输出目录删不掉（不是配置/代码问题）：换一个全新目录再试即可，例如\n' +
+      ? '\n  看起来是输出目录删不掉（不是配置/代码问题）—— 两种常见原因：\n' +
+        '    ① 旧产物里还有文件被别的进程占着（上一次打的包还在运行，或被编辑器 / 杀软 / 宿主进程抓住）；\n' +
+        '    ② 本机的删除策略拦下了（safe-delete / 配额）。\n' +
+        '  两种都只需换一个全新目录再试，例如\n' +
         `    node scripts/pack-local.mjs --config <file> --target ${args.target} --out ../tests/pack/electron-local-${stamp()}`
       : ''
     throw new FatalError(`electron-builder 失败（退出码 ${attempt.status}）${hint}`)

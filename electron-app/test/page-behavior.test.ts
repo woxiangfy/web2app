@@ -11,8 +11,11 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import {
+  canHistoryGoBack,
+  canHistoryGoForward,
   contextMenuTemplate,
   devtoolsEnabled,
+  isBuiltinUrl,
   isDevtoolsKey,
   saveDialogOptions,
   type MenuItemSpec,
@@ -148,7 +151,57 @@ test('saveDialogOptions：按后缀收敛过滤器；无后缀时不给过滤器
   assert.equal(saveDialogOptions('noext', 'D:/dl').filters, undefined)
 })
 
-test('saveDialogOptions：开覆盖确认（对齐 save_dialog.rs 的 FOS_OVERWRITEPROMPT）', () => {
+test('saveDialogOptions：开覆盖确认（对齐 save_dialog.rs 的 FOS_OVERWRITE_PROMPT）', () => {
   const props = saveDialogOptions('a.zip', 'D:/dl').properties ?? []
   assert.ok(props.includes('showOverwriteConfirmation'), '同名文件必须弹覆盖确认')
+})
+
+// ---------- 后退/前进落点守卫：内置 splash 页不可成为落点 ----------
+
+test('isBuiltinUrl：识别 splash 的两种 URL 形态（scheme 与 wry 改写后的 localhost）', () => {
+  assert.equal(isBuiltinUrl('splash://localhost/'), true)
+  assert.equal(isBuiltinUrl('http://splash.localhost/'), true)
+  assert.equal(isBuiltinUrl('https://splash.localhost/retry'), true)
+  assert.equal(isBuiltinUrl('http://splash.localhost'), true)
+  assert.equal(isBuiltinUrl('https://example.com/'), false)
+  assert.equal(isBuiltinUrl('http://splash.localhost.evil.com/'), false, '形似主机名不得误判')
+  assert.equal(isBuiltinUrl(''), false)
+})
+
+test('canHistoryGoBack：无上一条历史 → false（不得触发后退）', () => {
+  const entries = [{ url: 'https://a.test/' }]
+  assert.equal(canHistoryGoBack(entries, 0), false)
+  assert.equal(canHistoryGoBack([], 0), false)
+})
+
+test('canHistoryGoBack：上一条是内置 splash 页 → false（移动端/桌面端都不许退回内置页）', () => {
+  const entries = [
+    { url: 'http://splash.localhost/' },
+    { url: 'https://target.test/page' },
+  ]
+  assert.equal(canHistoryGoBack(entries, 1), false)
+})
+
+test('canHistoryGoBack：上一条是真实网页 → true（真实历史后退照常）', () => {
+  const entries = [
+    { url: 'http://splash.localhost/' },
+    { url: 'https://target.test/a' },
+    { url: 'https://target.test/b' },
+  ]
+  assert.equal(canHistoryGoBack(entries, 2), true)
+})
+
+test('canHistoryGoForward：下一条缺失或是内置 splash 页 → false；真实页面 → true', () => {
+  assert.equal(canHistoryGoForward([{ url: 'https://a.test/' }], 0), false, '无下一条')
+  const toSplash = [{ url: 'https://a.test/' }, { url: 'http://splash.localhost/' }]
+  assert.equal(canHistoryGoForward(toSplash, 0), false)
+  const toReal = [{ url: 'https://a.test/' }, { url: 'https://b.test/' }]
+  assert.equal(canHistoryGoForward(toReal, 0), true)
+})
+
+test('右键菜单：相邻落点是内置 splash 页时「返回」置灰（不是裸 canGoBack 语义）', () => {
+  const afterSplash = contextMenuTemplate(blankParams(), { canGoBack: false, canGoForward: true })
+  assert.equal(afterSplash.find((i) => i.label === '返回')?.enabled, false)
+  const realBack = contextMenuTemplate(blankParams(), { canGoBack: true, canGoForward: false })
+  assert.equal(realBack.find((i) => i.label === '返回')?.enabled, true)
 })

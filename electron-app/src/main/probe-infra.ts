@@ -199,6 +199,17 @@ export interface M3ProbeHooks {
   hasTray: () => boolean
   destroyTray: () => void
   trayIconPath: () => string | null
+  /**
+   * 悬浮球窗是否存活（隐藏也算）。用于 v1.75 的关窗驻留断言：球是真实窗口，
+   * 探针**必须**在收尾时确认它已随开关关闭而销毁，不能留在使用者桌面上。
+   */
+  hasFloat: () => boolean
+  /**
+   * 球上**右键**的真机路径（v1.76）：关功能（`float_enabled` 置 false 并落盘）+
+   * 销毁球窗 + 显示主窗口。探针必须调这**同一个**函数（`index.ts::hideFloatFromIcon`），
+   * 否则验的不是真机路径。⚠️ 它是 `setImmediate` 延后的，断言前要留出至少一拍。
+   */
+  hideFloatFromIcon: () => void
 }
 
 export interface ProbeContext {

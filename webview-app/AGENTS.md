@@ -28,13 +28,15 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。新 tab 落点：与入口同源（含上游真实主机）的链接映射到入口地址的对应路径，跨域外链**直接打开目标地址**（与 Electron 壳一致，v1.52）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；标题回传与 token 注入**只在主框架生效**（v1.55：WebView2 初始化脚本会注入所有 iframe，子框架（如 bilibili 页内广告 frame，其标题为 "Leader Iframe" 等）曾顶掉标签栏真实标题；契约测试 `tab_title_script_runs_in_top_frame_only` 钉住）；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`）。**顶部标签栏与单窗口标题栏为同一套配色/按钮样式**（v1.54：`shell.html` 复用 `titlebar.js` 的浅/深底色、下沿分隔线、按钮盒模型与 hover 色；静态契约测试 `tab_bar_palette_matches_titlebar` 钉住），且 `shell.html` 是双壳共用的单一真源，Tauri / Electron 表现一致 | Windows |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
-| 优雅关闭 | 关闭行为由设置决定：启用托盘且开启“最小化到托盘”时隐藏到托盘；否则退出应用 | Windows |
+| 优雅关闭 | 关闭行为由设置决定（两个**驻留理由**并列，任一成立即隐藏、不退出）：①启用托盘且开启“最小化到托盘”→ 隐藏到托盘；②启用桌面悬浮图标（v1.75）→ 隐藏到球（点球即唤回）。两者都不成立则退出应用。⚠️ 理由②不可省：少了它，只启用悬浮球时关窗走 `else` 分支 ⇒ 主窗被**真销毁**、球窗却还活着 ⇒ ①球窗挡住「所有窗口关闭 ⇒ 退出」，进程留成既无界面也退不掉的僵尸；②点球时 `toggle_window` 的 `get_webview_window("main")` 返回 `None`，一个动作都不做 ⇒「点了悬浮图标不回窗口」（2026-10-11 真机实测） | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
-| 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
+| 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**前进/后退带落点守卫（v1.66）**：经 Chromium Navigation API 判定相邻条目，没有真实历史或落点是内置 splash 启动页时按钮置灰、不触发导航。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
+| Android 返回键 | **系统返回键不允许回到内置 splash 启动页（v1.66）**：CI 在 `tauri android init` 后经 `.github/scripts/patch-android-back.py` 给 MainActivity 注入回调，用 `WebView.copyBackForwardList()` 判定上一条历史 —— 是真实网页才 `goBack()`，落点内置或无历史时走 `finish()` 回桌面 | Android |
 | 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏；目标页加载失败时加载层转失败卡（含「重试」）。**Android 导航后另发一次 Rust 侧可达性探测**（v1.60），把 DNS/连接/超时/TLS 的具体原因提前显示在失败卡上；**v1.61 起失败卡自带「现场诊断」**（当前地址 / readyState / HTTP 状态 / 资源数 / WebView UA / 页面脚本错误），截图即可区分「没离开启动页」与「外链没渲染」，无需 adb；**v1.62 修正启动页的加载层语义与重试落点**：①模式标记改由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入（`lib.rs::build_main_window`，此前只有 `tabs.rs` 有）——启动页不再被当成目标页跑，正常偏慢的启动不会被 overlay 的 15s 空白硬上限误报成失败；②启动页判定加改写后的 hostname（`splash.localhost`），重试改用**相对路径** `/retry`（此前 `location.protocol === 'splash:'` 在 wry 把协议改写成 `http://splash.localhost/` 后恒不成立，重试退化为只刷新 `/` 的死循环）；**v1.64 修启动期「发得太早」**：Android 上壳侧操作走 wry main-pipe，而 `LoadUrl` / `Eval` 在 webview 未就绪时**静默丢弃**，且初始 splash 导航是 `post{}` 异步、后续 `navigate` 是同步 ⇒ 直连配置下导航先发、随后**被那条 post 出去的 splash 加载覆盖**，同期进度 `eval` 又落在 document-start 之前被短路（真机表象：地址仍是 `splash.localhost` **且**零进度行，同一机制）；改为非 Windows 启动期**先等首个文档加载完成**（`bootstrap::BootReady`，就绪信号来自建窗时注册的 `on_page_load`）再解析 / 推送 / 导航；**v1.65 再加「落点校验 + 有限重发」**：`navigate()` 恒返回 `Ok(())`、返回值不能证明导航生效，故导航后隔 500ms 读一次真实地址（`is_splash_url` 同时认 `splash://` 与改写后的 `http://splash.localhost/`），仍停在启动页就重发（最多 2 次）—— v1.64 是预防、v1.65 是检验与自愈 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 登录密码保存 | 网页登录表单提交后弹出「保存密码？」气泡，保存后下次访问自动填充（v1.59 起显式开启 WebView2 `IsPasswordAutosaveEnabled`——该开关默认 **false**，与 Electron 壳的 Chromium 默认行为对齐；老运行时不支持 `ICoreWebView2Settings4` 时静默跳过，不影响其它钩子）；已保存密码随设置页「清除全部浏览数据」一并清除 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
+| 桌面悬浮图标（悬浮球） | 设置开关 `float_enabled`（v1.67 引入、v1.69 纠正形态、v1.70 修复交互、v1.71 真机闭环）：一个 56×56 **透明无边框置顶小球**（不占任务栏），加载内置本地页 `floaticon://localhost/`（`src/floaticon.html`，**不加载任何网页**；球内图标即软件自身 `icons/icon.png`，经同协议 `/icon.png` 编译期内嵌）；**单击球 = 切换原来的主窗口显隐**（v1.71 起 `tray::toggle_window`：可见非最小化→隐藏并同步 tab 可见性，否则显示 / 取消最小化 / 聚焦；此前只「显示」）；球可拖动（v1.70 起页面上报**屏幕绝对坐标**、pointerdown 发 `down` 存按下点，8 个事件；拖动中软钳制至少留 16 逻辑像素、松手自由态钳回显示器）、**右键 = 关闭悬浮图标功能并唤回主窗口**（v1.76：`float_enabled` 置 false 并落盘 + 销毁球窗 + 显示主窗 —— 只把球藏起来会留下「进程还在跑、桌面上却再也唤不出窗口」的死局）；拖到屏幕左 / 右缘自动**半隐藏吸附**（只露半球 28 逻辑像素；v1.70 起悬停展开 / 离开延迟 300ms 缩回 + 真实光标位置校验，防抖）；v1.71 起用 `SetWindowRgn`+`CreateEllipticRgn` 把可视 / 命中裁成 56 逻辑「活柱」内圆形（WebView2 强制宿主最小宽约 131 逻辑，区域外系统级穿透；`Resized`/DPI 变化幂等重裁）；几何与吸附边持久化在 `settings.json` 的 `float_window` 段（展开态物理像素）；托盘菜单「悬浮图标」可显隐切换。⚠️ 建窗必须显式 `.data_directory(config::data_dir(app))`（v1.71 真机根因：省略时 wry 回落默认 UDF，受控终端不可写致球窗静默建不出，有契约守卫）；**v1.72**：单击加 **250ms 双击去抖**（`floaticon.html` 的 `CLICK_DEBOUNCE_MS`，窗口期内的第二次点击丢弃 —— 系统双击会在 ~100ms 内送来两次 `pointerup`，旧实现两次都发 `click` ⇒ toggle 相互抵消、主窗「闪现」），Tauri 侧交互链路另有真机探针 `--float-probe`（27 项断言，见「测试」章）；**v1.73：球不挂原生提示**（原 `title` 改 `role="button"` + `aria-label`）—— 球窗 always-on-top，原生提示条（独立非置顶窗口）只会被画在球窗**之后**、从透明环带漏出一块浅色残片（真机现象「图标背景有异样图形」），守卫 `float_ball_has_no_native_tooltip`；**v1.77：球窗「真不进任务栏」** —— `.skip_taskbar(true)` **不够**（tao 的 `ON_TASKBAR` 按「窗口无父」置位 ⇒ 创建时写死 `WS_EX_APPWINDOW`，`DeleteTab` 又在窗口还没显示时调用 ⇒ 球实测是**带着任务栏按钮**被显示出来的，`ex=0x40118`），任务栏按钮的原生提示条 / 任务视图浮层被 always-on-top 球窗压到身后、只从透明环带漏出残片（真机现象「图标背景异样」，仅 Tauri 侧 —— Electron 的 `skipTaskbar` 是真移除）⇒ 修法：显示球窗**只能**经 `show_ball()`（`show → unminimize → apply_ball_window_styles → delete_taskbar_tab`，顺序硬要求 —— tao `apply_diff` 在显示路径用缓存标志**整体重写** `GWL_EXSTYLE`，写在 show 之前等于没改），置 `WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`、**按位清** `WS_EX_APPWINDOW`，再 `ITaskbarList::DeleteTab` 回收已建出的按钮，球窗 `.title("")`；读回实测 `0x40118` → `0x8000198`；**v1.77b：球必须铺满活柱**（球径 `46px → **56px**` = `ICON_SIZE_LOGICAL`）—— 窗口区域是「内接于活柱的圆」（现场只读取证 `GetRgnBox=(0,0)..(55,56)`、`PtInRegion` 网格两端递减），球比它小 ⇒ 中间那圈透明环带把窗口后面的东西透出来（Tauri/WebView2 非真透明 ⇒ 浅色残片；Electron 真透明 ⇒ 无感），这是「图标背景异样」的第三个源头（前两个：v1.73 球元素 `title`、v1.77 任务栏按钮）；连带 hover / grabbing 的 `scale()` 改 `filter: brightness()`、collapsed 的 `opacity` 改 `filter: brightness(.92)`、图标 `30 → 36px`，守卫 `float_page_ball_fills_the_live_pillar`，守卫 ⑥b / ⑥c | Windows |
 | 拖拽修复 | WebView2 拖拽 bug 的 polyfill（用鼠标事件合成完整 HTML5 DnD 序列） | Windows |
 
 ---
@@ -78,8 +80,9 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 1. **唤醒快捷键**：显示 / 隐藏主窗口的全局快捷键。支持“点击捕获”（按下组合键即可，按 Esc 取消）或从下拉框选择常用键。**默认不启用**（未设置时不注册任何全局快捷键）。
    - 保存后立即生效；不能与「打开设置(Shift+F1)」冲突。
 2. **是否启用托盘图标**：关闭后启动不创建托盘图标（关闭窗口即退出）。
-3. **关闭窗口后最小化到托盘**：勾选且同时启用托盘时，点关闭按钮 = 最小化到托盘；否则关闭窗口即退出应用。
-4. **清除缓存与 Cookie**：一个按钮，**只有全清**（刻意不做分项选择）。一次清空本应用的全部本地数据
+3. **关闭窗口后最小化到托盘**：勾选且同时启用托盘时，点关闭按钮 = 最小化到托盘；**只启用悬浮图标（v1.75）时点关闭 = 隐藏（点球唤回）**；两者都没有才「关闭窗口即退出应用」。
+4. **启用桌面悬浮图标（悬浮球）**（v1.67 引入，v1.69 纠正为悬浮球，v1.70 修复拖动 / 悬停 / 边界交互，v1.71 单击改 toggle + 活柱裁剪 + 数据目录根因修复）：勾选后立即创建小球，取消立即销毁；另有「立即显示悬浮图标」按钮（命令 `show_float_window`，跨平台注册、非 Windows 体内空操作）。**单击球切换原来的主窗口显隐**（可见则隐藏、否则显示聚焦）；球可拖动（屏幕绝对坐标协议，拖出屏会被钳回）、拖到屏幕左 / 右缘半隐藏吸附（悬停展开、移开延迟 300ms 缩回）、**右键 = 关闭悬浮图标功能 + 唤回主窗口**（v1.76：写 `float_enabled=false` 落盘 + 销毁球窗 + 显示主窗，且同步已打开设置页的复选框）；几何 / 吸附边写入 `settings.json` 的 `float_window` 段。详见功能特性表与 `src/floatwin.rs` / `src/floaticon.html`（协议注册见 `lib.rs`，能力见 `capabilities/float-icon.json`）。**v1.72**：单击带 **250ms 双击去抖**（`CLICK_DEBOUNCE_MS`，窗口期内第二次点击丢弃，防主窗「闪现」）；整条交互链路已由**真机合成指针 harness** `--float-probe` 取证（27 项断言，见「测试」章）。**v1.77**：球窗此前其实**带着任务栏按钮**（`.skip_taskbar(true)` 挡不住，实测 `GWL_EXSTYLE=0x40118` 含 `WS_EX_APPWINDOW`）⇒ 任务栏按钮的原生提示条浮层被置顶球窗压在身后、从透明环带漏出残片（真机「图标背景异样」）⇒ 显示球窗一律经 `show_ball()`（顺序 `show → unminimize → 补样式 → DeleteTab` 是硬要求，见 `src/floatwin.rs` 模块头），读回实测 `0x8000198`。 **v1.77b**：球径必须 = 活柱边长（`46px → 56px`）—— 窗口圆形区域与球之间那圈环带会透出窗口后面的东西（Tauri 侧成浅色残片）；悬停 / 拖动反馈从 `transform: scale()` 改 `filter: brightness()`，半隐藏从 `opacity` 改 `filter: brightness(.92)`（`opacity` 让整颗球半透明 = 自毁这层保护）；另补上 `ITaskbarList::HrInit()`（v1.77 漏了它 ⇒ `DeleteTab` 静默无效）。
+5. **清除缓存与 Cookie**：一个按钮，**只有全清**（刻意不做分项选择）。一次清空本应用的全部本地数据
    —— 缓存、Cookie（含登录状态）、Local Storage / IndexedDB、Service Worker 等，随后重新加载内容页，
    需要重新登录。⚠️ 后端命令 `clear_web_data` **仅 Windows 桌面版有实现**，其它平台返回明确的
    「不支持」错误（宁可报错，也不做「显示已清除、其实什么都没清」的假成功）。
@@ -90,18 +93,27 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
    ②清除刚结束时该 WebView 的**导航会被静默丢弃、甚至直接阻塞** ⇒ 重载前刻意留 1.2s 落定
    （`RELOAD_SETTLE`）。⚠️ 「清完重载一定生效」这条**本机未取证**，待真机目视。
 
+6. **退出程序**（v1.75）：面板里的一个按钮，二次点击确认后彻底结束应用（连托盘图标与悬浮图标一并收掉）。
+   ⚠️ 它不是「锦上添花的第二个关闭按钮」：启用了托盘或悬浮图标后「关闭窗口」只等于隐藏，而**没有托盘时
+   托盘的「退出」菜单项根本不存在** ⇒ 常驻后台的用户唯一的出口就是这里（Shift+F1 随时能打开本面板）。
+   后端命令 `quit_app` = 托盘「退出」同一条 `app.exit(0)` 路径。
+
 > 设置保存在**数据目录**下（`<data_dir>\settings.json` —— `data_dir` 默认 `"data"` ⇒ `<exe 同级>\data\settings.json`，与 cookie / 缓存 / 日志同一个目录；`app_name` 默认 `Web2App`），为 JSON 文件，下次启动自动读取。
 > ⚠️ 2026-09-23 前它固定在 `%APPDATA%\<app_name>\`；那个旧位置现在只作**读取兜底**（升级兼容，不迁移不删除）。
-> ⚠️ 只有上面 1–3 项落在 `settings.json` 里；**第 4 项不落盘** —— 它是一次性动作，不是配置项。
+> ⚠️ 只有上面 1–4 项落在 `settings.json` 里；**第 5 项不落盘** —— 它是一次性动作，不是配置项。
 > ⚠️ **窗口几何（上表「窗口几何记忆」）也在这同一个 `settings.json` 的 `window` 段里**（2026-09-23 起；
-> 此前单独占一个 `window-state.json`，该文件已不再读写，可手工删除）。两个写入方
-> （设置页保存 / 关窗记几何）一律走 `src/store.rs` 的**读-改-写**，互不覆盖。
+> 此前单独占一个 `window-state.json`，该文件已不再读写，可手工删除）；**悬浮球几何在 `float_window` 段**
+> （v1.67 起：`{x,y,width,height,edge}`，物理像素，`edge` 为 `none`/`left`/`right`，无几何时整段不出现）。
+> 三个写入方（设置页保存 / 关窗记主窗几何 / 悬浮球拖动与退出）一律走 `src/store.rs` 的**读-改-写**，互不覆盖。
 > 写盘是**原子的**（同目录临时文件 → `sync_all` → rename，与 Electron 侧 `writeDocument` 同策略）：
 > 写一半被杀 / 断电不会留下截断的 `settings.json` —— 否则下次启动整份解析失败，
-> 三个开关与窗口几何会一起被回默认值，**且不报错**。
+> 四个设置项与主窗 / 悬浮球几何会一起被回默认值，**且不报错**。
 
 界面后续可在 `dist/settings.html` 上继续扩展更多能力（Rust 命令通道 `get_settings` / `save_settings` /
-`close_settings_window` / `clear_web_data` 即可复用）。
+`close_settings_window` / `clear_web_data` / `show_float_window` / `quit_app` 即可复用）。
+`quit_app`（v1.75，面板「退出程序」按钮）= 托盘菜单「退出」同一条路径 `app.exit(0)`
+（→ `RunEvent::ExitRequested`，**不经过窗口 CloseRequested**，因此上面那个「驻留」分支
+不会把退出吞掉）；它是**常驻后台时唯一的退出入口** —— 没启用托盘的用户原本根本退不掉程序。
 ⚠️ 该 HTML 是**双壳共用的单一真源**：Electron 壳靠 `settings-preload.ts` 的命令白名单 +
 `settings-window.ts` 的 IPC 名对接，新增命令时**「页面字面量 / 白名单 / IPC 名」三处必须逐字一致**，
 否则表现是「按钮点了没反应」——探针与冒烟各有一条断言守着这个契约。
@@ -338,9 +350,40 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-09 v1.65 实测 198 条通过：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 125；另有 6 条 ignored）
+cargo test --all                # 全量单元测试（2026-10-11 v1.72 实测工作区 232 通过 / 6 ignored：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 159；主 crate 合计 162 条）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
+
+### 悬浮球真机探针（`--float-probe`，仅 Windows）
+
+`target/debug/web2app.exe --float-probe`（或 `cargo run -- --float-probe`）跑一次**真机合成指针**验证：
+建窗形态与活柱裁剪、自由态拖动（1:1 跟手 / 软钳制 / 松手钳回）、左右缘吸附（含活柱贴边与区域跟随）、
+悬停展开 / 抖动吸收 / 300ms 延迟缩回、单击 toggle 主窗、右键 = **关闭悬浮图标功能并唤回主窗口**
+（球窗**被销毁** + `float_enabled` 置 false + 主窗被唤回；复原后吸附态保留）
+（**27 项断言 + 6 项环境诊断**，诊断不计入失败；v1.72 为 24 项，v1.76 的右键语义升级 +3）。
+
+- **驱动方式**：`floatwin::inject_page_event` 用**真实令牌**构造合法载荷，走真实 `token_matches` →
+  `handle_event` → **真实窗口操作**；唯一跳过的是「球页 JS 把事件发出去」那一段
+  （因此**页面侧 JS** 由 Electron 侧 harness「真发 `PointerEvent`、驱动同一份共享球页」与 Rust 静态契约守卫
+  `float_page_click_is_debounced_against_double_click` 覆盖，见 `electron-app/AGENTS.md`）。
+- **退出码**：`0` = 全过；`>0` = 失败断言条数；**`97` = 窗口环境没起来**（主线程往返 60s 内不回来，
+  与环境有关、与代码无关）；**`98` = 看门狗总超时**（探针**绝不允许**挂死）。
+- ⚠️ **本机（受限桌面会话）`WebviewWindowBuilder::build()` 约 50% 概率永久挂死**，同一 exe 同样代码时好时坏；
+  该调用同步阻塞、进程内无法给自己设超时，且换 exe 目录 / 换 WebView2 UDF / 清残留 `msedgewebview2` 全都无效。
+  **这是环境抖动，不是产品缺陷** ⇒ 用外部重试器跑：
+  `powershell -NoProfile -ExecutionPolicy Bypass -File tests/float-v172-rc/run-float-probe.ps1`
+  （按「输出停滞 ≥160s」判卡 → 杀进程 → 换新目录重来）。
+- ⚠️ 探针模式会**跳过单实例插件与全局快捷键** —— 否则本机已有实例在跑时，单实例插件让进程**直接退出**，
+  表现为「零输出、退出码 0」的**假绿**。
+- ⚠️ **探针内手写建窗必须与生产同构**：假主窗漏设 `data_directory` 时建窗会从 7~9ms 退化成 60s+ 甚至挂死
+  （契约守卫 `float_probe_fake_main_window_sets_data_directory` 已钉住）。
+- 真机实测事实（写进断言，勿再当成「失败」）：`GetWindowRgnBox` 对椭圆区域**含端** ——
+  `[0,70)×[0,70)` 上报 `(0,0,69,69)`（宽高各 −1），100% / 125% 缩放一致；
+  `monitor_from_point` 用 `MONITOR_DEFAULTTONULL`（屏外的点查不到显示器 ⇒ 软钳制整段被跳过，
+  测试点必须落在显示器**内**）。
+- ⚠️ 本机删除走安全垫片（递归删除一律被拦、有配额）⇒ 探针的临时运行目录**不要自己清**，换新目录重来即可；
+  WebView2 的 UDF 落点是 `%LOCALAPPDATA%\com.example.web2app\EBWebView`，**与 exe 所在目录无关**
+  （「换个全新目录跑 exe」不会换掉脏 UDF；要禁用就**重命名备份**）。
 
 主 crate 的多数测试跑在 `#[cfg(not(windows))]` 路径上，因此**同时**在验证 Android 侧逻辑；
 Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也会跑它们。

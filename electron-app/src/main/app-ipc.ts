@@ -15,6 +15,7 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import type { AppConfig } from './config'
 import type { ResolvedTarget } from './navigate'
 import type { TabManager } from './tabs'
+import { canHistoryGoBack, canHistoryGoForward } from './page-behavior'
 
 export interface AppIpcDeps {
   /** 多页签模式：特权命令必须校验 sender.id === 壳 webContents.id */
@@ -162,9 +163,15 @@ function registerTabsIpc(deps: AppIpcDeps): void {
     const active = mgr().active
     if (!active) return null
     const nav = active.view.webContents.navigationHistory
-    // webContents.goBack() 在 Electron 44 已 Deprecated，用 navigationHistory.goBack()
-    if (dir === 'back') nav.goBack()
-    else if (dir === 'forward') nav.goForward()
+    // webContents.goBack() 在 Electron 44 已 Deprecated，用 navigationHistory；
+    // 且必须先判定落点：相邻条目是内置 splash 启动页时不触发（与 titlebar.js 同规则）。
+    const entries = nav.getAllEntries()
+    const index = nav.getActiveIndex()
+    if (dir === 'back') {
+      if (canHistoryGoBack(entries, index)) nav.goBack()
+    } else if (dir === 'forward') {
+      if (canHistoryGoForward(entries, index)) nav.goForward()
+    }
     return null
   })
   // 壳页面失败遮罩上的「重试」按钮（仅主进程在首签失败时注入该遮罩，页面自身不调用）。

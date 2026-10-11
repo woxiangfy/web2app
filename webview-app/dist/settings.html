@@ -21,7 +21,8 @@
       见 webview-app/capabilities/settings-window.json）。
     · 底部操作区固定：内容再多，保存按钮也不会被滚出视野。
   ⚠️ 元素 id（hkCurrent / captureBtn / keySelect / trayEnabled / minimizeOnClose /
-     clearDataBtn / saveBtn / closeBtn / status）是与脚本、探针的接口，改名要同步改。
+     floatEnabled / showFloatBtn / quitBtn / clearDataBtn / saveBtn / closeBtn / status）
+     是与脚本、探针的接口，改名要同步改。
 -->
 <style>
   :root {
@@ -259,7 +260,32 @@
         <div class="row">
           <label class="chk"><input type="checkbox" id="trayEnabled"/> 启用系统托盘图标</label>
           <label class="chk"><input type="checkbox" id="minimizeOnClose"/> 关闭窗口时最小化到托盘</label>
-          <div class="sub">默认关闭窗口即退出程序。勾选“启用系统托盘图标”并勾选“最小化到托盘”后，关闭窗口才会隐藏到托盘而非退出。</div>
+          <div class="sub">默认关闭窗口即退出程序。勾选“启用系统托盘图标”并勾选“最小化到托盘”后，关闭窗口会隐藏到托盘而非退出；勾选“启用桌面悬浮图标”后，关闭窗口会隐藏到悬浮图标（点图标即唤回）。隐藏后要真正结束程序，用下方的“退出程序”。</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <label class="chk"><input type="checkbox" id="floatEnabled"/> 启用桌面悬浮图标</label>
+          <div class="ctrl">
+            <button id="showFloatBtn">立即显示悬浮图标</button>
+          </div>
+          <div class="sub">在桌面显示一个始终置顶、不占任务栏的圆形悬浮图标：<b>单击图标可切换主窗口显隐（显示 / 隐藏）</b>；按住可拖动到任意位置，拖到屏幕左 / 右边缘松手会半隐藏（只露一半），鼠标移上去展开、移开缩回；右键图标可隐藏。勾选并保存后开启。</div>
+        </div>
+      </div>
+
+      <!-- 「退出程序」（v1.75）：启用托盘 / 悬浮图标后「关闭窗口」只等于隐藏，程序继续驻留；
+           没有启用托盘时，托盘的「退出」菜单项并不存在 ⇒ 用户会找不到任何退出入口。
+           放在设置页是因为 Shift+F1 能随时把本页打开，与窗口是否可见无关。 -->
+      <div class="card">
+        <div class="row">
+          <div class="label">退出程序</div>
+          <div class="ctrl">
+            <button class="danger" id="quitBtn">退出程序</button>
+          </div>
+          <div class="sub">
+            彻底结束应用（连托盘图标与悬浮图标一并收掉）。启用了托盘或悬浮图标时，关闭窗口只是把窗口藏起来、程序仍常驻后台 —— 需要真正退出时用这里。
+          </div>
         </div>
       </div>
 
@@ -318,6 +344,7 @@
       document.getElementById("hkCurrent").textContent = hkLabel(s.wake_hotkey);
       document.getElementById("trayEnabled").checked = s.tray_enabled;
       document.getElementById("minimizeOnClose").checked = s.minimize_on_close;
+      document.getElementById("floatEnabled").checked = !!s.float_enabled;
       captured = s.wake_hotkey; // 默认沿用当前
     } catch (e) {
       setStatus("加载设置失败：" + e, "err");
@@ -391,7 +418,8 @@
     const payload = {
       wake_hotkey: captured,
       tray_enabled: document.getElementById("trayEnabled").checked,
-      minimize_on_close: document.getElementById("minimizeOnClose").checked
+      minimize_on_close: document.getElementById("minimizeOnClose").checked,
+      float_enabled: document.getElementById("floatEnabled").checked
     };
     try {
       // Tauri generate_handler 会把 Rust 的 snake_case 参数名转为 camelCase，
@@ -407,6 +435,25 @@
   // 关闭按钮在面板头部（无边框窗没有系统标题栏的 ✕，只能自绘）。
   document.getElementById("closeBtn").addEventListener("click", async () => {
     try { await invoke("close_settings_window"); } catch (_) {}
+  });
+
+  // 「立即显示悬浮图标」：不必先勾选 / 保存即可唤出（图标仍受设置开关的创建 / 销毁约束，
+  // 此按钮只负责把已开启的悬浮图标显示出来；命令在不支持的平台是空操作）。
+  // ⚠️ 顺手把开关勾上：按钮显示的是【运行期效果】，开关才是【落盘】的那一份 —— 只点按钮不勾选，
+  //    重启后球就没了，用户会以为「设了却不生效」。
+  document.getElementById("showFloatBtn").addEventListener("click", async () => {
+    try {
+      await invoke("show_float_window");
+      var floatCb = document.getElementById("floatEnabled");
+      var autoTip = "";
+      if (floatCb && !floatCb.checked) {
+        floatCb.checked = true;
+        autoTip = "（已勾选「启用桌面悬浮图标」，保存后长期生效）";
+      }
+      setStatus("悬浮图标已显示。" + autoTip, "ok");
+    } catch (e) {
+      setStatus("显示悬浮图标失败：" + (e || "未知错误"), "err");
+    }
   });
 
   // ---- 清除缓存 / Cookie：只有一个「全清」动作，没有分项选项 ----
@@ -444,6 +491,46 @@
       setStatus("清除失败：" + (e || "未知错误"), "err");
     } finally {
       clearBtn.disabled = false;
+    }
+  });
+
+  // ---- 退出程序（v1.75）：常驻后台（托盘 / 悬浮图标）时**唯一稳当**的退出入口 ----
+  // 背景：勾了托盘或悬浮图标后「关闭窗口」只等于隐藏，而托盘的「退出」菜单项在没有托盘时
+  // 根本不存在 ⇒ 用户会找不到任何退出路径（真机 2026-10-11 实测）。
+  // 二次确认同样不用 window.confirm（部分壳 / 严格 CSP 下会被拦，且脚本对话框无法被自动化断言）。
+  const quitBtn = document.getElementById("quitBtn");
+  let quitConfirming = false;
+  let quitTimer = null;
+
+  function cancelQuitConfirm() {
+    quitConfirming = false;
+    quitBtn.textContent = "退出程序";
+    quitBtn.classList.remove("confirming");
+    if (quitTimer) { clearTimeout(quitTimer); quitTimer = null; }
+  }
+
+  quitBtn.addEventListener("click", async () => {
+    // 第一次点击 → 进入确认态；第二次点击才真的退出。
+    if (!quitConfirming) {
+      quitConfirming = true;
+      quitBtn.textContent = "再点一次确认退出";
+      quitBtn.classList.add("confirming");
+      setStatus("退出后托盘图标与悬浮图标会一并消失。点击上方按钮确认，或等 5 秒自动取消。", "muted");
+      quitTimer = setTimeout(cancelQuitConfirm, 5000);
+      return;
+    }
+
+    cancelQuitConfirm();
+    quitBtn.disabled = true;
+    setStatus("正在退出…", "muted");
+    try {
+      // 无参数；端上走 app.exit(0)（Tauri）/ app.quit()（Electron）。命令正常返回时进程已在退，
+      // 所以这里**不**需要后续状态切换；只有链路断了（未注册 / 被垫片白名单拒绝）才会到 catch。
+      await invoke("quit_app");
+    } catch (e) {
+      // ⚠️ 必须说出来：这是常驻状态下唯一的退出入口，静默失败 = 用户再也退不出程序。
+      quitBtn.disabled = false;
+      setStatus("退出失败：" + (e || "未知错误"), "err");
     }
   });
 </script>

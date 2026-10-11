@@ -2,7 +2,7 @@
  * 系统托盘 —— 对齐 Tauri 版（`webview-app/src/tray.rs`）。
  *
  * 行为契约（docs/electron-plan.md §4 第 7 条）：
- *   · 菜单四项，顺序与文案一致：显示窗口 / 设置 / 隐藏到托盘 / 退出；
+ *   · 菜单顺序与文案与 `tray.rs` 一致：显示窗口 / 设置 / [悬浮图标(仅 Windows)] / 隐藏到托盘 / 退出；
  *   · **左键单击**托盘图标 = 切换主窗口显隐（不弹菜单）；
  *   · 只有设置里 `tray_enabled=true` 时才创建；关掉时立即销毁。
  *
@@ -21,6 +21,8 @@ export interface TrayActions {
   onShow: () => void
   onHide: () => void
   onSettings: () => void
+  /** 悬浮图标显示 / 隐藏切换（仅 Windows 加菜单项；其他平台给空操作即可） */
+  onFloat: () => void
   onQuit: () => void
 }
 
@@ -68,13 +70,19 @@ export function createTray(opts: {
   // Windows 的系统托盘按 DPI 取 16/20/24/32px；图标源是 256px，缩一下更清晰。
   image = image.resize({ width: 16, height: 16 })
 
-  // ⚠️ 四项、无分隔线 —— 与 `tray.rs` 的菜单逐项一致（双壳的托盘长得不一样会直接被当成 bug 反馈）
-  const menu = Menu.buildFromTemplate([
+  // 菜单项与 `tray.rs` 逐项一致：悬浮图标项仅 Windows（双壳都只在 Windows 有悬浮球）。
+  const template: Electron.MenuItemConstructorOptions[] = [
     { label: '显示窗口', click: () => opts.actions.onShow() },
     { label: '设置', click: () => opts.actions.onSettings() },
+  ]
+  if (process.platform === 'win32') {
+    template.push({ label: '悬浮图标', click: () => opts.actions.onFloat() })
+  }
+  template.push(
     { label: '隐藏到托盘', click: () => opts.actions.onHide() },
     { label: '退出', click: () => opts.actions.onQuit() },
-  ])
+  )
+  const menu = Menu.buildFromTemplate(template)
 
   try {
     tray = new Tray(image)

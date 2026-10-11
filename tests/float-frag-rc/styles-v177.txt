@@ -1,0 +1,9 @@
+app pid=924 hasExited=False
+hwnd=0xB005FA vis=True  rect=1200,160 136x56 st=0x14CB0000 ex=0x8000198 [TOOLWINDOW|TOPMOST|NOACTIVATE] title=[] cls=Tauri Window
+hwnd=0xE10510 vis=True  rect=77,77 894x527 st=0x14CF0000 ex=0x40110 [APPWINDOW] title=[Web2App] cls=Tauri Window
+hwnd=0xB1805E4 vis=True  rect=0,0 14x14 st=0x94000000 ex=0x80800A0 [TOOLWINDOW|NOACTIVATE] title=[com.example.web2app-siw] cls=com.example.web2app-sic
+hwnd=0x3F063A vis=False rect=179,179 1278x646 st=0x4C00000 ex=0x80801A0 [TOOLWINDOW|NOACTIVATE] title=[] cls=global_hotkey_app
+hwnd=0x139051C vis=True  rect=0,0 14x14 st=0x94000000 ex=0x80800A0 [TOOLWINDOW|NOACTIVATE] title=[] cls=Tao Thread Event Target
+hwnd=0x15005AC vis=True  rect=154,154 991x518 st=0x14EF0000 ex=0xC0110 [APPWINDOW] title=[C:\dev\rust\web-app\webview-app\target\debug\web2app.exe] cls=ConsoleWindowClass
+hwnd=0x1760644 vis=False rect=0,0 0x0 st=0x8C000000 ex=0x8 [TOPMOST] title=[MSCTFIME UI] cls=MSCTFIME UI
+hwnd=0x39C05CA vis=False rect=0,0 0x0 st=0x8C000000 ex=0x8 [TOPMOST] title=[Default IME] cls=IME

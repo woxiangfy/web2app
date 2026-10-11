@@ -8,7 +8,7 @@ import { ConfigError, captureOutput, emit } from './diagnostic.mjs'
 import { buildMerged, toConfigJson } from './parser.mjs'
 import { getCloseMatches } from './pycompat.mjs'
 import { DEFAULTS } from './constants.mjs'
-import { ELECTRON_OUT_DEFAULT, TAURI_OUT_DEFAULT, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
+import { ELECTRON_OUT_DEFAULT, TAURI_OUT_DEFAULT, isDeleteBlocked, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
 import { ELECTRON, ROOT, WEBVIEW } from './paths.mjs'
 
 function assertThat(cond, msg) {
@@ -220,6 +220,41 @@ export function selftest() {
       TAURI_OUT_DEFAULT === join(ROOT, 'tests', 'pack', 'tauri'),
       'Tauri 默认产物目录是 tests/pack/tauri/（两壳绿色版同名，混放会互相覆盖）',
     )
+
+    // isDeleteBlocked：把失败分成「删不掉」与「真失败」两大类，判错的代价不对称 ——
+    //   漏判 ⇒ 本该自动换目录重试的场景变成硬失败，且用户只看到一句「退出码 1」；
+    //   误判 ⇒ 白跑一次重试 + 一句不对路的建议。
+    // 2026-10-11 实测就是这么漏的：判据只认 safe-delete/emptyDir，而真实报错是
+    // `EBUSY: resource busy or locked, unlink '…\win-unpacked\resources\app.asar'`
+    // （WorkBuddy 宿主进程抓着新落盘的 *.asar 不放）⇒ 既不重试也不提示。
+    const DELETED = (s) => isDeleteBlocked([s])
+    // ① 必须认成「删不掉」—— 文件被别的进程占着（本次实测的原文）/ 权限拒删 / 删除垫片
+    assertThat(
+      DELETED(
+        "⨯ EBUSY: resource busy or locked, unlink 'C:/dev/rust/web-app/tests/pack/electron/win-unpacked/resources/app.asar'  failedTask=build",
+      ),
+      'EBUSY unlink 必须算「删不掉」（否则不会自动换目录重试）',
+    )
+    assertThat(DELETED("EPERM: operation not permitted, unlink 'C:/x/a.dll'"), 'EPERM unlink 必须算')
+    assertThat(DELETED("EACCES: permission denied, unlink 'C:/x/a.dll'"), 'EACCES unlink 必须算')
+    assertThat(DELETED("EBUSY: resource busy or locked, rmdir 'C:/x/appdir'"), '目录 rmdir 被占同理')
+    assertThat(DELETED('⨯ safe-delete: 需要确认才能删除'), 'safe-delete 标记仍算（原有行为不许丢）')
+    assertThat(DELETED('⨯ emptyDir failed'), 'emptyDir 标记仍算（原有行为不许丢）')
+    assertThat(DELETED('Error: trash operation not permitted'), 'trash operation 标记仍算（原有行为不许丢）')
+    // ② 不许误判成「删不掉」
+    assertThat(
+      !DELETED("⨯ Timeout awaiting 'request' for 600000ms  failedTask=build"),
+      '网络超时是环境问题的另一类，不能算「删不掉」',
+    )
+    assertThat(
+      !DELETED("EPERM: operation not permitted, rename 'C:/a' -> 'C:/b'"),
+      '裸 EPERM 但非删除类调用（受限网络下下工具集会这样失败）不能算 —— 否则白等一次重试还给出错误建议',
+    )
+    assertThat(
+      !DELETED("EBUSY: resource busy or locked, open 'C:/x/a.dll'"),
+      'EBUSY 但发生在 open（读不到，不是删不掉）不能算',
+    )
+    assertThat(!DELETED('✗ 配置字段未知：proxy_enable'), '配置类报错显然不算')
 
     // proxy_bypass 默认串是跨壳 / 跨打包期 / 跨示例的**单一字面量契约**
     //（完整清单与原因见 docs/packaging-config.md §4.4）。改默认串时漏掉任何一处都会让

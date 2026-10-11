@@ -50,12 +50,17 @@ export function runSmokeChecks(deps: SmokeCheckDeps): boolean {
   //   · 托盘图标缺失 → 勾了「启用托盘」也没图标。
   // ⚠️ 清缓存那条命令（clear_web_data）同样列进来：设置页点了没反应与上面同源 ——
   //  页面里的字面量、垫片白名单、IPC 注册名三处必须逐字一致。
+  // ⚠️ 清单必须与 `renderer/settings-preload.ts` 的 ALLOWED 白名单**同集合**（一个不多一个不少）：
+  //  这里只判「页面里还在不在」，但少了名字就等于那条命令没有运行期绊线
+  //  （show_float_window / quit_app 曾长期缺席，v1.75 补齐）。
   const page = deps.readSettingsPage() ?? ''
   const missingCmds = [
     'get_settings',
     'save_settings',
     'close_settings_window',
     'clear_web_data',
+    'show_float_window',
+    'quit_app',
   ].filter((c) => !page.includes(c))
   console.log(
     `[web2app] 设置页资源：${page ? `${page.length} 字符` : '未找到！'}` +

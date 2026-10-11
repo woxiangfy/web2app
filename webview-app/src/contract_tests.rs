@@ -152,6 +152,12 @@ mod ipc_command_registry {
             "close_settings_window",
             "clear_web_data",
             "history_nav",
+            // 设置页「立即显示悬浮窗」按钮：跨平台注册（settings.html 是跨平台资源），
+            // 命令体在非 Windows 是空操作，见 lib.rs 的 show_float_window。
+            "show_float_window",
+            // 设置页「退出程序」按钮（v1.75）：常驻后台（托盘 / 悬浮图标）时**唯一**的退出入口，
+            // 同样必须跨平台注册（settings.html 是跨平台资源）。
+            "quit_app",
         ];
         for name in base {
             assert!(
@@ -757,6 +763,1281 @@ mod startup_visibility_contract {
         assert!(
             has_code_line(seg, "std::thread::spawn"),
             "落点校验必须跑在独立线程里（主线程会冻 UI）"
+        );
+    }
+}
+
+/// 「没有可退的真实页面时不触发后退，内置 splash 页不允许成为落点」的静态契约（跨平台）。
+///
+/// 背景：应用启动时主窗先加载内置 splash 启动页（`splash://localhost/`，wry 改写为
+/// `http://splash.localhost/`），随后再导航到目标网址 —— splash 因此成为历史里的上一条。
+/// 裸 `history.back()` / `WebView.goBack()` 在首个目标页就会退回到内置页。规则要求：
+///   · 电脑端（Tauri / Electron）：无真实上一页时不触发后退，并置灰标题栏按钮；
+///   · 移动端（Android）：系统返回键同样不得回到内置页，无真实历史时按系统默认结束页面。
+///
+/// 本模块把三处实现（注入脚本 titlebar.js、Rust history_nav 守卫脚本、Android CI 补丁）
+/// 与其接线（两个 workflow）一并钉死。
+#[cfg(test)]
+mod back_navigation_guard_contract {
+    /// 自绘标题栏注入脚本（两个壳单一真源）。
+    const TITLEBAR_JS: &str = include_str!("titlebar.js");
+    /// history_nav 命令实现（守卫脚本常量与调用点）。
+    const LIB_RS: &str = include_str!("lib.rs");
+    /// Android MainActivity 补丁脚本（CI 在 android init 之后调用）。
+    const PATCH_PY: &str = include_str!("../../.github/scripts/patch-android-back.py");
+    /// 两个会打出 Android 包的 workflow，必须接上补丁步骤。
+    const BUILD_CUSTOM_YML: &str = include_str!("../../.github/workflows/build-custom.yml");
+    const RELEASE_YML: &str = include_str!("../../.github/workflows/release.yml");
+
+    /// ① titlebar.js：前进/后退必须经 Navigation API 落点判定，且内置页两种形态都要挡。
+    #[test]
+    fn titlebar_checks_navigation_entries_before_back() {
+        for needle in [
+            "function isBuiltinUrl(u)",
+            "function navDirections()",
+            "window.navigation",
+            "n.currentEntry.index",
+            "n.entries()",
+            // 内置启动页的两种 URL 形态判据
+            "/^splash:/i",
+            "splash\\.localhost",
+        ] {
+            assert!(
+                TITLEBAR_JS.contains(needle),
+                "titlebar.js 后退守卫缺少要素：{needle}"
+            );
+        }
+        // history.back() 只能有一处（守卫内）；裸调用残留意味着按钮仍会无条件后退。
+        assert_eq!(
+            TITLEBAR_JS.matches("window.history.back()").count(),
+            1,
+            "titlebar.js 中 history.back() 应只在 onNav 守卫内出现一次"
+        );
+        assert_eq!(
+            TITLEBAR_JS.matches("window.history.forward()").count(),
+            1,
+            "titlebar.js 中 history.forward() 应只出现一次"
+        );
+        // 按钮必须随落点置灰。
+        assert!(
+            TITLEBAR_JS.contains("backBtn.disabled = !d.back")
+                && TITLEBAR_JS.contains("fwdBtn.disabled = !d.fwd"),
+            "标题栏前进/后退按钮必须按落点状态置灰"
+        );
+    }
+
+    /// ② lib.rs：history_nav 必须改用守卫脚本，裸 history.back() 脚本须消失。
+    #[test]
+    fn history_nav_uses_guarded_scripts() {
+        for needle in [
+            "const HISTORY_BACK_SCRIPT: &str",
+            "const HISTORY_FWD_SCRIPT: &str",
+            "window.navigation",
+            "n.currentEntry.index",
+            r"splash\.localhost",
+            "window.history.back();",
+            "window.history.forward();",
+            r#""back" => HISTORY_BACK_SCRIPT"#,
+            r#""forward" => HISTORY_FWD_SCRIPT"#,
+        ] {
+            assert!(
+                LIB_RS.contains(needle),
+                "lib.rs history_nav 守卫缺少要素：{needle}"
+            );
+        }
+        assert!(
+            !LIB_RS.contains(r#""try{window.history.back();}catch(e){}""#),
+            "裸 history.back() 脚本必须移除（会退回到内置 splash 页）"
+        );
+    }
+
+    /// ③ Android 补丁脚本：要素齐全（覆盖 AppPlugin 的返回回调，内置页不可后退）。
+    #[test]
+    fn android_patch_script_keeps_guard_pieces() {
+        for needle in [
+            "web2app-android-back-guard",
+            "override fun onWebViewCreate(webView: WebView)",
+            "onBackPressedDispatcher.addCallback(this",
+            "webView.copyBackForwardList()",
+            "list.currentIndex",
+            "isWeb2appBuiltInPage",
+            "finish()",
+            "splash.localhost",
+        ] {
+            assert!(
+                PATCH_PY.contains(needle),
+                "patch-android-back.py 缺少要素：{needle}"
+            );
+        }
+    }
+
+    /// ④ 两个 Android 打包 workflow 必须在 init 之后调用补丁脚本。
+    #[test]
+    fn workflows_invoke_android_back_patch() {
+        for (name, yml) in [
+            ("build-custom.yml", BUILD_CUSTOM_YML),
+            ("release.yml", RELEASE_YML),
+        ] {
+            assert!(
+                yml.contains("patch-android-back.py"),
+                "{name} 必须接上 Android 返回键补丁步骤（gen/android 每次现生成）"
+            );
+        }
+    }
+}
+
+/// 桌面悬浮球（仅 Windows）的静态契约（v1.68 纠正：球是悬浮图标，点击调出主窗口）。
+///
+/// 与多页签同一类「全是静默失败」的问题域：
+///   · 本地球页 floaticon.html 若事件名和 Rust 监听不一致 ⇒ 拖动 / 隐藏 / 点击点了没反应，无报错；
+///   · float-icon.json 少了 `core:event:allow-emit` 或窗口标签不匹配 ⇒ 所有事件发不出；
+///   · 一次性令牌若漏进子 frame ⇒ 伪造事件可以拖着用户的悬浮球走；
+///   · 球窗若导航远程页 / 自行 bootstrap ⇒ 违背悬浮图标语义，还会 abort 主窗在服的单实例代理。
+/// 这里用源码 / JSON 断言把这些前提钉死。
+#[cfg(test)]
+#[cfg(windows)]
+mod float_window_contract {
+    /// 悬浮球 Rust 实现。
+    const FLOAT_RS: &str = include_str!("floatwin.rs");
+    /// 悬浮球内置本地页面（双壳单一真源；v1.68 起替代旧的 floatbar.js）。
+    const FLOAT_HTML: &str = include_str!("floaticon.html");
+    /// app 接线处。
+    const LIB_RS: &str = include_str!("lib.rs");
+    /// 设置模块（右键关功能要写设置 + 同步设置页复选框）。
+    const SETTINGS_RS: &str = include_str!("settings.rs");
+    /// 设置页（双壳单一真源；复选框 id 与 Rust 推送脚本必须一致）。
+    const SETTINGS_HTML: &str = include_str!("../dist/settings.html");
+    /// 托盘（单击球复用其 show_window）。
+    const TRAY_RS: &str = include_str!("tray.rs");
+    /// bootstrap（v1.67 的 NavCache 已随方向纠正删除，这里钉住「别再加回来」）。
+    const BOOTSTRAP_RS: &str = include_str!("bootstrap.rs");
+    /// 悬浮球本地页的能力声明 —— include_str! 同时把「文件漏 git add」变成编译失败。
+    const FLOAT_CAP: &str = include_str!("../capabilities/float-icon.json");
+
+    /// 八个事件名（常量拆两段拼接，避免本文件的注释 / 断言自我满足）。
+    const EV_DOWN: &str = concat!("\"", "web2app:float-down", "\"");
+    const EV_MOVE: &str = concat!("\"", "web2app:float-move", "\"");
+    const EV_CANCEL: &str = concat!("\"", "web2app:float-cancel", "\"");
+    const EV_DRAG_END: &str = concat!("\"", "web2app:float-drag-end", "\"");
+    const EV_PEEK_ENTER: &str = concat!("\"", "web2app:float-peek-enter", "\"");
+    const EV_PEEK_LEAVE: &str = concat!("\"", "web2app:float-peek-leave", "\"");
+    const EV_HIDE: &str = concat!("\"", "web2app:float-hide", "\"");
+    const EV_CLICK: &str = concat!("\"", "web2app:float-click", "\"");
+
+    /// 只认真正的代码行（排除 `//` / `*` 注释），防止守卫被注释里的同名文字满足。
+    fn has_code_line(src: &str, needle: &str) -> bool {
+        src.lines().any(|line| {
+            let t = line.trim();
+            t.contains(needle) && !t.starts_with("//") && !t.starts_with('*')
+        })
+    }
+
+    /// 取某条 CSS 规则的**声明块**（选择器起，到第一个 `}` 为止）。用于把断言限定在
+    /// 「那一条规则」内 —— 与本模块的 `fn_body` 同理：只断言「文件里出现过某个字面量」
+    /// 会被别处的同名文字满足，是自我满足的假守卫。
+    fn css_block(src: &str, selector: &str) -> String {
+        let Some(start) = src.find(selector) else {
+            return String::new();
+        };
+        let rest = &src[start..];
+        match rest.find('}') {
+            Some(end) => rest[..end].to_string(),
+            None => String::new(),
+        }
+    }
+
+    /// 取 `floatwin.rs` 里 `ICON_SIZE_LOGICAL` 的**整数值**（`56.0` → `"56"`）。
+    ///
+    /// 为什么不用字面量：球页的 CSS 尺寸必须与它相等，两边各写一个 56 迟早会漂移
+    /// （这类「同一不变量在多处各写一遍」正是本项目反复踩的坑）。这里直接从常量声明里
+    /// 抠出数值，改常量就会自动要求 CSS 跟着改。
+    fn icon_size_logical_int() -> String {
+        let line = FLOAT_RS
+            .lines()
+            .find(|l| l.contains("const ICON_SIZE_LOGICAL: f64 ="))
+            .expect("floatwin.rs 里找不到 ICON_SIZE_LOGICAL 声明");
+        let value = line
+            .split('=')
+            .nth(1)
+            .expect("ICON_SIZE_LOGICAL 声明没有 `=`")
+            .trim()
+            .trim_end_matches(';')
+            .trim();
+        value
+            .split('.')
+            .next()
+            .expect("ICON_SIZE_LOGICAL 的值解析不出整数部分")
+            .to_string()
+    }
+
+    /// 取某个函数签名的**函数体**（签名行起，到第一个顶格 `}` 行为止）。
+    ///
+    /// 为什么需要它：只断言「文件里出现过某个调用」是**自我满足**的假守卫 —— 文件别处（别的
+    /// 函数、甚至注释）有同名调用照样能绿。把断言限定进被测函数的函数体内，才真正钉住
+    /// 「这一条路径做了那件事」。
+    fn fn_body(src: &str, signature: &str) -> String {
+        let Some(start) = src.find(signature) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for line in src[start..].lines() {
+            out.push_str(line);
+            out.push('\n');
+            if line == "}" {
+                break;
+            }
+        }
+        out
+    }
+
+    /// ① capability：只作用于 float 窗口、**仅本地页**（无 remote 段）、仅 event:emit，
+    ///    不给任何窗口控制权限。
+    #[test]
+    fn float_capability_is_local_and_minimal() {
+        let v: serde_json::Value =
+            serde_json::from_str(FLOAT_CAP).expect("capabilities/float-icon.json 不是合法 JSON");
+        let windows = v["windows"]
+            .as_array()
+            .expect("float-icon.json 缺 windows 数组");
+        let win_labels: Vec<&str> = windows.iter().filter_map(|x| x.as_str()).collect();
+        assert_eq!(
+            win_labels,
+            vec!["float"],
+            "float capability 必须且只能命中窗口标签 float（实际：{windows:?}）"
+        );
+        assert!(
+            v.get("remote").is_none(),
+            "悬浮球只加载内置本地页，float-icon.json 不得再带 remote 段（v1.67 的远程授权必须移除）"
+        );
+        let perms = v["permissions"]
+            .as_array()
+            .expect("float-icon.json 缺 permissions 数组");
+        assert!(
+            perms
+                .iter()
+                .any(|p| p.as_str() == Some("core:event:allow-emit")),
+            "float-icon.json 必须授予 core:event:allow-emit，否则球页所有事件都发不出"
+        );
+        for forbidden in [
+            "core:window:allow-minimize",
+            "core:window:allow-close",
+            "core:window:allow-start-dragging",
+            "core:window:allow-set-position",
+        ] {
+            assert!(
+                !perms.iter().any(|p| p.as_str() == Some(forbidden)),
+                "float capability 不应授予 {forbidden}：窗口移动 / 显隐全部由 Rust 完成（最小权限）"
+            );
+        }
+        // 旧的远程 capability 文件必须已删除（改名即落地，防止两份并存）。
+        assert!(
+            !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("capabilities/float-remote.json")
+                .exists(),
+            "capabilities/float-remote.json 必须删除（已被本地页 float-icon.json 取代）"
+        );
+    }
+
+    /// ② 八个事件名在 Rust 常量与 floaticon.html 字面量两侧逐字一致，且都走核心事件 + 令牌。
+    #[test]
+    fn float_event_names_match_between_rust_and_page() {
+        for (rust_lit, js_lit) in [
+            (EV_DOWN, "web2app:float-down"),
+            (EV_MOVE, "web2app:float-move"),
+            (EV_CANCEL, "web2app:float-cancel"),
+            (EV_DRAG_END, "web2app:float-drag-end"),
+            (EV_PEEK_ENTER, "web2app:float-peek-enter"),
+            (EV_PEEK_LEAVE, "web2app:float-peek-leave"),
+            (EV_HIDE, "web2app:float-hide"),
+            (EV_CLICK, "web2app:float-click"),
+        ] {
+            assert!(
+                FLOAT_RS.contains(rust_lit),
+                "floatwin.rs 必须定义事件常量 {rust_lit}"
+            );
+            assert!(
+                FLOAT_HTML.contains(js_lit),
+                "floaticon.html 必须包含事件名 {js_lit}（与 Rust 逐字一致，否则点了没反应）"
+            );
+        }
+        assert!(
+            FLOAT_HTML.contains("plugin:event|emit"),
+            "floaticon.html 必须走核心事件通路"
+        );
+        assert!(
+            FLOAT_HTML.contains("__web2appFloatToken"),
+            "floaticon.html 的每个事件都必须带一次性令牌 __web2appFloatToken"
+        );
+        // 八个事件都必须在 Rust 侧真正注册监听（不只是定义了常量）。
+        for reg in [
+            "listen(FLOAT_DOWN_EVENT",
+            "listen(FLOAT_MOVE_EVENT",
+            "listen(FLOAT_CANCEL_EVENT",
+            "listen(FLOAT_DRAG_END_EVENT",
+            "listen(FLOAT_PEEK_ENTER_EVENT",
+            "listen(FLOAT_PEEK_LEAVE_EVENT",
+            "listen(FLOAT_HIDE_EVENT",
+            "listen(FLOAT_CLICK_EVENT",
+        ] {
+            assert!(
+                FLOAT_RS.contains(reg),
+                "floatwin::register_float_listeners 必须注册监听 {reg}"
+            );
+        }
+    }
+
+    /// ③ 令牌只注入主框架（初始化脚本会进所有 frame；球页虽无 iframe，仍作纵深防御）。
+    #[test]
+    fn float_token_is_top_frame_only() {
+        assert!(
+            FLOAT_RS.contains("window.self === window.top"),
+            "floatwin.rs 注入 __web2appFloatToken 时必须带主框架判断，避免令牌漏给子 frame"
+        );
+        assert!(
+            FLOAT_RS.contains("window.__web2appFloatToken"),
+            "floatwin.rs 必须注入 __web2appFloatToken（不得误删注入本身）"
+        );
+        assert!(
+            FLOAT_RS.contains("fn token_matches"),
+            "Rust 必须校验事件令牌（对不上一律丢弃）"
+        );
+    }
+
+    /// ④ 单击球 = **切换**【原来的主窗口】显隐（v1.71：v1.68 起只调 show_window，
+    ///    主窗已经可见时点球毫无反应 —— 真机两轮复现的「点了没反应」）。
+    ///    ⚠️ v1.76 起「不得调 show_window」只对 **Click 分支**成立：右键路径
+    ///    （`disable_float_from_icon`）**要**调 show_window 把主窗还给用户，见 ⑫。
+    #[test]
+    fn float_click_toggles_the_original_main_window() {
+        assert!(
+            has_code_line(FLOAT_RS, "crate::tray::toggle_window(app)"),
+            "floatwin 的 Click 事件必须调 tray::toggle_window 切换原来的主窗口显隐"
+        );
+        // 反向对照：**单击分支内部**不得退回「只显示」（show_window 仍供托盘菜单等
+        // 「意图就是调出来」的调用方）。
+        // ⚠️ v1.76 起断言必须收窄到 Click 分支：右键路径（`disable_float_from_icon`）
+        //    **确实**要调 `crate::tray::show_window` 把主窗还给用户，全文判「floatwin.rs
+        //    不含 show_window」已不再是有效判据（真机缺陷的判据是「Click 分支」，不是「整个文件」）。
+        let click_branch = {
+            let start = FLOAT_RS
+                .find("EventKind::Click => {")
+                .expect("floatwin.rs 必须有 Click 分支");
+            let tail = &FLOAT_RS[start..];
+            // 以「下一个 match 分支的起点」为界收口（比数括号稳）。
+            let end = tail.find("\n        EventKind::").unwrap_or(tail.len());
+            &tail[..end]
+        };
+        assert!(
+            click_branch.contains("crate::tray::toggle_window(app)"),
+            "Click 分支必须调 tray::toggle_window（单击球 = 切换主窗显隐）"
+        );
+        assert!(
+            !click_branch.contains("show_window"),
+            "Click 分支不得调 tray::show_window：单击球必须是 toggle（v1.71 真机缺陷回归）"
+        );
+        assert!(
+            TRAY_RS.contains("pub(crate) fn toggle_window"),
+            "tray.rs 必须提供 toggle_window（托盘左键 / 唤醒快捷键 / 单击球共用）"
+        );
+        for needle in [
+            "window.hide()",
+            "sync_tabs_visibility(app, false)",
+            ".show()",
+        ] {
+            assert!(
+                TRAY_RS.contains(needle),
+                "tray::toggle_window 必须真正切换主窗口（找不到 {needle}）"
+            );
+        }
+        // 页面侧：click 必须是「没有越过拖动阈值的 pointerup」，且发送 float-click。
+        // v1.72 起判定改成两段式：拖动松手先走 dragend，其余才走（经双击去抖的）click，
+        // 见 ⑪ `float_page_click_is_debounced_against_double_click`。
+        assert!(
+            FLOAT_HTML.contains("if (moved) { send('dragend'); return; }"),
+            "floaticon.html 必须区分点击与拖动：越过阈值的松手发 dragend"
+        );
+        assert!(
+            FLOAT_HTML.contains("send('click')"),
+            "floaticon.html 未移动的松手必须发 click"
+        );
+    }
+
+    /// ④b v1.71：球内必须是**软件自己的图标**（icons/icon.png 编译期内嵌），
+    ///    不再是统一硬编码图形；页面经同协议 /icon.png 取图，协议不得开放其它路径。
+    #[test]
+    fn float_icon_is_the_app_icon_served_over_floaticon_protocol() {
+        assert!(
+            has_code_line(FLOAT_RS, "include_bytes!(\"../icons/icon.png\")"),
+            "handle_floaticon 必须编译期内嵌 icons/icon.png（打包替换图标后球天然跟随）"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "\"/icon.png\""),
+            "floaticon 协议必须按路径分流 /icon.png"
+        );
+        assert!(
+            FLOAT_RS.contains(".status(404)"),
+            "floaticon 协议对未登记路径必须回 404（只暴露页面与图标两个内置资源）"
+        );
+        assert!(
+            FLOAT_HTML.contains("src=\"icon.png\""),
+            "floaticon.html 必须用 <img src=\"icon.png\"> 渲染软件图标"
+        );
+        assert!(
+            !FLOAT_HTML.contains("<svg"),
+            "floaticon.html 不得再内嵌统一的硬编码 SVG 图形（必须换成软件图标）"
+        );
+        // 图标文件真实存在（include_str 兄弟；include_bytes! 本身也会在编译期钉住这一点）。
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("icons/icon.png")
+                .exists(),
+            "icons/icon.png 必须存在（悬浮球图标 + bundle 图标的同源文件）"
+        );
+    }
+
+    /// ④c v1.73：球**不得**挂原生提示（不给球写 title 属性）。
+    ///
+    /// 球窗是 always-on-top，而原生提示条是**独立的非置顶窗口** ⇒ 提示条只会被画在球窗
+    /// **之后**，从球窗的透明环带（圆内、球本体之外）漏出一块浅色残片，看起来就像
+    /// 「图标背景上有异样图形」。2026-10-11 真机截图 + Electron 复刻本页双重取证坐实
+    /// （hover 出现、移开消失）。作用说明改由 aria-label 承载（读屏可见）。
+    #[test]
+    fn float_ball_has_no_native_tooltip() {
+        // 只取球元素所在的**那一个标签**做判定：页面注释 / 别处的同名字样不参与。
+        let ball_tag = {
+            let idx = FLOAT_HTML
+                .find("id=\"w2f-ball\"")
+                .expect("floaticon.html 里找不到球元素 #w2f-ball");
+            let start = FLOAT_HTML[..idx].rfind('<').expect("球元素标签起点不完整");
+            let end = idx + FLOAT_HTML[idx..].find('>').expect("球元素标签未闭合");
+            &FLOAT_HTML[start..=end]
+        };
+        assert!(
+            !ball_tag.contains("title="),
+            "球不得挂 title 属性：原生提示条会被 always-on-top 球窗遮住、只从透明环带漏出残片（v1.73 真机 + Electron 复刻取证）。实际标签：{ball_tag}"
+        );
+        assert!(
+            ball_tag.contains("aria-label="),
+            "球的作用说明必须保留在 aria-label（没有原生提示，但读屏 / 源码可查）。实际标签：{ball_tag}"
+        );
+        assert!(
+            FLOAT_HTML.contains("单击显示"),
+            "球的作用说明文案不得丢失（现由 aria-label 承载）"
+        );
+    }
+
+    /// ④c v1.71：WebView2 把宿主窗最小宽度强制撑到约 131 逻辑像素，球窗必须用
+    ///    SetWindowRgn + CreateEllipticRgn 裁出 56 逻辑宽活柱内的**圆形**（可视 + 命中
+    ///    一起裁，柱外与四角点击穿透）；窗口开 transparent 让圆内环带透出桌面；所有
+    ///    吸附几何都经 live_offset 换算，右吸附活柱贴右、其余贴左。
+    #[test]
+    fn float_window_uses_live_region_against_webview2_min_width() {
+        assert!(
+            has_code_line(FLOAT_RS, "let rgn = CreateEllipticRgn(x1, 0, x2, lh);")
+                && has_code_line(FLOAT_RS, "SetWindowRgn(hwnd, Some(rgn), true)"),
+            "必须真正调用 Win32 CreateEllipticRgn + SetWindowRgn 把悬浮球宿主窗裁成圆形（import 不算数）"
+        );
+        // 矩形活柱会留下不透明且吃鼠标的方角：圆形区域一次解决撑宽部分穿透与四角裁剪。
+        assert!(
+            !FLOAT_RS.contains("CreateRectRgn"),
+            "活柱区域必须是圆形 CreateEllipticRgn（矩形会让球四角不透明且挡住点击）"
+        );
+        // 透明是圆内环带透出桌面的前提；Tauri 2 在 Windows 无需额外 cargo feature。
+        assert!(
+            has_code_line(FLOAT_RS, ".transparent(true)"),
+            "悬浮球建窗必须开 .transparent(true)（圆形区域内球本体外的环带要透出桌面）"
+        );
+        assert!(
+            has_code_line(
+                FLOAT_RS,
+                "fn apply_live_region(w: &WebviewWindow, edge: Option<DockEdge>)"
+            ),
+            "必须有 apply_live_region：按吸附边把宿主窗裁成活柱内的圆形"
+        );
+        assert!(
+            has_code_line(
+                FLOAT_RS,
+                "fn live_offset(host_w: i32, live_w: i32, edge: DockEdge) -> i32"
+            ),
+            "必须有 live_offset 纯函数：右吸附活柱贴右 host_w-live_w，其余贴左 0"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "fn reposition_for_dock(w: &WebviewWindow, d: Dock)"),
+            "必须有 reposition_for_dock：宿主宽迟到（WebView2 初始化 / DPI 变化）后按真实宽重定位活柱"
+        );
+        // on_page_load(Finished) 里必须重裁 + 重定位（建窗瞬间宿主可能还没被撑宽）。
+        assert!(
+            FLOAT_RS.contains("PageLoadEvent::Finished")
+                && has_code_line(FLOAT_RS, "reposition_for_dock(&w, d)"),
+            "页面 Finished 后必须按真实宿主宽重裁 / 重定位活柱"
+        );
+        // 建窗恢复几何时必须先裁区域（显现前）；宿主被撑宽（Resized）与跨 DPI
+        // （ScaleFactorChanged）两个迟到时机都必须重裁——只挂 DPI 会让右吸附球在
+        // WebView2 初始化撑宽窗口后活柱错位（真机取证根因之一）。
+        assert!(
+            FLOAT_RS.contains("WindowEvent::Resized")
+                && FLOAT_RS.contains("WindowEvent::ScaleFactorChanged"),
+            "Resized（WebView2 撑宽宿主）与 ScaleFactorChanged（跨 DPI）都必须重设活柱区域"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "apply_initial_geometry(app, &window, saved);"),
+            "建窗流程必须经 apply_initial_geometry（内部负责首裁活柱）"
+        );
+        // 真机排查期的临时插桩 / A/B 开关 / 页面诊断块不得残留。
+        assert!(
+            !FLOAT_RS.contains("[float-tmp]") && !FLOAT_RS.contains("W2A_FLOAT_NO_RGN"),
+            "floatwin.rs 不得残留临时诊断 eprintln 或 W2A_FLOAT_NO_RGN A/B 开关"
+        );
+        assert!(
+            !FLOAT_HTML.contains("w2a-dbg") && !FLOAT_HTML.contains("float-dbg"),
+            "floaticon.html 不得残留临时红块 / float-dbg 诊断回传脚本"
+        );
+        // 几何各处必须以活柱宽高（live_px）为基准，而不是 outer_size 的宿主宽。
+        for needle in [
+            "fn live_px(scale: f64) -> (i32, i32)",
+            "let (lw, lh) = live_px(scale);",
+        ] {
+            assert!(FLOAT_RS.contains(needle), "活柱几何缺少关键代码：{needle}");
+        }
+        // 页面必须能按主进程下发的 anchor 把球摆进左 / 右活柱（视口可能比球宽）。
+        assert!(
+            FLOAT_HTML.contains("data-anchor"),
+            "floaticon.html 必须支持 data-anchor 属性切换球在视口内的左 / 右位置"
+        );
+        // push_state 经 format! 注入变量，源码里钉住两个字面量 'r'/'l' 的取值分支。
+        assert!(
+            FLOAT_RS.contains("\"'r'\"") && FLOAT_RS.contains("\"'l'\""),
+            "push_state 必须下发 anchor 'l'/'r'（右吸附活柱贴右）"
+        );
+    }
+
+    /// ⑤ 悬浮球只加载内置本地页，绝不导航 / bootstrap / 访问远程（v1.67 方向已废弃）。
+    #[test]
+    fn float_loads_builtin_local_page_and_never_navigates() {
+        assert!(
+            FLOAT_RS.contains("FLOATICON_SCHEME")
+                && FLOAT_RS.contains("include_str!(\"floaticon.html\")"),
+            "悬浮球必须经 floaticon 自定义协议提供内嵌页面"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "WebviewUrl::CustomProtocol(floaticon_url())"),
+            "悬浮球建窗必须加载 floaticon:// 本地页（不得再是 App 页或远程 URL）"
+        );
+        assert!(
+            has_code_line(
+                LIB_RS,
+                ".register_uri_scheme_protocol(floatwin::FLOATICON_SCHEME, floatwin::handle_floaticon)"
+            ),
+            "lib.rs 必须注册 floaticon 自定义协议"
+        );
+        for forbidden in [
+            "navigate_window",
+            "NavCache",
+            "crate::bootstrap::bootstrap(",
+            "build_proxy_args",
+            "floatbar.js",
+        ] {
+            assert!(
+                !FLOAT_RS.contains(forbidden),
+                "floatwin.rs 不得再出现 {forbidden}：悬浮球不导航、不碰代理、不注入旧脚本"
+            );
+        }
+        // v1.71 真机根因：球窗 builder 省略数据目录时，wry 另起默认 UDF（%LOCALAPPDATA%\<bundle>），
+        // 受控 / 沙箱环境不可写 ⇒ 第二个 WebView2 环境创建失败被框架 log::error! 吞掉，build() 仍
+        // 返回 Ok、球窗 HWND 从不出现。必须与主窗（lib.rs）/ tab 窗（tabs.rs）同构显式指定。
+        assert!(
+            has_code_line(FLOAT_RS, "Some(dir) => builder.data_directory(dir),")
+                && has_code_line(FLOAT_RS, "let builder = match crate::config::data_dir(app) {"),
+            "悬浮球建窗必须与主窗 / tab 窗同构显式设置 WebView2 数据目录（v1.71：默认 UDF 不可写时球窗静默建不出）"
+        );
+        assert!(
+            !BOOTSTRAP_RS.contains("NavCache"),
+            "bootstrap.rs 的进程级 NavCache 必须随悬浮球改版一起删除（已无读取方）"
+        );
+        assert!(
+            !LIB_RS.contains("bootstrap::NavCache"),
+            "lib.rs 不得再 manage NavCache"
+        );
+        // 透明球窗是圆形外观的前提。
+        assert!(
+            has_code_line(FLOAT_RS, ".transparent(true)"),
+            "悬浮球窗口必须透明（球是圆形，窗外矩形区域要露出桌面）"
+        );
+    }
+
+    /// ⑥ 窗口属性：无边框 / 透明 / 置顶 / 不占任务栏 / 不可调大小。
+    ///
+    /// ⚠️ `.skip_taskbar(true)` **只是必要条件，不是充分条件** —— tao 0.35 的它只调一次
+    /// `ITaskbarList::DeleteTab`（且是在窗口还 `visible(false)` 时），`WS_EX_APPWINDOW`
+    /// 仍留在创建时的样式里、`show()` 会把任务栏按钮带回来。真正生效的一手补丁见 ⑥b。
+    #[test]
+    fn float_window_properties() {
+        for needle in [
+            ".decorations(false)",
+            ".transparent(true)",
+            ".always_on_top(true)",
+            ".skip_taskbar(true)",
+            ".resizable(false)",
+        ] {
+            assert!(FLOAT_RS.contains(needle), "悬浮球建窗必须包含属性 {needle}");
+        }
+    }
+
+    /// ⑥b v1.77：球窗必须**真不进任务栏** + **不带窗口标题**。
+    ///
+    /// 真机现象「悬浮图标背景异样」的第二个源头：`.skip_taskbar(true)` 挡不住任务栏按钮
+    /// （tao 的 `ON_TASKBAR` 按「窗口无父」置位 ⇒ 创建时写死 `WS_EX_APPWINDOW`；
+    /// `DeleteTab` 在窗口还没显示时调用无效，`show()` 后按钮回来 —— 实测球窗 `ex = 0x40118`
+    /// 含 `APPWINDOW`）。任务栏按钮自带**原生提示条 / 缩略图浮层**（内容是窗口标题），而球窗
+    /// always-on-top ⇒ 那个非置顶浮层只从球窗透明环带漏出一块浅色残片。Electron 的
+    /// `skipTaskbar: true` 是真移除 ⇒ 该现象**仅 Tauri 侧**。
+    #[test]
+    fn float_window_is_excluded_from_taskbar_and_has_no_title() {
+        // ① 样式必须改到位，且是「或上 want + 按位清掉 APPWINDOW」，不是只或上。
+        let body = fn_body(FLOAT_RS, "fn apply_ball_window_styles(w: &WebviewWindow)");
+        assert!(
+            !body.is_empty(),
+            "找不到 apply_ball_window_styles：把球窗扩展样式改到位的那一处没了"
+        );
+        for needle in [
+            "GWL_EXSTYLE",
+            "WS_EX_NOACTIVATE",
+            "WS_EX_TOOLWINDOW",
+            "WS_EX_APPWINDOW",
+            "SetWindowLongPtrW",
+        ] {
+            assert!(
+                body.contains(needle),
+                "apply_ball_window_styles 必须处理 {needle}（球窗扩展样式一条都不能少）"
+            );
+        }
+        assert!(
+            body.contains("& !(") && body.contains("WS_EX_APPWINDOW.0 as isize"),
+            "必须**清掉** WS_EX_APPWINDOW：只 OR 上 TOOLWINDOW 不够 —— APPWINDOW 会让任务栏在 show() 时把按钮加回来"
+        );
+
+        // ② 调用点必须在建窗函数体内、且在 `builder.build()` **之后**（样式得在真实 HWND 上改）。
+        let build = fn_body(
+            FLOAT_RS,
+            "fn build_float_window_on_main(app: &tauri::AppHandle)",
+        );
+        assert!(
+            !build.is_empty(),
+            "找不到 build_float_window_on_main 函数体"
+        );
+        let at_build = build
+            .find("builder.build()")
+            .expect("建窗函数体里找不到 builder.build()");
+        let at_call = build
+            .find("apply_ball_window_styles(&window);")
+            .expect("建窗函数体里必须在拿到窗口后调用 apply_ball_window_styles");
+        assert!(
+            at_build < at_call,
+            "apply_ball_window_styles 必须在 build() 拿到真实窗口之后调用（早于它就改不到 HWND）"
+        );
+
+        // ③ 球窗不得带窗口标题：任务栏按钮 / 任务视图的提示条内容就是它。
+        assert!(
+            has_code_line(FLOAT_RS, ".title(\"\")"),
+            "球窗必须显式置空标题（标题文本是任务栏提示条 / 任务视图流层的唯一内容来源）"
+        );
+        assert!(
+            !has_code_line(FLOAT_RS, ".title(TITLE)"),
+            "球窗不得再挂显示名标题：球无边框、不进任务栏与 Alt+Tab，标题没有任何可见载体，只会被其它外壳界面画成浮层残片"
+        );
+    }
+
+    /// ⑥c v1.77：所有「把球显示出来」的路径都必须经 [`show_ball`]，且内部顺序必须是
+    /// `show() → unminimize() → 补扩展样式 → 摘任务栏按钮`。
+    ///
+    /// 为什么顺序是硬要求：tao 在 `show()` / `unminimize()` 里会用**缓存标志**整体重写
+    /// `GWL_EXSTYLE`（真机读回 `0x40118`：`APPWINDOW` 回来、另两位丢失）⇒ 样式只能写在
+    /// 显示**之后**；而 `ITaskbarList::DeleteTab` 又必须等窗口真的显示过、按钮可能已建出
+    /// 来之后才收得掉。把补样式留在 show 之前 = 完全没改（本缺陷最初的修法就栽在这里）。
+    #[test]
+    fn float_every_show_path_goes_through_show_ball() {
+        let sb = fn_body(FLOAT_RS, "fn show_ball(w: &WebviewWindow)");
+        assert!(!sb.is_empty(), "找不到 show_ball：显示球窗的唯一入口没了");
+        let at_show = sb.find("w.show()").expect("show_ball 必须显示球窗");
+        let at_unmin = sb
+            .find("w.unminimize()")
+            .expect("show_ball 必须取消最小化（它同样会触发 tao 重写扩展样式）");
+        let at_style = sb
+            .find("apply_ball_window_styles(w)")
+            .expect("show_ball 必须在**显示之后**补扩展样式（写在 show 之前会被 tao 擦掉）");
+        let at_tab = sb
+            .find("delete_taskbar_tab(w)")
+            .expect("show_ball 必须在补完样式后摘掉任务栏按钮");
+        assert!(
+            at_show < at_unmin && at_unmin < at_style && at_style < at_tab,
+            "show_ball 的顺序必须是 show → unminimize → 补样式 → 摘按钮（实测偏移 {at_show}/{at_unmin}/{at_style}/{at_tab}）"
+        );
+
+        // 摘按钮那一步必须真用 ITaskbarList::DeleteTab，不能只是「清了样式就当完事」。
+        let dt = fn_body(FLOAT_RS, "fn delete_taskbar_tab(w: &WebviewWindow)");
+        assert!(
+            !dt.is_empty() && dt.contains("ITaskbarList") && dt.contains("DeleteTab"),
+            "delete_taskbar_tab 必须经 ITaskbarList::DeleteTab 回收已建出的任务栏按钮"
+        );
+        // ⚠️ ITaskbarList 的契约：任何方法前必须先 HrInit()，否则 DeleteTab 返回 E_FAIL 且
+        // 什么都不做（v1.77 第一版就漏了它，还把 HRESULT 用 `let _ =` 吞掉 ⇒ 纯静默失败）。
+        assert!(
+            dt.contains("HrInit()"),
+            "delete_taskbar_tab 必须先调 ITaskbarList::HrInit()：未初始化时 DeleteTab 静默无效"
+        );
+        assert!(
+            !dt.contains("let _ = list.DeleteTab"),
+            "delete_taskbar_tab 不得用 `let _ =` 吞掉 DeleteTab 的 HRESULT（失败必须留痕，否则又是静默失败）"
+        );
+
+        // 反向对照：show_ball 之外不得残留任何裸 show / unminimize —— 那等于绕开补样式，
+        // 球会以「带任务栏按钮 + 会抢前台」的姿态出现，而编译 / 单测全绿。
+        let rest = FLOAT_RS.replace(&sb, "");
+        assert!(
+            !has_code_line(&rest, "w.show()"),
+            "floatwin.rs 里不得有绕过 show_ball 的裸 w.show()：tao 会随即把扩展样式写脏"
+        );
+        assert!(
+            !has_code_line(&rest, ".unminimize()"),
+            "floatwin.rs 里不得有绕过 show_ball 的裸 unminimize()：它同样触发扩展样式重写"
+        );
+    }
+
+    /// ⑦ lib.rs 接线：托管状态 / 事件注册 / 启动按开关建球 / 关闭转隐藏 / 退出落盘。
+    #[test]
+    fn lib_wires_float_state_listeners_lifecycle_and_persistence() {
+        assert!(
+            has_code_line(LIB_RS, ".manage(floatwin::FloatState::default())"),
+            "lib.rs 必须 manage floatwin::FloatState"
+        );
+        assert!(
+            has_code_line(LIB_RS, "floatwin::register_float_listeners(app.handle());"),
+            "lib.rs 启动时必须注册悬浮球事件监听"
+        );
+        assert!(
+            has_code_line(LIB_RS, "if initial_settings.float_enabled {")
+                && has_code_line(LIB_RS, "floatwin::show_float_window(app.handle());"),
+            "启动时必须按设置 float_enabled 建悬浮球"
+        );
+        assert!(
+            has_code_line(LIB_RS, "if label == floatwin::FLOAT_LABEL {")
+                && has_code_line(LIB_RS, "floatwin::hide_float_window(app_handle);"),
+            "悬浮球的关闭（Alt+F4）必须被拦截转成隐藏，而不是销毁窗口"
+        );
+        assert!(
+            has_code_line(LIB_RS, "floatwin::persist_float_geometry(app_handle);"),
+            "退出时必须持久化悬浮球几何"
+        );
+    }
+
+    /// ⑧ 「销毁」必须真的销毁：`close()` 会被上面那条 CloseRequested 拦截整个吞掉
+    ///    （tauri-runtime-wry 把 `WindowMessage::Close` 直接交给 `on_close_requested`，
+    ///    与 Alt+F4 同一入口），结果是设置里取消勾选只把球藏起来 —— 静默降级，
+    ///    编译 / 单测 / CI 全绿。必须用 tauri 明示的强制路径 `destroy()`。
+    #[test]
+    fn float_destroy_path_forces_real_destroy_not_close() {
+        assert!(
+            has_code_line(FLOAT_RS, "let _ = w.destroy();"),
+            "销毁悬浮球必须调 WebviewWindow::destroy()（close() 会被 CloseRequested 处理器拦成隐藏）"
+        );
+        // 反向对照：源码里不得残留 `w.close()`（settings 窗那种无需拦截的窗口才用 close）。
+        assert!(
+            !FLOAT_RS.contains("w.close()"),
+            "floatwin.rs 不得使用 close() 来销毁悬浮球：它等价于「只隐藏」"
+        );
+        // 上面那条拦截是本缺陷成立的**前提**：若哪天不再拦截，这条守卫要一起重审。
+        assert!(
+            has_code_line(LIB_RS, "api.prevent_close();"),
+            "float 窗口的 CloseRequested 拦截（Alt+F4 → 隐藏）是 destroy/close 差异的前提，不得静默删掉"
+        );
+    }
+
+    /// ⑩ v1.75：**只启用悬浮图标**（未启用托盘）时，关闭主窗也必须【驻留】而不是真销毁。
+    ///
+    /// 真机缺陷（2026-10-11 使用者实测，策略 `tray_enabled:false / minimize_on_close:false /
+    /// float_enabled:true`）：关窗走 `else` 分支 ⇒ 主窗被真销毁，而球窗还活着 ——
+    ///   ① 球窗挡住「所有窗口关闭 ⇒ 退出」，进程留成既无界面也退不掉的僵尸；
+    ///   ② 点球时 `tray::toggle_window` 的 `get_webview_window("main")` 返回 `None`，
+    ///      一个动作都不做 ⇒ 用户看到「点了悬浮图标不回窗口」。
+    /// 球的产品语义就是「唤回主窗的入口」（见 floaticon.html 的 aria-label），
+    /// 故「球在 ⇒ 应用驻留」必须成立。
+    #[test]
+    fn main_close_stays_resident_when_float_icon_enabled() {
+        // 空白归一化后再匹配：本守卫要钉的是**语义**，不该被换行 / 缩进调整搞红。
+        let flat = LIB_RS.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("let stay_resident = (tray && min) || (cfg!(windows) && float_icon);"),
+            "handle_main_close 的驻留判据必须含「Windows 且 float_enabled」：\
+             少了它，只启用悬浮图标时关闭窗口会真销毁主窗 —— 球变成点不动的孤儿，进程还退不掉"
+        );
+        // ⚠️ 托盘那一路仍然必须**两个开关都要**（这条极易被「顺手放宽成 ||」弄坏：
+        //    只勾「启用托盘」而不勾「关闭时最小化到托盘」时，关窗应当正常退出）。
+        assert!(
+            !flat.contains("let stay_resident = tray ||"),
+            "托盘驻留不得放宽成只看 tray_enabled：必须 tray_enabled && minimize_on_close"
+        );
+        // 平台差异必须是 `cfg!` 布尔（只在**值**上分叉），不得用 `#[cfg]` 分叉语句：
+        // 后者会让 `float_icon` 在非 Windows 上变成「未使用的变量」⇒ -D warnings 编译失败。
+        assert!(
+            has_code_line(LIB_RS, "let (tray, min, float_icon) = {"),
+            "必须一次性读出三个开关（含 float_enabled）再统一判定驻留"
+        );
+        assert!(
+            !has_code_line(LIB_RS, "#[cfg(windows)] let stay_resident"),
+            "驻留判据不得用 #[cfg] 分叉语句（非 Windows 上 float_icon 会变成未使用变量）"
+        );
+    }
+
+    /// ⑪ v1.75：设置页「退出程序」必须与托盘「退出」走**同一条** `app.exit()` 路径。
+    ///
+    /// 启用托盘 / 悬浮图标后「关闭窗口」只等于隐藏 ⇒ 没启用托盘的用户原本**没有任何退出入口**
+    /// （托盘的「退出」菜单项并不存在）。这条按钮是那种状态下唯一的出口，所以：
+    ///   ① 命令体必须 `app.exit(0)`（→ `RunEvent::ExitRequested`，**不经过窗口 CloseRequested**，
+    ///      因此上面那条「驻留」分支不会把退出吞掉）；写成 `window.close()` 就会重现
+    ///      v1.68 缺陷②「点了退出，窗口只是藏起来」的形态；
+    ///   ② settings.html 里必须真的调它（跨文件字面量，漏一处就是「点了没反应」）。
+    #[test]
+    fn settings_page_quit_button_uses_exit_not_window_close() {
+        assert!(
+            has_code_line(LIB_RS, "app.exit(0);"),
+            "设置页「退出程序」必须调 app.exit(0)（与托盘 quit 同路径；window.close() 会被驻留分支吞掉）"
+        );
+        assert!(
+            has_code_line(LIB_RS, "fn quit_app(app: tauri::AppHandle) {"),
+            "quit_app 命令体必须存在（settings.html → 垫片白名单 → 注册表 → 命令体 是一条链）"
+        );
+        // 前端调用点：settings.html 是双壳单一真源，字面量必须逐字一致。
+        let html = include_str!("../dist/settings.html");
+        assert!(
+            html.contains("invoke(\"quit_app\")"),
+            "dist/settings.html 必须调用 quit_app（否则「退出程序」按钮点了没反应）"
+        );
+        assert!(
+            html.contains("id=\"quitBtn\""),
+            "dist/settings.html 必须有 #quitBtn（元素 id 是与脚本 / 探针的接口）"
+        );
+    }
+
+    /// ⑫ v1.76：**右键球 = 关闭悬浮图标功能 + 唤回主窗口**（不是「只把球藏起来」）。
+    ///
+    /// 真机缺陷（2026-10-11 使用者实测，策略 `tray_enabled:false / minimize_on_close:false /
+    /// float_enabled:true`）：主窗「关闭」只等于隐藏到球（驻留理由②），球于是成了桌面上
+    /// **唯一**可见的入口；此刻右键把球一藏 —— 进程因 `float_enabled` 仍为 true 继续驻留，
+    /// 桌面上却再也唤不出任何窗口。右键在用户直觉里本来就是「我不要这个球了」，
+    /// 正确语义是回到主窗口，所以三件事缺一不可：
+    ///   ① `float_enabled` 置 false 并落盘（含同步已打开设置页的复选框）；
+    ///   ② **销毁**球窗；③ 显示主窗口。
+    ///
+    /// ⚠️ 只钉「Hide 分支调了某个函数」远远不够：必须把**函数体里的三件事**逐条限定在
+    ///    `disable_float_from_icon` 内断言（`fn_body`），否则将来把函数体改回
+    ///    `hide_float_window` 仍会全绿 —— 死局静默复现。
+    #[test]
+    fn float_right_click_disables_feature_and_restores_main_window() {
+        // ① 事件分发：Hide 分支必须指向 disable_float_from_icon，不得退回 hide_float_window。
+        assert!(
+            has_code_line(FLOAT_RS, "EventKind::Hide => disable_float_from_icon(app),"),
+            "球上右键（float-hide）必须走 disable_float_from_icon"
+        );
+        assert!(
+            !has_code_line(FLOAT_RS, "EventKind::Hide => hide_float_window(app),"),
+            "Hide 分支不得退回 hide_float_window：只隐藏会留下「进程在跑、桌面再无入口」的死局"
+        );
+
+        // ② 三件事必须真的在函数体里（各自单独限定，缺哪件就红哪条）。
+        let body = fn_body(FLOAT_RS, "pub(crate) fn disable_float_from_icon");
+        assert!(
+            !body.is_empty(),
+            "floatwin.rs 必须有 disable_float_from_icon 函数"
+        );
+        assert!(
+            body.contains("crate::settings::set_float_enabled(app, false)"),
+            "右键必须把 float_enabled 置 false 并落盘（否则进程继续驻留、重启后球又回来）"
+        );
+        assert!(
+            body.contains("destroy_float_window(app)"),
+            "右键必须**销毁**球窗：只 hide 会继续挡住「所有窗口关闭 ⇒ 退出」，也留下无入口的隐患"
+        );
+        assert!(
+            body.contains("crate::tray::show_window(app)"),
+            "右键必须把主窗口显示出来（用户点完右键要看到窗口，而不是一片空桌面）"
+        );
+
+        // ③ 设置写入纪律：只翻转这一位 + 落盘成功才写内存态（与 save_settings 同）。
+        let setter = fn_body(SETTINGS_RS, "pub(crate) fn set_float_enabled");
+        assert!(
+            !setter.is_empty(),
+            "settings.rs 必须有进程内 set_float_enabled（右键那条路径没有前端 Settings 载荷）"
+        );
+        assert!(
+            setter.contains("persist_settings(app, &next)?") && setter.contains("*guard = next;"),
+            "set_float_enabled 必须先落盘、成功后才写内存态（失败不写内存态）"
+        );
+
+        // ④ 设置页复选框必须同步：设置页只在加载时读一次设置，不同步的话它仍打着勾，
+        //    用户随手一点「保存」就把 float_enabled 推回 true（球自己跑回来）。
+        assert!(
+            SETTINGS_RS.contains("fn push_float_enabled_to_settings_window"),
+            "settings.rs 必须把新值推给已打开的设置页"
+        );
+        assert!(
+            SETTINGS_RS.contains("getElementById('floatEnabled')")
+                && SETTINGS_HTML.contains("id=\"floatEnabled\""),
+            "设置页复选框 id（floatEnabled）在 Rust 推送脚本与 dist/settings.html 之间必须逐字一致"
+        );
+
+        // ⑤ 球页文案 / aria 必须写明新语义（读屏与文档层面的回归）。
+        assert!(
+            FLOAT_HTML.contains("右键关闭悬浮图标"),
+            "floaticon.html 的 aria-label 必须写明「右键关闭悬浮图标」"
+        );
+    }
+
+    /// ⑨ v1.70：拖动必须走「页面屏幕绝对坐标 + 主进程抓取偏移」协议。
+    ///    v1.69 上报 clientX 增量，窗口每帧 set_position，下一帧增量被窗口自身位移
+    ///    抵消（稳态半速跟手 + 来回抖），真机表现「球拖不动 / 乱跳」。
+    #[test]
+    fn float_drag_tracks_by_absolute_screen_coords() {
+        // 页面侧：真实代码行必须用 screenX/screenY（注释里的解释文字不算）。
+        // 先用状态机剥掉 <!-- ... --> 块注释（不能逐行判前缀：块注释中间的行没有任何
+        // 注释前缀，v1.70 的解释文字就写在那里，会骗过反向守卫），再剥行内 // 注释。
+        let strip_html_comments = |s: &str| -> String {
+            let bytes = s.as_bytes();
+            let mut out = String::with_capacity(s.len());
+            let mut i = 0;
+            let mut in_comment = false;
+            while i < bytes.len() {
+                if !in_comment && i + 4 <= bytes.len() && &bytes[i..i + 4] == b"<!--" {
+                    in_comment = true;
+                    i += 4;
+                } else if in_comment && i + 3 <= bytes.len() && &bytes[i..i + 3] == b"-->" {
+                    in_comment = false;
+                    i += 3;
+                } else {
+                    let ch = s[i..].chars().next().unwrap();
+                    if !in_comment {
+                        out.push(ch);
+                    }
+                    i += ch.len_utf8();
+                }
+            }
+            out
+        };
+        let page_code_lines: Vec<String> = strip_html_comments(FLOAT_HTML)
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => l[..i].to_string(),
+                None => l.to_string(),
+            })
+            .collect();
+        assert!(
+            page_code_lines.iter().any(|l| l.contains("e.screenX")),
+            "floaticon.html 拖动必须读取 e.screenX（屏幕绝对坐标）"
+        );
+        assert!(
+            page_code_lines.iter().any(|l| l.contains("e.screenY")),
+            "floaticon.html 拖动必须读取 e.screenY（屏幕绝对坐标）"
+        );
+        assert!(
+            !page_code_lines
+                .iter()
+                .any(|l| l.contains("clientX") || l.contains("clientY")),
+            "floaticon.html 真实代码不得再用 clientX/clientY（窗口移动会污染其增量）"
+        );
+        // Rust 侧：载荷字段是 sx/sy；on_move 按 sx/sy 收参并有抓取偏移锚点。
+        assert!(
+            has_code_line(FLOAT_RS, "sx: f64,"),
+            "FloatMsg 必须含 sx 字段（屏幕绝对坐标）"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "sy: f64,"),
+            "FloatMsg 必须含 sy 字段（屏幕绝对坐标）"
+        );
+        assert!(
+            has_code_line(
+                FLOAT_RS,
+                "fn on_move(app: &tauri::AppHandle, w: &WebviewWindow, sx: f64, sy: f64)"
+            ),
+            "on_move 必须接收屏幕绝对坐标 sx/sy，而不是增量"
+        );
+        assert!(
+            FLOAT_RS.contains("anchor: Mutex<Option<(i32, i32)>>"),
+            "FloatState 必须持有抓取点偏移 anchor"
+        );
+        // v1.70 真机取证补：抓取偏移必须源自 pointerdown 的【按下点】而不是首帧 move 的光标。
+        assert!(
+            FLOAT_RS.contains("press: Mutex<Option<(i32, i32)>>"),
+            "FloatState 必须暂存 pointerdown 按下点 press"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "fn on_down(w: &WebviewWindow, sx: f64, sy: f64)"),
+            "必须有 on_down：只暂存按下点，不展开、不置 moving"
+        );
+        assert!(
+            page_code_lines
+                .iter()
+                .any(|l| l.contains("send('down', e.screenX, e.screenY)")),
+            "pointerdown 必须立即上报 down（按下点）；首帧 move 才取它算锚点"
+        );
+        assert!(
+            page_code_lines
+                .iter()
+                .any(|l| l.contains("send(moved ? 'dragend' : 'cancel')")),
+            "pointercancel 未拖动必须发 cancel（只复位），不得发 click 弹主窗"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "fn clear_drag_runtime(app: &tauri::AppHandle)"),
+            "必须有 clear_drag_runtime 供 click / cancel / dragend 统一清按压 / 拖动态"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "clamp_visible("),
+            "拖动中必须软钳制（至少留窄边在屏内，可跨屏，不甩丢）"
+        );
+    }
+
+    /// ⑩ v1.70：悬停缩回必须延迟 + 到期校验真实光标位置，治边缘抖动；
+    ///    自由态松手必须钳回显示器；球窗必须等页面加载完成再 show。
+    #[test]
+    fn float_peek_delay_cursor_check_clamp_and_show_after_load() {
+        assert!(
+            FLOAT_RS.contains("const COLLAPSE_DELAY_MS: u64 = 300;"),
+            "缩回必须延迟 300ms（边缘进出事件连环触发时防抖）"
+        );
+        assert!(
+            has_code_line(
+                FLOAT_RS,
+                "fn finish_peek_leave(app: &tauri::AppHandle, gen: u64)"
+            ),
+            "必须有延迟到期的统一收口 finish_peek_leave"
+        );
+        assert!(
+            FLOAT_RS.contains("peek_gen: AtomicU64"),
+            "必须有悬停代际计数器，使排队中的旧缩回任务作废"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "w.cursor_position()"),
+            "到期必须读真实光标位置：光标已在缩回后矩形内则保持展开"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "fn point_in_rect("),
+            "光标位置必须做点包含判定（纯函数，有单测）"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, "fn clamp_visible("),
+            "拖动中软钳制必须抽成纯函数（有单测）"
+        );
+        assert!(
+            has_code_line(FLOAT_RS, ".on_page_load("),
+            "球窗必须注册 on_page_load：页面 Finished 后再 show + push_state"
+        );
+        assert!(
+            FLOAT_RS.contains("PageLoadEvent::Finished"),
+            "必须在 Finished（不是 Started）时显现，避免透明空窗 / 首帧前 setState 丢失"
+        );
+        // 建窗函数里不得再立刻 show（show 已移到 on_page_load 回调）。
+        let build_fn = &FLOAT_RS[FLOAT_RS
+            .find("fn build_float_window_on_main")
+            .expect("build_float_window_on_main 存在")..];
+        let build_end = build_fn
+            .find("\n}\n")
+            .map(|i| i + 2)
+            .unwrap_or(build_fn.len());
+        assert!(
+            !build_fn[..build_end].contains("window.show()"),
+            "建窗后不得立刻 show：透明 WebView2 首帧前是看不见的空窗，show 必须在 on_page_load"
+        );
+    }
+
+    /// ⑪ v1.72：单击必须**双击去抖** —— 系统双击在 ~100ms 内送来两次 `pointerup`（两次
+    ///    `click`），而 `click` 是 toggle 主窗：两次相互抵消，用户只看到主窗「闪现」一下。
+    ///    窗口期内的第二次点击必须丢弃（双击只认第一次），窗口之外的单击照常各算一次。
+    #[test]
+    fn float_page_click_is_debounced_against_double_click() {
+        assert!(
+            FLOAT_HTML.contains("var CLICK_DEBOUNCE_MS = 250;"),
+            "球页必须有双击去抖窗口常量 CLICK_DEBOUNCE_MS（缺了双击会让主窗闪现）"
+        );
+        assert!(
+            has_code_line(
+                FLOAT_HTML,
+                "if (now - lastClickAt < CLICK_DEBOUNCE_MS) return;"
+            ),
+            "窗口期内的第二次单击必须早退（丢弃），不得再发一次 click"
+        );
+        assert!(
+            has_code_line(FLOAT_HTML, "lastClickAt = now;"),
+            "通过去抖的单击必须记录时间戳，否则去抖恒不生效"
+        );
+        assert!(
+            !FLOAT_HTML.contains("send(moved ? 'dragend' : 'click')"),
+            "旧的未去抖单击写法必须消失（它就是双击闪现的来源）"
+        );
+    }
+
+    /// ⑫ v1.72：球页把球摆进活柱靠 `left: 28px`（= `ICON_SIZE_LOGICAL / 2`）。这个 28 与
+    ///    `PEEK_LOGICAL = 28` **数值巧合相同、含义无关** ⇒ 用跨文件等式钉住：改活柱边长
+    ///    必须同步页面，否则球会在活柱里偏心（外观错位、命中区与球错开）。
+    #[test]
+    fn float_page_ball_offset_equals_half_icon_size() {
+        assert!(
+            FLOAT_RS.contains("const ICON_SIZE_LOGICAL: f64 = 56.0;"),
+            "活柱边长常量必须是 56.0（页面 left:28px 与 Electron DEFAULT_FLOAT_W 都对齐它）"
+        );
+        assert!(
+            FLOAT_HTML.contains("left: 28px;"),
+            "锚左（活柱贴宿主左边）时球心必须在左起 28px = ICON_SIZE_LOGICAL/2"
+        );
+        assert!(
+            FLOAT_HTML.contains("left: calc(100% - 28px);"),
+            "锚右（右吸附活柱贴宿主右边）时球心必须在视口右起 28px = ICON_SIZE_LOGICAL/2"
+        );
+    }
+
+    /// ⑭ v1.77b：球**必须铺满活柱**（球直径 == 区域圆的直径 == `ICON_SIZE_LOGICAL`）。
+    ///
+    /// 真机现象「不选中时 悬浮图标背景异样」的第三个源头（前两个：v1.73 的球元素 title、
+    /// v1.77 的任务栏按钮 / 标题）。实测残片的**外边界是以球心为圆心、半径恒定的一个圆**
+    /// ⇒ 它就是「球（当时 46px）」与「区域圆（56px）」之间那圈**透明环带**被区域裁出来的
+    /// 形状：那圈环带会把窗口后面的东西透出来，而 Tauri 侧 WebView2 的底层不是真透明 ⇒
+    /// 露成一圈浅色残片（Electron 的透明是真透明，所以「仅限 Tauri」）。
+    /// 球与区域圆直径取同一个常量后两者严格重合，环带在几何上不存在。
+    #[test]
+    fn float_page_ball_fills_the_live_pillar() {
+        let size = icon_size_logical_int();
+
+        // ① 球元素那条规则：宽高必须都等于活柱边长，且不得再靠 transform 放大
+        //    （球已铺满，scale>1 会被区域裁掉 = 没有反馈；放大出的那圈又是透明环带）。
+        let ball = css_block(FLOAT_HTML, "#w2f-ball {");
+        assert!(
+            !ball.is_empty(),
+            "floaticon.html 里找不到 #w2f-ball 的 CSS 规则块"
+        );
+        for needle in [format!("width: {size}px;"), format!("height: {size}px;")] {
+            assert!(
+                ball.contains(&needle),
+                "#w2f-ball 必须 {needle}（= ICON_SIZE_LOGICAL）：球比区域圆小就会留出一圈透明环带，把窗口后面的东西透出来"
+            );
+        }
+        assert!(
+            !ball.contains("scale("),
+            "#w2f-ball 不得用 transform: scale() 放大：球已铺满活柱，放大只会被区域裁掉并重新露出透明环带"
+        );
+
+        // ② 悬停 / 拖动反馈改为提亮（filter），且同样不得 scale。
+        let hover = css_block(FLOAT_HTML, "html #w2f-ball:hover {");
+        assert!(
+            hover.contains("filter: brightness(1.12)"),
+            "悬停反馈必须是 filter: brightness(1.12)（提亮），不能靠放大"
+        );
+        assert!(!hover.contains("scale("), "悬停反馈不得使用 scale()");
+
+        // ③ 半隐藏态的「压暗」必须用 filter，不能用 opacity ——
+        //    opacity 会让整颗球半透明，等于把刚堵上的那层保护自己拆掉。
+        let collapsed = css_block(FLOAT_HTML, "html.w2f-collapsed #w2f-ball {");
+        assert!(
+            collapsed.contains("filter: brightness("),
+            "半隐藏态必须用 filter: brightness() 压暗"
+        );
+        assert!(
+            !collapsed.contains("opacity"),
+            "半隐藏态不得用 opacity：整颗球半透明会把窗口底色透出来（正是本条要防的现象）"
+        );
+    }
+
+    /// ⑬ v1.72：capability 的 `description` 也是安全文档，必须与实现同步 —— 它曾写着
+    ///    「单击球调出主窗口」（v1.71 已改为 toggle）且只列 6 个事件（v1.70 新增的
+    ///    `float-down` / `float-cancel` 不在表里）。这两处都是静默漂移：没人会去读 JSON 里的说明。
+    #[test]
+    fn float_capability_description_lists_all_events_and_toggle_semantics() {
+        let v: serde_json::Value =
+            serde_json::from_str(FLOAT_CAP).expect("capabilities/float-icon.json 不是合法 JSON");
+        let desc = v["description"]
+            .as_str()
+            .expect("float-icon.json 必须有 description");
+        assert!(
+            desc.contains("切换主窗口显隐"),
+            "description 必须写明单击是 toggle 主窗显隐（v1.71 起，不再是「调出来」）"
+        );
+        for lit in [
+            concat!("float-", "down"),
+            concat!("float-", "move"),
+            concat!("float-", "cancel"),
+            concat!("float-", "drag-end"),
+            concat!("float-", "peek-enter"),
+            concat!("float-", "peek-leave"),
+            concat!("float-", "hide"),
+            concat!("float-", "click"),
+        ] {
+            assert!(
+                desc.contains(lit),
+                "capability description 必须列出事件 {lit}（否则安全文档与实际事件集漂移）"
+            );
+        }
+        assert!(
+            !desc.contains("单击球调出主窗口"),
+            "description 不得再写「单击球调出主窗口」：v1.71 已改为 toggle"
+        );
+    }
+
+    /// ⑭ v1.72：悬浮球真机探针的「假主窗」也必须设 WebView2 用户数据目录。
+    ///
+    /// 漏设的后果**不是**「换了个缓存目录」这么轻：真机实测 `WebviewWindowBuilder::build()`
+    /// **永不返回** —— HWND 已经建出来（进程窗口列表里能看到探针给它的标题）、主线程此后也
+    /// 不再执行任何任务（连排队的 `app.exit` 都送不到），整轮探针只能等看门狗给 98。
+    /// 症状伪装成「WebView2 初始化偶发停摆」：本机为此白查了一整轮（换 UDF、换运行目录、
+    /// 清残留 WebView2 进程全都无效，`run-D/E/F` 三次复现）。生产三处建窗
+    /// （`lib.rs` 主窗 / `tabs.rs` tab 窗 / `floatwin.rs` 球窗）都设了它，探针这一处不能例外。
+    #[test]
+    fn float_probe_fake_main_window_sets_data_directory() {
+        const FLOATPROBE_RS: &str = include_str!("floatprobe.rs");
+        const NEEDLE: &str = concat!("Some(dir) => b.", "data_directory(dir),");
+        assert!(
+            has_code_line(FLOATPROBE_RS, NEEDLE),
+            "floatprobe 的假主窗必须 data_directory(dir)（与生产主窗同一个 UDF；漏设 = build() 卡死）"
+        );
+        // 反向对照：把调用挖掉后同一判据必须不再成立，否则这条守卫咬不住人。
+        let broken = FLOATPROBE_RS.replace(NEEDLE, "Some(dir) => b,");
+        assert_ne!(
+            broken, FLOATPROBE_RS,
+            "反向对照：被测 needle 必须真的存在于源码里"
+        );
+        assert!(
+            !has_code_line(&broken, NEEDLE),
+            "反向对照失败：挖掉 data_directory 后判据仍成立 ⇒ 守卫是自欺的"
+        );
+    }
+
+    /// 多页签宿主窗口也必须显式设 WebView2 数据目录。
+    ///
+    /// ⚠️ 这是一处**真实修掉的偏差**（v1.72）：`create_host_window` 原来漏了这一句，而它恰是
+    /// 多页签模式下**最先创建 WebView2 环境**的窗口 —— 后果是①宿主的 WebView2 数据落到系统
+    /// 默认目录（绿色版「不写程序目录之外」被破坏）；②`tabs.rs` 里那段「宿主是同 UDF 下第一个
+    /// 创建环境的窗口，所以 proxy 参数必须挂在它身上」的注释前提不再成立（宿主与 tab 分裂成两个
+    /// 环境）。两处都静默，编译 / 单测 / 探针全绿，只有真机往盘上看才现形。
+    ///
+    /// 判据为什么用 `builder.` 作接收者：`create_host_window` 的局部变量正是 `builder`，
+    /// 而 tab 窗那处是 `window.`、主窗是 `wb.`、球窗是 `b.` —— 四种接收者互不相同，
+    /// 于是这条 needle 在本文件里只能来自宿主窗那一行（不会被别处误满足）。
+    #[test]
+    fn tabs_host_window_sets_data_directory() {
+        const TABS_RS: &str = include_str!("tabs.rs");
+        const NEEDLE: &str = concat!("Some(dir) => build", "er.data_directory(dir),");
+        assert!(
+            has_code_line(TABS_RS, NEEDLE)
+                && has_code_line(
+                    TABS_RS,
+                    "let builder = match crate::config::data_dir(app) {"
+                ),
+            "create_host_window 必须与主窗 / tab 窗同构显式设置 WebView2 数据目录"
+        );
+        // 反向对照：挖掉后同判据必须不再成立。
+        let broken = TABS_RS.replace(NEEDLE, "Some(dir) => builder,");
+        assert_ne!(
+            broken, TABS_RS,
+            "反向对照：被测 needle 必须真的存在于 tabs.rs"
+        );
+        assert!(
+            !has_code_line(&broken, NEEDLE),
+            "反向对照失败：挖掉 data_directory 后判据仍成立 ⇒ 守卫是自欺的"
         );
     }
 }

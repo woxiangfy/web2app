@@ -231,13 +231,25 @@ def main() -> int:
         checked += 1
         check_bash_syntax(rel, path.read_text(encoding="utf-8"), errors)
 
+    # 共享 Python 脚本（parse-packaging-config.py / patch-android-back.py …）：
+    # 语法错同样只在 CI 调用时才炸，这里用 compile() 静态挡住，与 shell 脚本同理。
+    for path in sorted((ROOT / ".github" / "scripts").glob("*.py")):
+        rel = path.relative_to(ROOT).as_posix()
+        checked += 1
+        try:
+            compile(path.read_text(encoding="utf-8"), rel, "exec")
+        except SyntaxError as e:
+            errors.append(f"{rel}: Python 语法错误：{e.msg}（第 {e.lineno} 行）")
+
     if errors:
         print("工作流检查发现问题：")
         for e in errors:
             print(f"::error::{e}")
         return 1
+    n_sh = len(list((ROOT / ".github" / "scripts").glob("*.sh")))
+    n_py = len(list((ROOT / ".github" / "scripts").glob("*.py")))
     print(f"工作流检查通过 ✓（{len(WORKFLOWS)} 个 workflow / {checked} 个脚本片段，"
-          f"其中 {len(scripts)} 个 .github/scripts/*.sh）")
+          f"含 .github/scripts 下 {n_sh} 个 .sh + {n_py} 个 .py）")
     return 0
 
 

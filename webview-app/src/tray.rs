@@ -31,6 +31,20 @@ pub(crate) fn toggle_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 显示并聚焦主窗口（托盘菜单「显示窗口」/ 第二实例 共用）：
+/// 取消最小化、显现、置顶聚焦；不做 toggle——调用方意图就是「把窗口调出来」。
+///
+/// ⚠️ **单击悬浮球不走这里**（v1.71 起改走 [`toggle_window`]：可见且非最小化 → 隐藏）——
+/// 别再把它当成悬浮球的入口写进注释或调用点。
+pub(crate) fn show_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(main_window_label()) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    sync_tabs_visibility(app, true);
+}
+
 /// 创建系统托盘图标（含右键菜单、左键切换窗口）。仅当设置“启用托盘”时调用。
 pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
@@ -38,9 +52,15 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
     let show_i = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+    // 悬浮图标菜单项仅 Windows（floatwin 模块整体 cfg(windows)）；两壳托盘项保持一致。
+    #[cfg(windows)]
+    let float_i = MenuItem::with_id(app, "float", "悬浮图标", true, None::<&str>)?;
     let hide_i = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    #[cfg(not(windows))]
     let menu = Menu::with_items(app, &[&show_i, &settings_i, &hide_i, &quit_i])?;
+    #[cfg(windows)]
+    let menu = Menu::with_items(app, &[&show_i, &settings_i, &float_i, &hide_i, &quit_i])?;
 
     // 图标缺失返回 Err 而不是 expect：本函数在「设置里勾选启用托盘」的运行期路径上也会被
     // 调用（settings.rs），expect 会让进程因配置问题直接 panic；交给上层弹可读错误。
@@ -60,17 +80,17 @@ pub(crate) fn create_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip(TITLE)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
-                if let Some(w) = app.get_webview_window(main_window_label()) {
-                    let _ = w.unminimize();
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-                sync_tabs_visibility(app, true);
+                show_window(app);
             }
             // 托盘右键菜单新增的"设置"项：打开（或聚焦）设置窗口，
             // 与右键网页菜单的"设置"、全局快捷键 Shift+F1 走同一入口。
             "settings" => {
                 crate::settings::open_settings_window(app);
+            }
+            // 悬浮窗显示 / 隐藏切换（仅 Windows 有此菜单项）。
+            #[cfg(windows)]
+            "float" => {
+                crate::floatwin::toggle_float_window(app);
             }
             "hide" => {
                 if let Some(w) = app.get_webview_window(main_window_label()) {

@@ -74,10 +74,30 @@ export function runTee(cmd, cwd, env, dry) {
 
 /**
  * 失败是不是「这台机器不让删东西」这一类 —— 而不是配置写错 / 代码坏。
- * electron-builder 打包前要清空 appOutDir，清不掉时它给的就是这两种标记。
+ * electron-builder 打包前要清空 appOutDir，清不掉时它给的就是下面这几类标记：
+ *
+ *   ① `safe-delete` / `emptyDir` / `trash operation` —— 本机删除垫片（配额）拦下的；
+ *   ② `<CODE>: …, unlink|rmdir '<path>'`（CODE ∈ EBUSY/EPERM/EACCES）—— **文件被占着**。
+ *      Windows 上只要别的进程的句柄没带 `FILE_SHARE_DELETE`，unlink/rmdir 必失败：
+ *        · 文件被谁打开着（上一次打的包还在跑 / 编辑器 / 杀软 / **宿主进程**）⇒ `EBUSY: resource busy or locked`
+ *        · 只读属性或权限拒删 ⇒ `EPERM` / `EACCES`
+ *      ⚠️ 实测（2026-10-11）：WorkBuddy 宿主进程会抓住新落盘的 `resources/*.asar`
+ *         ⇒ 默认产物目录里的 `app.asar` 删不掉，打包以退出码 1 收场。
+ *
+ * ⚠️⚠️ 判据**刻意只盯「删除类系统调用」**，不用裸 `EPERM`：
+ *    受限网络下 electron-builder 下工具集会在重试约 8 分钟后以 `EPERM`（rename/copyfile）失败，
+ *    那不是「删不掉」⇒ 误判会白等一次重试、还给出「换目录」的错误建议。
+ *
+ * ⚠️ 这条判据曾经**只认 ①**（2026-10-11 前）。于是 ② 这一类 —— 恰恰是本机最常见的一种 ——
+ *    既不触发下面的「自动换全新目录重试」，也不打印排错提示：用户最终只看到一句
+ *    `✗ electron-builder 失败（退出码 1）`，而真正的 `EBUSY: … unlink '…\app.asar'` 躺在上面几十行。
  */
 export function isDeleteBlocked(tail) {
-  return tail.some((l) => /safe-delete|emptyDir|trash operation/i.test(l))
+  return tail.some(
+    (l) =>
+      /safe-delete|emptyDir|trash operation/i.test(l) ||
+      /\b(EBUSY|EPERM|EACCES)\b[^\n]*\b(unlink|rmdir)\b/i.test(l),
+  )
 }
 
 /**

@@ -97,10 +97,40 @@ export interface ContextMenuParamsLike {
   editFlags: { canCopy: boolean; canCut: boolean; canPaste: boolean }
 }
 
-/** 导航历史可用性（`wc.navigationHistory` 的两个方法在构造菜单时读一次）。 */
+/** 导航历史可用性（构造菜单时按历史条目实时计算一次）。 */
 export interface NavFlags {
   canGoBack: boolean
   canGoForward: boolean
+}
+
+/**
+ * 内置页面判定：内置启动页 splash 有两种 URL 形态 —— 原生 `splash://` scheme，与 wry 在
+ * Windows/Android 改写后的 `http://splash.localhost/`。与 webview-app 的 titlebar.js
+ * isBuiltinUrl 逐字对齐：内置页永远不该成为前进/后退落点（移动端规则同此）。
+ */
+export function isBuiltinUrl(url: string): boolean {
+  return /^splash:/i.test(url) || /^https?:\/\/splash\.localhost(?:[/?#]|$)/i.test(url)
+}
+
+/**
+ * 后退落点是否为真实网页：当前条目的上一条历史存在，且其 URL 不是内置 splash 页。
+ * 应用启动时 splash 是第一条历史（splash → 目标地址 loadURL），裸 canGoBack() 会误放行。
+ */
+export function canHistoryGoBack(
+  entries: ReadonlyArray<{ url: string }>,
+  activeIndex: number
+): boolean {
+  const prev = entries[activeIndex - 1]
+  return !!prev && !isBuiltinUrl(prev.url)
+}
+
+/** 前进落点同理：下一条历史存在且不是内置 splash 页。 */
+export function canHistoryGoForward(
+  entries: ReadonlyArray<{ url: string }>,
+  activeIndex: number
+): boolean {
+  const next = entries[activeIndex + 1]
+  return !!next && !isBuiltinUrl(next.url)
 }
 
 /**
@@ -185,12 +215,17 @@ export function attachDevtools(wc: WebContents, enabled: boolean): void {
 /** 把菜单动作落到目标 `WebContents` 上。 */
 function runMenuAction(wc: WebContents, action: ContextMenuAction | undefined, linkURL: string, onSettings: () => void): void {
   switch (action) {
-    case 'back':
-      if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack()
+    case 'back': {
+      // 落点不是真实网页时不触发（不能只信 canGoBack：splash 也在历史里）。
+      const h = wc.navigationHistory
+      if (canHistoryGoBack(h.getAllEntries(), h.getActiveIndex())) h.goBack()
       break
-    case 'forward':
-      if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward()
+    }
+    case 'forward': {
+      const h = wc.navigationHistory
+      if (canHistoryGoForward(h.getAllEntries(), h.getActiveIndex())) h.goForward()
       break
+    }
     case 'reload':
       wc.reload()
       break
@@ -225,6 +260,10 @@ function runMenuAction(wc: WebContents, action: ContextMenuAction | undefined, l
  */
 export function attachContextMenu(wc: WebContents, onSettings: () => void): void {
   wc.on('context-menu', (_e, params) => {
+    // 菜单可用性按历史落点实时算：相邻条目是内置 splash 页时「返回 / 前进」置灰。
+    const navHistory = wc.navigationHistory
+    const allEntries = navHistory.getAllEntries()
+    const activeIndex = navHistory.getActiveIndex()
     const specs = contextMenuTemplate(
       {
         isEditable: params.isEditable,
@@ -237,8 +276,8 @@ export function attachContextMenu(wc: WebContents, onSettings: () => void): void
         },
       },
       {
-        canGoBack: wc.navigationHistory.canGoBack(),
-        canGoForward: wc.navigationHistory.canGoForward(),
+        canGoBack: canHistoryGoBack(allEntries, activeIndex),
+        canGoForward: canHistoryGoForward(allEntries, activeIndex),
       },
     )
     const template = specs.map((s) =>

@@ -1,0 +1,169 @@
+﻿TOTAL=167
+=== 全部窗口（按 y 排序，非 0x0 的优先）===
+hwnd=0x33008A     vis=True  rect=-25600,-25600   159x27    ex=0x100      pid=11304  cls=CabinetWClass | title=此电脑
+hwnd=0x23006E2    vis=True  rect=-25600,-25600   159x27    ex=0x100      pid=11304  cls=CabinetWClass | title=C:\dev\rust\web-app\tests\pack\tauri
+hwnd=0x10034      vis=False rect=-25600,-25600   159x27    ex=0x0        pid=2432   cls=Dwm | title=DWM Notification Window
+hwnd=0x43079C     vis=False rect=-25492,-25517   775x179   ex=0x80       pid=11304  cls=ComboLBox | title=
+hwnd=0x1CD031E    vis=True  rect=    -7,-7      1718x902   ex=0x100      pid=2516   cls=Chrome_WidgetWin_1 | title=WorkBuddy
+hwnd=0x603F4      vis=False rect=    -7,-7      1718x902   ex=0x100      pid=5496   cls=Chrome_WidgetWin_1 | title=Agent [管理员]
+hwnd=0x1102C8     vis=True  rect=    -6,-6      1717x901   ex=0x100      pid=5512   cls=Chrome_WidgetWin_1 | title=TraeWork CN [管理员]
+hwnd=0x5904DA     vis=False rect=     0,0        136x38    ex=0x100      pid=10408  cls=00007FF6BC12B758-PAL_SYS_WIN32_TIMER_WNDCLASS | title=
+hwnd=0x500742     vis=False rect=     0,0        205x80    ex=0x100      pid=10408  cls=RdpClipMainWindowClass | title=
+hwnd=0xC015C      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x1013A      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x25053A     vis=False rect=     0,0        136x38    ex=0x100      pid=10408  cls=URBRedirectorDeviceNotifications | title=
+hwnd=0x10124      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x29107B0    vis=False rect=     0,0        205x80    ex=0x4        pid=10408  cls=RdpClipRdrWindowClass | title=
+hwnd=0x30054      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=BluetoothNotificationAreaIconWindowClass | title=BluetoothNotificationAreaIconWindowClass
+hwnd=0x2805E8     vis=False rect=     0,0        136x38    ex=0x100      pid=8620   cls=crashpad_SessionEndWatcher | title=
+hwnd=0x45B04B6    vis=False rect=     0,0          1x1     ex=0x0        pid=2516   cls=GDI+ Hook Window Class | title=G
+hwnd=0xB0784      vis=False rect=     0,0        136x38    ex=0x100      pid=10408  cls=00007FF6BC12B758-PAL_SYS_WIN32_TIMER_WNDCLASS | title=
+hwnd=0x1E06AE     vis=True  rect=     0,0       1704x888   ex=0x200100   pid=3664   cls=ApplicationFrameWindow | title=
+hwnd=0x1012C      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x1028E      vis=False rect=     0,0          1x1     ex=0x0        pid=4708   cls=GDI+ Hook Window Class | title=G
+hwnd=0x101D2      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x101CA      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x801D4      vis=False rect=     0,0          1x1     ex=0x0        pid=7836   cls=GDI+ Hook Window Class | title=G
+hwnd=0x40456      vis=False rect=     0,0        136x38    ex=0x100      pid=7076   cls=crashpad_SessionEndWatcher | title=
+hwnd=0x103C0      vis=False rect=     0,0       1704x928   ex=0x200000   pid=3664   cls=Windows.UI.Core.CoreWindow | title=Window
+hwnd=0x50180      vis=False rect=     0,0        136x38    ex=0x100      pid=5496   cls=AhaElectron_MessageWindow | title=
+hwnd=0x201AC      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x48806E0    vis=False rect=     0,0       1704x898   ex=0x8200080  pid=3664   cls=TabletModeCoverWindow | title=
+hwnd=0x16300B4    vis=False rect=     0,0        109x31    ex=0x100      pid=5512   cls=AhaElectron_MessageWindow | title=
+hwnd=0x2C0324     vis=False rect=     0,0          1x1     ex=0x0        pid=7288   cls=GDI+ Hook Window Class | title=G
+hwnd=0xE03FE      vis=False rect=     0,0        109x31    ex=0x100      pid=8016   cls=crashpad_SessionEndWatcher | title=
+hwnd=0x101A8      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x5B0506     vis=False rect=     0,0        136x38    ex=0x100      pid=11304  cls=WorkerW | title=
+hwnd=0x101AA      vis=False rect=     0,0        136x38    ex=0x100      pid=3664   cls=WorkerW | title=
+hwnd=0x101D8      vis=False rect=     0,0        136x38    ex=0x108      pid=3664   cls=PNIHiddenWnd | title=
+hwnd=0x101BA      vis=False rect=     0,0         13x13    ex=0x188      pid=3664   cls=SystemTray_Main | title=电池指示器
+hwnd=0x2001A      vis=False rect=     0,0        136x38    ex=0x100      pid=3312   cls=COMTASKSWINDOWCLASS | title=Task Host Window
+hwnd=0x103C2      vis=False rect=     0,0       1704x928   ex=0x200008   pid=3664   cls=Windows.UI.Core.CoreWindow | title=Window
+hwnd=0x502B8      vis=False rect=     0,0          1x1     ex=0x0        pid=3664   cls=GDI+ Hook Window Class | title=G
+hwnd=0x10120      vis=True  rect=     0,0       1704x928   ex=0x80       pid=3664   cls=Progman | title=Program Manager
+hwnd=0x8F0578     vis=False rect=     0,0       1704x928   ex=0x80       pid=3664   cls=WorkerW | title=
+hwnd=0x291067C    vis=False rect=     0,0        136x38    ex=0x100      pid=11304  cls=WorkerW | title=
+hwnd=0x800C6      vis=False rect=     0,0        136x39    ex=0x100      pid=11720  cls=CicLoaderWndClass | title=
+hwnd=0x45060C     vis=True  rect=     0,0         14x14    ex=0x80800A0  pid=4400   cls=com.example.web2app-sic | title=com.example.web2app-siw
+hwnd=0x1BB0630    vis=True  rect=     0,0         14x14    ex=0x80800A0  pid=4400   cls=Tao Thread Event Target | title=
+hwnd=0x1E0398     vis=False rect=     0,0        136x39    ex=0x100      pid=11768  cls=crashpad_SessionEndWatcher | title=
+hwnd=0x180786     vis=False rect=    10,0        855x888   ex=0x200000   pid=8180   cls=Chrome_WidgetWin_1 | title=无标题
+hwnd=0x1406B0     vis=True  rect=    15,0       1689x3     ex=0x8200080  pid=3664   cls=EdgeUiInputTopWndClass | title=
+hwnd=0x510360     vis=False rect=    26,26      1278x646   ex=0x100      pid=8180   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x3F05E6     vis=True  rect=    77,77      1100x650   ex=0x40110    pid=4400   cls=Tauri Window | title=Mark
+hwnd=0x3B0484     vis=False rect=   102,102      136x56    ex=0x40118    pid=4400   cls=Tauri Window | title=Mark
+hwnd=0x101EA      vis=False rect=   108,109     1278x647   ex=0x100      pid=3664   cls=MS_WebcheckMonitor | title=MS_WebcheckMonitor
+hwnd=0xFA90646    vis=True  rect=    77,114     1100x613   ex=0x110      pid=4400   cls=Tauri Window | title=Mark
+hwnd=0x1007FA     vis=False rect=   128,128     1278x646   ex=0x100      pid=2516   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x20274      vis=False rect=   134,136     1278x646   ex=0x120      pid=4708   cls=WeaselIPCWindow_1.0 | title=WeaselIPCWindow_1.0
+hwnd=0x10296      vis=False rect=   160,161      991x518   ex=0xC0110    pid=4740   cls=ConsoleWindowClass | title=C:\pf\CheckIn\war.exe
+hwnd=0x1B05BC     vis=False rect=   179,179     1278x646   ex=0x80801A0  pid=4400   cls=global_hotkey_app | title=
+hwnd=0x28047A     vis=False rect=   186,181     1152x604   ex=0x100      pid=5512   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x90382      vis=False rect=   210,192     1278x646   ex=0x100      pid=5496   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x50B07D0    vis=False rect=   636,214      714x240   ex=0x8C       pid=11304  cls=Auto-Suggest Dropdown | title=
+hwnd=0x202BC      vis=False rect=   622,225      462x250   ex=0x100      pid=3664   cls=OperationStatusWindow | title=文件夹正在使用
+hwnd=0x2011E      vis=False rect=    38,249      190x20    ex=0x800A8    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x102A4      vis=False rect=   658,287      400x332   ex=0x0        pid=4740   cls=WarManagerWindowV1 | title=war 控制台
+hwnd=0x10116      vis=False rect=     0,686     1704x202   ex=0x80088    pid=3664   cls=TaskListThumbnailWnd | title=
+hwnd=0x10104      vis=False rect=  1518,788       70x20    ex=0x800A8    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x100E4      vis=False rect=  1502,808       80x80    ex=0x88       pid=3664   cls=NotifyIconOverflowWindow | title=
+hwnd=0x10102      vis=False rect=  1556,829      120x84    ex=0x800A8    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x10290      vis=False rect=  1666,848       38x38    ex=0x8080088  pid=4708   cls=ATL:00007FF78BC15CB0 | title=
+hwnd=0x100BE      vis=True  rect=     0,888     1704x40    ex=0x88       pid=3664   cls=Shell_TrayWnd | title=
+hwnd=0x160370     vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x580618     vis=False rect=     0,0          0x0     ex=0x0        pid=8180   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x10172      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=IME | title=Default IME
+hwnd=0x101C6      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=IME | title=Default IME
+hwnd=0x3606A0     vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x2D0438     vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x103C4      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=IME | title=Default IME
+hwnd=0x1013C      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=IME | title=Default IME
+hwnd=0x1011A      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x100C4      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=IME | title=Default IME
+hwnd=0x103C6      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=IME | title=Default IME
+hwnd=0x45044A     vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x202C0      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x7018C      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x102A0      vis=False rect=     0,0          0x0     ex=0x0        pid=4756   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x102A6      vis=False rect=     0,0          0x0     ex=0x0        pid=4740   cls=IME | title=Default IME
+hwnd=0x9059E      vis=False rect=     0,0          0x0     ex=0x0        pid=11304  cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x4041A      vis=False rect=     0,0          0x0     ex=0x0        pid=5496   cls=IME | title=Default IME
+hwnd=0x3045A      vis=False rect=     0,0          0x0     ex=0x0        pid=7076   cls=IME | title=Default IME
+hwnd=0x4905C8     vis=False rect=     0,0          0x0     ex=0x0        pid=11304  cls=IME | title=Default IME
+hwnd=0x10298      vis=False rect=     0,0          0x0     ex=0x0        pid=4756   cls=IME | title=Default IME
+hwnd=0x400308     vis=False rect=     0,0          0x0     ex=0x0        pid=11304  cls=IME | title=Default IME
+hwnd=0x110470     vis=False rect=     0,0          0x0     ex=0x0        pid=11304  cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x100A6      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x10136      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x201B4      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x101CC      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x10086      vis=False rect=     0,0          0x0     ex=0x0        pid=3236   cls=IME | title=Default IME
+hwnd=0x10126      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x303F6      vis=False rect=     0,0          0x0     ex=0x0        pid=5496   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0xB04F6      vis=False rect=     0,0          0x0     ex=0x0        pid=2516   cls=IME | title=Default IME
+hwnd=0x50204A0    vis=False rect=     0,0          0x0     ex=0x0        pid=2516   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x2403AA     vis=False rect=     0,0          0x0     ex=0x0        pid=5512   cls=IME | title=Default IME
+hwnd=0x1A8037E    vis=False rect=     0,0          0x0     ex=0x0        pid=5512   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x509047E    vis=False rect=     0,0          0x0     ex=0x0        pid=4400   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x260442     vis=False rect=     0,0          0x0     ex=0x0        pid=8180   cls=IME | title=Default IME
+hwnd=0x140588     vis=False rect=     0,0          0x0     ex=0x0        pid=11768  cls=IME | title=Default IME
+hwnd=0x16F0632    vis=False rect=     0,0          0x0     ex=0x0        pid=4400   cls=IME | title=Default IME
+hwnd=0x102D2      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=MSCTFIME UI | title=MSCTFIME UI
+hwnd=0x2A70488    vis=False rect=     0,0          0x0     ex=0x0        pid=10408  cls=IME | title=Default IME
+hwnd=0x1007DC     vis=False rect=     0,0          0x0     ex=0x0        pid=10408  cls=IME | title=Default IME
+hwnd=0xF0356      vis=False rect=     0,0          0x0     ex=0x0        pid=8016   cls=IME | title=Default IME
+hwnd=0x13904E8    vis=False rect=     0,0          0x0     ex=0x0        pid=10408  cls=IME | title=Default IME
+hwnd=0xD04D2      vis=False rect=     0,0          0x0     ex=0x0        pid=2516   cls=IME | title=Default IME
+hwnd=0x202BA      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0xB07CC      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=IME | title=Default IME
+hwnd=0x2D04A8     vis=False rect=     0,0          0x0     ex=0x0        pid=8620   cls=IME | title=Default IME
+hwnd=0x140698     vis=False rect=     0,0          0x0     ex=0x0        pid=2516   cls=Electron_SystemPreferencesHostWindow | title=
+hwnd=0x5FD06E4    vis=False rect=     0,0          0x0     ex=0x8000000  pid=2516   cls=Base_PowerMessageWindow | title=
+hwnd=0x10140      vis=False rect=     0,0          0x0     ex=0x8200000  pid=3664   cls=ApplicationManager_DesktopShellWindow | title=
+hwnd=0xD205B2     vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x12056A     vis=False rect=     0,0          0x0     ex=0x80       pid=2516   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x1206C8     vis=False rect=     0,0          0x0     ex=0x0        pid=2516   cls=Electron_NotifyIconHostWindow | title=
+hwnd=0xB03FC      vis=False rect=     0,0          0x0     ex=0x8000000  pid=5512   cls=Base_PowerMessageWindow | title=
+hwnd=0xA04E4      vis=False rect=     0,0          0x0     ex=0x100000   pid=11304  cls=UIRibbonStdCompMgr | title=
+hwnd=0x12A03B2    vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x707D2      vis=False rect=     0,0          0x0     ex=0x80       pid=5512   cls=Chrome_WidgetWin_0 | title=
+hwnd=0xE0158      vis=False rect=     0,0          0x0     ex=0x0        pid=5512   cls=Electron_NotifyIconHostWindow | title=
+hwnd=0x2403B6     vis=False rect=     0,0          0x0     ex=0x0        pid=5512   cls=Electron_SystemPreferencesHostWindow | title=
+hwnd=0x3C0396     vis=False rect=     0,0          0x0     ex=0x8000000  pid=8180   cls=Base_PowerMessageWindow | title=
+hwnd=0x100F4      vis=False rect=     0,0          0x0     ex=0x80088    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x100E2      vis=False rect=     0,0          0x0     ex=0x80088    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x100D2      vis=False rect=     0,0          0x0     ex=0x80088    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x1014A      vis=False rect=     0,0          0x0     ex=0x8200088  pid=3664   cls=ForegroundStaging | title=
+hwnd=0x100FE      vis=False rect=     0,0          0x0     ex=0x80088    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x100F8      vis=False rect=     0,0          0x0     ex=0x80088    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x101DA      vis=False rect=     0,0          0x0     ex=0x8        pid=3664   cls=ATL:00007FF9079AD230 | title=Network Flyout
+hwnd=0x203A2      vis=False rect=     0,0          0x0     ex=0x80088    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x3405CE     vis=False rect=     0,0          0x0     ex=0x80       pid=8180   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x10106      vis=False rect=     0,0          0x0     ex=0x800A8    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x10114      vis=False rect=     0,0          0x0     ex=0x800A8    pid=3664   cls=tooltips_class32 | title=
+hwnd=0x101C4      vis=False rect=     0,0          0x0     ex=0x88       pid=3664   cls=ATL:00007FF90F81B280 | title=
+hwnd=0x100A4      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=DDEMLMom | title=
+hwnd=0x10084      vis=False rect=     0,0          0x0     ex=0x0        pid=3236   cls=PushNotificationsPowerManagement | title=Windows Push Notifications Platform
+hwnd=0x3704A2     vis=False rect=     0,0          0x0     ex=0x100000   pid=11304  cls=UIRibbonStdCompMgr | title=
+hwnd=0x10168      vis=True  rect=     0,0          0x0     ex=0x8200080  pid=3664   cls=DummyDWMListenerWindow | title=
+hwnd=0x1012E      vis=False rect=     0,0          0x0     ex=0x8000080  pid=3664   cls=WorkerW | title=
+hwnd=0x100A8      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=DDEMLEvent | title=
+hwnd=0x7074E      vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x1FB035A    vis=False rect=     0,0          0x0     ex=0x0        pid=11304  cls=_SearchEditBoxFakeWindow | title=
+hwnd=0xCE06BC     vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0xE0738      vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x2107CE     vis=False rect=     0,0          0x0     ex=0x80080    pid=11304  cls=tooltips_class32 | title=
+hwnd=0xB0592      vis=False rect=     0,0          0x0     ex=0x80       pid=11304  cls=WorkerW | title=
+hwnd=0x201B2      vis=False rect=     0,0          0x0     ex=0x0        pid=3664   cls=OleDdeWndClass | title=DDE Server Window
+hwnd=0x3904B0     vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x98D02E4    vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x3505D6     vis=False rect=     0,0          0x0     ex=0x80       pid=11304  cls=WorkerW | title=
+hwnd=0x430160     vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x15042E     vis=False rect=     0,0          0x0     ex=0x0        pid=11304  cls=_SearchEditBoxFakeWindow | title=
+hwnd=0x705C0      vis=False rect=     0,0          0x0     ex=0x800A0    pid=11304  cls=tooltips_class32 | title=
+hwnd=0x4041E      vis=False rect=     0,0          0x0     ex=0x8000000  pid=5496   cls=Base_PowerMessageWindow | title=
+hwnd=0x10170      vis=False rect=     0,0          0x0     ex=0x8200088  pid=3664   cls=ForegroundStaging | title=
+hwnd=0x10292      vis=False rect=     0,0          0x0     ex=0x0        pid=4708   cls=TrayIconClass | title=
+hwnd=0x70410      vis=False rect=     0,0          0x0     ex=0x80       pid=5496   cls=Chrome_WidgetWin_0 | title=
+hwnd=0x60454      vis=False rect=     0,0          0x0     ex=0x0        pid=5496   cls=Electron_NotifyIconHostWindow | title=
+hwnd=0x502D4      vis=False rect=     0,0          0x0     ex=0x0        pid=5496   cls=Electron_SystemPreferencesHostWindow | title=

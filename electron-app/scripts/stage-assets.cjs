@@ -123,6 +123,11 @@ const injectSrcs = [
   ['webview-app/src/splash.html', 'splash.html'],
   ['webview-app/src/titlebar.js', 'titlebar.js'],
   ['webview-app/src/loading.js', 'loading.js'],
+  ['webview-app/src/floaticon.html', 'floaticon.html'],
+  // 悬浮球内的软件图标（与 floaticon.html 同目录，页面以相对路径 icon.png 引用）。
+  // 与托盘 / exe 图标同源：打包时 icon_url 会先覆盖 webview-app/icons/icon.png（见
+  // packlib/driver-electron.mjs），所以这里 stage 到的始终是本次配置的软件图标。
+  ['webview-app/icons/icon.png', 'icon.png'],
   ['webview-app/src/shell.html', 'shell.html'],
   ['webview-app/dist/settings.html', 'settings.html'],
 ]

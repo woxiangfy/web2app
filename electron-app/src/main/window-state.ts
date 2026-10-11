@@ -21,6 +21,7 @@
 import { screen, type BrowserWindow } from 'electron'
 
 import {
+  FLOAT_WINDOW_KEY,
   loadDocument,
   parseSettings,
   readRawForUpdate,
@@ -80,7 +81,12 @@ export function saveWindowState(loc: StoreLocation, st: WindowState): void {
     // ⚠️ 「读」走 readRawForUpdate（候选顺序），不是写入位置 —— 落点刚搬到数据目录时
     //    写入位置还没有文件，设置还在旧位置，只认写入位置会把它们清零。
     const cur = readRawForUpdate(loc)
-    writeDocument(loc, { settings: parseSettings(cur), window: st })
+    // 顺带保留悬浮窗几何段（否则挪主窗口落盘会把它抹掉）。
+    writeDocument(loc, {
+      settings: parseSettings(cur),
+      window: st,
+      float_window: cur[FLOAT_WINDOW_KEY],
+    })
   } catch (e) {
     console.warn(`[web2app] 保存窗口几何失败：${(e as Error).message}`)
   }

@@ -3,7 +3,8 @@
  *
  * 为什么是垫片而不是改 HTML（见 settings-window.ts 的说明）：设置页是双壳共用的单一真源，
  * 它按 Tauri 的约定调用 `invoke("get_settings")` / `invoke("save_settings", { newSettings })` /
- * `invoke("close_settings_window")` / `invoke("clear_web_data")`。这边只要把这四条命令接到 IPC 上，
+ * `invoke("close_settings_window")` / `invoke("clear_web_data")` /
+ * `invoke("show_float_window")` / `invoke("quit_app")`。这边只要把这六条命令接到 IPC 上，
  * 页面一行都不用动 —— 也就不会出现「Tauri 版设置页修了、Electron 版忘了改」这种分叉。
  *
  * ⚠️ 垫片只暴露 `invoke` 一个方法，且**只放行白名单里的命令**。
@@ -22,6 +23,9 @@ const ALLOWED = new Set([
   'save_settings',
   'close_settings_window',
   'clear_web_data',
+  'show_float_window',
+  // 设置页「退出程序」（v1.75）：常驻后台（托盘 / 悬浮图标）时的唯一退出入口。
+  'quit_app',
 ])
 
 contextBridge.exposeInMainWorld('__TAURI_INTERNALS__', {

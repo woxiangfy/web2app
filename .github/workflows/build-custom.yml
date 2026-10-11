@@ -611,6 +611,13 @@ jobs:
               break
           PY
 
+      - name: 接管系统返回键（不允许退回到内置启动页）
+        # 补丁逻辑（含自测）见 .github/scripts/patch-android-back.py：给 MainActivity
+        # 注入 onWebViewCreate 钩子，按 WebView.copyBackForwardList 的相邻条目 URL 判定 ——
+        # 落点是真实网页才 goBack；没有可退的真实页面时 finish()（与无历史的系统默认
+        # 同手感：回桌面/后台）。gen/android 每次现生成，故每轮 init 后都必须打。
+        run: python3 ../.github/scripts/patch-android-back.py
+
       - name: Allow cleartext HTTP (localhost proxy)
         # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，
         # release 构建的 usesCleartextTraffic 默认为 false，必须置 true 否则鉴权代理真机上加载失败。
