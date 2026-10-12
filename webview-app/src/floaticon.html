@@ -4,12 +4,17 @@
   ---------------------------------------------------------------------------
   这是悬浮球窗口（Tauri label "float" / Electron 独立 BrowserWindow）加载的**唯一**
   本地内置页面：一个 56×56 透明活柱里的圆形球（Tauri 宿主窗被 WebView2 最小宽度撑宽，
-  靠 SetWindowRgn 裁成活柱内的圆形区域，本页按主进程下发的 anchor 把球摆到活柱内）。它本身**不加载
-  任何网页**，职责只有四个：
+  圆外区域靠 NCHITTEST 命中穿透、视觉则是真逐像素 alpha，本页按主进程下发的 anchor 把球
+  摆到活柱内）。它本身**不加载任何网页**，职责只有四个：
 
-  ⚠️⚠️ 球的直径**必须等于活柱边长**（56 = ICON_SIZE_LOGICAL），不能留边 —— 详见
-  `#w2f-ball` 的 width/height 处那段说明（球比区域圆小 ⇒ 中间那圈透明环带会把窗口
-  后面的东西透出来；Tauri 侧表现为「不选中时背景异样」，2026-10-11 v1.77b 真机定位）。
+  ⚠️⚠️ 球的直径**必须等于活柱边长**（56 = ICON_SIZE_LOGICAL），不能留边；边缘观感完全
+  由系统合成器负责，本页**不铺任何不透明底、不靠窗口区域保边**。三轮真机教训（详见
+  `#w2f-ball` 注释与 floatwin.rs 模块文档）：
+    · v1.77b SetWindowRgn 严格裁圆 ⇒ 1bit 硬边切掉抗锯齿，白锯齿；
+    · v1.78 区域外扩 4px ⇒ 旧透明链路把半透明像素压平白底，环带漏浅色异形；
+    · v1.79 页面铺黑底绕过坏 alpha ⇒ 异形没了但轮廓仍是整像素阶梯，暗锯齿；
+  v1.80 起 Tauri 开 WS_EX_NOREDIRECTIONBITMAP（与 Electron 同一条 DirectComposition
+  路径），border-radius / box-shadow 的半透明像素逐像素合成，本页双壳统一保持真透明。
     1. 单击（没有发生拖动的 pointerup）→ 通知主进程「切换【原来的主窗口】显隐」
        （v1.71：由「只显示」改为 toggle —— 可见则隐藏、隐藏则显示并聚焦）；
     2. 按住拖动 → 上报指针的**屏幕绝对坐标**（screenX/screenY，CSS 像素），窗口位置由主进程
@@ -56,6 +61,11 @@
     overflow: hidden;
     /* 球在活柱内居中；窗口本身透明，半隐藏时被平移到屏外的一半接不到指针。 */
   }
+  /* ⚠️ body 只有这一条规则：双壳都必须保持真透明。
+     v1.79 曾在这里加过「Tauri 壳标记 → body 黑底」规则以绕过旧透明链路上半透明像素被
+     压平白底的问题；v1.80 起 Tauri 开 WS_EX_NOREDIRECTIONBITMAP 走真逐像素 alpha
+     （与 Electron 同路径），黑底规则与壳标记注入已整版删除 —— 不要再加回来，也不要
+     在本页写死任何壳标记（守卫 float_page_and_init_script_stay_truly_transparent 钉着）。 */
   #w2f-ball {
     position: absolute;
     /* 默认活柱贴宿主窗左边：球心在左起 28px = ICON_SIZE_LOGICAL/2（活柱中心；Electron 窗恰好
@@ -63,23 +73,30 @@
        按 ICON/2 钉住，改 ICON_SIZE_LOGICAL 必须同步这里。 */
     left: 28px;
     top: 50%;
-    /* ⚠️⚠️ 球必须**铺满整个活柱**（= ICON_SIZE_LOGICAL），不能比它小（v1.77b 真机根因）。
-       主进程把窗口的可视 / 命中区域裁成「活柱内的**圆**」，球比这个圆小 ⇒ 两者之间留出一圈
-       **透明的环带**，而窗口是 transparent 的 ⇒ 这圈环带会把窗口后面的东西透出来：
-         · Electron：透明是真透明，环带透出的是桌面，通常看不出问题；
-         · Tauri（WebView2）：底层不是真透明，环带会**露出一圈浅色残片**（真机现象
-           「不选中时 悬浮图标背景异样」，2026-10-11 使用者两次报告；实测残片的外边界
-           正是以球心为圆心、半径恒定的一个圆 —— 即被区域裁出来的那一圈）。
-       球直径与本窗口区域圆的直径都取 ICON_SIZE_LOGICAL ⇒ 两者严格重合，环带不存在。
-       守见 `contract_tests::float_window_contract::float_page_ball_fills_the_live_pillar`。
+    /* ⚠️⚠️ 几何与观感的职责划分（v1.80 定稿，改前必读 floatwin.rs 模块文档）：
+       ① 球必须**铺满整个活柱**（= ICON_SIZE_LOGICAL），不能比它小（v1.77b 真机根因：
+          球 46 / 命中圆 56，圆内球外一圈透明环带漏残片）。
+       ② 命中圆 == 活柱 == 球（Rust 侧 WM_NCHITTEST 子类化，圆心即活柱中心）。
+       ③ 视觉与命中**完全分离**：窗口不设任何 SetWindowRgn，球缘抗锯齿 / 外阴影由
+          WS_EX_NOREDIRECTIONBITMAP 的真逐像素 alpha 合成（双壳同路径）；本页不铺黑底、
+          不做任何壳判断。
 
-       实测两半证据（2026-10-11）：
-         · 真机截图：残片的内边界 = 球的边缘（拟合半径 ≈ 球半径），外边界与球同心且
-           半径 ≈ 球半径 × 56/46 —— 就是一个以球心为圆心、外径 = 活柱边长的**圆环**；
-           环带只在左上 / 右侧可见，是因为球自己的深色 box-shadow 把其余部分压到看不出。
-         · 用户现场实例的**窗口区域**（只读 GetWindowRgn + PtInRegion 网格）：
+       三代失败方案存档（都不要再试）：
+         · v1.77b SetWindowRgn 严格裁圆：1bit 硬边切 AA ⇒ 白锯齿；
+         · v1.78 区域四边外扩 4px：旧透明链路（wry 0.55 HWND 控制器 / 无合成表面）把
+           半透明像素压平白底 ⇒ 环带漏浅色异形（2026-10-12 真机复现）；
+         · v1.79 body 自绘黑底：异形消失但窗口轮廓仍是整像素阶梯 ⇒ 暗锯齿，方向错误。
+       v1.80 升级 Tauri 2.12（tauri-runtime-wry 2.12.1 才透传 no_redirection_bitmap）后
+       根因消除。守卫：float_page_ball_fills_the_live_pillar（球 == 活柱）、
+       float_window_uses_per_pixel_alpha_and_circle_hittest（真 alpha + NCHITTEST、
+       不得有 SetWindowRgn）、float_page_and_init_script_stay_truly_transparent。
+
+       历史实测几何（2026-10-11，v1.77b 定位环带残片，脚本留档）：
+         · 真机截图：残片内边界 = 球的边缘，外边界与球同心且半径 ≈ 球半径 × 56/46 ——
+           外径 = 活柱边长的圆环；
+         · 用户现场实例的窗口区域（只读 GetWindowRgn + PtInRegion 网格）：
            `GetRgnBox=(0,0)..(55,56)`，每行宽度两端递减、y=28 处最宽 55 ⇒ 内接于 56×56
-           活柱的圆。区域圆 Ø56 而球只有 46 ⇒ 环带宽度 5 逻辑像素。
+           活柱的圆，区域圆 Ø56 而球只有 46 ⇒ 环带宽度 5 逻辑像素。
        取证脚本：tests/float-frag-rc/region-probe.py（区域）、analyze-frag.py（截图）。 */
     width: 56px;
     height: 56px;
@@ -108,9 +125,9 @@
   html.w2f-collapsed #w2f-ball {
     filter: brightness(.92);
   }
-  /* 悬停 / 拖动反馈：⚠️ **不能再靠 scale 放大** —— 球已经铺满活柱，任何 scale>1 都会立刻
-     被窗口区域裁掉，等于「没有反馈」（且放大出的那一圈仍是透明环带，问题会回来）。
-     改为提亮 + 加强外发光：视觉上依旧是「鼠标压上去亮了一下」。 */
+  /* 悬停 / 拖动反馈：⚠️ **不能靠 scale 放大** —— 球与命中圆等大，scale>1 放大出的部分
+     会超出圆形命中区（放大边缘看着在球上却点不着、抓不住），双壳同理；且放大期间球心不
+     变会在吸附边缘抖。改为提亮 + 加强外发光：视觉上依旧是「鼠标压上去亮了一下」。 */
   html #w2f-ball:hover {
     filter: brightness(1.12);
     box-shadow: 0 3px 12px rgba(20, 40, 100, .6), inset 0 1px 2px rgba(255, 255, 255, .55);

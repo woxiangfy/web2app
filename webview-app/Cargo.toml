@@ -53,13 +53,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros",
 hickory-resolver = "0.26"
 
 # 仅 Windows：调用 WebView2 原生 API 处理 Basic 鉴权。
-# 版本必须与 Tauri 2.11.x 内部使用的 wry 一致（webview2-com 0.38 / windows 0.61），
+# 版本必须与 Tauri 2.12.x 内部使用的 wry 0.57 一致（webview2-com 0.39 / windows 0.62），
 # 否则 ICoreWebView2 等 COM 类型会因版本不同而编译失败。
 [target.'cfg(windows)'.dependencies]
-webview2-com = "0.38"
+webview2-com = "0.39"
 # Win32_UI_Shell / Win32_UI_Shell_Common：下载时弹系统「另存为」对话框（IFileSaveDialog），
 # 见 `src/save_dialog.rs`。两者都不引入新的 crate，只是给同一个 windows crate 多开两个模块。
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
@@ -94,8 +94,8 @@ tauri-plugin-single-instance = "2"
 # wry / tao，用来实测「WebView2 注入脚本执行时 DOM 是否已存在」。仅测试目标使用，
 # 不进发布产物。
 [target.'cfg(windows)'.dev-dependencies]
-wry = "0.55"
-tao = "0.35"
+wry = "0.57"
+tao = "0.37"
 
 [profile.release]
 # 性能优先：CPU 密集路径（本地代理转发、Ed25519 验签 / AES-256-GCM 解密）按

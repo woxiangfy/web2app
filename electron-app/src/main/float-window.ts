@@ -334,6 +334,10 @@ function createFloatWindow(): void {
   // 把窗口的**系统区域**裁成圆（`setShape` 只接受矩形数组，见 float-layout.circleShapeRects）：
   // `transparent: true` 只让四角「看不见」，却仍然「点得着」—— 不裁的话球四角会把桌面 /
   // 下层窗口的点击吃掉。区域只决定**命中**，视觉仍由 CSS 圆 + transparent 负责。
+  // ⚠️ 区域与球严格同尺寸、绝不外扩：Electron 的 setShape 在 NOREDIRECTIONBITMAP 合成
+  //    路径下不裁视觉（CSS 软边 / 外阴影天然光滑），外扩只会让球外环带重新吃掉桌面点击。
+  //    v1.80 起 Tauri 同走真 alpha，命中改由 WM_NCHITTEST 圆形穿透（不再 SetWindowRgn、
+  //    不再页面黑底）；两壳视觉 / 命中分离的架构一致，见 floaticon.html 文件头存档。
   // ⚠️ `setShape` 在 Electron 里标记 `@experimental`（win32 / linux）⇒ 失败**不能**让球不可用，
   //    只记日志（退化成「四角挡点击」的旧行为，其余一切照常）。
   try {

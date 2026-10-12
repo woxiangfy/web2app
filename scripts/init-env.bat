@@ -38,7 +38,7 @@ if errorlevel 1 (
 
 node "%~dp0init-env.mjs" %*
 set RC=%errorlevel%
-if not "%RC%"=="0" echo [init-env] Exit code %RC% - see the messages above.
+if not "%RC%"=="0" echo [init-env] Exit code %RC% - the failing command's output tail and the full log file path were printed above by init-env.mjs.
 
 :end
 echo.

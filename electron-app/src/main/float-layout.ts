@@ -113,7 +113,16 @@ export function rectAt(x: number, y: number, win: { width: number; height: numbe
  * 会把桌面 / 下层窗口在球四角上的点击吃掉（layered window 的完全透明像素**不会**自动穿透）。
  * `setShape` 的官方语义是「区域外不绘制、**不接收鼠标事件**，事件穿透到后面的窗口」，
  * 正好补上「**点得着**」这一半。视觉仍由 CSS 圆 + transparent 决定，本区域只决定**命中**，
- * 所以阶梯边缘不会被看到（Tauri 侧用 `CreateEllipticRgn` 是真椭圆，两壳视觉一致）。
+ * 所以阶梯边缘不会被看到。
+ *
+ * ⚠️ 与 Tauri 壳的关系（v1.80 起两壳同构）：两壳的窗口视觉都走
+ * WS_EX_NOREDIRECTIONBITMAP + DirectComposition 真逐像素 alpha（Tauri v1.80 升级
+ * Tauri 2.12 后开 `.no_redirection_bitmap(true)`，与 Electron 长期以来的透明窗路径
+ * 相同），border-radius 的抗锯齿软边 / box-shadow 原样上屏。命中则两壳各自实现圆形
+ * 穿透：Electron 用这里的 `setShape` 扫描线区域，Tauri 用 WM_NCHITTEST 子类化
+ * （HTTRANSPARENT）——两者都**只管命中、不裁视觉**，所以都与球严格同尺寸、绝不外扩
+ * （Electron 外扩会把四角点击重新吃回来；Tauri 三代外扩 / 黑底方案均已真机证伪，
+ * 见 floaticon.html 文件头存档）。
  *
  * 取整规则：按「**像素中心**是否落在圆内」逐行定左右端，使阶梯边缘与真圆的偏差 < 1 像素 ——
  * 既不切掉球面本来能点的像素，也不把四角放回命中区。

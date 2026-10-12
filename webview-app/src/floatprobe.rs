@@ -5,16 +5,17 @@
 //! 守卫（`contract_tests::float_window_contract`，钉的是**源码字面量**）；③ 真机**人工**观察。
 //! 它们都证不了「一次拖动 / 一次悬停 → 窗口**真的**按预期移动 / 吸附 / 缩回」。Electron 壳有
 //! `tests/float-v170-harness`（真窗 + 合成 PointerEvent），Tauri 壳一直**零**这类证据 ——
-//! 而活柱 / `SetWindowRgn` 裁剪 / `WS_EX_NOACTIVATE` / WebView2 最小宽度都是 **Tauri 独有**的
-//! 实现细节。本 harness 就是补这一格。
+//! 而活柱 / `WM_NCHITTEST` 圆形命中子类化 / `WS_EX_NOACTIVATE` / WebView2 最小宽度都是
+//! **Tauri 独有**的实现细节。本 harness 就是补这一格。
 //!
 //! ## 它怎么做到「真机」
 //! 在**真实进程内**跑：真实 `WebviewWindowBuilder` 建真实球窗（真 WebView2 + 真
 //! `floaticon.html`），真实事件分发 + 真实窗口操作，再读回**真实窗口 API** 的结果：
 //!   · `outer_position` / `outer_size` → 换算成【活柱】几何（宿主被 WebView2 撑宽，见
 //!     `floatwin` 模块文档，不能直接拿宿主原点当球的位置）；
-//!   · `GetWindowRgnBox` → 读回 `SetWindowRgn` 裁出的圆形区域的**包围盒**（活柱裁剪的
-//!     唯一直接证据）；
+//!   · `GetWindowRgnBox` → 断言 v1.80 起窗口**没有区域**（视觉走真 alpha，不得再裁剪）；
+//!   · 向父窗与 WebView2 子窗 `SendMessage(WM_NCHITTEST)` → 圆心必须 HTCLIENT、圆外必须
+//!     HTTRANSPARENT（命中圆与活柱重合；父 / 子两窗都验，漏拦子窗则矩形吃鼠标）；
 //!   · `dock_state` → 把内部吸附态与上面的几何**对照**断言（几何对、状态错同样是缺陷）。
 //!
 //! ## 驱动方式：直接注入事件（**不是**走 JS）
@@ -60,6 +61,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{Listener, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST;
 
 use crate::floatwin::{
     collapsed_x, dock_state, expanded_x, live_offset, live_px, min_visible_px, peek_px,
@@ -342,11 +345,11 @@ fn phase_frame(app: &tauri::AppHandle, env: &Env, r: &mut Report) {
             w.is_decorated().unwrap_or(true),
             w.outer_size().map(|s| s.height).unwrap_or(0),
             w.outer_size().map(|s| s.width).unwrap_or(0),
-            region_box(&w),
+            has_window_region(&w),
         ))
     })
     .flatten();
-    let Some((on_top, decorated, host_h, host_w, region)) = got else {
+    let Some((on_top, decorated, host_h, host_w, has_region)) = got else {
         r.check("能读到球窗属性", false, "窗口消失了");
         return;
     };
@@ -363,10 +366,14 @@ fn phase_frame(app: &tauri::AppHandle, env: &Env, r: &mut Report) {
         &format!("宿主宽 {host_w} vs 活柱宽 {}", env.lw),
     );
     r.check(
-        "SetWindowRgn 把可视 / 命中区裁成活柱内的圆形（区域包围盒 = 活柱矩形）",
-        region == Some(expect_region(0, env)),
-        &format!("实际 {region:?}，期望 {:?}", Some(expect_region(0, env))),
+        "v1.80 不再设 SetWindowRgn（视觉走真 alpha、命中走 NCHITTEST，区域必须为空）",
+        !has_region,
+        &format!("GetWindowRgnBox 仍读到区域：{has_region}"),
     );
+    // 当前活柱偏移由真实吸附态决定（首次跑探针通常是自由态 / 默认摆放）。
+    let (edge, _) = dock_state(app);
+    let off = live_offset(host_w as i32, env.lw, edge);
+    check_circle_hit_testing(r, app, env, off, "建窗形态");
 }
 
 /// 自由态拖动：① 1:1 跟手；② 拖动中软钳制；③ 松手完整钳回。
@@ -465,19 +472,9 @@ fn phase_right_dock(app: &tauri::AppHandle, env: &Env, r: &mut Report) {
         live.map(|l| l.1) == Some(env.my + env.mh / 2),
         &format!("实际 {:?}，期望 {}", live.map(|l| l.1), env.my + env.mh / 2),
     );
-    // Tauri 独有：宿主被 WebView2 撑宽，右吸附时活柱必须贴宿主**右边**，裁出的圆形区域
-    // 包围盒也要跟着右移 —— 这是「半球露在屏内」的机械前提。
-    let region = region_now(app);
-    r.check(
-        "右吸附：圆形裁剪区域贴宿主右边（x 平移 live_offset）",
-        region == Some(expect_region(off, env)),
-        &format!(
-            "实际 {region:?}，期望 {:?}（宿主宽 {} − 活柱宽 {} = {off}）",
-            Some(expect_region(off, env)),
-            env.host_w,
-            env.lw
-        ),
-    );
+    // Tauri 独有：宿主被 WebView2 撑宽，右吸附时命中圆必须贴宿主**右边**（圆心 x 平移
+    // live_offset）—— 这是「半球露在屏内仍点得中、撑宽部分依旧穿透」的机械前提。
+    check_circle_hit_testing(r, app, env, off, "右吸附缩回态");
 }
 
 /// 悬停展开 / 抖动吸收 / 真离开缩回（都在右吸附态下做）。
@@ -555,12 +552,7 @@ fn phase_left_dock(app: &tauri::AppHandle, env: &Env, r: &mut Report) {
         &format!("实际 {:?}，期望 {expect_x}", live.map(|l| l.0)),
     );
     // 左吸附的活柱贴宿主左边 ⇒ 偏移 0（与右吸附形成对照，钉住 live_offset 只对 Right 生效）。
-    let region = region_now(app);
-    r.check(
-        "左吸附：圆形裁剪区域贴宿主左边（x 偏移 0）",
-        region == Some(expect_region(0, env)),
-        &format!("实际 {region:?}，期望 {:?}", Some(expect_region(0, env))),
-    );
+    check_circle_hit_testing(r, app, env, 0, "左吸附缩回态");
 }
 
 /// 单击 = toggle 主窗（对称语义）。
@@ -754,35 +746,107 @@ fn live_rect(app: &tauri::AppHandle, edge: DockEdge) -> Option<(i32, i32, i32, i
     .flatten()
 }
 
-/// `SetWindowRgn` + `CreateEllipticRgn` 裁出的圆形区域，其 `GetWindowRgnBox` 包围盒的期望值。
-///
-/// ⚠️ `GetWindowRgnBox` 返回的右 / 下边是**含端**：实测椭圆在 `[0,70)×[0,70)` 上报
-/// `(0,0,69,69)`（宽高各 −1），100% / 125% 两种缩放下都一样。这里把这条实测事实收敛成一处，
-/// 免得三个断言各写一遍「−1」。
-fn expect_region(off: i32, env: &Env) -> (i32, i32, i32, i32) {
-    (off, 0, env.lw - 1, env.lh - 1)
+/// 球窗是否**仍挂着窗口区域**（v1.80 起必须为 false：视觉走真 alpha，裁剪交给
+/// WM_NCHITTEST；GetWindowRgnBox 返回 0 = 无区域 / 调用失败，这里只在真实 HWND 上调用，
+/// 0 即视为无区域）。
+fn has_window_region(w: &WebviewWindow) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::GetWindowRgnBox;
+    let Ok(hwnd) = w.hwnd() else {
+        return false;
+    };
+    let mut rc = RECT::default();
+    unsafe { GetWindowRgnBox(hwnd, &mut rc).0 != 0 }
 }
 
-/// 读回球窗当前的圆形裁剪区域包围盒（客户区坐标；无边框窗客户区即整窗）。
-fn region_now(app: &tauri::AppHandle) -> Option<(i32, i32, i32, i32)> {
+/// 取球窗父 HWND 与其**第一个后代子窗**（WebView2 控制器 HWND）。命中断言两个窗口都要发：
+/// 只拦父窗拦不住覆盖整个客户区的子窗（见 floatwin.rs 模块文档「命中」）。
+fn hit_hwnds(app: &tauri::AppHandle) -> Option<(isize, isize)> {
+    use windows::core::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
     main_call(app, |a| {
-        a.get_webview_window(FLOAT_LABEL)
-            .and_then(|w| region_box(&w))
+        let w = a.get_webview_window(FLOAT_LABEL)?;
+        let parent = w.hwnd().ok()?;
+        let mut found: Option<HWND> = None;
+        unsafe extern "system" fn first(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            *(lparam.0 as *mut Option<HWND>) = Some(hwnd);
+            BOOL(0) // FALSE = 枚举到第一个就停
+        }
+        unsafe {
+            let _ = EnumChildWindows(
+                Some(parent),
+                Some(first),
+                LPARAM(&mut found as *mut Option<HWND> as isize),
+            );
+        }
+        Some((parent.0 as isize, found?.0 as isize))
     })
     .flatten()
 }
 
-fn region_box(w: &WebviewWindow) -> Option<(i32, i32, i32, i32)> {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Gdi::GetWindowRgnBox;
-    let hwnd = w.hwnd().ok()?;
-    let mut rc = RECT::default();
-    // 返回值 == 0 表示「窗口没有区域」或调用失败；>0 时是区域类型（RGN_OR 等）。
-    let kind = unsafe { GetWindowRgnBox(hwnd, &mut rc) };
-    if kind.0 == 0 {
-        return None;
+/// 向 `target` 发 WM_NCHITTEST（坐标给父窗客户区物理坐标，内部转屏幕坐标），
+/// 返回命中码（HTCLIENT=1 / HTTRANSPARENT=-1 …）。
+fn nchittest(parent: isize, target: isize, client_x: i32, client_y: i32) -> i32 {
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+    let parent = HWND(parent as *mut core::ffi::c_void);
+    let target = HWND(target as *mut core::ffi::c_void);
+    let mut pt = POINT {
+        x: client_x,
+        y: client_y,
+    };
+    unsafe {
+        let _ = ClientToScreen(parent, &mut pt);
+        let lparam = ((pt.x as u16) as isize) | (((pt.y as u16) as isize) << 16);
+        SendMessageW(
+            target,
+            WM_NCHITTEST,
+            Some(WPARAM(0)),
+            Some(LPARAM(lparam)),
+        )
+        .0 as i32
     }
-    Some((rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top))
+}
+
+/// 圆形命中的一组断言（父窗 + 子窗各发一遍）。`off` = 活柱相对宿主左边的物理偏移：
+/// 圆心 `(off + lw/2, lh/2)`；旁侧点朝**撑宽方向**外移 3px（保证仍在宿主客户区内）。
+fn check_circle_hit_testing(
+    r: &mut Report,
+    app: &tauri::AppHandle,
+    env: &Env,
+    off: i32,
+    label: &str,
+) {
+    let Some((parent, child)) = hit_hwnds(app) else {
+        r.check(
+            &format!("{label}：取父窗 / WebView2 子窗 HWND"),
+            false,
+            "EnumChildWindows 没枚举到子窗（子类化无从验证）",
+        );
+        return;
+    };
+    let cx = off + env.lw / 2;
+    let cy = env.lh / 2;
+    let side_x = if off > 0 { off - 3 } else { off + env.lw + 3 };
+    let cases: [(&str, i32, i32, i32); 3] = [
+        ("圆心（球内）", cx, cy, 1 /*HTCLIENT*/),
+        ("客户区角点 (2,2)", 2, 2, -1 /*HTTRANSPARENT*/),
+        ("活柱外的撑宽区", side_x, cy, -1),
+    ];
+    for (name, x, y, want) in cases {
+        let on_parent = nchittest(parent, parent, x, y);
+        let on_child = nchittest(parent, child, x, y);
+        r.check(
+            &format!("{label} NCHITTEST·父窗「{name}」"),
+            on_parent == want,
+            &format!("实际 {on_parent}，期望 {want}"),
+        );
+        r.check(
+            &format!("{label} NCHITTEST·WebView2 子窗「{name}」（子窗漏拦则圆外矩形吃点击）"),
+            on_child == want,
+            &format!("实际 {on_child}，期望 {want}"),
+        );
+    }
 }
 
 /// 任意窗口的当前 URL（诊断用）。

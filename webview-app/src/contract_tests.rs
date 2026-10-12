@@ -932,6 +932,15 @@ mod float_window_contract {
         })
     }
 
+    /// [`has_code_line`] 的反向版：代码行（剥纯注释行）里是否出现过 `needle`。用于
+    /// 「某 API 不得复活」类反向钉死 —— 模块文档 / 存档注释里允许提到名字。
+    fn code_has_occurrence(src: &str, needle: &str) -> bool {
+        src.lines().any(|line| {
+            let t = line.trim();
+            t.contains(needle) && !t.starts_with("//") && !t.starts_with('*')
+        })
+    }
+
     /// 取某条 CSS 规则的**声明块**（选择器起，到第一个 `}` 为止）。用于把断言限定在
     /// 「那一条规则」内 —— 与本模块的 `fn_body` 同理：只断言「文件里出现过某个字面量」
     /// 会被别处的同名文字满足，是自我满足的假守卫。
@@ -1226,33 +1235,61 @@ mod float_window_contract {
         );
     }
 
-    /// ④c v1.71：WebView2 把宿主窗最小宽度强制撑到约 131 逻辑像素，球窗必须用
-    ///    SetWindowRgn + CreateEllipticRgn 裁出 56 逻辑宽活柱内的**圆形**（可视 + 命中
-    ///    一起裁，柱外与四角点击穿透）；窗口开 transparent 让圆内环带透出桌面；所有
-    ///    吸附几何都经 live_offset 换算，右吸附活柱贴右、其余贴左。
+    /// ④c v1.80：WebView2 把宿主窗最小宽度强制撑到约 131 逻辑像素，球窗只有 56 逻辑宽
+    ///    活柱。v1.77b→v1.79 三代方案（SetWindowRgn 严格裁圆 / 区域外扩 / 页面黑底）真机
+    ///    全部证伪（锯齿或浅色异形），v1.80 改为**视觉 / 命中彻底分离**：
+    ///    · 视觉：`.transparent(true)` + `.no_redirection_bitmap(true)` 同开，走
+    ///      WS_EX_NOREDIRECTIONBITMAP + DirectComposition 的真逐像素 alpha（与 Electron
+    ///      同路径；依赖 tauri-runtime-wry ≥ 2.12 才透传该开关），窗口**不得再有任何
+    ///      SetWindowRgn**（1bit 硬掩码会把 DComp 软边重新切成阶梯）；
+    ///    · 命中：父窗 + WebView2 子窗统一子类化，只拦 WM_NCHITTEST，圆外回
+    ///      HTTRANSPARENT（圆 == 活柱 == 球）。所有吸附几何仍经 live_offset 换算。
     #[test]
-    fn float_window_uses_live_region_against_webview2_min_width() {
+    fn float_window_uses_per_pixel_alpha_and_circle_hittest() {
+        // 真逐像素 alpha：两个开关必须并存（只 transparent 在 tao 上只是 DwmEnableBlurBehind）。
         assert!(
-            has_code_line(FLOAT_RS, "let rgn = CreateEllipticRgn(x1, 0, x2, lh);")
-                && has_code_line(FLOAT_RS, "SetWindowRgn(hwnd, Some(rgn), true)"),
-            "必须真正调用 Win32 CreateEllipticRgn + SetWindowRgn 把悬浮球宿主窗裁成圆形（import 不算数）"
+            has_code_line(FLOAT_RS, ".transparent(true)")
+                && has_code_line(FLOAT_RS, ".no_redirection_bitmap(true)"),
+            "悬浮球建窗必须同开 .transparent(true) 与 .no_redirection_bitmap(true)：\
+             后者才会加 WS_EX_NOREDIRECTIONBITMAP 走 DComp 真逐像素 alpha（v1.80 架构核心）"
         );
-        // 矩形活柱会留下不透明且吃鼠标的方角：圆形区域一次解决撑宽部分穿透与四角裁剪。
+        // 反向钉死：窗口区域 API 不得以任何形式回到代码里（注释存档不算）。
+        for banned in ["SetWindowRgn", "CreateEllipticRgn", "CreateRectRgn", "REGION_PAD"] {
+            assert!(
+                !code_has_occurrence(FLOAT_RS, banned),
+                "floatwin.rs 代码里不得再出现 {banned}：窗口区域是 1bit 硬掩码，会切掉 DComp \
+                 软边（v1.77b 白锯齿 / v1.78 外扩漏异形，v1.80 已整体移除）"
+            );
+        }
         assert!(
-            !FLOAT_RS.contains("CreateRectRgn"),
-            "活柱区域必须是圆形 CreateEllipticRgn（矩形会让球四角不透明且挡住点击）"
+            !code_has_occurrence(FLOAT_RS, "apply_live_region"),
+            "旧的 apply_live_region 已由 update_hit_circle（只更新命中原子量）取代，不得复活"
         );
-        // 透明是圆内环带透出桌面的前提；Tauri 2 在 Windows 无需额外 cargo feature。
-        assert!(
-            has_code_line(FLOAT_RS, ".transparent(true)"),
-            "悬浮球建窗必须开 .transparent(true)（圆形区域内球本体外的环带要透出桌面）"
-        );
+        // 命中圆必须随活柱几何更新，且几何来自同一套 live_px / live_offset。
         assert!(
             has_code_line(
                 FLOAT_RS,
-                "fn apply_live_region(w: &WebviewWindow, edge: Option<DockEdge>)"
-            ),
-            "必须有 apply_live_region：按吸附边把宿主窗裁成活柱内的圆形"
+                "fn update_hit_circle(w: &WebviewWindow, edge: Option<DockEdge>)"
+            ) && has_code_line(FLOAT_RS, "fn install_circle_hit_test(w: &WebviewWindow)"),
+            "必须有 update_hit_circle（更新命中圆原子量）与 install_circle_hit_test（子类化）"
+        );
+        for needle in [
+            "EnumChildWindows",
+            "SetWindowLongPtrW(hwnd, GWLP_WNDPROC",
+            "if msg == WM_NCHITTEST",
+            "LRESULT(HTTRANSPARENT as isize)",
+        ] {
+            assert!(
+                has_code_line(FLOAT_RS, needle),
+                "圆形命中子类化缺少关键代码：{needle}（父窗 + 全部后代子窗都必须拦 WM_NCHITTEST）"
+            );
+        }
+        // 子窗可能晚于父窗创建：建窗后 / on_page_load / Resized 都要幂等补装子类化。
+        let installs = FLOAT_RS.matches("install_circle_hit_test(&w)").count();
+        assert!(
+            installs >= 3,
+            "install_circle_hit_test 至少要在建窗后、PageLoadEvent::Finished、WindowEvent::Resized \
+             三处幂等补装（WebView2 子窗 HWND 可能晚创建），实际 {installs} 处"
         );
         assert!(
             has_code_line(
@@ -1265,23 +1302,21 @@ mod float_window_contract {
             has_code_line(FLOAT_RS, "fn reposition_for_dock(w: &WebviewWindow, d: Dock)"),
             "必须有 reposition_for_dock：宿主宽迟到（WebView2 初始化 / DPI 变化）后按真实宽重定位活柱"
         );
-        // on_page_load(Finished) 里必须重裁 + 重定位（建窗瞬间宿主可能还没被撑宽）。
+        // on_page_load(Finished) 里必须更新命中圆 + 重定位 + 补装子类化。
         assert!(
             FLOAT_RS.contains("PageLoadEvent::Finished")
                 && has_code_line(FLOAT_RS, "reposition_for_dock(&w, d)"),
-            "页面 Finished 后必须按真实宿主宽重裁 / 重定位活柱"
+            "页面 Finished 后必须按真实宿主宽重定位活柱 / 更新命中圆"
         );
-        // 建窗恢复几何时必须先裁区域（显现前）；宿主被撑宽（Resized）与跨 DPI
-        // （ScaleFactorChanged）两个迟到时机都必须重裁——只挂 DPI 会让右吸附球在
-        // WebView2 初始化撑宽窗口后活柱错位（真机取证根因之一）。
+        // 宿主被撑宽（Resized）与跨 DPI（ScaleFactorChanged）两个迟到时机都必须重算几何。
         assert!(
             FLOAT_RS.contains("WindowEvent::Resized")
                 && FLOAT_RS.contains("WindowEvent::ScaleFactorChanged"),
-            "Resized（WebView2 撑宽宿主）与 ScaleFactorChanged（跨 DPI）都必须重设活柱区域"
+            "Resized（WebView2 撑宽宿主）与 ScaleFactorChanged（跨 DPI）都必须重算活柱几何"
         );
         assert!(
             has_code_line(FLOAT_RS, "apply_initial_geometry(app, &window, saved);"),
-            "建窗流程必须经 apply_initial_geometry（内部负责首裁活柱）"
+            "建窗流程必须经 apply_initial_geometry（内部负责首置活柱 / 命中圆）"
         );
         // 真机排查期的临时插桩 / A/B 开关 / 页面诊断块不得残留。
         assert!(
@@ -1308,6 +1343,42 @@ mod float_window_contract {
         assert!(
             FLOAT_RS.contains("\"'r'\"") && FLOAT_RS.contains("\"'l'\""),
             "push_state 必须下发 anchor 'l'/'r'（右吸附活柱贴右）"
+        );
+    }
+
+    /// ④d v1.80：球页与初始化脚本必须保持**真透明**，页面里不允许任何「按壳铺不透明底」
+    /// 的残留。v1.79 曾注入 data-w2f-shell 标记让 body 铺 #000 黑底以绕过旧透明链路
+    /// （wry 0.55 HWND 控制器 + 无合成表面，半透明像素被压平白底）；v1.80 升级 Tauri 2.12
+    /// 开 NOREDIRECTIONBITMAP 后根因消除，黑底反而带来整像素阶梯暗锯齿，必须整版删除且
+    /// 不得复活（双壳共用同一份页面，任何写死的壳标记都会误伤 Electron 真透明）。
+    #[test]
+    fn float_page_and_init_script_stay_truly_transparent() {
+        // ① 真 alpha 开关是「不需要黑底」的前提，和④c 互相咬合。
+        assert!(
+            has_code_line(FLOAT_RS, ".no_redirection_bitmap(true)"),
+            "Rust 侧必须开 .no_redirection_bitmap(true)，页面真透明才有合成保证"
+        );
+        // ② 初始化脚本只许注入一次性令牌，不得注入任何壳标记（连注释里的脚本代码也算，
+        //    用 code_has_occurrence 剥掉纯注释行；这里钉的是可执行字符串）。
+        assert!(
+            !code_has_occurrence(FLOAT_RS, "data-w2f-shell"),
+            "initialization_script 不得再注入 data-w2f-shell（v1.79 黑底方案 v1.80 已废弃）"
+        );
+        // ③ 页面侧：黑底选择器 / 纯黑背景 / 壳标记字面量一律不得存在。
+        assert!(
+            !FLOAT_HTML.contains("data-w2f-shell"),
+            "floaticon.html 不得再出现 data-w2f-shell（双壳统一真透明，不允许任何壳判断；\
+             注释存档也请换个别名表述，避免本守卫永久误报）"
+        );
+        assert!(
+            !FLOAT_HTML.contains("background: #000") && !FLOAT_HTML.contains("background:#000"),
+            "floaticon.html 不得给 body 铺纯黑底（v1.79 绕路方案，v1.80 真 alpha 下是暗锯齿源）"
+        );
+        // ④ 基础规则必须仍是 transparent（双壳都依赖）。
+        let base = css_block(FLOAT_HTML, "html, body {");
+        assert!(
+            base.contains("background: transparent;"),
+            "html, body 基础规则必须保持 background: transparent（双壳真透明依赖它）"
         );
     }
 
@@ -1892,20 +1963,25 @@ mod float_window_contract {
         );
     }
 
-    /// ⑭ v1.77b：球**必须铺满活柱**（球直径 == 区域圆的直径 == `ICON_SIZE_LOGICAL`）。
+    /// ⑭ v1.77b：球**必须铺满活柱**（球直径 == `ICON_SIZE_LOGICAL` == 活柱边长）。
     ///
     /// 真机现象「不选中时 悬浮图标背景异样」的第三个源头（前两个：v1.73 的球元素 title、
     /// v1.77 的任务栏按钮 / 标题）。实测残片的**外边界是以球心为圆心、半径恒定的一个圆**
     /// ⇒ 它就是「球（当时 46px）」与「区域圆（56px）」之间那圈**透明环带**被区域裁出来的
-    /// 形状：那圈环带会把窗口后面的东西透出来，而 Tauri 侧 WebView2 的底层不是真透明 ⇒
-    /// 露成一圈浅色残片（Electron 的透明是真透明，所以「仅限 Tauri」）。
-    /// 球与区域圆直径取同一个常量后两者严格重合，环带在几何上不存在。
+    /// 形状：那圈环带会把窗口后面的东西透出来，露成一圈浅色残片（残片载体后证实为
+    /// WebView2 的 title 提示条**子窗**与任务栏浮层，已分别在 v1.73 / v1.77 移除）。
+    ///
+    /// ⚠️ v1.80 定稿：不变量是「**球 == 活柱 == 命中圆**，三者严格等大；视觉不经过窗口
+    /// 区域」。历史三案（v1.77b 严格裁圆白锯齿 / v1.78 区域外扩漏浅色异形 / v1.79 页面
+    /// 黑底暗锯齿）全部真机证伪，v1.80 起视觉走 NOREDIRECTIONBITMAP 真逐像素 alpha（守卫
+    /// ④c `float_window_uses_per_pixel_alpha_and_circle_hittest`），页面保持真透明（守卫
+    /// ④d `float_page_and_init_script_stay_truly_transparent`），命中靠 WM_NCHITTEST。
     #[test]
     fn float_page_ball_fills_the_live_pillar() {
         let size = icon_size_logical_int();
 
         // ① 球元素那条规则：宽高必须都等于活柱边长，且不得再靠 transform 放大
-        //    （球已铺满，scale>1 会被区域裁掉 = 没有反馈；放大出的那圈又是透明环带）。
+        //    （球已铺满，scale>1 会超出圆形命中区 = 看着在球上却点不着；双壳同理）。
         let ball = css_block(FLOAT_HTML, "#w2f-ball {");
         assert!(
             !ball.is_empty(),
@@ -1914,12 +1990,12 @@ mod float_window_contract {
         for needle in [format!("width: {size}px;"), format!("height: {size}px;")] {
             assert!(
                 ball.contains(&needle),
-                "#w2f-ball 必须 {needle}（= ICON_SIZE_LOGICAL）：球比区域圆小就会留出一圈透明环带，把窗口后面的东西透出来"
+                "#w2f-ball 必须 {needle}（= ICON_SIZE_LOGICAL = 活柱边长）：球比活柱小就会留出一圈透明环带"
             );
         }
         assert!(
             !ball.contains("scale("),
-            "#w2f-ball 不得用 transform: scale() 放大：球已铺满活柱，放大只会被区域裁掉并重新露出透明环带"
+            "#w2f-ball 不得用 transform: scale() 放大：球已铺满活柱，放大只会被裁掉并重新露出透明环带"
         );
 
         // ② 悬停 / 拖动反馈改为提亮（filter），且同样不得 scale。

@@ -42,20 +42,41 @@
 //! 吸附后 `x/y` 持久化的是【展开态】左上角；半隐藏只是把窗口整体平移到屏外、留 `PEEK`
 //! 物理像素（= 球宽的一半）在屏内，尺寸不变。落盘只需多记一条 [`crate::store::DockEdge`]。
 //!
-//! ## WebView2 最小宽度与「活柱」（v1.71 真机取证）
+//! ## WebView2 最小宽度与「活柱」；视觉 / 命中的彻底分离（v1.71 取证，v1.80 定稿）
 //! WebView2 运行时会把控制器宿主 HWND 的宽度强制撑到约 131 逻辑像素（200% DPI 下实测
 //! 262 物理），任何 `set_size` 都会被立刻弹回；但高度不设限。我们的球只有 56 逻辑宽 ——
-//! 解决方式是**接受宿主窗实际宽度**，用 Win32 `SetWindowRgn` 把窗口的可视 / 命中区域裁成
-//! 一个落在 56 逻辑宽「活柱」内的**圆形**（`CreateEllipticRgn`）：右吸附时活柱贴宿主窗
-//! 右边、其余贴左边；区域外（含被撑宽的宿主部分与球的四角）既不绘制也不接收鼠标
-//! （系统级点击穿透，含 WebView2 子窗）。窗口本身仍开 `.transparent(true)`（Tauri 2 在
-//! Windows 无需额外 cargo feature：tao 走 DWM blur-behind、wry 把 WebView2 背景色置为
-//! 全透明），让圆形区域内、球本体之外的环带透出桌面。本模块所有几何（拖动 / 吸附 / 钳制 /
-//! 落盘 / 恢复）一律以【活柱矩形】为准，宿主窗实际宽度只用于算活柱偏移 [`live_offset`]。
-//! 页面侧由 `push_state` 下发 `anchor`（`'l'`/`'r'`），floaticon.html 把球摆进对应活柱。
+//! 接受这个「宿主窗」，真正的球是宿主内一个 56 逻辑宽的【活柱】：右吸附时活柱贴宿主窗
+//! 右边、其余贴左边（偏移见 [`live_offset`]）。宿主被撑宽的部分与球的四角既不该看见、
+//! 也不该吃到鼠标。v1.71→v1.80 真机四轮教训换来的正解是**视觉与命中用两套机制各管各**：
+//!
+//! ### 视觉：真逐像素 alpha（`.transparent(true).no_redirection_bitmap(true)`）
+//! `WS_EX_NOREDIRECTIONBITMAP` 让宿主窗没有 GDI 重定向表面，DWM 直接把 WebView2 的
+//! DirectComposition 视觉树逐像素合成到桌面 —— 与 Electron 完全相同的合成路径：页面 body
+//! 真透明，border-radius 的抗锯齿、box-shadow 的半透明像素都带真 alpha 与桌面合成，窗口
+//! **不再设任何 SetWindowRgn**（那是 1bit 硬掩码，会把 DComp 的软边重新切成阶梯）。
+//! 版本门槛：该属性 tauri-runtime-wry **2.12.1** 才透传（2.11.4 只透传 transparent），
+//! 故本仓 Tauri 2.11 → 2.12（wry 0.55 → 0.57 / tao 0.35 → 0.37）。
+//! 失败链存档（勿再尝试）：
+//!   · v1.77b 区域与球严格重合 ⇒ 旧链路上 1bit 硬边切 AA，白锯齿；
+//!   · v1.78 区域四边外扩 4px 想保 AA ⇒ 半透明像素被压平白底，环带漏浅色异形；
+//!   · v1.79 页面自绘不透明黑底绕过坏 alpha ⇒ 异形消失但窗口轮廓仍是整像素阶梯，暗锯齿
+//!     （「跟硬边打补丁」的方向错误，v1.80 整版弃用：页面恢复真透明，不注入壳标记）。
+//!
+//! ### 命中：WM_NCHITTEST 圆形穿透（[`install_circle_hit_test`]）
+//! 子类化父窗**以及** `EnumChildWindows` 枚举出的 WebView2 子窗的窗口过程，只拦截
+//! `WM_NCHITTEST`：屏点落在「以活柱中心为圆心、活柱半径为半径」的圆内 → 调原过程
+//! （父 / 子各自返回 HTCLIENT，页面正常收指针事件）；圆外一律回 `HTTRANSPARENT`，系统
+//! 继续向更下层窗口投递（含其他进程，即系统级点击穿透）。命中圆的物理坐标存于原子量
+//! （[`update_hit_circle`]），吸附 / DPI / 宿主宽变化时随几何一起更新。子窗必须一起
+//! 子类化：WebView2 控制器是覆盖整个宿主客户区的子 HWND，鼠标命中先落在它身上，只改
+//! 父窗过程拦不住。
+//!
+//! 本模块所有几何（拖动 / 吸附 / 钳制 / 落盘 / 恢复）一律以【活柱矩形】为准，宿主窗实际
+//! 宽度只用于算活柱偏移 [`live_offset`]。页面侧由 `push_state` 下发 `anchor`（`'l'`/`'r'`），
+//! floaticon.html 把球摆进对应活柱。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 use tauri::webview::PageLoadEvent;
@@ -64,11 +85,14 @@ use tauri::{
     WebviewWindowBuilder, WindowEvent,
 };
 use url::Url;
-use windows::Win32::Graphics::Gdi::{CreateEllipticRgn, SetWindowRgn};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_SERVER};
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    CallWindowProcW, EnumChildWindows, GetWindowLongPtrW, SetWindowLongPtrW, GWLP_WNDPROC,
+    GWL_EXSTYLE, HTTRANSPARENT, WM_NCHITTEST, WNDPROC, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW,
 };
 
@@ -96,14 +120,21 @@ pub(crate) const FLOAT_HIDE_EVENT: &str = "web2app:float-hide";
 /// 单击悬浮球：切换原来的主窗口显隐（不是开新窗、不是导航）。
 pub(crate) const FLOAT_CLICK_EVENT: &str = "web2app:float-click";
 
-/// 活柱的固定尺寸（**逻辑**像素；正方形透明区域，其中被区域裁出一个**直径相同的圆**）。
+/// 活柱的固定尺寸（**逻辑**像素；正方形；球 = 与它严格重合的圆）。
 ///
-/// ⚠️⚠️ 球页（`floaticon.html`）里 `#w2f-ball` 的宽高**必须等于本常量**，不能更小 ——
-/// 区域圆与球重合才没有「透明环带」，否则那圈环带会把窗口后面的东西透出来（Tauri 侧
-/// 表现为「不选中时背景异样」，v1.77b 真机定位）。守卫
-/// `contract_tests::float_window_contract::float_page_ball_fills_the_live_pillar` 钉住两者相等。
+/// ⚠️⚠️ 三层关系（v1.71→v1.80 真机反复取证，改动前必读模块文档「视觉 / 命中的彻底分离」）：
+/// 1. **球 == 活柱 == 命中圆**：页面上球铺满活柱；命中测试（WM_NCHITTEST 子类化）的圆以
+///    活柱中心为圆心、半径为活柱一半。球比活柱小 ⇒ 圆内球外有一圈透明但吃得到 / 吃得不到
+///    鼠标的环带（v1.77b 的浅色残片与 v1.78 的异形本质都是几何与合成错配）。
+/// 2. **视觉不经过任何窗口区域**：球缘抗锯齿 / 外阴影由 `.no_redirection_bitmap(true)` 的
+///    真逐像素 alpha 合成（v1.80），既不外扩区域也不铺黑底 —— 那两条（v1.78 / v1.79）
+///    都已真机证伪。
+/// 3. 宿主窗实际宽度由 WebView2 最小宽度决定（见模块文档「活柱」），不以本常量为准。
 ///
-/// 宿主窗实际宽度由 WebView2 最小宽度决定（见模块文档「活柱」），不以本常量为准。
+/// 守卫：`contract_tests::float_window_contract::float_page_ball_fills_the_live_pillar`
+/// 钉住「球 == 活柱」，`float_window_uses_per_pixel_alpha_and_circle_hittest` 钉住「真
+/// alpha 合成 + NCHITTEST 圆形命中、不得再有 SetWindowRgn」，
+/// `float_page_and_init_script_stay_truly_transparent` 钉住「页面真透明、不注入壳标记」。
 const ICON_SIZE_LOGICAL: f64 = 56.0;
 /// 半隐藏时留在屏幕内的宽度（逻辑像素）= 球窗的一半，即真正的「半」隐藏。
 const PEEK_LOGICAL: f64 = 28.0;
@@ -546,6 +577,11 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
     .shadow(false)
     // 透明：球是圆形的，窗外矩形区域必须能点穿到桌面（页面 body 背景透明）。
     .transparent(true)
+    // v1.80：WS_EX_NOREDIRECTIONBITMAP —— 宿主无 GDI 重定向表面，DWM 对 WebView2 的
+    // DirectComposition 视觉树做**逐像素 alpha** 合成（与 Electron 同一条路径），球缘
+    // 抗锯齿 / 外阴影才是真软边。需与 transparent(true) 同开；tao 此时跳过 blur-behind。
+    // （tauri-runtime-wry ≥ 2.12.1 才透传本属性，见模块文档「视觉」。）
+    .no_redirection_bitmap(true)
     // 不占任务栏按钮：悬浮球是「附属小工具」，入口在设置页 / 托盘 / 右键。
     .skip_taskbar(true)
     // 不允许用户缩放：球是定尺寸的小工具（尺寸由 WebView2 最小宽度 + 活柱区域决定）。
@@ -558,6 +594,8 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
     .visible(false)
     .inner_size(ICON_SIZE_LOGICAL, ICON_SIZE_LOGICAL)
     // 一次性令牌只挂主框架（自定义协议页没有 iframe，这里仍是纵深防御）。
+    // v1.80：真 alpha 合成后页面保持**真透明**即可，不再注入任何壳标记（v1.79 的 Tauri
+    // 专用黑底是坏 alpha 链路上的补丁，已弃用，见模块文档失败链存档）。
     .initialization_script(format!(
         "if (window.self === window.top) {{ window.__web2appFloatToken = {}; }}",
         crate::loading::js_str(&token)
@@ -567,10 +605,13 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
     .on_page_load(move |w, payload| {
         if payload.event() == PageLoadEvent::Finished {
             // 此时 WebView2 已完成初始化，宿主宽大概率已被最小宽度约束改写：
-            // 建窗瞬间按 56 宽算的右吸附 offset 可能失效，这里用真实宿主宽重裁 /
+            // 建窗瞬间按 56 宽算的右吸附 offset 可能失效，这里用真实宿主宽重设命中圆 /
             // 重定位一次（幂等：宿主宽没变时位置结果不变）。
+            // 再装一次圆形命中子类化：WebView2 部分子 HWND 可能在控制器初始化后才创建
+            // （枚举幂等，已子类化的窗口会跳过）。
             let dock = current_dock(&app_for_load);
-            apply_live_region(&w, dock.map(|d| d.edge));
+            install_circle_hit_test(&w);
+            update_hit_circle(&w, dock.map(|d| d.edge));
             if let Some(d) = dock {
                 reposition_for_dock(&w, d);
             }
@@ -608,13 +649,16 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
     // 被 tao 的 `apply_diff` 按缓存标志整体重写 `GWL_EXSTYLE`（真机读回实测 `0x40118`），
     // ⇒ 每次把球显示出来都必须走 [`show_ball`]，由它在 show 之后再补一次。
     apply_ball_window_styles(&window);
+    // 装上圆形命中测试（父窗 + WebView2 子窗窗口过程子类化）。建窗时先装一次；控制器的
+    // 部分子 HWND 可能尚未创建，on_page_load(Finished) 会再幂等补装一次。
+    install_circle_hit_test(&window);
 
-    // 宿主物理尺寸有两类迟到变化，都必须按真实宿主宽重裁圆形区域，右吸附 / 缩回态
+    // 宿主物理尺寸有两类迟到变化，都必须按真实宿主宽重设命中圆，右吸附 / 缩回态
     // 还要按新 offset 重定位宿主，保证【活柱】仍贴在原来的边上：
     //  ① Resized：WebView2 初始化后才把宿主撑到最小宽度（建窗瞬间 outer_size 可能还
-    //     是 56，首裁的右吸附偏移会失效）；
+    //     是 56，首算的右吸附偏移会失效）；
     //  ② ScaleFactorChanged：跨 DPI 缩放 / 拖到不同缩放的显示器，活柱物理宽随之改变。
-    // 两者幂等（尺寸没变时结果不变），且只裁区域 / 定位，不会再触发 Resized，无反馈环。
+    // 两者幂等（尺寸没变时结果不变），且只更新几何 / 定位，不会再触发 Resized，无反馈环。
     let app_for_event = app.clone();
     window.on_window_event(move |event| {
         if matches!(
@@ -623,7 +667,9 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
         ) {
             if let Some(w) = app_for_event.get_webview_window(FLOAT_LABEL) {
                 let dock = current_dock(&app_for_event);
-                apply_live_region(&w, dock.map(|d| d.edge));
+                // 子 HWND 树也可能在尺寸变化后重建，顺手幂等补装一次命中子类化。
+                install_circle_hit_test(&w);
+                update_hit_circle(&w, dock.map(|d| d.edge));
                 if let Some(d) = dock {
                     reposition_for_dock(&w, d);
                 }
@@ -632,7 +678,7 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
     });
 
     // 恢复上次几何（含吸附态）；无有效几何则按主显示器右上角默认摆放。
-    // show 在 on_page_load 里做；这里先定位 + 裁剪活柱，窗口显现时即在正确位置 / 形状，
+    // show 在 on_page_load 里做；这里先定位 + 设好命中圆，窗口显现时即在正确位置 / 形状，
     // 不会从默认位滑入或先露出一截被 WebView2 撑宽的透明空窗。
     let saved = crate::store::load(app).float_window;
     apply_initial_geometry(app, &window, saved);
@@ -647,9 +693,10 @@ fn build_float_window_on_main(app: &tauri::AppHandle) {
         let _ = a.run_on_main_thread(move || {
             if let Some(w) = am.get_webview_window(FLOAT_LABEL) {
                 if !w.is_visible().unwrap_or(true) {
-                    // 与 on_page_load(Finished) 同语义：用真实宿主宽补一次重裁 / 重定位。
+                    // 与 on_page_load(Finished) 同语义：用真实宿主宽补一次命中圆 / 重定位。
                     let dock = current_dock(&am);
-                    apply_live_region(&w, dock.map(|d| d.edge));
+                    install_circle_hit_test(&w);
+                    update_hit_circle(&w, dock.map(|d| d.edge));
                     if let Some(d) = dock {
                         reposition_for_dock(&w, d);
                     }
@@ -803,7 +850,7 @@ fn apply_initial_geometry(app: &tauri::AppHandle, w: &WebviewWindow, saved: Opti
                     let y = clamp_y(g.y, lh, mon.1, mon.3);
                     let lx = collapsed_x(g.edge, mon.0, mon.2, lw, peek_px(scale));
                     let off = live_offset(host.width as i32, lw, g.edge);
-                    apply_live_region(w, Some(g.edge));
+                    update_hit_circle(w, Some(g.edge));
                     let _ = w.set_position(PhysicalPosition::new(lx - off, y));
                     set_dock(
                         app,
@@ -820,14 +867,14 @@ fn apply_initial_geometry(app: &tauri::AppHandle, w: &WebviewWindow, saved: Opti
                 }
             } else {
                 // 自由态：活柱贴宿主窗左边，宿主原点即活柱原点。
-                apply_live_region(w, Some(DockEdge::None));
+                update_hit_circle(w, Some(DockEdge::None));
                 let _ = w.set_position(PhysicalPosition::new(g.x, g.y));
                 return;
             }
         }
     }
     // 默认（或几何失效）：主显示器右上角留白摆放（自由态，活柱贴左）。
-    apply_live_region(w, Some(DockEdge::None));
+    update_hit_circle(w, Some(DockEdge::None));
     if let Some(mon) = w.primary_monitor().ok().flatten() {
         let pos = mon.position();
         let m = (MARGIN_LOGICAL * scale).round() as i32;
@@ -858,26 +905,166 @@ pub(crate) fn live_offset(host_w: i32, live_w: i32, edge: DockEdge) -> i32 {
     }
 }
 
-/// 按吸附边把宿主窗的系统区域（可视 + 命中）裁成活柱内的圆形。区域坐标是**物理客户区
-/// 坐标**；无边框窗客户区即整窗。成功后区域归系统所有，无需 DeleteObject。
-/// 必须在主线程调用（与所有窗口操作同）。
-fn apply_live_region(w: &WebviewWindow, edge: Option<DockEdge>) {
+// ===========================================================================
+// 圆形命中测试（v1.80：视觉走真 alpha，命中走 WM_NCHITTEST 子类化，见模块文档）
+// ===========================================================================
+
+/// 命中圆（父窗客户区物理坐标）：圆心 x。全局唯一球窗，用静态原子量即可。
+static HIT_CENTER_X: AtomicI32 = AtomicI32::new(0);
+/// 命中圆圆心 y。
+static HIT_CENTER_Y: AtomicI32 = AtomicI32::new(0);
+/// 命中圆半径；`0` = 几何尚未初始化（此时 fail-open，命中交原过程，球仍可点）。
+static HIT_RADIUS: AtomicI32 = AtomicI32::new(0);
+/// 父窗 HWND（`as usize`）：子窗过程收到的屏幕坐标要换算到**父窗**客户区再判圆。
+static HIT_PARENT: AtomicUsize = AtomicUsize::new(0);
+
+/// 已被子类化的窗口（HWND, 原窗口过程）。`OnceLock` + `Mutex` 只在装 / 卸与窗口销毁时
+/// 短暂加锁；WM_NCHITTEST 热路径判圆不碰它。
+fn subclasses() -> &'static Mutex<Vec<(isize, isize)>> {
+    static SUBCLASSES: OnceLock<Mutex<Vec<(isize, isize)>>> = OnceLock::new();
+    SUBCLASSES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 按吸附边更新命中圆：圆心 = 活柱中心（右吸附时活柱贴宿主右边），半径 = 活柱一半。
+/// 坐标是父窗**客户区物理坐标**；无边框窗客户区即整窗。必须在主线程调用。
+/// 调用时机与旧版 SetWindowRgn 完全相同：建窗后 / on_page_load / Resized /
+/// ScaleFactorChanged / 拖动结束 / 兜底显现（任一窗口几何变化都可能移动活柱中心）。
+fn update_hit_circle(w: &WebviewWindow, edge: Option<DockEdge>) {
     let (Ok(scale), Ok(host)) = (w.scale_factor(), w.outer_size()) else {
-        // 窗口句柄 / 尺寸尚不可用（建窗极早期）：on_page_load 与 Resized 还会再裁。
+        // 窗口句柄 / 尺寸尚不可用（建窗极早期）：on_page_load 与 Resized 还会再设。
         return;
     };
     let edge = edge.unwrap_or(DockEdge::None);
     let (lw, lh) = live_px(scale);
-    let x1 = live_offset(host.width as i32, lw, edge);
-    let x2 = x1 + lw;
-    if let Ok(hwnd) = w.hwnd() {
-        unsafe {
-            // 每次新建区域：SetWindowRgn 成功后系统接管旧区域，复用句柄反而二次释放。
-            // 椭圆（直径 = 活柱宽高）而非矩形：区域外既不绘制也不接收鼠标，一次同时裁掉
-            // 被 WebView2 撑宽的宿主部分与球的四角；区域内、球本体外的环带由窗口透明透出桌面。
-            let rgn = CreateEllipticRgn(x1, 0, x2, lh);
-            let _ = SetWindowRgn(hwnd, Some(rgn), true);
+    let cx = live_offset(host.width as i32, lw, edge) + lw / 2;
+    let cy = lh / 2;
+    HIT_CENTER_X.store(cx, Ordering::Relaxed);
+    HIT_CENTER_Y.store(cy, Ordering::Relaxed);
+    HIT_RADIUS.store(lw / 2, Ordering::Relaxed);
+}
+
+/// 安装圆形命中：子类化父窗 + 全部 WebView2 后代子窗。幂等（重复调用只补装新出现的
+/// HWND）。必须在主线程调用（与 SetWindowLongPtr 的所有用法同）。
+/// 失败不致命：最坏退化是矩形窗四角 / 撑宽部分吃鼠标（视觉仍是圆的），球照常可用。
+fn install_circle_hit_test(w: &WebviewWindow) {
+    let Ok(parent) = w.hwnd() else {
+        return;
+    };
+    HIT_PARENT.store(parent.0 as usize, Ordering::Relaxed);
+    unsafe {
+        // EnumChildWindows 递归枚举**全部后代**：WebView2 控制器子 HWND 及其内部 Chrome
+        // 窗口都要拦 —— 鼠标命中先落在最内层子窗，漏一个它就是矩形吃点击。
+        let mut children: Vec<HWND> = Vec::new();
+        let _ = EnumChildWindows(
+            Some(parent),
+            Some(enum_children_proc),
+            LPARAM(&mut children as *mut Vec<HWND> as isize),
+        );
+        subclass_window(parent);
+        for child in children {
+            subclass_window(child);
         }
+    }
+}
+
+/// `EnumChildWindows` 回调：把后代 HWND 收集进 lParam 携带的 Vec。
+unsafe extern "system" fn enum_children_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let found = &mut *(lparam.0 as *mut Vec<HWND>);
+    found.push(hwnd);
+    BOOL(1) // TRUE = 继续枚举
+}
+
+/// 给单个 HWND 换上 [`hit_test_wndproc`]；已装过则跳过。
+unsafe fn subclass_window(hwnd: HWND) {
+    let mut guard = subclasses()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = hwnd.0 as isize;
+    if guard.iter().any(|(h, _)| *h == key) {
+        return;
+    }
+    let new_proc: WNDPROC = Some(hit_test_wndproc);
+    let new_proc_ptr = std::mem::transmute::<WNDPROC, isize>(new_proc);
+    // 64 位 Windows 必须用 SetWindowLongPtrW（SetWindowLongW 装不下过程地址）。
+    let old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, new_proc_ptr);
+    if old == 0 {
+        dlog!("[float] 球窗 {key:#x} 命中子类化失败（SetWindowLongPtrW 返回 0），该窗退化矩形命中");
+        return;
+    }
+    guard.push((key, old));
+}
+
+/// 球窗父 / 子窗口过程：只接管 WM_NCHITTEST，其余消息一律调原过程。
+unsafe extern "system" fn hit_test_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCHITTEST && HIT_RADIUS.load(Ordering::Relaxed) > 0 {
+        // lParam 低 / 高位是有符号的屏幕坐标（GET_X_LPARAM / GET_Y_LPARAM）。
+        let sx = (lparam.0 as u16) as i16 as i32;
+        let sy = ((lparam.0 >> 16) as u16) as i16 as i32;
+        let parent = HWND(HIT_PARENT.load(Ordering::Relaxed) as *mut core::ffi::c_void);
+        let mut pt = POINT { x: sx, y: sy };
+        // 统一换算到父窗客户区：命中圆是按「活柱在父窗客户区里的位置」定义的。
+        let _ = ScreenToClient(parent, &mut pt);
+        let cx = HIT_CENTER_X.load(Ordering::Relaxed);
+        let cy = HIT_CENTER_Y.load(Ordering::Relaxed);
+        let r = HIT_RADIUS.load(Ordering::Relaxed) as i64;
+        let dx = pt.x as i64 - cx as i64;
+        let dy = pt.y as i64 - cy as i64;
+        if dx * dx + dy * dy > r * r {
+            // 圆外：让系统继续向更下层（含跨进程）窗口投递此次命中。
+            return LRESULT(HTTRANSPARENT as isize);
+        }
+    }
+    let result = call_original_proc(hwnd, msg, wparam, lparam);
+    if msg == windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY {
+        // 先让原过程处理完销毁，再把窗口过程还原（此后系统保证不再投递消息到本过程）。
+        uninstall_window(hwnd);
+    }
+    result
+}
+
+/// 调回被替换前的原窗口过程；找不到记录（理论上不会发生）时用 DefWindowProcW 兜底。
+unsafe fn call_original_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let old = {
+        let guard = subclasses()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = hwnd.0 as isize;
+        guard.iter().find(|(h, _)| *h == key).map(|(_, p)| *p)
+    };
+    if let Some(ptr) = old {
+        let old_proc: WNDPROC = std::mem::transmute::<isize, WNDPROC>(ptr);
+        CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+    } else {
+        windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// 窗口销毁时还原原窗口过程并移出子类化表。
+unsafe fn uninstall_window(hwnd: HWND) {
+    let old = {
+        let mut guard = subclasses()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = hwnd.0 as isize;
+        guard
+            .iter()
+            .position(|(h, _)| *h == key)
+            .map(|i| guard.swap_remove(i).1)
+    };
+    if let Some(ptr) = old {
+        let old_proc: WNDPROC = std::mem::transmute::<isize, WNDPROC>(ptr);
+        let new_ptr = std::mem::transmute::<WNDPROC, isize>(old_proc);
+        let _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, new_ptr);
     }
 }
 
@@ -1009,7 +1196,7 @@ fn on_drag_end(app: &tauri::AppHandle, w: &WebviewWindow) {
         })
     });
     let Some((mx, my, mw, mh)) = mon else {
-        apply_live_region(w, Some(DockEdge::None));
+        update_hit_circle(w, Some(DockEdge::None));
         set_dock(app, None);
         persist_geometry(app, w);
         push_state(w, None);
@@ -1026,7 +1213,7 @@ fn on_drag_end(app: &tauri::AppHandle, w: &WebviewWindow) {
             let y = clamp_y(pos.y, lh, my, mh);
             let lx = expanded_x(edge, mx, mw, lw);
             let off = live_offset(host.width as i32, lw, edge);
-            apply_live_region(w, Some(edge));
+            update_hit_circle(w, Some(edge));
             let _ = w.set_position(PhysicalPosition::new(lx - off, y));
             let dock = Dock {
                 edge,
@@ -1046,7 +1233,7 @@ fn on_drag_end(app: &tauri::AppHandle, w: &WebviewWindow) {
             // 找不回来 —— 它没有标题栏，移出屏幕的部分无法再抓）。纵向同样钳。
             let x = pos.x.clamp(mx, (mx + mw - lw).max(mx));
             let y = clamp_y(pos.y, lh, my, mh);
-            apply_live_region(w, Some(DockEdge::None));
+            update_hit_circle(w, Some(DockEdge::None));
             if x != pos.x || y != pos.y || !matches!(edge0, DockEdge::None) {
                 let _ = w.set_position(PhysicalPosition::new(x, y));
             }
