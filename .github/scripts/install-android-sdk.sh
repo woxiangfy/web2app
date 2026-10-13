@@ -20,8 +20,17 @@
 #      安装命令也必须带 `--channel=3`，否则仍然「找不到包」。
 #
 # 本地行为验证（别只看代码）：`bash tests/ci-sdk-step/run-tests.sh`
-# —— 用假 sdkmanager + 从真实仓库清单生成的 stable/canary 数据干跑 33 条断言（含两处反向对照）。
+# —— 用假 sdkmanager + 从真实仓库清单生成的 stable/canary 数据干跑 36 条断言（含两处反向对照）。
+#
+# 环境变量 `ANDROID_SDK_STRICT`（可选）：非空时，「模板要的平台在仓库里不存在 ⇒ 回落最高可用」
+# 这条**尽力而为**的降级会变成硬失败（`::error::` + 退出 1）。默认空 = 保留降级。
 set -euo pipefail
+
+# 严格模式开关（默认关 = 保留「尽力而为」的降级，见下方回落分支的说明）：
+#   空/未设 → 模板要的平台不存在时，回落最高可用平台并改写 gradle（现状）；
+#   非空   → 同一情形直接 `::error::` + 退出 1，让「模板已前移而环境没跟上」在安装步就暴露，
+#            而不是等到 gradle 配置期才以更难读的报错出现。
+ANDROID_SDK_STRICT="${ANDROID_SDK_STRICT:-}"
 
 if [ ! -f tauri.conf.json ]; then
   echo "::error::install-android-sdk.sh 必须在 webview-app/ 目录下运行（当前目录：$PWD）"
@@ -94,6 +103,13 @@ else
       exit 1
     fi
     echo "::warning::仓库没有 android-$SDK，回落 android-$MAX_N（gradle 里同步改写 compileSdk/targetSdk）"
+    # ⚠️ 这是**尽力而为**的降级：gradle 的 compileSdk 会被降到低于 Tauri 依赖预期的版本，
+    #    很可能仍在 gradle 配置/编译期失败（AGP 的 sdkDownload 有机会自动补齐，故不直接判死）。
+    #    要让这种情形硬失败，调用点设 ANDROID_SDK_STRICT=1。
+    if [ -n "$ANDROID_SDK_STRICT" ]; then
+      echo "::error::ANDROID_SDK_STRICT=1：模板要 android-$SDK，但仓库最高只有 android-$MAX_N，拒绝降级"
+      exit 1
+    fi
     PLATFORM=$(pick_platform "$MAX_N")
     SDK=$MAX_N
     if [ -n "$APP_GRADLE" ]; then

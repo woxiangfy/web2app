@@ -82,6 +82,15 @@ name: 自定义打包
 #                                            //   且共享同一数据目录（同账号，cookie/localStorage 互通），
 #                                            //   target="_blank" / window.open() 直接新开一个 tab；
 #                                            //   Android 端忽略此开关（无多页签能力）。
+#     "mobile_bar": false,                   // 布尔，**不带引号**（默认 false，仅移动端生效）：
+#                                            //   true = 移动端屏幕底部常驻一条导航条 ——
+#                                            //     首页（回到 app_url）/ 后退 / 前进 / 列表；
+#                                            //   false = 移动端没有任何壳自绘控件（默认）。
+#                                            //   Windows / Electron 桌面端忽略此开关
+#                                            //   （底栏只在移动端实现，桌面端连代码路径都没有）。
+#                                            //   ⚠️「列表」按钮只在当前平台真的有页签可切时才渲染：
+#                                            //     移动端目前没有多页签 ⇒ 只画前三个按钮，
+#                                            //     不会出现点了没反应的死按钮。
 #     "android_keystore_base64": "...",      // Android 签名 keystore(.jks/.keystore) 的 base64（可选，
 #                                            //   优先于仓库 secrets；正式签名，跨构建可覆盖升级）
 #     "android_key_alias": "my-alias",       // keystore 别名（配了 keystore 时必填）
@@ -92,7 +101,7 @@ name: 自定义打包
 # 字段名拼错 / 类型不对 / 写了已移除的字段 ⇒ **直接失败**（不是警告）。
 # 曾经只打 ::warning:: 就跳过，于是「拼错」与「不生效」表现完全一样，只能靠猜。
 #
-# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 19 个字段）
+# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 20 个字段）
 #           electron-app/config.example.json（Electron 绿色版侧，省略仅 Android 用的 android_*）
 #   ⚠️ 两份模板覆盖同一份契约，字段名与类型完全一致；差异只在「本端不用的字段是否列出」。
 #      JSON 标准不支持注释，故模板保持纯 JSON，各字段含义见上面这份说明与 docs/packaging-config.md。
@@ -306,77 +315,17 @@ jobs:
           python3 "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" \
             --env-out "$GITHUB_ENV" --android-keystore
 
-      - name: 统一安装名称、版本号与 Android 包名（app_name → productName + identifier，version → tauri.conf.json）
-        # Android 端必须在 `cargo tauri android init` 之前把 app_name 写入
-        # tauri.conf.json 的 productName，否则 init 会把默认名 "Web2App"/"web2app"
-        # 烘焙进安卓工程（strings.xml / Manifest），后续 strings.xml 补丁只是兜底。
-        #
-        # version 同理且与 app_name 无关：init 会把 tauri.conf.json 的 version 烘焙成
-        # build.gradle 的 versionName（versionCode 由其派生），所以即使 app_name 为空、
-        # 本步骤随后早退，也必须先把 version 写进去（配置未给时解析器已注入默认 0.0.1）。
-        #
-        # 包名（applicationId）同理：Tauri 2 **没有** bundle.android.package 字段，安卓包名只能
-        # 来自 tauri.conf.json 的 identifier ⇒ 必须在 init 之前把 identifier 也改成 app_name 派生值。
-        # 否则所有配置的 APK 共用 com.example.web2app，相互覆盖安装（装了一个就把上一个顶掉）。
+      - name: 预写 tauri.conf.json（version / productName / identifier）
+        # 逻辑在 .github/scripts/prepare-android-conf.py —— 与 release.yml 调用**同一个脚本**，
+        # 不再各存一份内联 python（本仓库历史上同类分裂就漏过 EXTRA / ICON_URL）。
+        # 必须在 `cargo tauri android init` **之前**写：init 会把 productName 烘焙成安卓应用名、
+        # 把 identifier 烘焙成 Android 包名（Tauri 2 无 bundle.android.package 字段，包名只能
+        # 来自 identifier），并把 version 烘焙成 versionName / versionCode。
+        # VERSION 由解析步骤注入（缺省 0.0.1）。
         env:
           PYTHONUTF8: "1"
         shell: bash
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, re, sys
-          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-          # ---- version：无论 app_name 是否配置都先写（早退之前），供 android init 烘焙 ----
-          version = (os.environ.get("VERSION", "") or "").strip() or "0.0.1"
-          with open("tauri.conf.json", encoding="utf-8") as f:
-              conf = json.load(f)
-          conf["version"] = version
-          with open("tauri.conf.json", "w", encoding="utf-8") as f:
-              json.dump(conf, f, ensure_ascii=False, indent=2)
-              f.write("\n")
-          print(f"version     = {version}（android init 将据此烘焙 versionName/versionCode）")
-
-          name = os.environ.get("APP_NAME", "").strip()
-          if not name:
-              print("未配置 app_name，沿用默认名称与包名")
-              raise SystemExit(0)
-          # 去掉 Windows 文件名非法字符；压缩连续空白；去首尾空格与句点；空则回落默认名
-          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
-          safe = re.sub(r"\s+", " ", safe).strip(" .")
-          if not safe:
-              safe = "Web2App"
-
-          # ---- Android 包名：由 app_name 派生，必须同时满足 aapt 与 Java 的包名规则 ----
-          # 只保留 ASCII 字母/数字/下划线并小写；首字符不能是数字（否则补 app 前缀）。
-          seg = re.sub(r"[^0-9A-Za-z_]", "", name).lower()
-          if not seg or seg[0].isdigit():
-              seg = "app" + seg
-          if seg == "app":
-              # 原名里一个可用 ASCII 字符都没有（如纯中文 app_name）⇒ 用名字指纹兜底，
-              # 保证不同 app_name 派生出不同包名，而不是统统撞在同一个上。
-              seg = "app" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
-          # 包名的任一段都不能是 Java 关键字（aapt/gradle 会直接报 invalid package name）
-          if seg in ("abstract","assert","boolean","break","byte","case","catch","char","class","const",
-                     "continue","default","do","double","else","enum","extends","final","finally","float",
-                     "for","goto","if","implements","import","instanceof","int","interface","long","native",
-                     "new","package","private","protected","public","return","short","static","strictfp",
-                     "super","switch","synchronized","this","throw","throws","transient","try","void",
-                     "volatile","while"):
-              seg += "_"
-          # 前缀固定 com.web2app —— 上架应用市场时若要换成自己公司域名（如 com.yourcorp.*），改这一行。
-          pkg = "com.web2app." + seg
-
-          with open("tauri.conf.json", encoding="utf-8") as f:
-              conf = json.load(f)
-          old_pkg = conf.get("identifier", "")
-          conf["productName"] = safe
-          conf["identifier"] = pkg
-          with open("tauri.conf.json", "w", encoding="utf-8") as f:
-              json.dump(conf, f, ensure_ascii=False, indent=2)
-              f.write("\n")
-          print(f"productName = {safe}（android init 将据此烘焙安卓应用名称）")
-          print(f"identifier  = {old_pkg} → {pkg}（android init 将据此烘焙 Android 包名）")
-          PY
+        run: python3 ../.github/scripts/prepare-android-conf.py
 
       - name: Install Rust toolchain (with Android target)
         uses: dtolnay/rust-toolchain@stable
@@ -401,13 +350,10 @@ jobs:
           packages: 'platform-tools'
 
       - name: Install NDK
-        # 平台/构建工具的版本跟随 Tauri 模板（见下方 "Initialize Android project" 步骤，
-        # 会在 init 后读取生成工程实际的 compileSdk / buildToolsVersion 再安装对应版本），
-        # 避免模板升级后 compileSdk 变化（如 34→35）而这里写死导致 gradle 配置期失败。
-        run: |
-          yes | sdkmanager "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+        # 版本单一真源见 .github/scripts/install-android-ndk.sh —— 3 个 workflow 共用同一份
+        #（原先三处各写死一遍同一个版本号，模板换 NDK 时必然漂移）。脚本除安装外还会
+        # 校验目录存在（装不上即硬失败），并导出 ANDROID_NDK_HOME / NDK_HOME / ANDROID_NDK_ROOT。
+        run: bash ../.github/scripts/install-android-ndk.sh
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -463,153 +409,16 @@ jobs:
           fi
 
       - name: 统一应用名称（Android 应用名称 ← title）
-        # Android 的应用名称（桌面图标下的 label）定义在 gen/android 的 strings.xml
-        #（或 Manifest 内联 android:label）。这里统一取 JSON 的 title（缺省回落 app_name），
-        # 与 Windows 窗口标题同源；app_name 只负责"安装名"（安装包/快捷方式/安装目录），
-        # 两者分离后可实现"安装名用英文、显示名用中文"。
-        #
-        # 注意执行顺序：上面 "app_name → productName" 那一步已经让 android init 把安装名烘焙进了
-        # strings.xml，这一步在 init 之后用 title 覆盖它，因此最终生效的是 title。
-        run: |
-          python3 - <<'PY'
-          import os, re, sys, pathlib
-          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-          def esc_res(v):
-              # Android 资源字符串里单引号必须转义为 \'，否则 aapt 报
-              # "Apostrophe not preceded by backslash"；& < > 做 XML 实体转义。
-              return (v.replace("&", "&amp;")
-                       .replace("<", "&lt;")
-                       .replace(">", "&gt;")
-                       .replace("'", "\\'"))
-
-          # Android 应用名称取 title；未配置 title 时回落 app_name（解析步骤已做过该回落，
-          # 这里再兜一次底，防止只配了 app_name 的老配置拿到空名）。
-          name = (os.environ.get("TITLE", "") or "").strip() or (os.environ.get("APP_NAME", "") or "").strip()
-          if not name:
-              print("未配置 title/app_name，Android 沿用默认名称")
-              raise SystemExit(0)
-          label = esc_res(name)
-
-          # 1) strings.xml 的应用名资源：app_name（application 的 label）与
-          #    main_activity_title（MainActivity 的 label，才是桌面图标/任务栏真正显示的名字）。
-          #    tauri v2 模板里这两个都等于 productName（= app_name），必须【都】改成 title，
-          #    否则桌面仍显示 app_name。缺哪个就补哪个，避免只改一半。
-          res = pathlib.Path("gen/android/app/src/main/res/values/strings.xml")
-          if res.exists():
-              s = res.read_text(encoding="utf-8")
-              s2 = s
-              for res_name in ("app_name", "main_activity_title"):
-                  # 容忍 name 上可能带额外属性（如 translatable="false"）
-                  pat = rf'(<string\s+name="{res_name}"(?:\s+[\w:-]+="[^"]*")*\s*>)[^<]*(</string>)'
-                  s2, n = re.subn(pat, lambda m: m.group(1) + label + m.group(2), s2)
-                  if n == 0 and "</resources>" in s2:
-                      s2 = s2.replace("</resources>",
-                                      f'    <string name="{res_name}">{label}</string>\n</resources>')
-                      n = 1
-                  print(f"strings.xml: {res_name} → {name}（{'覆盖' if n else '未找到，已跳过'}）")
-              res.write_text(s2, encoding="utf-8")
-          else:
-              print("::warning::未找到 strings.xml")
-
-          # 2) Manifest 若使用内联 label（而非 @string/app_name 引用），直接替换
-          mf = pathlib.Path("gen/android/app/src/main/AndroidManifest.xml")
-          if mf.exists():
-              s = mf.read_text(encoding="utf-8")
-              s2, n = re.subn(r'(android:label=")(?!@string/)[^"]*(")',
-                              lambda m: m.group(1) + label + m.group(2), s)
-              if n:
-                  mf.write_text(s2, encoding="utf-8")
-                  print(f"AndroidManifest: 内联 android:label → {name}")
-          PY
+        # 逻辑在 .github/scripts/apply-android-labels.py —— 两壳共用。显示名取 title
+        #（缺省回落 app_name），一次改 strings.xml 的 app_name / main_activity_title 与
+        # Manifest 内联 android:label；app_name 只负责「安装名」。
+        run: python3 ../.github/scripts/apply-android-labels.py
 
       - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
-        # Tauri 模板的 MainActivity 调用了 enableEdgeToEdge()：WebView 会延伸绘制到
-        # 状态栏/导航栏下方，页面顶部被系统通栏遮挡。这里【保留原文件结构】，只做外科手术式注入：
-        #   1) 补 androidx.core 的 3 个 import（若模板已有则跳过）；
-        #   2) 在 super.onCreate(...) 之后注册 WindowInsets 监听，让内容视图按
-        #      systemBars 实际高度内缩——edge-to-edge 仍生效（应用全屏），但页面内容
-        #      不被系统通栏遮挡。
-        # 采用"只注入、不重写"的方式，避免破坏模板原有的 import / 基类写法，兼容性更好。
-        # gen/android 每次构建现生成，因此每次 init 后都要打一遍补丁。
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
-          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-          root = pathlib.Path("gen/android/app/src/main/java")
-          files = [p for p in root.rglob("MainActivity.*") if p.suffix in (".kt", ".java")]
-          if not files:
-              raise SystemExit("::error::未找到 MainActivity.kt / MainActivity.java")
-          f = files[0]
-          src = f.read_text(encoding="utf-8")
-
-          if "setOnApplyWindowInsetsListener" in src:
-              print("MainActivity 已包含系统栏适配，跳过改写")
-          else:
-              # 1) 补 import（缺失才加，插到最后一条 import 之后；若完全没有 import 则插在 package 之后）
-              needed = [
-                  "import androidx.core.graphics.Insets",
-                  "import androidx.core.view.ViewCompat",
-                  "import androidx.core.view.WindowInsetsCompat",
-              ]
-              for imp in needed:
-                  if imp in src:
-                      continue
-                  imports = list(re.finditer(r"^import .*$", src, re.M))
-                  if imports:
-                      pos = imports[-1].end()
-                  else:
-                      mp = re.search(r"^package .*$", src, re.M)
-                      pos = mp.end() if mp else 0
-                      imp = ("\n\n" + imp) if pos else (imp + "\n")
-                  src = src[:pos] + "\n" + imp + src[pos:]
-
-              # 2) 在 super.onCreate(...) 之后注入 insets 监听（Kotlin/Java 均兼容）
-              if f.suffix == ".kt":
-                  listener = (
-                      "        ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { v, insets ->\n"
-                      "            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())\n"
-                      "            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)\n"
-                      "            insets\n"
-                      "        }\n"
-                  )
-              else:
-                  listener = (
-                      "        ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content),\n"
-                      "                (v, insets) -> {\n"
-                      "                    Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());\n"
-                      "                    v.setPadding(bars.left, bars.top, bars.right, bars.bottom);\n"
-                      "                    return insets;\n"
-                      "                });\n"
-                  )
-
-              pat = re.compile(r"super\.onCreate\s*\([^)]*\)\s*;?")
-              if not pat.search(src):
-                  raise SystemExit("::error::MainActivity 中未找到 super.onCreate 调用，模板可能已变化，请人工确认")
-              src = pat.sub(lambda m: m.group(0) + "\n" + listener, src, count=1)
-
-              f.write_text(src, encoding="utf-8")
-              print(f"已改写 {f}（内容视图按系统栏 insets 内缩，避免顶部通栏遮挡）")
-
-          # 确保 androidx.core 可用（模板的 androidx.activity/appcompat 一般已传递引入；
-          # 兜底：gradle 中既无 androidx.core 也无 appcompat 时补一行依赖）
-          for gname in ("build.gradle.kts", "build.gradle"):
-              g = pathlib.Path("gen/android/app") / gname
-              if not g.exists():
-                  continue
-              t = g.read_text(encoding="utf-8")
-              if ("androidx.core" in t) or ("appcompat" in t):
-                  print(f"{gname} 已含 androidx.core/appcompat 依赖")
-                  break
-              t2, n = re.subn(r"(dependencies\s*\{)",
-                              lambda mm: mm.group(1) + '\n    implementation("androidx.core:core-ktx:1.9.0")',
-                              t, count=1)
-              if n:
-                  g.write_text(t2, encoding="utf-8")
-                  print(f"{gname} 已补充 androidx.core 依赖")
-              break
-          PY
+        # 逻辑在 .github/scripts/patch-android-insets.py —— 两壳共用（两份内联逻辑实测逐字节相同）。
+        # 模板 MainActivity 调用了 enableEdgeToEdge()，WebView 会绘制到系统栏下方；脚本按
+        # systemBars 实际高度给内容视图加内缩：全屏仍生效，但页面不被系统通栏遮挡。
+        run: python3 ../.github/scripts/patch-android-insets.py
 
       - name: 接管系统返回键（不允许退回到内置启动页）
         # 补丁逻辑（含自测）见 .github/scripts/patch-android-back.py：给 MainActivity
@@ -626,58 +435,10 @@ jobs:
           grep -n "usesCleartextTraffic" gen/android/app/src/main/AndroidManifest.xml
 
       - name: 设置 Android 产物文件名（APK 文件名 ← app_name）
-        # 默认 Tauri 模板的 APK 产物名是通用的 app-universal-release-unsigned.apk。
-        # 这里把 gradle 的 archivesBaseName 设为 app_name，让最终签名后的 APK 文件名
-        # 带上应用名（如 MyApp-universal-release-unsigned.apk），下载时一目了然。
-        # 同时去掉 Windows 文件名非法字符，保证产物路径稳定。
-        env:
-          PYTHONUTF8: "1"
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os, re, sys, pathlib
-          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-          name = (os.environ.get("APP_NAME", "") or "").strip()
-          if not name:
-              print("未配置 app_name，APK 沿用默认文件名")
-              raise SystemExit(0)
-          # 去掉文件名非法字符，压缩空白，去首尾空格/句点
-          safe = re.sub(r'[\\/:*?"<>|]+', "_", name)
-          safe = re.sub(r"\s+", " ", safe).strip(" .")
-          if not safe:
-              safe = "Web2App"
-
-          g = pathlib.Path("gen/android/app/build.gradle.kts")
-          if not g.exists():
-              g = pathlib.Path("gen/android/app/build.gradle")
-          if not g.exists():
-              print("::warning::未找到 app/build.gradle(.kts)，跳过 APK 重命名")
-              raise SystemExit(0)
-
-          src = g.read_text(encoding="utf-8")
-
-          # 已在别处设置过 archivesBaseName / archivesName 则跳过
-          if re.search(r'(archivesBaseName|base\s*\.\s*archivesName)', src):
-              print("build.gradle 已设置 archivesBaseName，跳过")
-              raise SystemExit(0)
-
-          # 在 android { ... } 块内注入 base.archivesName（AGP 7.4+ 推荐写法；
-          # 若模板不支持 base 命名空间则回退到 archivesBaseName）。
-          # 找 android { 块的开头。
-          m = re.search(r'(^|\n)(\s*)android\s*\{', src)
-          if not m:
-              # 没有 android 块（不太可能），退而求其次在文件末尾追加
-              src = src.rstrip() + f'\narchivesBaseName = "{safe}"\n'
-          else:
-              indent = m.group(2) + "    "
-              inject = f'\n{indent}base {{ archivesName.set("{safe}") }}\n'
-              pos = m.end()
-              src = src[:pos] + inject + src[pos:]
-
-          g.write_text(src, encoding="utf-8")
-          print(f"APK 产物名 → {safe}（build.gradle 已注入 archivesName）")
-          PY
+        # 逻辑在 .github/scripts/set-android-apk-name.py —— 两壳共用，产物名就此对齐
+        #（此前只有 build-custom.yml 有这一步，release.yml 出的 APK 一直是通用的
+        # app-universal-release-unsigned.apk）。
+        run: python3 ../.github/scripts/set-android-apk-name.py
 
       - name: 开启 gradle 错误栈（便于定位 assemble 失败原因）
         # 把 org.gradle.stacktrace=all 写进 gen/android/gradle.properties，
@@ -696,11 +457,11 @@ jobs:
           echo "--- gradle.properties ---"; cat "$gp"
 
       - name: Build Android APK
-        # --apk 仅产出 APK（便于直接安装测试）；若要上架 Play Store 的 AAB，去掉 --apk 即可。
-        # 注意：tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），
-        # 不是 rustup 的完整三元组 aarch64-linux-android。
-        # release APK 默认【未签名】，直接安装会提示"无证书/无法安装"，需下一步 zipalign+apksigner 签名。
-        run: cargo tauri android build --target aarch64 --apk
+        # --apk 仅产出 APK（便于直接安装测试）；上架 Play Store 的 AAB 去掉 --apk 即可。
+        # tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），不是 rustup 的
+        # 完整三元组 aarch64-linux-android。release APK 默认【未签名】，下一步签名后才能安装。
+        # tee 到日志：失败时随 "Upload Android build log" 上传，便于定位 gradle 根因。
+        run: cargo tauri android build --target aarch64 --apk 2>&1 | tee "$RUNNER_TEMP/android-build.log"
 
       - name: 签名 APK（release 包默认未签名，不签名无法安装）
         # 签名密钥三级策略：
@@ -788,6 +549,7 @@ jobs:
             PROXY_HTTP_VAL="${PROXY_HTTP:-}" PROXY_HTTPS_VAL="${PROXY_HTTPS:-}" \
             PROXY_BYPASS_VAL="${PROXY_BYPASS:-}" \
             DATA_DIR_VAL="${DATA_DIR-data}" TABS_ENABLED_VAL="${TABS_ENABLED:-false}" \
+            MOBILE_BAR_VAL="${MOBILE_BAR:-false}" \
             PUBLIC_KEY_VAL="${PUBLIC_KEY:-}" RESOLVE_SECRET_VAL="${RESOLVE_SECRET:-}" \
             DEBUG_VAL="${DEBUG:-false}" \
             CONTRACT_KEYS="$CONTRACT_KEYS" \
@@ -819,6 +581,7 @@ jobs:
               # 不要 `.strip() or "data"`，那会把用户配的空串吃掉。
               "data_dir": env["DATA_DIR_VAL"],
               "tabs_enabled": env["TABS_ENABLED_VAL"].strip().lower() == "true",
+              "mobile_bar": env["MOBILE_BAR_VAL"].strip().lower() == "true",
               "public_key": env["PUBLIC_KEY_VAL"],
               "resolve_secret": env["RESOLVE_SECRET_VAL"],
               # debug：诊断日志开关（默认关）。与其它布尔一样必须是真 bool。
@@ -891,6 +654,15 @@ jobs:
         with:
           name: android-signing-key
           path: ${{ runner.temp }}/android-signing-key/
+          if-no-files-found: ignore
+
+      - name: Upload Android build log (诊断用)
+        # 与 release.yml 对齐：完整构建日志（含 gradle 错误栈）落盘为 artifact。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-build-log
+          path: ${{ runner.temp }}/android-build.log
           if-no-files-found: ignore
 
       - name: Upload APK

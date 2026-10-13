@@ -798,13 +798,7 @@ fn nchittest(parent: isize, target: isize, client_x: i32, client_y: i32) -> i32 
     unsafe {
         let _ = ClientToScreen(parent, &mut pt);
         let lparam = ((pt.x as u16) as isize) | (((pt.y as u16) as isize) << 16);
-        SendMessageW(
-            target,
-            WM_NCHITTEST,
-            Some(WPARAM(0)),
-            Some(LPARAM(lparam)),
-        )
-        .0 as i32
+        SendMessageW(target, WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(lparam))).0 as i32
     }
 }
 

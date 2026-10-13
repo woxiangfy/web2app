@@ -1,5 +1,8 @@
 # 架构与组织结构审查 — 2026-09-29
 
+> ⚠️ **本文是 2026-09-29 的时点快照**：其中的模块行数、测试计数（144）等都是**当时**的实测值，后续版本演进**不回填**；
+> 只在「结论已失效」处补一行现值。现行状态一律以根 `AGENTS.md`、`webview-app/AGENTS.md`、`electron-app/AGENTS.md` 为准。
+
 审查范围：`webview-app/`（Rust + Tauri 2，`src/` 22 文件 / 10,330 行）、`electron-app/`（TypeScript，17 个 `src/main` 模块 / 6,568 行）、`scripts/pack-local.mjs`、`docs/` 与 CI 脚本。
 原则：职责单一、边界清晰、结构合理、依赖简单、**最小重构**。
 
@@ -91,6 +94,12 @@ warning: function `update_at` is never used
 
 ### 📋 P1-1 `lib.rs` 是「装配中枢 + IPC 命令 + 启动日志」三合一
 
+> ✅ **2026-10-12 现值：已落地（零行为变更）**。四个函数（`hotkey_label` 已先落
+> `settings.rs`）已迁入 `debug_log.rs`，`lib.rs` 只留一次 `debug_log::log_startup(...)`；
+> 新增静态守卫 `startup_log_lives_in_debug_log_and_not_in_lib` 钉死归属并完成反向对照
+> （注入重复定义 → 守卫 FAILED → 还原）。既有 `include_str!` 守卫均不引用这四个函数名，
+> 未触发守卫重排。详见 `docs/changes/2026-10-12.md` 第三轮。
+
 **依据**：`lib.rs` 1,188 行里约 120 行是纯格式化职责 —— `log_startup` / `describe_target` / `describe_proxy` / `describe_tabs` / `hotkey_label`。
 其中 `hotkey_label()` 与 Electron 侧 `hotkeyLabel()` 同名同形，是跨壳契约的一部分，却藏在入口文件里。
 
@@ -117,6 +126,14 @@ warning: function `update_at` is never used
 
 ### 📋 P1-3 crate 根 `#![allow(dead_code)]` 是全局豁免毯
 
+> 🟡 **2026-10-12 现值：Windows 侧已闭环，Android 补盲仍挂起**。摘除 blanket 后
+> `cargo check --all-targets`（Windows）实测暴出 3 个真死代码（`bootstrap.rs` 的
+> `ProbeFailure` / `probe_failure_message` / `probe_ok_message`，仅 `not(windows)`
+> 生产路径使用）⇒ 三项改挂 `#[cfg(any(not(windows), test))]`，复检零告警；blanket 按原
+> 决策保留（Android 目标本机不可验证），但已补「新增代码不得依赖豁免毯」纪律注释。
+> CI 的 `--target aarch64-linux-android` check 作业仍待补。详见
+> `docs/changes/2026-10-12.md` 第三轮。
+
 **依据**：本次实测证明它正在掩盖真实死代码（A-4 的 `update_at`）。它存在有正当理由 —— Android 目标下 `DEVTOOLS_ENABLED` 等部分常量本就不参与编译，摘掉会直接让 `-D warnings` 的 CI 挂掉；而本机**做不了非 Windows 目标**（无 NDK），属于盲区。
 
 **方案**：不改 blanket 本身，改为「**新增 code 一律不得依赖它**」：新增分支 item 用行级 `#[allow(dead_code)]` + 注释说明为何该目标用不到。CI 侧建议补一个 `--target aarch64-linux-android` 的 check 作业把盲区补上。
@@ -124,7 +141,7 @@ warning: function `update_at` is never used
 
 ### 📋 P2-1 配置解析仍存在两份实现
 
-**依据**：`.github/scripts/parse-packaging-config.py`（37,721 字节，自称唯一真源，18 键）与 `scripts/pack-local.mjs`（1,510 行，自述为「前者的**复刻**而非复用」）。这是项目已知并已用 `--selftest` / `--parity` 护栏兜住的技术债。
+**依据**：`.github/scripts/parse-packaging-config.py`（2026-09-29 时点 37,721 字节 / 18 键；**现 42,168 字节 / 785 行 / 19 键**）与 `scripts/pack-local.mjs`（2026-09-29 时点是 1,510 行单文件；**现已拆成入口薄壳 `pack-local.mjs`（241 行）+ `packlib/` 10 个模块（≈1,626 行）**，仍是前者的**复刻**而非复用）。这是项目已知并已用 `--selftest` / `--parity` 护栏兜住的技术债。
 
 **方案**：把字段表抽成一份 JSON Schema，`pack-local.mjs` 读 JSON、Python 侧同样读 JSON + 保留 `str()` 等校验语义，让两侧从「复刻」变成「同源不同实现」。
 **收益**：消除 `为一侧加字段、另一侧同步遗漏` 这一类事故。建议在中大型配置变更窗口做，不要在功能开发中途动。
@@ -155,7 +172,7 @@ warning: function `update_at` is never used
 ## 5. 建议的最小落地顺序
 
 1. ✅ **已完成**：A-1 ~ A-4（本次，144 测试全绿）
-2. P2-2 清 2 个 `.pyc`（一行命令，零风险）
-3. P1-1 `lib.rs` 启动日志迁出（单独提交 + 守卫反向对照）
+2. P2-2 清 2 个 `.pyc`（一行命令，零风险；仍待授权执行）
+3. ✅ **2026-10-12 已完成**：P1-1 `lib.rs` 启动日志迁出（含新归属守卫与反向对照，241 测试全绿）；同日 P1-3 Windows 侧死代码收窄（3 项精确 cfg + blanket 纪律注释），Android CI 补盲仍排期
 4. P1-2 Electron 探针隔离（需先在产物上验证动态 import 可用）
-5. P1-3 / P2-1 需要 Android / 配置窗口等外部条件，排期处理
+5. P1-3 Android 补盲 / P2-1 需要 NDK CI / 配置窗口等外部条件，排期处理

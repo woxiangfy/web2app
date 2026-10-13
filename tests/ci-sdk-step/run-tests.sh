@@ -48,8 +48,11 @@ case_run() {
   : > "$d/fake.log"
   (
     cd "$d" || exit 99
+    # EXTRA_ENV：给脚本追加环境变量前缀（如 ANDROID_SDK_STRICT=1），由调用方在 case_run 前设置。
+    # ⚠️ 必须经 `env` 传：bash 只在**展开前**把字面量 `NAME=value` 认成赋值前缀，
+    #    由变量展开出来的 `NAME=value` 会被当成命令名 ⇒ `NAME=value: command not found`（127）。
     ANDROID_HOME="$d/sdk" RUNNER_TEMP="$d" FAKE_PKGS="$stable" FAKE_PKGS_CANARY="$canary" \
-      FAKE_LOG="$d/fake.log" PATH="$d/bin:$PATH" bash step.sh > out.log 2>&1
+      FAKE_LOG="$d/fake.log" PATH="$d/bin:$PATH" env ${EXTRA_ENV:-} bash step.sh > out.log 2>&1
   )
   echo "$?" > "$d/rc"
   D="$d"
@@ -83,6 +86,12 @@ chk_has "打了回落 warning" "$(out)" "::warning::仓库没有 android-39，�
 chk_has "安装了 platforms;android-37.0" "$(log)" "platforms;android-37.0"
 chk "gradle compileSdk 被改写为 37" "$(count "$D/gen/android/app/build.gradle.kts" 'compileSdk = 37$')" "1"
 chk "gradle targetSdk 被改写为 37" "$(count "$D/gen/android/app/build.gradle.kts" 'targetSdk = 37$')" "1"
+
+echo "== 用例 3b：ANDROID_SDK_STRICT=1 时，同样的「模板要 39、仓库最高 37」应硬失败而不是降级 =="
+EXTRA_ENV="ANDROID_SDK_STRICT=1"; case_run c3b-strict 39 "$STABLE" "$CANARY"; EXTRA_ENV=""
+chk "严格模式下退出码为 1（拒绝降级）" "$(cat "$D/rc")" "1"
+chk_has "给出 ::error:: 说明拒绝降级" "$(out)" "::error::ANDROID_SDK_STRICT=1"
+chk "严格模式下没有真的去装降级平台" "$(count "$D/fake.log" 'platforms;android-37')" "0"
 
 echo "== 用例 4：没有 gen/android gradle（解析不出 compileSdk）→ 默认 36"
 case_run c4-nogradle "" "$STABLE" "$CANARY"

@@ -5,7 +5,7 @@
 >
 > 仓库级规则、目录地图与文档索引见根目录 `AGENTS.md`。Windows 免安装绿色版由另一个壳
 > `electron-app/`（Electron + TS）交付，两者共用同一份注入脚本与 `config.json` 契约 ——
-> 改动**单一真源**（`src/{titlebar.js,loading.js,shell.html,splash.html}`、`src/{proxy.rs,resolve.rs}`、
+> 改动**单一真源**（`src/{titlebar.js,loading.js,tab_title.js,dnd_polyfill.js,shell.html,splash.html,floaticon.html}`、`src/{proxy.rs,resolve.rs}`、
 > `dist/settings.html`）后必须双壳同步验证，详见根 `AGENTS.md`「3.4 其它全局约定」。
 
 Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统托盘、用全局快捷键一键显隐；
@@ -25,18 +25,19 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
 | 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效；2026-09-27 起多页签的宿主与 tab 窗口同样挂载，避免整组页签绕过代理） | Windows |
 | 新窗口拦截 | `target="_blank"` / `window.open()` 强制在当前窗口打开 | Windows |
-| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。新 tab 落点：与入口同源（含上游真实主机）的链接映射到入口地址的对应路径，跨域外链**直接打开目标地址**（与 Electron 壳一致，v1.52）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；标题回传与 token 注入**只在主框架生效**（v1.55：WebView2 初始化脚本会注入所有 iframe，子框架（如 bilibili 页内广告 frame，其标题为 "Leader Iframe" 等）曾顶掉标签栏真实标题；契约测试 `tab_title_script_runs_in_top_frame_only` 钉住）；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`）。**顶部标签栏与单窗口标题栏为同一套配色/按钮样式**（v1.54：`shell.html` 复用 `titlebar.js` 的浅/深底色、下沿分隔线、按钮盒模型与 hover 色；静态契约测试 `tab_bar_palette_matches_titlebar` 钉住），且 `shell.html` 是双壳共用的单一真源，Tauri / Electron 表现一致 | Windows |
+| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；**首个 tab（入口 app_url）是「首页」：固定在第一位、不允许关闭，名字前带主页图标**（判定单一真源 `tabs.rs::is_home_index` ∥ Electron `tab-order.ts::isPinnedHome`，两者必须同答案；`get_tabs` / `listForIpc` 下发四元组 `[label,title,active,home]`，`shell.html` 据此画图标 / 不画 ×；守卫 `contract_tests::tab_home_marker_contract` + 探针 P1h/P7h。见 `docs/changes/2026-10-13.md`）；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。新 tab 落点：与入口同源（含上游真实主机）的链接映射到入口地址的对应路径，跨域外链**直接打开目标地址**（与 Electron 壳一致，v1.52）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；标题回传与 token 注入**只在主框架生效**（v1.55：WebView2 初始化脚本会注入所有 iframe，子框架（如 bilibili 页内广告 frame，其标题为 "Leader Iframe" 等）曾顶掉标签栏真实标题；契约测试 `tab_title_script_runs_in_top_frame_only` 钉住）；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`）。**顶部标签栏与单窗口标题栏为同一套配色/按钮样式**（v1.54：`shell.html` 复用 `titlebar.js` 的浅/深底色、下沿分隔线、按钮盒模型与 hover 色；静态契约测试 `tab_bar_palette_matches_titlebar` 钉住），且 `shell.html` 是双壳共用的单一真源，Tauri / Electron 表现一致 | Windows |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定（两个**驻留理由**并列，任一成立即隐藏、不退出）：①启用托盘且开启“最小化到托盘”→ 隐藏到托盘；②启用桌面悬浮图标（v1.75）→ 隐藏到球（点球即唤回）。两者都不成立则退出应用。⚠️ 理由②不可省：少了它，只启用悬浮球时关窗走 `else` 分支 ⇒ 主窗被**真销毁**、球窗却还活着 ⇒ ①球窗挡住「所有窗口关闭 ⇒ 退出」，进程留成既无界面也退不掉的僵尸；②点球时 `toggle_window` 的 `get_webview_window("main")` 返回 `None`，一个动作都不做 ⇒「点了悬浮图标不回窗口」（2026-10-11 真机实测） | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
 | 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**前进/后退带落点守卫（v1.66）**：经 Chromium Navigation API 判定相邻条目，没有真实历史或落点是内置 splash 启动页时按钮置灰、不触发导航。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
+| 移动端底栏 | 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**。后退前进的**落点守卫与桌面端标题栏同一条规则**（没有真实上/下一条、或落点是内置 splash 时不动作并置灰），与 Android 系统返回键的判定同源。**「列表」按钮只在当前构建真的有页签可切时才渲染**（移动端目前无多页签 ⇒ 只画前三个按钮，绝不出现点了没反应的死按钮；判定单一真源 `mobilebar.rs::tabs_available`，将来移动端有了页签只需放宽它的 cfg，前端一行不用改）。底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移，否则页面页脚会被底栏盖住。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径 | Android |
 | Android 返回键 | **系统返回键不允许回到内置 splash 启动页（v1.66）**：CI 在 `tauri android init` 后经 `.github/scripts/patch-android-back.py` 给 MainActivity 注入回调，用 `WebView.copyBackForwardList()` 判定上一条历史 —— 是真实网页才 `goBack()`，落点内置或无历史时走 `finish()` 回桌面 | Android |
 | 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏；目标页加载失败时加载层转失败卡（含「重试」）。**Android 导航后另发一次 Rust 侧可达性探测**（v1.60），把 DNS/连接/超时/TLS 的具体原因提前显示在失败卡上；**v1.61 起失败卡自带「现场诊断」**（当前地址 / readyState / HTTP 状态 / 资源数 / WebView UA / 页面脚本错误），截图即可区分「没离开启动页」与「外链没渲染」，无需 adb；**v1.62 修正启动页的加载层语义与重试落点**：①模式标记改由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入（`lib.rs::build_main_window`，此前只有 `tabs.rs` 有）——启动页不再被当成目标页跑，正常偏慢的启动不会被 overlay 的 15s 空白硬上限误报成失败；②启动页判定加改写后的 hostname（`splash.localhost`），重试改用**相对路径** `/retry`（此前 `location.protocol === 'splash:'` 在 wry 把协议改写成 `http://splash.localhost/` 后恒不成立，重试退化为只刷新 `/` 的死循环）；**v1.64 修启动期「发得太早」**：Android 上壳侧操作走 wry main-pipe，而 `LoadUrl` / `Eval` 在 webview 未就绪时**静默丢弃**，且初始 splash 导航是 `post{}` 异步、后续 `navigate` 是同步 ⇒ 直连配置下导航先发、随后**被那条 post 出去的 splash 加载覆盖**，同期进度 `eval` 又落在 document-start 之前被短路（真机表象：地址仍是 `splash.localhost` **且**零进度行，同一机制）；改为非 Windows 启动期**先等首个文档加载完成**（`bootstrap::BootReady`，就绪信号来自建窗时注册的 `on_page_load`）再解析 / 推送 / 导航；**v1.65 再加「落点校验 + 有限重发」**：`navigate()` 恒返回 `Ok(())`、返回值不能证明导航生效，故导航后隔 500ms 读一次真实地址（`is_splash_url` 同时认 `splash://` 与改写后的 `http://splash.localhost/`），仍停在启动页就重发（最多 2 次）—— v1.64 是预防、v1.65 是检验与自愈 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 登录密码保存 | 网页登录表单提交后弹出「保存密码？」气泡，保存后下次访问自动填充（v1.59 起显式开启 WebView2 `IsPasswordAutosaveEnabled`——该开关默认 **false**，与 Electron 壳的 Chromium 默认行为对齐；老运行时不支持 `ICoreWebView2Settings4` 时静默跳过，不影响其它钩子）；已保存密码随设置页「清除全部浏览数据」一并清除 | Windows |
 | 窗口几何记忆 | 记住上次窗口位置 / 尺寸（物理像素），几何失效时自动最大化 | Windows |
-| 桌面悬浮图标（悬浮球） | 设置开关 `float_enabled`（v1.67 引入、v1.69 纠正形态、v1.70 修复交互、v1.71 真机闭环）：一个 56×56 **透明无边框置顶小球**（不占任务栏），加载内置本地页 `floaticon://localhost/`（`src/floaticon.html`，**不加载任何网页**；球内图标即软件自身 `icons/icon.png`，经同协议 `/icon.png` 编译期内嵌）；**单击球 = 切换原来的主窗口显隐**（v1.71 起 `tray::toggle_window`：可见非最小化→隐藏并同步 tab 可见性，否则显示 / 取消最小化 / 聚焦；此前只「显示」）；球可拖动（v1.70 起页面上报**屏幕绝对坐标**、pointerdown 发 `down` 存按下点，8 个事件；拖动中软钳制至少留 16 逻辑像素、松手自由态钳回显示器）、**右键 = 关闭悬浮图标功能并唤回主窗口**（v1.76：`float_enabled` 置 false 并落盘 + 销毁球窗 + 显示主窗 —— 只把球藏起来会留下「进程还在跑、桌面上却再也唤不出窗口」的死局）；拖到屏幕左 / 右缘自动**半隐藏吸附**（只露半球 28 逻辑像素；v1.70 起悬停展开 / 离开延迟 300ms 缩回 + 真实光标位置校验，防抖）；v1.71 起用 `SetWindowRgn`+`CreateEllipticRgn` 把可视 / 命中裁成 56 逻辑「活柱」内圆形（WebView2 强制宿主最小宽约 131 逻辑，区域外系统级穿透；`Resized`/DPI 变化幂等重裁）；几何与吸附边持久化在 `settings.json` 的 `float_window` 段（展开态物理像素）；托盘菜单「悬浮图标」可显隐切换。⚠️ 建窗必须显式 `.data_directory(config::data_dir(app))`（v1.71 真机根因：省略时 wry 回落默认 UDF，受控终端不可写致球窗静默建不出，有契约守卫）；**v1.72**：单击加 **250ms 双击去抖**（`floaticon.html` 的 `CLICK_DEBOUNCE_MS`，窗口期内的第二次点击丢弃 —— 系统双击会在 ~100ms 内送来两次 `pointerup`，旧实现两次都发 `click` ⇒ toggle 相互抵消、主窗「闪现」），Tauri 侧交互链路另有真机探针 `--float-probe`（27 项断言，见「测试」章）；**v1.73：球不挂原生提示**（原 `title` 改 `role="button"` + `aria-label`）—— 球窗 always-on-top，原生提示条（独立非置顶窗口）只会被画在球窗**之后**、从透明环带漏出一块浅色残片（真机现象「图标背景有异样图形」），守卫 `float_ball_has_no_native_tooltip`；**v1.77：球窗「真不进任务栏」** —— `.skip_taskbar(true)` **不够**（tao 的 `ON_TASKBAR` 按「窗口无父」置位 ⇒ 创建时写死 `WS_EX_APPWINDOW`，`DeleteTab` 又在窗口还没显示时调用 ⇒ 球实测是**带着任务栏按钮**被显示出来的，`ex=0x40118`），任务栏按钮的原生提示条 / 任务视图浮层被 always-on-top 球窗压到身后、只从透明环带漏出残片（真机现象「图标背景异样」，仅 Tauri 侧 —— Electron 的 `skipTaskbar` 是真移除）⇒ 修法：显示球窗**只能**经 `show_ball()`（`show → unminimize → apply_ball_window_styles → delete_taskbar_tab`，顺序硬要求 —— tao `apply_diff` 在显示路径用缓存标志**整体重写** `GWL_EXSTYLE`，写在 show 之前等于没改），置 `WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`、**按位清** `WS_EX_APPWINDOW`，再 `ITaskbarList::DeleteTab` 回收已建出的按钮，球窗 `.title("")`；读回实测 `0x40118` → `0x8000198`；**v1.77b：球必须铺满活柱**（球径 `46px → **56px**` = `ICON_SIZE_LOGICAL`）—— 窗口区域是「内接于活柱的圆」（现场只读取证 `GetRgnBox=(0,0)..(55,56)`、`PtInRegion` 网格两端递减），球比它小 ⇒ 中间那圈透明环带把窗口后面的东西透出来（Tauri/WebView2 非真透明 ⇒ 浅色残片；Electron 真透明 ⇒ 无感），这是「图标背景异样」的第三个源头（前两个：v1.73 球元素 `title`、v1.77 任务栏按钮）；连带 hover / grabbing 的 `scale()` 改 `filter: brightness()`、collapsed 的 `opacity` 改 `filter: brightness(.92)`、图标 `30 → 36px`，守卫 `float_page_ball_fills_the_live_pillar`，守卫 ⑥b / ⑥c | Windows |
+| 桌面悬浮图标（悬浮球） | 设置开关 `float_enabled`（v1.67 引入、v1.69 纠正形态、v1.70 修复交互、v1.71 真机闭环）：一个 56×56 **透明无边框置顶小球**（不占任务栏），加载内置本地页 `floaticon://localhost/`（`src/floaticon.html`，**不加载任何网页**；球内图标即软件自身 `icons/icon.png`，经同协议 `/icon.png` 编译期内嵌）；**单击球 = 切换原来的主窗口显隐**（v1.71 起 `tray::toggle_window`：可见非最小化→隐藏并同步 tab 可见性，否则显示 / 取消最小化 / 聚焦；此前只「显示」）；球可拖动（v1.70 起页面上报**屏幕绝对坐标**、pointerdown 发 `down` 存按下点，8 个事件；拖动中软钳制至少留 16 逻辑像素、松手自由态钳回显示器）、**右键 = 关闭悬浮图标功能并唤回主窗口**（v1.76：`float_enabled` 置 false 并落盘 + 销毁球窗 + 显示主窗 —— 只把球藏起来会留下「进程还在跑、桌面上却再也唤不出窗口」的死局）；拖到屏幕左 / 右缘自动**半隐藏吸附**（只露半球 28 逻辑像素；v1.70 起悬停展开 / 离开延迟 300ms 缩回 + 真实光标位置校验，防抖）；v1.71 起曾用 `SetWindowRgn`+`CreateEllipticRgn` 把可视 / 命中裁成 56 逻辑「活柱」内圆形（WebView2 强制宿主最小宽约 131 逻辑，区域外系统级穿透）—— ⚠️ **v1.80 已把这套区域 API 全部删除**：该 1bit 区域会切过 CSS 圆边的抗锯齿、且区域圆与球之间会留出透明环带（真机「背景异形」的两个源头），改为**真逐像素 alpha + `WM_NCHITTEST` 子类化**（见本行末尾 v1.78–v1.80）；几何与吸附边持久化在 `settings.json` 的 `float_window` 段（展开态物理像素）；托盘菜单「悬浮图标」可显隐切换。⚠️ 建窗必须显式 `.data_directory(config::data_dir(app))`（v1.71 真机根因：省略时 wry 回落默认 UDF，受控终端不可写致球窗静默建不出，有契约守卫）；**v1.72**：单击加 **250ms 双击去抖**（`floaticon.html` 的 `CLICK_DEBOUNCE_MS`，窗口期内的第二次点击丢弃 —— 系统双击会在 ~100ms 内送来两次 `pointerup`，旧实现两次都发 `click` ⇒ toggle 相互抵消、主窗「闪现」），Tauri 侧交互链路另有真机探针 `--float-probe`（27 项断言，见「测试」章）；**v1.73：球不挂原生提示**（原 `title` 改 `role="button"` + `aria-label`）—— 球窗 always-on-top，原生提示条（独立非置顶窗口）只会被画在球窗**之后**、从透明环带漏出一块浅色残片（真机现象「图标背景有异样图形」），守卫 `float_ball_has_no_native_tooltip`；**v1.77：球窗「真不进任务栏」** —— `.skip_taskbar(true)` **不够**（tao 的 `ON_TASKBAR` 按「窗口无父」置位 ⇒ 创建时写死 `WS_EX_APPWINDOW`，`DeleteTab` 又在窗口还没显示时调用 ⇒ 球实测是**带着任务栏按钮**被显示出来的，`ex=0x40118`），任务栏按钮的原生提示条 / 任务视图浮层被 always-on-top 球窗压到身后、只从透明环带漏出残片（真机现象「图标背景异样」，仅 Tauri 侧 —— Electron 的 `skipTaskbar` 是真移除）⇒ 修法：显示球窗**只能**经 `show_ball()`（`show → unminimize → apply_ball_window_styles → delete_taskbar_tab`，顺序硬要求 —— tao `apply_diff` 在显示路径用缓存标志**整体重写** `GWL_EXSTYLE`，写在 show 之前等于没改），置 `WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`、**按位清** `WS_EX_APPWINDOW`，再 `ITaskbarList::DeleteTab` 回收已建出的按钮，球窗 `.title("")`；读回实测 `0x40118` → `0x8000198`；**v1.77b：球必须铺满活柱**（球径 `46px → **56px**` = `ICON_SIZE_LOGICAL`）—— 窗口区域是「内接于活柱的圆」（现场只读取证 `GetRgnBox=(0,0)..(55,56)`、`PtInRegion` 网格两端递减），球比它小 ⇒ 中间那圈透明环带把窗口后面的东西透出来（Tauri/WebView2 非真透明 ⇒ 浅色残片；Electron 真透明 ⇒ 无感），这是「图标背景异样」的第三个源头（前两个：v1.73 球元素 `title`、v1.77 任务栏按钮）；连带 hover / grabbing 的 `scale()` 改 `filter: brightness()`、collapsed 的 `opacity` 改 `filter: brightness(.92)`、图标 `30 → 36px`，守卫 `float_page_ball_fills_the_live_pillar`，守卫 ⑥b / ⑥c；**v1.78–v1.80：给球窗换「透明地基」**（详见 `docs/changes/2026-10-12.md`）—— v1.78 把区域外扩 4px 仍漏浅色异形、v1.79 回退外扩并让页面自绘不透明黑底仍留锯齿：三案都困在「wry 0.55 + tao 0.35 的透明链路会把 border-radius 抗锯齿这类**半透明像素压平到白底**」这条旧链路里，几何与底色都救不了。**v1.80 弃掉绕路**：升级 **tauri 2.12.1 / wry 0.57 / tao 0.37**（`no_redirection_bitmap` 自 tauri-runtime-wry 2.12 起才透传），球窗 builder 同开 `.transparent(true).no_redirection_bitmap(true)` ⇒ `WS_EX_NOREDIRECTIONBITMAP` + DirectComposition 拿到**真逐像素 alpha**；**删除全部 `SetWindowRgn` / `CreateEllipticRgn`**，新增 `install_circle_hit_test`（`EnumChildWindows` 递归枚举父窗 + 全部 WebView2 子窗 → `SetWindowLongPtrW(GWLP_WNDPROC)` 幂等子类化，进程只拦 `WM_NCHITTEST`：圆内转 `HTCLIENT`、圆外回 `HTTRANSPARENT`，圆心/半径存静态原子量、未初始化 fail-open）⇒ **视觉与命中彻底分离**，与 Electron（`win.setShape(circleShapeRects(…))`）同构；页面恢复真透明、初始化脚本不再注入壳标记。⚠️ v1.80 的真机目视（浅/深桌面软边、四角穿透、拖动/悬停/单击/右键四类交互）**仍待复验** | Windows |
 | 拖拽修复 | WebView2 拖拽 bug 的 polyfill（用鼠标事件合成完整 HTML5 DnD 序列） | Windows |
 
 ---
@@ -44,7 +45,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 ## 支持平台
 
 - **Windows**：原生 WebView2 渲染，支持托盘、全局快捷键、F12 调试、外部代理。
-- **Android**：复用同一份 Rust 代码，鉴权走纯 Rust 本地反向代理（零平台依赖）；无系统托盘/快捷键（移动端由系统任务管理替代）。`tauri.conf.json` 的 `bundle.android` 目前仅设 `minSdkVersion: 24`（当前 Tauri 2 版本尚未支持 `package` / `targetSdkVersion` / `useKotlin` / `permissions` 字段，**应用包名只能取自 `identifier`**）；更细的 SDK 版本与权限在 `cargo tauri android init` 生成 `gen/android` 后于原生工程中调整。
+- **Android**：复用同一份 Rust 代码，鉴权走纯 Rust 本地反向代理（零平台依赖）；无系统托盘/快捷键（移动端由系统任务管理替代）。`tauri.conf.json` 的 `bundle.android` 目前仅设 `minSdkVersion: 24`（实测当前依赖 `tauri-utils 2.10.1` 的 `AndroidConfig` **只认** `minSdkVersion` / `versionCode` / `autoIncrementVersionCode` / `debugApplicationIdSuffix` 四个键，且 `deny_unknown_fields` ⇒ 写 `package` / `targetSdkVersion` / `useKotlin` / `permissions` 一律在**桌面构建阶段也报错**；**应用包名只能取自 `identifier`**）；更细的 SDK 版本与权限在 `cargo tauri android init` 生成 `gen/android` 后于原生工程中调整。
   > ⚠️ 打包工作流会在 `android init` **之前**把 `identifier` 改写成 **`com.web2app.<由 app_name 清洗得到>`**，
   > 于是不同 `app_name` 的 APK 包名不同、可以在同一台手机共存（否则全都叫 `com.example.web2app` 会互相覆盖安装）。
   > 清洗规则与「上架要换自己域名前缀」的说明见 `docs/packaging-config.md` §4.2。
@@ -81,7 +82,7 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
    - 保存后立即生效；不能与「打开设置(Shift+F1)」冲突。
 2. **是否启用托盘图标**：关闭后启动不创建托盘图标（关闭窗口即退出）。
 3. **关闭窗口后最小化到托盘**：勾选且同时启用托盘时，点关闭按钮 = 最小化到托盘；**只启用悬浮图标（v1.75）时点关闭 = 隐藏（点球唤回）**；两者都没有才「关闭窗口即退出应用」。
-4. **启用桌面悬浮图标（悬浮球）**（v1.67 引入，v1.69 纠正为悬浮球，v1.70 修复拖动 / 悬停 / 边界交互，v1.71 单击改 toggle + 活柱裁剪 + 数据目录根因修复）：勾选后立即创建小球，取消立即销毁；另有「立即显示悬浮图标」按钮（命令 `show_float_window`，跨平台注册、非 Windows 体内空操作）。**单击球切换原来的主窗口显隐**（可见则隐藏、否则显示聚焦）；球可拖动（屏幕绝对坐标协议，拖出屏会被钳回）、拖到屏幕左 / 右缘半隐藏吸附（悬停展开、移开延迟 300ms 缩回）、**右键 = 关闭悬浮图标功能 + 唤回主窗口**（v1.76：写 `float_enabled=false` 落盘 + 销毁球窗 + 显示主窗，且同步已打开设置页的复选框）；几何 / 吸附边写入 `settings.json` 的 `float_window` 段。详见功能特性表与 `src/floatwin.rs` / `src/floaticon.html`（协议注册见 `lib.rs`，能力见 `capabilities/float-icon.json`）。**v1.72**：单击带 **250ms 双击去抖**（`CLICK_DEBOUNCE_MS`，窗口期内第二次点击丢弃，防主窗「闪现」）；整条交互链路已由**真机合成指针 harness** `--float-probe` 取证（27 项断言，见「测试」章）。**v1.77**：球窗此前其实**带着任务栏按钮**（`.skip_taskbar(true)` 挡不住，实测 `GWL_EXSTYLE=0x40118` 含 `WS_EX_APPWINDOW`）⇒ 任务栏按钮的原生提示条浮层被置顶球窗压在身后、从透明环带漏出残片（真机「图标背景异样」）⇒ 显示球窗一律经 `show_ball()`（顺序 `show → unminimize → 补样式 → DeleteTab` 是硬要求，见 `src/floatwin.rs` 模块头），读回实测 `0x8000198`。 **v1.77b**：球径必须 = 活柱边长（`46px → 56px`）—— 窗口圆形区域与球之间那圈环带会透出窗口后面的东西（Tauri 侧成浅色残片）；悬停 / 拖动反馈从 `transform: scale()` 改 `filter: brightness()`，半隐藏从 `opacity` 改 `filter: brightness(.92)`（`opacity` 让整颗球半透明 = 自毁这层保护）；另补上 `ITaskbarList::HrInit()`（v1.77 漏了它 ⇒ `DeleteTab` 静默无效）。
+4. **启用桌面悬浮图标（悬浮球）**（v1.67 引入，v1.69 纠正为悬浮球，v1.70 修复拖动 / 悬停 / 边界交互，v1.71 单击改 toggle + 活柱裁剪 + 数据目录根因修复；v1.80 起「活柱裁剪」改为真逐像素 alpha + `WM_NCHITTEST` 圆形命中）：勾选后立即创建小球，取消立即销毁；另有「立即显示悬浮图标」按钮（命令 `show_float_window`，跨平台注册、非 Windows 体内空操作）。**单击球切换原来的主窗口显隐**（可见则隐藏、否则显示聚焦）；球可拖动（屏幕绝对坐标协议，拖出屏会被钳回）、拖到屏幕左 / 右缘半隐藏吸附（悬停展开、移开延迟 300ms 缩回）、**右键 = 关闭悬浮图标功能 + 唤回主窗口**（v1.76：写 `float_enabled=false` 落盘 + 销毁球窗 + 显示主窗，且同步已打开设置页的复选框）；几何 / 吸附边写入 `settings.json` 的 `float_window` 段。详见功能特性表与 `src/floatwin.rs` / `src/floaticon.html`（协议注册见 `lib.rs`，能力见 `capabilities/float-icon.json`）。**v1.72**：单击带 **250ms 双击去抖**（`CLICK_DEBOUNCE_MS`，窗口期内第二次点击丢弃，防主窗「闪现」）；整条交互链路已由**真机合成指针 harness** `--float-probe` 取证（27 项断言，见「测试」章）。**v1.77**：球窗此前其实**带着任务栏按钮**（`.skip_taskbar(true)` 挡不住，实测 `GWL_EXSTYLE=0x40118` 含 `WS_EX_APPWINDOW`）⇒ 任务栏按钮的原生提示条浮层被置顶球窗压在身后、从透明环带漏出残片（真机「图标背景异样」）⇒ 显示球窗一律经 `show_ball()`（顺序 `show → unminimize → 补样式 → DeleteTab` 是硬要求，见 `src/floatwin.rs` 模块头），读回实测 `0x8000198`。 **v1.77b**：球径必须 = 活柱边长（`46px → 56px`）—— 窗口圆形区域与球之间那圈环带会透出窗口后面的东西（Tauri 侧成浅色残片）；悬停 / 拖动反馈从 `transform: scale()` 改 `filter: brightness()`，半隐藏从 `opacity` 改 `filter: brightness(.92)`（`opacity` 让整颗球半透明 = 自毁这层保护）；另补上 `ITaskbarList::HrInit()`（v1.77 漏了它 ⇒ `DeleteTab` 静默无效）。**v1.78–v1.80**：透明链路换地基（见功能特性表同项）—— v1.80 起球窗走**真逐像素 alpha**（`.no_redirection_bitmap(true)`），`SetWindowRgn` / `CreateEllipticRgn` **已全部删除**，圆形命中改由 `WM_NCHITTEST` 子类化（`install_circle_hit_test`）接管、视觉不再经过窗口区域；因此「球 == 活柱 == 命中圆」这条约束仍成立，但**不再是靠窗口区域裁出来的**，`Resized` / `ScaleFactorChanged` / `on_page_load` 触发的是 `update_hit_circle` 而非旧 `apply_live_region`。
 5. **清除缓存与 Cookie**：一个按钮，**只有全清**（刻意不做分项选择）。一次清空本应用的全部本地数据
    —— 缓存、Cookie（含登录状态）、Local Storage / IndexedDB、Service Worker 等，随后重新加载内容页，
    需要重新登录。⚠️ 后端命令 `clear_web_data` **仅 Windows 桌面版有实现**，其它平台返回明确的
@@ -157,13 +158,13 @@ webview-app/
 ├── src/
 │   ├── main.rs             # 桌面入口（薄壳，装配在 lib.rs）
 │   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
-│   ├── contract_tests.rs   # 静态契约测试（IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 加载层模式标记；仅 cargo test 编译）
+│   ├── contract_tests.rs   # 静态契约测试（IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 加载层模式标记 / 启动日志归属；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
 │   ├── bootstrap.rs        # 后台解析真实地址 → 就绪后导航
 │   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
 │   ├── resolve.rs          # DNS TXT 查询 + 验签解密
 │   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
-│   ├── debug_log.rs        # 诊断日志（dlog! 宏 / 落盘 / 1 MiB 轮转 / mask_url 去凭据）
+│   ├── debug_log.rs        # 诊断日志（dlog! 宏 / 落盘 / 1 MiB 轮转 / mask_url 去凭据 / log_startup 启动信息格式化）
 │   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写；落点 = 数据目录）
 │   ├── settings.rs         # 设置结构、快捷键转换、设置窗口/命令（持久化委托 store）
 │   ├── tabs.rs             # 多页签（宿主窗口 + shell 标签栏 + tab 窗口）
@@ -172,9 +173,13 @@ webview-app/
 │   ├── webview_hooks.rs    # WebView2 原生事件（鉴权 / 新窗口 / 右键 / 下载）
 │   ├── web_data.rs         # 清除浏览数据（缓存 / Cookie 全清，WebView2 ICoreWebView2Profile2）
 │   ├── save_dialog.rs      # 下载「另存为」原生对话框（IFileSaveDialog）
+│   ├── floatwin.rs         # 桌面悬浮球窗口（建窗 / 显示入口 show_ball / 拖动吸附 / 圆形命中）
+│   ├── floatprobe.rs       # 悬浮球真机合成指针 harness（--float-probe，仅 Windows）
 │   ├── splash.html         # 启动页（内联 titlebar.js，解决首文档无初始化脚本）
 │   ├── shell.html          # 多页签外壳（标签栏）
-│   ├── titlebar.js         # 自绘标题栏注入脚本
+│   ├── floaticon.html      # 悬浮球页面（双壳单一真源，透明 + 内置图标）
+│   ├── titlebar.js         # 自绘标题栏注入脚本（Windows）
+│   ├── mobilebar.js        # 移动端底部导航栏注入脚本（仅移动端；mobile_bar=true 时注入）
 │   ├── loading.js          # 加载层注入脚本
 │   ├── tab_title.js        # 多页签真实标题回传
 │   └── dnd_polyfill.js     # WebView2 拖拽 polyfill
@@ -187,9 +192,9 @@ webview-app/
 │   └── settings.html       # 设置界面 UI 源码（编译期被 include_str! 内嵌，经 settings:// 自定义协议加载）
 ├── tools/                  # 服务端辅助脚本（encrypt_url.py / loading_test.js）
 ├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs / probe_clear_data.rs）
-├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗；tabs-remote.json=多页签 tab-* 远程页，仅授事件发送）
+├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗；tabs-remote.json=多页签 tab-* 远程页，仅授事件发送；float-icon.json=悬浮球窗，仅授 event emit）
 ├── icons/                  # 应用图标（icon.ico / icon.png 等）
-├── txttest_keys/           # 验签测试密钥对（见 docs/txttest-verify-materials.md）
+├── txttest_keys/           # 验签测试密钥对（⚠️ **当前工作区已不存在**：私钥被 .gitignore 忽略、目录整体已移除，见 docs/txttest-verify-materials.md 的换钥说明）
 └── （CI 与打包工作流已上移至仓库根 `.github/workflows/`，见下文「自动构建」）
 ```
 
@@ -302,10 +307,13 @@ Get-Content .\data\logs\startup.log -Tail 40
   - Visual Studio 生成工具（含「使用 C++ 的桌面开发」工作负载）
 - **Android**
   - JDK 17
-  - Android SDK + NDK（r27 及以上）。**平台与 build-tools 版本不要写死**：Tauri 模板随 tauri-cli 前移
-    （Tauri 2.12 起 `compileSdk = 37`，且不再指定 `buildToolsVersion`），CI 由
-    `.github/scripts/install-android-sdk.sh` 读模板实际值、再从仓库里真实存在的包名中挑
-    （注意 Android 16 起平台包带次版本号：`platforms;android-37.0` 而非 `android-37`，且 37.x 只在 canary 通道）
+  - Android SDK + NDK。**平台、build-tools 与 NDK 版本都不要写死**：
+    Tauri 模板随 tauri-cli 前移（Tauri 2.12 起 `compileSdk = 37`，且不再指定 `buildToolsVersion`），
+    CI 由 `.github/scripts/install-android-sdk.sh` 读模板实际值、再从仓库里真实存在的包名中挑
+    （注意 Android 16 起平台包带次版本号：`platforms;android-37.0` 而非 `android-37`，且 37.x 只在 canary 通道）；
+    ⚠️ 模板要的平台在仓库里**不存在**时，该脚本会回落最高可用平台并改写 gradle（尽力而为，会打
+    `::warning::`）—— 要让它硬失败，调用点设 `ANDROID_SDK_STRICT=1`。
+    NDK 版本由 `.github/scripts/install-android-ndk.sh` **单一真源**（三个 workflow 共用，不再各写死一遍）。
   - 已执行过 `cargo tauri android init`（见下）
 
 ### Windows
@@ -328,16 +336,26 @@ cargo tauri build
 # 1) 安装 Tauri CLI
 cargo install tauri-cli --version "^2"
 
-# 2) 初始化安卓工程（仅首次；会生成 gen/android 与 Kotlin 胶水，请提交到仓库）
+# 2) 初始化安卓工程（仅首次；生成 gen/android 与 Kotlin 胶水）
+#    ⚠️ gen/ 已被 .gitignore 忽略，**不要提交**（CI 每次 `cargo tauri android init --ci` 现生成）
 cargo tauri android init
 
 # 3) 构建 APK（调试/直接安装）
-cargo tauri android build --target aarch64-linux-android --apk
+#    ⚠️ tauri-cli 的 --target 只接受**架构名**（aarch64/armv7/i686/x86_64），
+#       不是 rustup 的完整三元组 aarch64-linux-android —— 写成后者会直接报错。
+cargo tauri android build --target aarch64 --apk
 # 若需上架 Play Store 的 AAB，去掉 --apk 即可
 ```
 
 > 本地首次构建前需跑一次 `cargo tauri android init`。该目录已被 `.gitignore` 忽略，**无需提交**；
 > `release.yml` 的 Android 任务会在 CI 里用 `cargo tauri android init --ci` 现生成。
+>
+> 安卓工程（`gen/android`）的所有改写都由 `.github/scripts/` 下的**共享脚本**完成，两个打包
+> workflow 只调用它们，不各自内联（避免漂移）：`prepare-android-conf.py`（init 前写
+> version / productName / identifier）、`apply-android-labels.py`（应用名）、
+> `patch-android-insets.py`（系统栏 insets）、`set-android-apk-name.py`（APK 文件名）、
+> `patch-android-back.py`（返回键守卫）、`install-android-ndk.sh`（NDK 版本单一真源）。
+> 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
 
 ---
 
@@ -350,17 +368,17 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-11 v1.72 实测工作区 232 通过 / 6 ignored：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 159；主 crate 合计 162 条）
+cargo test --all                # 全量单元测试（2026-10-12 优化闭环后实测 241 通过 / 6 ignored：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 168；主 crate 合计 171 条，含 `contract_tests` 静态契约守卫）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
 ### 悬浮球真机探针（`--float-probe`，仅 Windows）
 
 `target/debug/web2app.exe --float-probe`（或 `cargo run -- --float-probe`）跑一次**真机合成指针**验证：
-建窗形态与活柱裁剪、自由态拖动（1:1 跟手 / 软钳制 / 松手钳回）、左右缘吸附（含活柱贴边与区域跟随）、
+建窗形态（v1.80 起：**窗口无区域** + 真逐像素 alpha）、自由态拖动（1:1 跟手 / 软钳制 / 松手钳回）、左右缘吸附（含活柱贴边与几何跟随）、圆形命中（**`WM_NCHITTEST` 三形态**：建窗 / 右吸附缩回 / 左吸附缩回 —— 圆心与 WebView2 子窗都必须 `HTCLIENT`，四角与活柱外的撑宽区必须 `HTTRANSPARENT`）、
 悬停展开 / 抖动吸收 / 300ms 延迟缩回、单击 toggle 主窗、右键 = **关闭悬浮图标功能并唤回主窗口**
 （球窗**被销毁** + `float_enabled` 置 false + 主窗被唤回；复原后吸附态保留）
-（**27 项断言 + 6 项环境诊断**，诊断不计入失败；v1.72 为 24 项，v1.76 的右键语义升级 +3）。
+（断言项数随版本演进：v1.72 = 24、v1.76 = 27 **+ 6 项环境诊断**（诊断不计入失败）；**v1.80 把区域断言改为「窗口无区域」并新增 NCHITTEST 三形态校验（建窗 / 右吸附 / 左吸附），确切条数以真机 `ALL PASS` 行为准**——v1.80 改的是 `floatprobe.rs` 自身，须重新打包后在真机复验）。
 
 - **驱动方式**：`floatwin::inject_page_event` 用**真实令牌**构造合法载荷，走真实 `token_matches` →
   `handle_event` → **真实窗口操作**；唯一跳过的是「球页 JS 把事件发出去」那一段
@@ -370,17 +388,13 @@ cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT �
   与环境有关、与代码无关）；**`98` = 看门狗总超时**（探针**绝不允许**挂死）。
 - ⚠️ **本机（受限桌面会话）`WebviewWindowBuilder::build()` 约 50% 概率永久挂死**，同一 exe 同样代码时好时坏；
   该调用同步阻塞、进程内无法给自己设超时，且换 exe 目录 / 换 WebView2 UDF / 清残留 `msedgewebview2` 全都无效。
-  **这是环境抖动，不是产品缺陷** ⇒ 用外部重试器跑：
-  `powershell -NoProfile -ExecutionPolicy Bypass -File tests/float-v172-rc/run-float-probe.ps1`
-  （按「输出停滞 ≥160s」判卡 → 杀进程 → 换新目录重来）。
+  **这是环境抖动，不是产品缺陷** ⇒ 用外部重试器跑。⚠️ 重试器是**一次性本机工作区产物**，跑完往往已被清掉、目录名随批次变化 ⇒ **本文不指向具体文件**（历史用过 `tests/run-float-probe-*.ps1`、`tests/float-*-rc/`，**现均已不在工作区**），按「输出停滞判卡 → 杀进程 → 换全新目录重来」的思路自建即可。⚠️ 注意根 `.gitignore` 对 `tests/` 是**逐条锚定忽略、不是整目录**（只忽略 `/tests/pack/`、`/tests/json/`、`/tests/pw-fixture/`、`/tests/pw-udd-*/`）⇒ 新建一次性目录前先确认它落在忽略规则内。⚠️ 选型教训：**判断结论要看结果文件里的 `ALL PASS` 行，不要只看退出码** —— 旧版 `.ps1` 重试器在本机**读不到退出码**（打印 `EXIT=` 空值 ⇒ 即便跑出 0 也不认，一路重试到假失败），新版改用 .NET `WaitForExit(ms)` 并以结果文件为准。
 - ⚠️ 探针模式会**跳过单实例插件与全局快捷键** —— 否则本机已有实例在跑时，单实例插件让进程**直接退出**，
   表现为「零输出、退出码 0」的**假绿**。
 - ⚠️ **探针内手写建窗必须与生产同构**：假主窗漏设 `data_directory` 时建窗会从 7~9ms 退化成 60s+ 甚至挂死
   （契约守卫 `float_probe_fake_main_window_sets_data_directory` 已钉住）。
-- 真机实测事实（写进断言，勿再当成「失败」）：`GetWindowRgnBox` 对椭圆区域**含端** ——
-  `[0,70)×[0,70)` 上报 `(0,0,69,69)`（宽高各 −1），100% / 125% 缩放一致；
-  `monitor_from_point` 用 `MONITOR_DEFAULTTONULL`（屏外的点查不到显示器 ⇒ 软钳制整段被跳过，
-  测试点必须落在显示器**内**）。
+- 真机实测事实（写进断言，勿再当成「失败」）：`monitor_from_point` 用 **`MONITOR_DEFAULTTONULL`**（屏外的点查不到显示器 ⇒ 软钳制整段被跳过，测试点必须落在显示器**内**）。
+  > ⚠️ 历史取值：v1.77b–v1.79 用窗口椭圆区域裁圆时，`GetWindowRgnBox` 对椭圆区域**含端**（`[0,70)×[0,70)` 上报 `(0,0,69,69)`，宽高各 −1；100% / 125% 缩放一致）。**v1.80 起球窗不再设任何窗口区域**，该断言已反转为「`GetWindowRgnBox` 必须为空」，这条「含端」事实只在读旧版本证据时才有意义。
 - ⚠️ 本机删除走安全垫片（递归删除一律被拦、有配额）⇒ 探针的临时运行目录**不要自己清**，换新目录重来即可；
   WebView2 的 UDF 落点是 `%LOCALAPPDATA%\com.example.web2app\EBWebView`，**与 exe 所在目录无关**
   （「换个全新目录跑 exe」不会换掉脏 UDF；要禁用就**重命名备份**）。
@@ -406,19 +420,19 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 
-### 1. 提交即测试 — `.github/workflows/ci.yml`
+### 1. 手动触发 — `.github/workflows/ci.yml`
 
-在 `push` 到 `main`/`master` 或针对它们的 PR 时运行：
+⚠️ 该 workflow **只有 `workflow_dispatch`**（在 Actions 页点「Run workflow」），**已不再随 push / PR 自动运行**：
 
 - **Lint & Test (Ubuntu)**：安装 WebKit2GTK 等依赖 → `cargo fmt --all -- --check`（**阻断**）→
   `cargo clippy -D warnings` → `cargo test --all`（同时验证 Android 代码路径）。
 - **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译，并跑 `clippy` / `test`。
 - **Check (Android)**：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，并跑 **Android 目标 clippy**
-  （**阻断**，不产出 APK）。
-- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、校验全仓库 workflow YAML 与
-  `.github/scripts/*.sh` 语法（`check-workflows.py`）、逐个校验两份 `config.example.json` 与
-  `scripts/pack-local.mjs`
-  的 `--parity`（Node 复刻与 Python 解析器的 39 组用例必须逐条一致）。详见
+  （**阻断**，不产出 APK）。NDK 由 `.github/scripts/install-android-ndk.sh` 安装（版本单一真源）。
+- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、**六个安卓共享脚本各自的
+  `--selftest`**、校验全仓库 workflow YAML 与 `.github/scripts/*.sh` 语法（`check-workflows.py`）、
+  逐个校验两份 `config.example.json` 与 `scripts/pack-local.mjs`
+  的 `--parity`（Node 复刻与 Python 解析器的 43 组用例必须逐条一致）。详见
   `docs/packaging-config.md` §5。
 
 ### 2. 发版即编译 — `.github/workflows/release.yml`
@@ -429,6 +443,9 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 - **Build Windows installers**（仅 Release 事件）：`cargo tauri build` 产出 `msi` / `nsis`，自动上传到本次 Release 的资源附件。
 - **Build Android APK**：在 CI 里现跑 `cargo tauri android init --ci` 生成 `gen/android`（该目录被
   `.gitignore` 忽略，无需提交），再构建 `aarch64` APK 并作为 workflow artifact 上传。
+- **产物版本号**：`VERSION`（仓库变量；为空则回落本次 Release 的 tag，自动剥前导 `v`；再为空则
+  保留 `tauri.conf.json` 的值）—— 与 `build-custom.yml` 的能力对齐（历史上 release 侧不写 version，
+  发版产物版本恒为 `tauri.conf.json` 的 `0.1.0`）。
 
 > Android 正式签名所需仓库 Secrets：`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` /
 > `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD`。流水线里由 `build-custom.yml` / `release.yml`
@@ -720,11 +737,14 @@ base64 -w0 release.keystore     # Git Bash / macOS / Linux
   排查时可用 `adb shell run-as <pkg> ls files/` 查看。
   （构建产物 APK 不在手机上，而在构建机的 `gen/android/app/build/outputs/apk/`，CI 签名后上传为 artifact。）
 - **`cargo run` 报 `unknown field package` / `targetSdkVersion` / `permissions`（build script 阶段）**：
-  这是 **当前 Tauri 2 版本的 `tauri-build` 对 `bundle.android` 仅识别 `minSdkVersion` 等少量字段**所致
-  （`package` / `targetSdkVersion` / `useKotlin` / `permissions` 是较新版本才支持的）。该错误会在桌面构建时
-  同样报出（因为 `tauri-build` 始终解析整份 `tauri.conf.json`）。**不要升级 Tauri 版本**（会破坏已调通的
-  WebView2 钩子），直接把 `bundle.android` 精简为只保留 `minSdkVersion`，其余在 `cargo tauri android init`
-  生成 `gen/android` 后再于原生工程里配置即可。
+  `tauri-build` 对 `bundle.android` 只识别少量字段，本仓的 `tauri.conf.json` 因此**只写 `minSdkVersion`**。
+  `package` / `targetSdkVersion` / `useKotlin` / `permissions` 写进去会在**桌面**构建时同样报错（`tauri-build`
+  始终解析整份 `tauri.conf.json`）。处理方式是**保持精简**，其余在 `cargo tauri android init` 生成
+  `gen/android` 后于原生工程里配置 —— **不要为了凑这些字段去升级依赖**。
+  > ⚠️ 但这不等于「Tauri 版本不许动」：**v1.80 已把 tauri 升到 2.12.1**（wry 0.57 / tao 0.37），
+  > 目的是让 `tauri-runtime-wry` 透传 `no_redirection_bitmap`（球窗真逐像素 alpha，见「测试」章）。
+  > 升级本身不是禁区，代价是必须逐项复验 WebView2 钩子（`webview_hooks.rs` 的初始化脚本、新窗口、下载、
+  > 右键）与多页签链路；本仓 v1.80 的升级经 `cargo check` 零涟漪 + 全量测试通过，尚未在真机复验。
 - **换产品名 / 包名**：改 `Cargo.toml` 的 `package.name`（决定 exe / 进程名）、`tauri.conf.json` 的
   `productName`（决定窗口标题 / 托盘提示）即可。**Android 应用包名不再手改 `identifier`**：打包工作流会在
   `android init` 之前按打包配置里的 `app_name` 自动把 `identifier` 改写成 `com.web2app.<清洗值>`

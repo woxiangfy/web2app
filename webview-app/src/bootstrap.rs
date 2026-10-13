@@ -435,6 +435,10 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
                         *cache = Some(nav.clone());
                     }
                 }
+                // 移动端底栏的「首页」按钮：把解析结果缓存下来，点首页时直接复用
+                //（不重跑 DNS 解析、不重启本地代理）。见 `crate::mobilebar::HomeNav`。
+                #[cfg(mobile)]
+                crate::mobilebar::set_home_nav(&app, &nav);
                 let a = app.clone();
                 let l = label.clone();
                 let _ = app.run_on_main_thread(move || navigate_main(&a, &l, nav));
@@ -707,9 +711,16 @@ const PROBE_TOTAL_TIMEOUT_SECS: u64 = 20;
 
 /// 可达性探测的失败类别。
 ///
-/// 刻意与 reqwest 的具体错误类型解耦：`probe_failure_message` 是纯函数，
-/// 在【所有平台】（含 Windows 宿主 `cargo test`）都可单测；只有错误归类与
+/// 刻意与 reqwest 的具体错误类型解耦：`probe_failure_message` 是纯函数，可在
+/// **Windows 宿主 `cargo test`** 上单测（Android 逻辑在桌面 CI 一并验证）；只有错误归类与
 /// HTTP 探测本体依赖 reqwest，gate 在 `#[cfg(not(windows))]`。
+///
+/// ⚠️ cfg 取 `any(not(windows), test)` 而不是无条件编译：生产调用方全部是 `not(windows)`
+/// 路径，无条件编译会让这三项在 Windows 发布构建里成为死代码（crate 根的
+/// `#![allow(dead_code)]` 会把它静默兜住 —— 新增代码不允许再依赖那条豁免毯）。
+/// 取并集后：Android 生产构建在编、Windows 宿主测试也在编，唯独 Windows 发布二进制不携带
+/// 这组仅 Android 使用的诊断文案。
+#[cfg(any(not(windows), test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeFailure {
     /// TCP 连接建立失败（含 DNS 解析失败、端口不可达）。
@@ -728,6 +739,7 @@ enum ProbeFailure {
 ///
 /// `host` 只放主机名，绝不放完整 URL（直连地址已剥离 userinfo，代理地址可能带入口令牌，
 /// 都不应出现在面向用户的文案里）。
+#[cfg(any(not(windows), test))]
 fn probe_failure_message(kind: ProbeFailure, host: &str) -> (String, String) {
     match kind {
         ProbeFailure::Connect => (
@@ -762,6 +774,7 @@ fn probe_failure_message(kind: ProbeFailure, host: &str) -> (String, String) {
 ///
 /// `host` 只放主机名（理由同 [`probe_failure_message`]）；`status` 为 `None` 表示内核没给出
 /// 状态码。
+#[cfg(any(not(windows), test))]
 fn probe_ok_message(host: &str, status: Option<u16>, ms: u128) -> String {
     let st = match status {
         Some(code) => format!("HTTP {code}"),

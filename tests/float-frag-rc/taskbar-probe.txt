@@ -1,4 +1,0 @@
-app pid=5304 hasExited=True
-screen={X=0,Y=0,Width=1704,Height=928}
-
-BALL WINDOW NOT FOUND

@@ -28,6 +28,7 @@ r"""打包配置 JSON 的**唯一解析实现**（Tauri / Android / Electron 三
 | proxy_bypass             | string                | "localhost;127.0.0.1;<-loopback>"   |
 | data_dir                 | string                | "data"                              |
 | tabs_enabled             | bool                  | false                               |
+| mobile_bar               | bool                  | false                               |
 | public_key               | string                | ""（app_url 为数组时必填）          |
 | resolve_secret           | string                | ""                                  |
 | debug                    | bool                  | false                               |
@@ -120,6 +121,14 @@ DEFAULTS: dict[str, object] = {
     #    Rust 侧因此不能用 env_str!（它把空串当未设置）。
     "data_dir": "data",
     "tabs_enabled": False,
+    # 移动端底栏（mobile_bar）：仅移动端（Android/iOS）生效的**底部导航栏**模式。
+    #   true  = 屏幕底部常驻一条导航条：首页（回到 app_url）/ 后退 / 前进 / 列表。
+    #           「列表」按钮只在**当前平台真的有页签可切**时才渲染（见下）。
+    #   false = 与历史一致：移动端没有任何壳自绘控件（默认）。
+    # ⚠️ 它是**移动端专用**：Windows / Electron 桌面壳即使打包时注入了 true 也一律忽略
+    #    （Rust 侧常量按 `#[cfg(mobile)]` 编译，桌面目标上不存在这条代码路径），
+    #    这样「配了但不生效」不会退化成一条看不见的静默行为。
+    "mobile_bar": False,
     "public_key": "",
     "resolve_secret": "",
     # 诊断日志开关（默认关）：false = 两壳都不写启动日志、也不输出诊断到 stdout/stderr；
@@ -132,7 +141,7 @@ DEFAULTS: dict[str, object] = {
     "android_key_password": "",
 }
 
-BOOL_KEYS = {"proxy_enabled", "tabs_enabled", "debug"}
+BOOL_KEYS = {"proxy_enabled", "tabs_enabled", "mobile_bar", "debug"}
 # 需要保持 JSON 结构（对象/数组/标量）的字段：序列化成单行 JSON 文本进 env，
 # 供 Rust 侧以 EXTRA 编译期变量原样内联成 `window.web2appExtra = <JSON>;`。
 JSON_KEYS = {"extra"}
@@ -579,6 +588,9 @@ def _selftest_cases() -> None:
     assert m["title"] == "Web2App", "title 空 → 回落 app_name"
     assert m["proxy_enabled"] == "False" and m["tabs_enabled"] == "False"
     assert m["debug"] == "False", "debug 默认必须关闭（默认开启＝往用户数据目录里塞日志文件）"
+    # mobile_bar 默认必须关闭：默认开启等于给每个移动端包凭空加一条常驻底栏，
+    # 而「打包的人没写这个字段」却多出一块 UI 是最难解释的那类默认行为。
+    assert m["mobile_bar"] == "False", "mobile_bar 默认必须关闭（默认＝无底栏）"
     assert m["data_dir"] == "data", "data_dir 默认是相对路径 data"
     assert m["proxy_bypass"] == "localhost;127.0.0.1;<-loopback>"
 
@@ -605,6 +617,10 @@ def _selftest_cases() -> None:
     # debug 也是布尔字段：真 true 通过，"true" 字符串拒绝
     assert build_merged({"app_url": "https://a.com", "debug": True})["debug"] == "True"
     _expect_error({"app_url": "https://a.com", "debug": "true"}, "必须是布尔值")
+    # mobile_bar 同样是布尔字段：真 true 通过，任何字符串拒绝（与 tabs_enabled 同规则）
+    assert build_merged({"app_url": "https://a.com", "mobile_bar": True})["mobile_bar"] == "True"
+    _expect_error({"app_url": "https://a.com", "mobile_bar": "true"}, "必须是布尔值")
+    _expect_error({"app_url": "https://a.com", "mobile_bar": 1}, "必须是布尔值")
     # 布尔：字符串拒绝（两壳曾对 "on" 判定相反）
     for bad in ("true", "false", "1", "yes", "on", ""):
         _expect_error({"app_url": "https://a.com", "proxy_enabled": bad}, "必须是布尔值")
@@ -690,6 +706,7 @@ def _selftest_cases() -> None:
             "app_url": ["a.com"],
             "public_key": "AAAA",
             "tabs_enabled": True,
+            "mobile_bar": True,
             "debug": True,
             "data_dir": "",
             "android_keystore_base64": "eHh4",
@@ -697,6 +714,7 @@ def _selftest_cases() -> None:
         write_config_json(p, merged, {})
         out = json.loads(pathlib.Path(p).read_text(encoding="utf-8"))
         assert out["tabs_enabled"] is True, "config.json 里必须是真 bool"
+        assert out["mobile_bar"] is True, "mobile_bar 在 config.json 里也必须是真 bool"
         assert out["debug"] is True, "debug 在 config.json 里也必须是真 bool（Electron 侧按真 bool 解析）"
         assert out["app_url"] == ["a.com"], "config.json 里数组要保持数组"
         assert "android_keystore_base64" not in out, "android_* 不应进 Windows 包的 config.json"
@@ -712,6 +730,8 @@ def _selftest_cases() -> None:
         assert "DATA_DIR=\n" in env_text, f"空串必须落成一行 DATA_DIR=，实际：{env_text!r}"
         # debug 也要落进 env（Rust 侧 DEBUG 是编译期常量，Electron 侧读 config.json）
         assert "DEBUG=False\n" in env_text, f"debug 默认必须写出一行 DEBUG=False，实际：{env_text!r}"
+        # mobile_bar 同理：Rust 侧的编译期常量靠这一行拿到取值（桌面目标读不到就等于关闭）
+        assert "MOBILE_BAR=False\n" in env_text, f"默认必须写出一行 MOBILE_BAR=False，实际：{env_text!r}"
         with open(env_path, "w", encoding="utf-8"):
             pass
         write_env(env_path, build_merged({"app_url": "https://a.com", "debug": True}))

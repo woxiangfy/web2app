@@ -21,7 +21,7 @@
 
 | # | 判据 | 手段 |
 | :-- | :--- | :--- |
-| A1 | 单窗口模式**零回归**：现有 `probe` **138** 条全绿（2026-09-27 实测；条数随探针演进，以实跑输出为准） | `pnpm run probe --no-sandbox --in-process-gpu`，退出码 0 |
+| A1 | 单窗口模式**零回归**：现有 `probe` 全绿（设计基线 138 条 @ 2026-09-27；**v1.76 起 150 条**；条数随探针演进，以实跑输出为准） | `pnpm run probe --no-sandbox --in-process-gpu`，退出码 0 |
 | A2 | 多页签模式：新增断言组全绿 | 同上，加 `--tabs`（本文 §8 清单） |
 | A3 | **打包产物**自带探针在两种模式下均退出码 0 | `Start-Process -Wait -PassThru` 取 `ExitCode`。⚠️ 前提：**探针的起窗模式必须由探针标志决定、不受 `tabs_enabled` 影响**（v1.6 修复）——否则 `tabs_enabled=true` 的包里 `--probe` 会以页签模式起窗而失败 |
 | A4 | 标签栏与内容区**逐像素**不重叠、不留缝 | §8 的「位置 + 存在性」成对判据 |
@@ -122,7 +122,8 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 > 的 overlay 模式依赖 preload 把它经 `webFrame.executeJavaScript` 注入**主世界**，而内容视图为安全
 > 刻意不挂 preload（远程页面连 `ipcRenderer` 都碰不到）。为「加载层」单独引入第三个 preload 的成本大于
 > 收益（纯白底 → 转圈动画）。**这是有意的简化**；失败态靠 `did-fail-load` → 页签标题「加载失败」兜底。
-> 若后续要补「切页签无白闪 + 失败重试」的完整过渡，再评估引入轻量 `tab-preload.ts`。
+> 若后续要补「切页签无白闪 + 失败重试」的完整过渡，再评估引入轻量页签 preload
+> （命名与现有 `src/renderer/tabs-probe-preload.ts` 同族；**该文件目前并不存在**，仅为本条留的待办口径）。
 
 **坐标契约**：`38` 同时是 `shell.html` 的 `--bar-h` 与内容视图的 `y` 起点，两者必须来自**同一个常量**
 （`TAB_BAR_HEIGHT`）。这是 Tauri 侧 `tabs.rs` 已有的约定，沿用。
@@ -178,7 +179,7 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | :-- | :--- | :--- |
 | 9 | 各内容视图 | `page-title-updated` / `setWindowOpenHandler` / `did-fail-load` 逐视图挂载；`will-download` 挂在共享 `defaultSession`（主窗口与内容视图都没设 `partition` ⇒ 挂一次全局生效；若未来设独立 partition 必须改回逐视图）；`setWindowOpenHandler` 页签模式返回 `deny` + `spawnTab(url)`；`did-fail-load` 记日志 + 页签标题置「加载失败」 |
 | 10 | `tabs.ts` | 页签上限 32 熔断 + 超限拒绝（对齐 `MAX_TABS`，含一条可排查日志） |
-| 11 | `tabs.ts` | 关闭最后一个页签 → 关闭宿主窗口（复用既有托盘/退出语义）；激活态落到相邻页签（优先右侧） |
+| 11 | `tabs.ts` | 关闭最后一个页签 → 关闭宿主窗口（复用既有托盘/退出语义）；激活态落到相邻页签（优先右侧）。⚠️ 2026-10-13 起**首页（位次 0）不可关** ⇒ 该分支在正常路径下不可达，仅作异常态兜底（见 §8.1 P1h/P7h） |
 | 12 | `tabs.ts` | `destroyAllTabs()`：宿主确定退出时显式 `close()` 所有视图 webContents（官方明示视图不随窗口销毁自动回收）+ 清 Map 引用；探针加「引用归零」断言 |
 | 13 | 壳页面 | 前进/后退用 `webContents.navigationHistory.goBack()`（`webContents.goBack()` 在 Electron 44 已标记 Deprecated）；历史导航作用于**当前激活的内容视图** |
 | 14 | 托盘 / 快捷键 / 设置窗 / 几何 | 作用对象仍是 `BrowserWindow` ⇒ **零改动**；页签模式下逐项回归（probe 断言 + 人工确认） |
@@ -205,23 +206,25 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | :-- | :--- | :--- |
 | P1 | `contentView[i].getBounds() === {x:0,y:38,w:W,h:H-38}`（W/H 取自 `getContentBounds()`） | 位置 + 尺寸 |
 | P2 | `win.contentView.children.length === tabCount` | 存在性（不许靠「删掉视图」满足 P1） |
+| P1h | **首页页签标记**：`listForIpc()[0] === [label,title,active,true]` ∧ 壳 DOM 里该 `.tab` 有 `.home-ico` **且没有 `.close`**；非首页页签反向成立 | 2026-10-13 新增（首页固定第一位 + 不可关）。后半句不可省：只断言「首页有图标」会被「所有页签都加图标」满足 |
 | P3 | **命中测试**：壳页面内 `elementFromPoint(5,5)` 命中标签栏元素；内容视图内命中的是页面自身元素 | 被遮住只能用命中测试或像素证明，`getBoundingClientRect()` 不够（项目同一坑踩过两次） |
 | P4 | 切换后 `active.getVisible() === true` ∧ 其余**全部** `=== false` | 缺后半句会被「全都可见、靠 z-order 盖住」蒙混 |
 | P5 | 内容视图内 `scrollTo(0,200)` 后 `scrollY ≈ 200`，且页面上边界仍在视图内（不越过标签栏） | 顶部空间契约在页签模式下的等价断言 |
 | P6 | 页面 `<title>X</title>` → 标签栏文本 `=== X` | 事件链路 |
 | P7 | 关闭一个页签：children 减 1 **且**激活态落到相邻页签（不悬空、不全隐） | 位置 + 存在性 |
+| P7h | **首页不可关**：`closeTab(首页)` 返回 `false`，且集合数 / 首位 / 激活 / children **四项全不变**；再关掉全部非首页页签 → 激活落回首页且**不误触发「关最后一个 ⇒ 关宿主」** | 2026-10-13 新增。反面对照：去掉 `closeTab` 里的首页拦截后，探针行至 P7 时集合归零 → 宿主被关掉、进程退出（连汇总都打不出来），即「首页不可关」是整条链路的承重墙 |
 | P8 | 熔断：连开至上限后第 N+1 次返回失败，且 children **不再增长** | 防空转建窗 |
 | P9 | 一次 `window.open()` 只新增 **1** 个页签 | 对齐 Tauri 侧「一次点击只开 1 个」回归判据 |
 | P10 | `target="_blank"` 的目标 path 被保留（未被降级成入口地址） | 对齐 Tauri `resolve_popup_url` 回归判据 |
 | P11 | **特权命令 sender 校验**：从内容视图发 `close_host` 类消息必须被拒绝，且日志有拒绝记录 | §3-2 安全硬化；只断言「壳能关窗」会被「谁都能关窗」满足 |
 | P12 | 重复 `addChildView(view)` 后 children **不增**且该视图在数组末尾；`setVisible(false)` 后重复 add 仍为 `false` | §3-4 实测语义，防后续 Electron 升级改变行为后无人察觉 |
-| P13 | 单窗口模式跑全量断言 = **138** 条不变、退出码 0 | 零回归闸门 |
+| P13 | 单窗口模式跑全量断言：**条数不变、退出码 0**（设计基线 138 条 @ 2026-09-27；v1.76 起 150 条，**判据是「不减少」而不是某个固定数字**） | 零回归闸门 |
 
 ### 8.2 工具与命令
 
 ```bash
 # 无 GPU 沙箱必须带这两个参数（历史教训：只靠 disableHardwareAcceleration 不够）
-pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口 138 条（2026-09-27 实测）
+pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口断言（v1.76 起 150 条；设计时 138 条）
 pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 33 条（2026-09-27 实测）
 pnpm run tabs-v4 / tabs-v4-negative                          # V4 绘制顺序 正/负向对照（退出码即结论）
 
@@ -310,3 +313,12 @@ Start-Process -FilePath "...\Web2App.exe" -ArgumentList '--probe','--tabs' -Wait
 「推理过度」教训）；v1.2 T0 完成、V4 程序化验证通过；v1.3–v1.5 T1–T4 完成、探针单窗口 112/112 +
 页签 23/23；v1.6 修复「探针起窗模式受 `tabs_enabled` 影响」缺陷 + 正式出包（config `tabs_enabled=true`）；
 v1.7 2026-09-18 真机验收 V1–V4 全部关闭、多页签 8/8 正常。）
+
+- **2026-10-13（a）：首页页签** —— 默认入口（app_url）那一签固定第一位、不可关、名字前带房子图标。
+  判定真源 = 「列表位次 0」（Rust `tabs.rs::is_home_index` ∥ `tab-order.ts::isPinnedHome`），渲染在共享
+  `shell.html`。`get_tabs` 契约三元组 → **四元组** `[label,title,active,home]`（双壳同步，漏一位即静默降级）。
+  探针 +8 条（含 P1h 成对判据 / P7h 关闭被拒）。
+- **2026-10-13（b）：页签外观对齐 Chrome** —— 顶部 8px 圆角、页签坐落条底、相邻非激活页签之间改为
+  **短竖线**（`.tab + .tab::before`，紧邻激活/悬停侧不画）、激活页签白底 + 上浮阴影、关闭按钮改**圆点**。
+  **只改形状、不改配色**（与单窗口标题栏共享的 7 个色值仍由 `top_bar_style_contract` 钉住）。
+  详见 `docs/changes/2026-10-13.md` 的「追加」一节。

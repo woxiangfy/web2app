@@ -9,6 +9,13 @@
     web2app:tab-title（应用命令对远程 origin 必被 ACL 拒），见 src/tab_title.js。
   · 宿主窗口是 decorations(false)，系统标题栏不存在 → 设置 / 最小化 / 关闭按钮由本页右侧自绘。
   · Rust 侧通过 window.__web2appTabs.render(items) 推送 tab 列表（含激活态）刷新。
+  · 页签外观 = **Chrome 风**（2026-10-13）：顶部 8px 圆角、坐落条底、非激活透明 +
+    相邻页签间短竖线、激活页签白底上浮阴影、关闭按钮为小圆点。**只改形状，不改配色** ——
+    那 7 个与 titlebar.js 逐字同源的色值仍由 top_bar_style_contract 钉住。
+  · **首页页签**：列表中的**第一个**页签即默认入口（app_url）那一签，固定位、不可关闭。
+    它由宿主判定（Rust `tabs.rs::is_home_index` / Electron `tabs.ts::isPinnedHome`）后随条目
+    下发 `home` 标记，本页只负责「名字前画房子图标 + 不画 ×」。判定规则**不在本页重复实现**
+    —— 双壳必须给出同一位次的答案，同一条规则维护两遍就会漂移。
 -->
 <html lang="zh-CN" data-page-node-id="JIII7qWwDRGwHRqbGIOito">
   <head data-page-node-id="lnd3TOd3uomPf1dS2i51hw">
@@ -32,6 +39,12 @@
         --text-dark: #e6ebf2;
         --muted: #8892a0;
         --hover: rgba(120,133,153,.16);     /* = titlebar.js .w2t-btn:hover（不分深浅色） */
+        /* ↓ Chrome 风页签形状专用：分隔线 / 激活页签上浮阴影。**不是**与 titlebar.js
+         *   共享的配色（那 7 个色值由 top_bar_style_contract 逐字钉住），放这里互不干扰。 */
+        --tab-sep: rgba(0,0,0,.12);                  /* 相邻非激活页签之间的短竖线 */
+        --tab-sep-dark: rgba(255,255,255,.10);
+        --tab-shadow: 0 1px 2px rgba(0,0,0,.14), 0 0 0 1px rgba(0,0,0,.03);
+        --tab-shadow-dark: 0 1px 2px rgba(0,0,0,.40), 0 0 0 1px rgba(255,255,255,.04);
       }
       * { box-sizing: border-box; }
       html, body {
@@ -69,7 +82,9 @@
       }
       .tabs {
         display: flex;
-        align-items: stretch;
+        /* 页签坐落条底（顶部留 4px）—— Chrome 的页签是「贴住工具栏的那一排」，
+         * 而不是上下居中的方块。 */
+        align-items: flex-end;
         flex: 1;
         overflow-x: auto;
         overflow-y: hidden;
@@ -77,45 +92,92 @@
         /* 标签条空白处也可拖动窗口（标签自身 no-drag）。 */
         -webkit-app-region: drag;
       }
+      /* 页签（Chrome 风）：顶部圆角、坐落条底、非激活透明、激活上浮提亮。
+       * 与单窗口 titlebar.js 的**配色**仍然同源（top_bar_style_contract 盯着），这里只改形状。 */
       .tab {
         -webkit-app-region: no-drag; /* 标签本身可点击，不参与拖动 */
+        position: relative;
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 0 12px;
-        max-width: 180px;
-        min-width: 60px;
-        cursor: pointer;
-        border-right: 1px solid var(--border);
+        padding: 0 8px 0 11px;
+        /* 贴条底：条高 38（含 1px 下沿分隔线）⇒ 页签 33，顶部自然留出 4px 缝。 */
+        height: calc(var(--bar-h) - 5px);
+        /* Chrome 同款宽度策略：页签少时随可用宽度长到 max-width 即停（单页签不铺满整条），
+         * 页签多时一起收缩到 min-width，再多就横向滚动。 */
+        flex: 1 1 auto;
+        max-width: 220px;
+        min-width: 68px;
+        cursor: default;
+        border: 0;
+        border-radius: 8px 8px 0 0;
+        background: transparent;
         color: var(--muted);
         white-space: nowrap;
         overflow: hidden;
-        position: relative;
+        transition: background .12s ease, color .12s ease;
       }
+      /* 相邻非激活页签之间的短竖线（Chrome 用细线分隔，而不是整条边框）：
+       * 紧邻激活页签 / 悬停页签的那一侧不画。 */
+      .tab + .tab::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 50%;
+        width: 1px;
+        height: 16px;
+        transform: translateY(-50%);
+        background: var(--tab-sep);
+        transition: opacity .12s ease;
+      }
+      .tab.active::before, .tab.active + .tab::before,
+      .tab:hover::before, .tab:hover + .tab::before { opacity: 0; }
       @media (prefers-color-scheme: dark) {
-        .tab { border-right-color: var(--border-dark); }
+        .tab + .tab::before { background: var(--tab-sep-dark); }
       }
       .tab .label {
         overflow: hidden;
         text-overflow: ellipsis;
         flex: 1;
       }
+      /* 首页页签（列表第一个，见 tabs.rs::is_home_index / tabs.ts::isPinnedHome）：固定位、
+       * 不可关闭。可见标记 = 名字前的房子图标；因为它**不渲染 .close**，右侧会空出一块 ——
+       * 与普通页签的「×」位不对称是刻意的，一眼就能看出这一签关不掉。 */
+      .tab.home .label { font-weight: 600; }
+      .tab .home-ico {
+        display: flex;
+        align-items: center;
+        flex: none;
+        /* 图标用 currentColor 跟随页签文字色，深浅色主题自动切换，不额外引入色值。 */
+        opacity: .7;
+      }
+      .tab.active .home-ico { opacity: .95; }
+      /* 激活页签：白底（深色下用提亮底）+ 上浮阴影 —— Chrome「当前页签凸起」的观感。 */
       .tab.active {
         background: var(--tab-active);
         color: var(--text);
+        box-shadow: var(--tab-shadow);
       }
+      /* 非激活页签悬停：淡色圆角底（Chrome 的 hover 反馈很轻，不改文字层级）。 */
+      .tab:not(.active):hover { background: var(--hover); }
       @media (prefers-color-scheme: dark) {
-        .tab.active { background: var(--tab-active-dark); color: var(--text-dark); }
+        .tab.active {
+          background: var(--tab-active-dark);
+          color: var(--text-dark);
+          box-shadow: var(--tab-shadow-dark);
+        }
       }
+      /* 关闭按钮：Chrome 的小圆点 —— 默认只有一个淡 ×，悬停时浮出一个圆形底。 */
       .tab .close {
         -webkit-app-region: no-drag;
         width: 16px; height: 16px;
         line-height: 16px;
         text-align: center;
-        border-radius: 4px;
-        font-size: 12px;
+        border-radius: 50%;
+        font-size: 13px;
         color: var(--muted);
         flex: none;
+        transition: background .1s ease, color .1s ease;
       }
       .tab .close:hover {
         background: var(--hover);
@@ -235,34 +297,62 @@
 
       const tabsEl = document.getElementById("tabs");
 
+      // 主页图标（房子）逐节点构造，不用 innerHTML：与本站其它动态节点同一姿势，
+      // 也避免把一整段标记串塞进 CSP 敏感的路径。
+      const SVG_NS = "http://www.w3.org/2000/svg";
+      function homeIcon() {
+        const ico = document.createElement("span");
+        ico.className = "home-ico";
+        ico.setAttribute("aria-hidden", "true");
+        const svg = document.createElementNS(SVG_NS, "svg");
+        svg.setAttribute("width", "13");
+        svg.setAttribute("height", "13");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("fill", "currentColor");
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", "M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z");
+        svg.appendChild(path);
+        ico.appendChild(svg);
+        return ico;
+      }
+
       // 当前 tab 列表（由 render() 维护）
       let items = [];
 
+      // items: [{label, title, active, home}]，home = 首页标记（固定位、不可关闭）。
       function render(nextItems) {
         items = Array.isArray(nextItems) ? nextItems : [];
         tabsEl.innerHTML = "";
         items.forEach((t) => {
           const el = document.createElement("div");
-          el.className = "tab" + (t.active ? " active" : "");
+          el.className = "tab" + (t.active ? " active" : "") + (t.home ? " home" : "");
           el.dataset.label = t.label;
+
+          if (t.home) el.appendChild(homeIcon());
 
           const label = document.createElement("span");
           label.className = "label";
           label.textContent = t.title || t.label;
           label.title = t.title || t.label;
-
-          const close = document.createElement("span");
-          close.className = "close";
-          close.textContent = "×";
-          close.title = "关闭页签";
-
           el.appendChild(label);
-          el.appendChild(close);
+
+          // ⚠️ 首页不渲染关闭按钮 —— 这是「首页一定要有」的可见保证（后端 close_tab 另有
+          //    拒绝，两道一起才是成对判据：少了后端那道，一次误调就能把首页关掉）。
+          if (!t.home) {
+            const close = document.createElement("span");
+            close.className = "close";
+            close.textContent = "×";
+            close.title = "关闭页签";
+            el.appendChild(close);
+          }
+
           tabsEl.appendChild(el);
         });
       }
 
       // 事件委托：切换 / 关闭
+      // ⚠️ 首页不渲染 .close（见 render），所以关闭分支天然走不到它；后端 close_tab /
+      //    closeTab 另有「首页拒绝关闭」的兜底，两处成对。
       tabsEl.addEventListener("click", (e) => {
         const tab = e.target.closest(".tab");
         if (!tab) return;
@@ -295,9 +385,11 @@
         invoke("history_nav", { direction: "forward" }).catch(() => {});
       });
 
-      // 初始化：拉取当前 tab 列表
+      // 初始化：拉取当前 tab 列表。
+      // ⚠️ get_tabs 返回**四元组** [label, title, active, home]（与 render 的对象契约字段一一对应）；
+      //    只解一个 label 或漏掉 home，首页会渲染成普通页签（带 ×、无图标）—— 静默降级。
       invoke("get_tabs").then((list) => {
-        render(list.map(([label, title, active]) => ({ label, title, active })));
+        render(list.map(([label, title, active, home]) => ({ label, title, active, home })));
       }).catch(() => {});
 
       // 暴露给 Rust：Rust 侧 push_tabs_to_shell 会调用 window.__web2appTabs.render(items)

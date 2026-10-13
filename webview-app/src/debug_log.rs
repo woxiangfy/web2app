@@ -228,6 +228,142 @@ pub(crate) fn mask_url(text: &str) -> String {
     out
 }
 
+// ─────────────────────────── 启动信息 ───────────────────────────
+
+/// 启动信息（写进诊断日志；默认 `debug=false` 时整段是空操作）。
+///
+/// 与 Electron 侧 `electron-app/src/main/index.ts::logStartup()` **一一对应**，目的是让两壳的
+/// 日志能互相印证（同一个用户报同一个问题，换壳排查时不用重新学一遍字段名）。
+///
+/// 2026-10-12 架构审查 P1-1：本函数与三个 `describe_*` 助手原本住在装配中枢 `lib.rs`，
+/// 连同约 120 行纯格式化职责混在 IPC 命令 / 启动装配之间；`debug_log` 才是「诊断」的职责
+/// 所有者，故整体迁到这里，`lib.rs` 只留一次 `debug_log::log_startup(...)` 调用。
+///
+/// ⚠️⚠️ **绝不记凭据**：地址一律经 [`mask_url`]（隐去 `user:pass@`），
+///    Secret 只报「已配置 / 未配置」，公钥只报状态不报内容。
+pub(crate) fn log_startup(app: &AppHandle, settings: &crate::settings::Settings) {
+    dlog!("[web2app] 启动信息");
+    dlog!("  分发形态      : Tauri（配置是编译期常量 —— 改配置必须重新编译/打包）");
+    dlog!(
+        "  应用名 / 标题 : {} / {}",
+        crate::config::APP_NAME,
+        crate::config::TITLE
+    );
+    dlog!("  目标地址      : {}", describe_target());
+    #[cfg(windows)]
+    dlog!(
+        "  数据目录      : {}",
+        match crate::config::data_dir(app) {
+            Some(d) => d.display().to_string(),
+            None => "(不可用，改用 WebView2 自身默认位置)".to_string(),
+        }
+    );
+    #[cfg(not(windows))]
+    dlog!("  数据目录      : (非 Windows：由平台自行管理)");
+    dlog!("  代理          : {}", describe_proxy());
+    dlog!("  多页签        : {}", describe_tabs());
+    dlog!(
+        "  开发者工具    : {}",
+        if crate::config::DEVTOOLS_ENABLED {
+            "已启用（按 F12 打开）"
+        } else {
+            "未启用"
+        }
+    );
+    dlog!(
+        "  配置文件      : {}（设置 + 窗口几何）",
+        crate::store::path(app)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(取不到配置目录)".to_string())
+    );
+    dlog!(
+        "  唤醒快捷键    : {}",
+        crate::settings::hotkey_label(&settings.wake_hotkey)
+    );
+    dlog!(
+        "  托盘 / 关闭行为: {} / {}",
+        if settings.tray_enabled {
+            "已启用"
+        } else {
+            "未启用"
+        },
+        if settings.tray_enabled && settings.minimize_on_close {
+            "关闭时隐藏到托盘"
+        } else {
+            "关闭即退出"
+        }
+    );
+    dlog!(
+        "  加解密 Secret : {}",
+        if resolve_core::secret_is_configured() {
+            "已由配置提供"
+        } else {
+            "未配置（用内置默认串：域名数组模式下安全门槛较低）"
+        }
+    );
+    dlog!(
+        "  日志文件      : {}",
+        log_file_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(debug 已开启但不可写，本次只有 stderr)".to_string())
+    );
+    dlog!("  web2appExtra  : {}", crate::config::extra_json());
+}
+
+/// 目标地址的一行描述（**脱敏**）：域名数组只报「几个 / 都是谁」，普通 URL 隐去 userinfo。
+fn describe_target() -> String {
+    if let Some(domains) = crate::resolve::parse_domains(crate::config::APP_URL) {
+        let list: Vec<String> = domains
+            .iter()
+            .map(|d| crate::resolve::normalize_domain(d.as_str()))
+            .collect();
+        return format!(
+            "{} 个跳板域名（DNS TXT 解析 + 验签解密）：{}；公钥{}",
+            list.len(),
+            list.join("、"),
+            if crate::config::PUBLIC_KEY.trim().is_empty() {
+                "未配置（数组模式必须配，否则解析必然失败）"
+            } else {
+                "已配置"
+            }
+        );
+    }
+    mask_url(crate::config::APP_URL)
+}
+
+/// 代理模式的一行描述。判据与 `bootstrap::local_proxy_enabled()` 同源，别各写一份。
+fn describe_proxy() -> String {
+    if !crate::config::PROXY_ENABLED {
+        return "未启用（直连）".to_string();
+    }
+    if crate::bootstrap::local_proxy_enabled() {
+        return "本地反向代理（HTTP + WebSocket 统一注入 Basic 鉴权）".to_string();
+    }
+    #[cfg(windows)]
+    {
+        match crate::config::build_proxy_args() {
+            // ⚠️ 外部代理地址里可能带 `user:pass@`，同样要脱敏后才进日志
+            Some(args) => format!("外部代理：{}", mask_url(&args)),
+            None => "已启用但没配任何代理地址（等价于直连）".to_string(),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        "已启用（非 Windows 只有本地反向代理这一条路）".to_string()
+    }
+}
+
+/// 多页签是否启用（仅 Windows 有该能力）。
+fn describe_tabs() -> &'static str {
+    #[cfg(windows)]
+    {
+        if crate::tabs::tabs_enabled() {
+            return "已启用";
+        }
+    }
+    "未启用"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

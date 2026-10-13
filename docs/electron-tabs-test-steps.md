@@ -52,8 +52,8 @@
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue   # ⚠️ 必做，否则退出码 9
 $exe = "C:\...\electron-app\release\Web2App-0.1.0-win-x64\Web2App.exe"
 
-(Start-Process $exe -ArgumentList '--probe'        -Wait -PassThru).ExitCode   # 期望 0（138 条单窗口断言，2026-09-27 实测）
-(Start-Process $exe -ArgumentList '--probe','--tabs' -Wait -PassThru).ExitCode   # 期望 0（33 条页签断言，2026-09-27 实测）
+(Start-Process $exe -ArgumentList '--probe'        -Wait -PassThru).ExitCode   # 期望 0（单窗口断言：v1.76 起 150 条；2026-09-27 时为 138 条）
+(Start-Process $exe -ArgumentList '--probe','--tabs' -Wait -PassThru).ExitCode   # 期望 0（页签断言：v1.58 起 39 条；2026-09-27 时为 33 条）
 (Start-Process $exe -ArgumentList '--smoke'        -Wait -PassThru).ExitCode   # 期望 0
 ```
 

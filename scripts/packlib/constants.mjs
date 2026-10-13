@@ -20,6 +20,9 @@ export const DEFAULTS = {
   // 空串在本字段里**是有含义的取值**（= 系统默认程序目录），不是「未设置」。
   data_dir: 'data',
   tabs_enabled: false,
+  // 移动端底栏：仅移动端（Android/iOS）生效的底部导航栏（首页 / 后退 / 前进 / 列表）。
+  // 桌面壳（Windows Tauri / Electron）注入了也一律忽略 —— Rust 侧常量按 #[cfg(mobile)] 编译。
+  mobile_bar: false,
   public_key: '',
   resolve_secret: '',
   debug: false,
@@ -29,7 +32,7 @@ export const DEFAULTS = {
   android_key_password: '',
 }
 
-export const BOOL_KEYS = new Set(['proxy_enabled', 'tabs_enabled', 'debug'])
+export const BOOL_KEYS = new Set(['proxy_enabled', 'tabs_enabled', 'mobile_bar', 'debug'])
 // 需要保持 JSON 结构（对象/数组/标量）的字段：序列化成单行 JSON 文本进 env。
 export const JSON_KEYS = new Set(['extra'])
 // 签名相关字段不进环境变量：keystore 体积大 / 密码敏感。

@@ -3,7 +3,8 @@
 //!   · `capability_contract` —— capabilities 授权 + Rust/JS 两侧事件名字面量；
 //!   · `top_bar_style_contract` —— 多页签标签栏与单窗口标题栏的关键配色逐字一致；
 //!   · `webview2_password_autosave` —— WebView2 密码自动保存开关（Windows）；
-//!   · `loading_mode_contract` —— 加载层模式标记必须在 OVERLAY_SCRIPT 之前注册（跨平台）。
+//!   · `loading_mode_contract` —— 加载层模式标记必须在 OVERLAY_SCRIPT 之前注册（跨平台）；
+//!   · `startup_log_placement_contract` —— 启动信息实现只允许住在 debug_log.rs（架构审查 P1-1）。
 //!
 //! 2026-10-03 从 lib.rs 整体迁出：入口文件不该混装数百行测试（既有架构评审 P1-1）。
 //! ⚠️ 本文件与 lib.rs 同处 `src/` 目录 ⇒ 所有 `include_str!` 的相对路径与迁出前**逐字相同**
@@ -517,6 +518,94 @@ mod top_bar_style_contract {
     }
 }
 
+/// 首页页签标记（`src/shell.html`）的静态契约。
+///
+/// 背景：多页签模式下打开默认入口地址（app_url）的那一签是「首页」—— 它**固定在第一位**且
+/// **不允许关闭**，页签名字前带一个房子图标作标记。判定真源在宿主侧（Rust
+/// `tabs.rs::is_home_index` / Electron `tab-order.ts::isPinnedHome`），本模块钉住**渲染那一半**。
+///
+/// 为什么必须钉：三处漏一处都是**静默降级** —— 编译期零警告、clippy 与 CI 全绿：
+///   · 不画图标 ⇒ 用户看不出哪个是首页（需求要的「特定标记」没了）；
+///   · 给首页也画 × ⇒ 用户点了没反应（后端已拒绝），本项目最忌讳的失败形态；
+///   · 解不出 / 不下发 `home` ⇒ 首页退化成普通页签，上面两条同时发生。
+///
+/// ⚠️ 位置类断言（「关闭按钮必须被 home 判断包住」）必须在**只含代码行**的文本上做，
+/// 否则注释里的同名字面量会把位置带偏（本项目已栽过「针被注释满足」）。
+#[cfg(test)]
+mod tab_home_marker_contract {
+    /// 被测真源：双壳共用的标签栏页面（Electron 经 `shell://` 协议读同一份文件）。
+    const SHELL: &str = include_str!("shell.html");
+
+    /// 只认真正的代码行（排除 `//` 注释行与 `*` 续行）。
+    fn code_lines(src: &str) -> String {
+        src.lines()
+            .filter(|line| {
+                let t = line.trim();
+                !t.starts_with("//") && !t.starts_with('*')
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn has_code_line(src: &str, needle: &str) -> bool {
+        code_lines(src).contains(needle)
+    }
+
+    #[test]
+    fn home_tab_renders_icon_and_never_a_close_button() {
+        // ① 样式：首页专属类名 + 图标盒子（图标颜色走 currentColor，深浅色主题自动跟随）。
+        assert!(
+            has_code_line(SHELL, ".tab.home .label"),
+            "shell.html 缺少首页页签样式 `.tab.home .label`（首页应当在名字上加粗/标记）"
+        );
+        assert!(
+            has_code_line(SHELL, ".tab .home-ico {"),
+            "shell.html 缺少 `.tab .home-ico` 图标盒子样式"
+        );
+
+        // ② 渲染：home 进类名 + 图标挂在 label **之前**（名字前的小图标）。
+        assert!(
+            has_code_line(
+                SHELL,
+                r#"el.className = "tab" + (t.active ? " active" : "") + (t.home ? " home" : "")"#
+            ),
+            "render() 必须按 t.home 给页签加 `home` 类（改坏 ⇒ 首页在标签栏上看不出区别）"
+        );
+        assert!(
+            has_code_line(SHELL, "if (t.home) el.appendChild(homeIcon());"),
+            "render() 必须在首页上插入主页图标"
+        );
+        // 图标本体：钉住房子路径数据本身，避免「插一个空盒子」也算过。
+        assert!(
+            SHELL.contains("M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"),
+            "主页图标必须是真的房子图形（路径数据被改掉了？）"
+        );
+
+        // ③ 关闭按钮：`.close` 的构造必须在 `if (!t.home)` 之内 —— 位置断言（成对判据的
+        //    「不该有」那一半；「该有」那一半由 Electron 探针在真实 DOM 上验）。
+        let code = code_lines(SHELL);
+        let guard = code
+            .find("if (!t.home) {")
+            .expect("render() 必须有 `if (!t.home) {` 守卫：首页不渲染关闭按钮");
+        let close = code
+            .find(r#"close.className = "close";"#)
+            .expect("render() 必须构造关闭按钮（非首页页签仍要能关）");
+        assert!(
+            guard < close,
+            "关闭按钮必须被 `if (!t.home)` 包住 —— 顺序反了等于给首页也画了 ×"
+        );
+
+        // ④ 初始化链路：get_tabs 是**四元组**，解构必须带 home（漏一个 ⇒ 首页退化成普通页签）。
+        assert!(
+            has_code_line(
+                SHELL,
+                "render(list.map(([label, title, active, home]) => ({ label, title, active, home })));"
+            ),
+            "shell.html 的 get_tabs 初始化必须解出第 4 位 home（对齐 tabs.rs::get_tabs 的四元组）"
+        );
+    }
+}
+
 /// WebView2 网页密码自动保存开关的静态契约（Windows）。
 ///
 /// 背景：WebView2 的 `IsPasswordAutosaveEnabled` **默认 false** —— 不弹「保存/更新密码？」
@@ -881,6 +970,166 @@ mod back_navigation_guard_contract {
             assert!(
                 yml.contains("patch-android-back.py"),
                 "{name} 必须接上 Android 返回键补丁步骤（gen/android 每次现生成）"
+            );
+        }
+    }
+}
+
+/// Android 打包流水线的「共享脚本」契约（2026-10-13）。
+///
+/// 背景：同一段逻辑曾在 `build-custom.yml` 与 `release.yml` 里**各存一份内联 python**
+/// （applicationId 派生 / strings.xml 应用名 / 状态栏 insets / APK 文件名），只靠人肉保持同步 ——
+/// 本仓库历史上同类分裂就漏过 EXTRA / ICON_URL。现四块全部抽进 `.github/scripts/` 下的共享脚本，
+/// 两个 workflow 只留一行调用；NDK 版本也从三处硬编码收敛为 `install-android-ndk.sh` 单一真源。
+/// 另有一处 P0：工程根解析的默认值曾写死成 `webview-app/gen/android`，而 CI 的 cwd 已是
+/// `webview-app` ⇒ `FileNotFoundError` ⇒ android job 在补丁步中断、后续构建/签名/上传全被跳过
+/// （job 是 `continue-on-error: true`，所以「APK 没产出」看不出根因）。
+///
+/// 这些守卫要拦的正是「内联实现又被抄回去」「两壳能力再次分叉」「工程根又被写死」。
+#[cfg(test)]
+mod android_pipeline_contract {
+    const BUILD_CUSTOM_YML: &str = include_str!("../../.github/workflows/build-custom.yml");
+    const RELEASE_YML: &str = include_str!("../../.github/workflows/release.yml");
+    const CI_YML: &str = include_str!("../../.github/workflows/ci.yml");
+    /// 工程根解析的单一真源（P0 回归守卫的落点）。
+    const ANDROID_GEN_PY: &str = include_str!("../../.github/scripts/android_gen.py");
+    /// 返回键补丁（应复用 android_gen 的解析，而非自带一份候选表）。
+    const PATCH_PY: &str = include_str!("../../.github/scripts/patch-android-back.py");
+    /// 预写 tauri.conf.json（内含包名派生实现）。
+    const PREPARE_PY: &str = include_str!("../../.github/scripts/prepare-android-conf.py");
+    const LABELS_PY: &str = include_str!("../../.github/scripts/apply-android-labels.py");
+    const INSETS_PY: &str = include_str!("../../.github/scripts/patch-android-insets.py");
+    const APK_NAME_PY: &str = include_str!("../../.github/scripts/set-android-apk-name.py");
+    /// NDK 安装脚本（版本单一真源）。
+    const NDK_SH: &str = include_str!("../../.github/scripts/install-android-ndk.sh");
+    /// NDK 版本。⚠️ 用 concat! 拆段：避免「守卫的针」与「被测字面量」同在一处而被自己满足。
+    const NDK_VERSION: &str = concat!("27.0.", "12077973");
+
+    /// ① 两个 Android 打包 workflow 必须调用**全部**共享脚本（而不是内联实现）。
+    #[test]
+    fn workflows_call_shared_android_scripts() {
+        for (name, yml) in [
+            ("build-custom.yml", BUILD_CUSTOM_YML),
+            ("release.yml", RELEASE_YML),
+        ] {
+            for script in [
+                "prepare-android-conf.py",
+                "apply-android-labels.py",
+                "patch-android-insets.py",
+                "set-android-apk-name.py",
+                "patch-android-back.py",
+                "install-android-ndk.sh",
+            ] {
+                assert!(yml.contains(script), "{name} 必须调用共享脚本 {script}");
+            }
+        }
+        assert!(
+            CI_YML.contains("install-android-ndk.sh"),
+            "ci.yml 的 check-android 也必须用同一份 NDK 安装脚本"
+        );
+    }
+
+    /// ② 反向对照：内联实现不得回流（这些特征串只应存在于共享脚本里）。
+    #[test]
+    fn workflows_no_longer_inline_android_logic() {
+        for (name, yml) in [
+            ("build-custom.yml", BUILD_CUSTOM_YML),
+            ("release.yml", RELEASE_YML),
+        ] {
+            for sentinel in [
+                "setOnApplyWindowInsetsListener",    // insets 内联实现的标志
+                "archivesBaseName",                  // APK 文件名内联实现的标志
+                "import hashlib, json, os, re, sys", // 包名派生内联实现的标志
+                "def esc_res",                       // strings.xml 改写内联实现的标志
+            ] {
+                assert!(
+                    !yml.contains(sentinel),
+                    "{name} 仍含内联实现特征串 `{sentinel}` —— 应改为调用 .github/scripts/ 下的共享脚本"
+                );
+            }
+        }
+        // 特征串在共享脚本里必须存在，否则上面的「不存在」断言是空的（守卫自我满足）。
+        assert!(
+            INSETS_PY.contains("setOnApplyWindowInsetsListener"),
+            "insets 实现应落在共享脚本"
+        );
+        assert!(
+            APK_NAME_PY.contains("archivesName"),
+            "APK 名校验应落在共享脚本"
+        );
+        assert!(
+            PREPARE_PY.contains("derive_package"),
+            "包名派生应落在共享脚本"
+        );
+        assert!(
+            LABELS_PY.contains("def esc_res"),
+            "strings.xml 改写应落在共享脚本"
+        );
+    }
+
+    /// ③ P0 回归守卫：工程根解析的首选候选必须是 **cwd 相对的** `gen/android`。
+    #[test]
+    fn gen_root_resolution_prefers_cwd_relative_gen_android() {
+        assert!(
+            ANDROID_GEN_PY
+                .contains("GEN_ROOT_CANDIDATES = (\"gen/android\", \"webview-app/gen/android\")"),
+            "候选必须且只能按这个顺序：gen/android（CI 的 cwd 形态）优先 —— \
+             在仓库根手跑时自动回落到 webview-app/gen/android"
+        );
+        // 补丁脚本必须复用 android_gen（不得再自带一份写死的工程根）。
+        assert!(
+            PATCH_PY.contains("from android_gen import"),
+            "patch-android-back.py 必须复用 android_gen 的工程根解析"
+        );
+        // ⚠️ 只禁「把工程根写成默认值」这一原始形态 —— 自测里合法地引用了候选串，不能一禁了之。
+        assert!(
+            !PATCH_PY.contains("default=\"webview-app/gen/android\""),
+            "补丁脚本里不得再把工程根写成 --gen-root 的默认值（P0 缺陷的原始形态）"
+        );
+        assert!(
+            PATCH_PY.contains("default=None"),
+            "patch-android-back.py 的 --gen-root 默认必须为 None，交给 android_gen 自动探测"
+        );
+    }
+
+    /// ④ NDK 版本单一真源：只准出现在 install-android-ndk.sh，workflow 一律不得再硬编码。
+    #[test]
+    fn ndk_version_is_single_sourced() {
+        assert!(
+            NDK_SH.contains(NDK_VERSION),
+            "NDK 版本必须定义在 install-android-ndk.sh"
+        );
+        for (name, yml) in [
+            ("build-custom.yml", BUILD_CUSTOM_YML),
+            ("release.yml", RELEASE_YML),
+            ("ci.yml", CI_YML),
+        ] {
+            assert!(
+                !yml.contains(NDK_VERSION),
+                "{name} 不得再硬编码 NDK 版本 —— 应调用 install-android-ndk.sh（单一真源）"
+            );
+        }
+    }
+
+    /// ⑤ 能力等价：release.yml 也必须支持 version（历史上两个 job 都不写 ⇒ 版本恒为 0.1.0）。
+    #[test]
+    fn release_supports_version_like_manual_packaging() {
+        assert!(
+            RELEASE_YML.matches("VERSION:").count() >= 2,
+            "release.yml 的 windows 与 android 两个 job 都要注入 VERSION"
+        );
+        assert!(
+            RELEASE_YML.contains("github.event.release.tag_name"),
+            "VERSION 应有 release tag 回落（tag 惯例 v1.2.3，脚本会剥前导 v）"
+        );
+        // 两个 android job 都要用同一份预写脚本（version 由它写入 tauri.conf.json）。
+        for (name, yml) in [
+            ("build-custom.yml", BUILD_CUSTOM_YML),
+            ("release.yml", RELEASE_YML),
+        ] {
+            assert!(
+                yml.contains("prepare-android-conf.py"),
+                "{name} 必须用共享预写脚本"
             );
         }
     }
@@ -1254,7 +1503,12 @@ mod float_window_contract {
              后者才会加 WS_EX_NOREDIRECTIONBITMAP 走 DComp 真逐像素 alpha（v1.80 架构核心）"
         );
         // 反向钉死：窗口区域 API 不得以任何形式回到代码里（注释存档不算）。
-        for banned in ["SetWindowRgn", "CreateEllipticRgn", "CreateRectRgn", "REGION_PAD"] {
+        for banned in [
+            "SetWindowRgn",
+            "CreateEllipticRgn",
+            "CreateRectRgn",
+            "REGION_PAD",
+        ] {
             assert!(
                 !code_has_occurrence(FLOAT_RS, banned),
                 "floatwin.rs 代码里不得再出现 {banned}：窗口区域是 1bit 硬掩码，会切掉 DComp \
@@ -2114,6 +2368,359 @@ mod float_window_contract {
         assert!(
             !has_code_line(&broken, NEEDLE),
             "反向对照失败：挖掉 data_directory 后判据仍成立 ⇒ 守卫是自欺的"
+        );
+    }
+}
+
+/// 启动信息实现的**归属**契约（架构审查 2026-09-29 P1-1，2026-10-12 落地）。
+///
+/// 背景：`log_startup` + 三个 `describe_*` 是约 120 行纯格式化职责，原本混在装配中枢
+/// `lib.rs`（装配 + IPC 命令 + 启动日志三合一），而 `debug_log` 才是「诊断」的职责所有者。
+/// P1-1 把它们整体迁走后，`lib.rs` 只留一行 `debug_log::log_startup(...)`。本守卫钉死搬迁
+/// 结果，防止以后有人在 `lib.rs` 再抄出第二份启动日志 —— 两份真源漂移时，两壳日志字段会
+/// 静默对不上，且编译期零告警、clippy 全绿。
+#[cfg(test)]
+mod startup_log_placement_contract {
+    const LIB_RS: &str = include_str!("lib.rs");
+    const DEBUG_LOG_RS: &str = include_str!("debug_log.rs");
+
+    /// 同其它模块：只认代码行，排除注释（针写在注释里不该让守卫变绿）。
+    fn has_code_line(src: &str, needle: &str) -> bool {
+        src.lines().any(|line| {
+            let t = line.trim();
+            t.contains(needle) && !t.starts_with("//") && !t.starts_with('*')
+        })
+    }
+
+    #[test]
+    fn startup_log_lives_in_debug_log_and_not_in_lib() {
+        // ① 唯一实现必须在 debug_log.rs，且对模块外可见（lib.rs 只能经限定路径调用）。
+        assert!(
+            has_code_line(DEBUG_LOG_RS, "pub(crate) fn log_startup("),
+            "log_startup 必须定义在 debug_log.rs（诊断职责的所有者，架构审查 P1-1）"
+        );
+
+        // ② lib.rs 不得再持有四个函数中的任何一个定义（抄回第二份 = 真源分裂）。
+        for banned in [
+            "fn log_startup(",
+            "fn describe_target(",
+            "fn describe_proxy(",
+            "fn describe_tabs(",
+        ] {
+            assert!(
+                !has_code_line(LIB_RS, banned),
+                "lib.rs 不得再定义 {banned}：启动日志的唯一真源已迁到 debug_log.rs（P1-1），\
+                 抄第二份会让日志字段静默漂移"
+            );
+        }
+
+        // ③ 装配处只允许经限定路径调这一次（不靠 use 把名字重新拉回 lib.rs）。
+        assert!(
+            has_code_line(LIB_RS, "debug_log::log_startup("),
+            "lib.rs 必须以 debug_log::log_startup(...) 调用启动信息（装配处只留一行）"
+        );
+    }
+}
+
+/// 移动端底栏（mobile_bar）的静态契约测试。
+///
+/// 存在理由：这一整块功能**本机跑不到**（移动端目标只能靠 CI / 真机），而它又全是
+/// 「静默失败」体质 —— 事件名两侧不逐字一致、cfg 脚本与脚本注册顺序颠倒、按钮无条件渲染，
+/// 三者的表象都是「点了没反应」且零报错。所以每一条都写成**成对可观测判据**：
+/// 改坏了必须 FAIL，而不是无声降级。
+///
+/// 覆盖：
+///   · 前端 ↔ Rust 三个事件名逐字一致；
+///   · cfg 脚本必须排在 mobilebar.js 之前（初始化脚本按注册顺序执行）；
+///   · 按钮清单与顺序（首页 / 后退 / 前进 / 列表）；
+///   · 「列表」按钮**由页签可用性决定**，不是无条件渲染（死按钮守卫）；
+///   · 底部空间契约（与顶部空间契约镜像）+ 前进后退落点守卫 + 启动页不画底栏；
+///   · 打包配置字段 `mobile_bar` 在四处真源里都存在。
+#[cfg(test)]
+mod mobile_bar_contract {
+    const LIB_RS: &str = include_str!("lib.rs");
+    const BAR_RS: &str = include_str!("mobilebar.rs");
+    const BAR_JS: &str = include_str!("mobilebar.js");
+    const CONFIG_RS: &str = include_str!("config.rs");
+    const PARSER_PY: &str = include_str!("../../.github/scripts/parse-packaging-config.py");
+    const PARSER_MJS: &str = include_str!("../../scripts/packlib/constants.mjs");
+    const ELECTRON_CONFIG: &str = include_str!("../../electron-app/src/main/config.ts");
+
+    /// 事件名：拆成两段拼接，避免本文件自己的字面量把断言「自我满足」。
+    /// ⚠️ JS 侧用的是单引号字面量，Rust 侧是双引号常量值 —— 两侧写法不同，各按各的找。
+    const NAV_HOME_IN_JS: &str = concat!("'", "web2app:nav-home", "'");
+    const NAV_HOME_IN_RUST: &str = concat!("\"", "web2app:nav-home", "\"");
+    const SWITCH_IN_JS: &str = concat!("'", "web2app:switch-tab", "'");
+    const SWITCH_IN_RUST: &str = concat!("\"", "web2app:switch-tab", "\"");
+    const CLOSE_IN_JS: &str = concat!("'", "web2app:close-tab", "'");
+    const CLOSE_IN_RUST: &str = concat!("\"", "web2app:close-tab", "\"");
+
+    /// 只看「代码行」：剥掉整行注释后再匹配，否则针会被注释满足（本仓库踩过）。
+    fn has_code_line(src: &str, needle: &str) -> bool {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .any(|l| l.contains(needle))
+    }
+
+    /// ① 三个事件名：前端字面量 ↔ Rust 常量 ↔ Rust 监听点，缺一侧就是「点了没反应」。
+    ///
+    /// ⚠️ Rust 侧用的是**常量**（`NAV_HOME_EVENT` 等）而不是字面量，所以「监听点」这一侧
+    ///    按常量名找；常量值与前端字面量的逐字一致由 `mobilebar.rs` 自己的单测钉住
+    ///    （`event_names_are_stable`），两侧合起来才是完整闭环。
+    #[test]
+    fn event_names_match_between_page_and_rust() {
+        for (js, listen, name) in [
+            (
+                NAV_HOME_IN_JS,
+                "app.listen(NAV_HOME_EVENT",
+                "web2app:nav-home",
+            ),
+            (
+                SWITCH_IN_JS,
+                "app.listen(SWITCH_TAB_EVENT",
+                "web2app:switch-tab",
+            ),
+            (
+                CLOSE_IN_JS,
+                "app.listen(CLOSE_TAB_EVENT",
+                "web2app:close-tab",
+            ),
+        ] {
+            assert!(
+                BAR_JS.contains(js),
+                "src/mobilebar.js 缺少事件字面量 {name}（找的是 {js}）"
+            );
+            assert!(
+                has_code_line(BAR_RS, listen),
+                "src/mobilebar.rs 必须监听 {name}（找的是 {listen}），否则按钮点了没人接"
+            );
+        }
+        // 常量值本身必须与前端字面量同源（改一处忘另一处 = 静默失效）。
+        for (rust, name) in [
+            (NAV_HOME_IN_RUST, "web2app:nav-home"),
+            (SWITCH_IN_RUST, "web2app:switch-tab"),
+            (CLOSE_IN_RUST, "web2app:close-tab"),
+        ] {
+            assert!(
+                BAR_RS.contains(rust),
+                "src/mobilebar.rs 的事件常量值必须是 {name}（找的是 {rust}）"
+            );
+        }
+    }
+
+    /// ② 前端必须走**核心事件**通路：远程页面调应用命令必被 ACL 拒（与 titlebar.js 同约束）。
+    #[test]
+    fn page_emits_core_events_not_app_commands() {
+        assert!(
+            BAR_JS.contains("plugin:event|emit"),
+            "src/mobilebar.js 必须走核心事件通路（__TAURI_INTERNALS__ 兜底）"
+        );
+        // 首页要能工作，capability 必须已经授予 emit —— default.json 那条由
+        // capability_contract::main_capability_grants_remote_titlebar_permissions 钉着。
+    }
+
+    /// ③ cfg 脚本必须排在 mobilebar.js **之前**（初始化脚本按注册顺序执行）。
+    ///    顺序反了 ⇒ 底栏照画，但高度与「列表」按钮不再由壳决定（静默错位）。
+    #[test]
+    fn config_script_is_registered_before_bar_script() {
+        let cfg_at = LIB_RS
+            .find("mobilebar::config_script()")
+            .unwrap_or_else(|| panic!("lib.rs 必须注入 mobilebar::config_script()"));
+        let js_at = LIB_RS
+            .find("include_str!(\"mobilebar.js\")")
+            .unwrap_or_else(|| panic!("lib.rs 必须注入 include_str!(\"mobilebar.js\")"));
+        assert!(
+            cfg_at < js_at,
+            "cfg 脚本必须排在 mobilebar.js 之前注册（当前 cfg@{cfg_at} js@{js_at}）：\
+             初始化脚本按注册顺序执行，反了会让底栏用默认值渲染"
+        );
+    }
+
+    /// ④ 按钮清单与顺序：首页 / 后退 / 前进 / 列表（列表在最后）。
+    #[test]
+    fn bar_renders_home_back_forward_then_list() {
+        let kinds = [
+            ("home", "首页"),
+            ("back", "后退"),
+            ("fwd", "前进"),
+            ("list", "列表"),
+        ];
+        let mut last = 0usize;
+        for (cls, label) in kinds {
+            let needle = format!("btn('{cls}',");
+            let at = BAR_JS
+                .find(&needle)
+                .unwrap_or_else(|| panic!("src/mobilebar.js 必须渲染「{label}」按钮（{needle}）"));
+            assert!(
+                at > last,
+                "底栏按钮顺序必须是 首页 → 后退 → 前进 → 列表（{label} 位置不对）"
+            );
+            last = at;
+            assert!(
+                BAR_JS.contains(&format!("w2m-{cls}")),
+                "按钮 {label} 必须带 w2m-{cls} 类名（样式与交互选择器都靠它）"
+            );
+        }
+    }
+
+    /// ⑤ 死按钮守卫：「列表」必须**由页签可用性决定**，不是无条件渲染。
+    ///    移动端目前没有多页签，无条件画它 = 点了没反应且毫无线索。
+    #[test]
+    fn list_button_is_conditional_on_tab_availability() {
+        assert!(
+            has_code_line(BAR_JS, "if (HAS_TABS) items.push("),
+            "「列表」按钮必须由 HAS_TABS 决定是否渲染（无条件渲染 = 移动端出现死按钮）"
+        );
+        // 判据的另一半在壳侧：tabs_available() 必须真的按平台/开关判定，而不是写死 true。
+        assert!(
+            has_code_line(BAR_RS, "cfg!(windows) && TABS_ENABLED"),
+            "mobilebar.rs::tabs_available() 必须按「平台 + TABS_ENABLED」判定；\
+             写死 true 会让移动端出现点了没反应的列表按钮"
+        );
+        // cfg 里必须把这个结论下发给页面，否则前端无从判断。
+        assert!(
+            BAR_RS.contains("__web2appMobileBarCfg"),
+            "mobilebar.rs::config_script() 必须下发 __web2appMobileBarCfg（页面读的就是它）"
+        );
+        assert!(
+            BAR_RS.contains("tabs_available()"),
+            "config_script() 必须把 tabs_available() 的结论一起下发"
+        );
+        assert!(
+            BAR_JS.contains("CFG.tabs === true"),
+            "src/mobilebar.js 必须按下发的 tabs 标记判定（不能用别处推断）"
+        );
+        // 反例锁定：`tabs_available()` 不得返回常量 true（改坏这条测试应 FAIL）。
+        assert!(
+            !has_code_line(BAR_RS, "fn tabs_available() -> bool { true }"),
+            "tabs_available() 不得无条件返回 true"
+        );
+    }
+
+    /// ⑥ 底部空间契约（顶部空间契约的镜像）：底栏占了屏幕底部一格，页面必须让出来，
+    ///    否则页面自己的页脚 / 贴底操作条会被底栏盖住。
+    #[test]
+    fn bottom_space_contract_mirrors_the_top_one() {
+        assert!(
+            BAR_JS.contains("html{box-sizing:border-box!important;height:100%!important;overflow:hidden!important;}"),
+            "底部空间契约要求 html 不滚（body 当滚动容器），否则滚动条会画到底栏上"
+        );
+        assert!(
+            BAR_JS.contains("margin-bottom:"),
+            "body 必须让出底部一格（margin-bottom）—— padding 会让滚动条穿过去"
+        );
+        assert!(
+            BAR_JS.contains("min-height:0!important;height:"),
+            "body 的 min-height 必须归零：页面常写 min-height:100vh，会把 body 撑高一格底栏"
+        );
+        // 页面自己的贴底固定条 / 100vh 容器也要一起适配
+        assert!(
+            BAR_JS.contains("applyChromeFit") && BAR_JS.contains("SHRINK_ATTR"),
+            "底栏必须把页面自己的「贴底固定条 / 按视口高度定尺寸的容器」一起适配"
+        );
+        // 安全区：手势导航条那一截由 env() 补，不能写死
+        assert!(
+            BAR_JS.contains("env(safe-area-inset-bottom, 0px)"),
+            "底栏必须让出 env(safe-area-inset-bottom)：手势导航条高度随设备变化，写死必然压到系统条"
+        );
+    }
+
+    /// ⑦ 前进 / 后退的落点守卫：与桌面端标题栏、Android 系统返回键**同一条规则**
+    ///    —— 没有真实相邻历史、或落点是内置启动页时不动作（移动端绝不退回内置页）。
+    #[test]
+    fn back_forward_use_the_same_landing_guard_as_desktop() {
+        assert!(
+            BAR_JS.contains("window.navigation"),
+            "前进/后退必须经 Navigation API 判定落点（与 titlebar.js 同规则）"
+        );
+        assert!(
+            BAR_JS.contains("isBuiltinUrl"),
+            "落点是内置启动页时必须拒绝（移动端不允许退回到内置页面）"
+        );
+        assert!(
+            BAR_JS.contains("backBtn.disabled") && BAR_JS.contains("fwdBtn.disabled"),
+            "无历史可走时按钮必须置灰（否则「点了没反应」没有任何解释）"
+        );
+    }
+
+    /// ⑧ 启动页（内置页）不画底栏：那时既没有真实历史、也不该给用户一个假的「首页」。
+    #[test]
+    fn builtin_splash_page_renders_no_bar() {
+        assert!(
+            has_code_line(BAR_JS, "isBuiltinUrl(location.href)"),
+            "内置启动页必须早退（不画底栏）：那时没有可前进/后退的真实页面"
+        );
+    }
+
+    /// ⑨ 移动端交互约定：别把桌面端的鼠标习惯带进来（没有 hover、触摸目标 ≥ 44px）。
+    #[test]
+    fn mobile_interaction_rules_are_present() {
+        assert!(
+            BAR_JS.contains("touch-action:manipulation"),
+            "必须 touch-action:manipulation（去掉双击缩放带来的点击延迟）"
+        );
+        assert!(
+            BAR_JS.contains("min-height:44px"),
+            "触摸目标必须 ≥ 44px（Apple HIG / Material 同为 44–48dp）"
+        );
+        assert!(
+            BAR_JS.contains("-webkit-tap-highlight-color:transparent"),
+            "必须去掉系统点击高亮块（否则整格按钮按下时闪一个色块）"
+        );
+        assert!(
+            BAR_JS.contains("w2m-btn:active"),
+            "触摸设备没有可靠的 :hover ⇒ 反馈必须走 :active"
+        );
+        // 反面：不得再画桌面端那种 hover tooltip（触摸设备上要么不出现、要么粘住不走）
+        assert!(
+            !BAR_JS.contains("data-tip"),
+            "底栏不该有 tooltip：触摸设备上 :hover 不可靠，语义交给 aria-label"
+        );
+    }
+
+    /// ⑩ 打包配置字段 `mobile_bar` 必须在**四处真源**里都存在 —— 少一处就是
+    ///    「配置里写了却静默失效」（解析器未知字段会硬失败，而不是忽略）。
+    #[test]
+    fn config_field_exists_in_every_source_of_truth() {
+        assert!(
+            has_code_line(PARSER_PY, "\"mobile_bar\": False"),
+            ".github/scripts/parse-packaging-config.py 的 DEFAULTS 必须含 mobile_bar"
+        );
+        assert!(
+            has_code_line(PARSER_PY, "\"mobile_bar\""),
+            "解析器的 BOOL_KEYS 必须含 mobile_bar（否则字符串布尔不会被拒绝）"
+        );
+        assert!(
+            has_code_line(PARSER_MJS, "mobile_bar: false"),
+            "scripts/packlib/constants.mjs（Node 复刻）必须含 mobile_bar"
+        );
+        assert!(
+            has_code_line(PARSER_MJS, "'mobile_bar'"),
+            "Node 复刻的 BOOL_KEYS 必须含 mobile_bar"
+        );
+        assert!(
+            has_code_line(ELECTRON_CONFIG, "mobile_bar: boolean"),
+            "electron-app/src/main/config.ts 的 AppConfig 必须含 mobile_bar"
+        );
+        assert!(
+            has_code_line(CONFIG_RS, "pub(crate) const MOBILE_BAR: bool"),
+            "webview-app/src/config.rs 必须定义 MOBILE_BAR 编译期常量"
+        );
+        // 它必须是**移动端专用**：桌面目标连这个常量都不存在（而不是「存在但恒 false」）。
+        assert!(
+            has_code_line(CONFIG_RS, "#[cfg(mobile)]"),
+            "config.rs 里 MOBILE_BAR 必须是 #[cfg(mobile)]（桌面端无此代码路径）"
+        );
+        assert!(
+            has_code_line(LIB_RS, "#[cfg(mobile)]") && LIB_RS.contains("crate::config::MOBILE_BAR"),
+            "lib.rs 必须在移动端按 MOBILE_BAR 决定是否注入底栏脚本"
+        );
+        // 桌面端（Windows）不得注入底栏脚本：那条块整体 cfg(mobile)，这里按「注入点只有一个
+        // 且带 mobile 标记」间接钉住（include_str! 只应出现一次）。
+        assert_eq!(
+            LIB_RS.matches("include_str!(\"mobilebar.js\")").count(),
+            1,
+            "lib.rs 里 mobilebar.js 的注入点必须唯一（多一处就会重复挂载底栏）"
         );
     }
 }

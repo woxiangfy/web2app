@@ -1,6 +1,6 @@
 # web2app 项目全盘分析与优化建议
 
-> 分析日期：2026-09-14 ｜ 现状核对：2026-09-17 ｜ 精简：2026-09-22 ｜ 计数复测：2026-10-07
+> 分析日期：2026-09-14 ｜ 现状核对：2026-09-17 ｜ 精简：2026-09-22 ｜ 计数复测：**2026-10-12（实跑）**
 > 范围：`webview-app/`（含 4 个 crate：根包 `web2app` + `resolve-core` / `resolve-tool` / `proxy-server` 三个成员 crate、注入脚本、CI/打包工作流）。
 > 后续新增的 `electron-app/`（Windows 绿色版壳）另见 `docs/electron-plan.md` / `docs/electron-analysis.md`。
 > 约束：所有优化建议**不改变现有功能点**，仅做质量/性能/安全/可维护性层面的改进。
@@ -14,8 +14,8 @@
 | 定位 | Rust + Tauri 2 的跨平台 WebView 壳：嵌网址 + 托盘最小化 + 全局快捷键 + 代理/Basic 鉴权 |
 | 目标平台 | Windows（WebView2，主战场）+ Android（交叉编译验证，未真机交付） |
 | 架构 | cargo workspace 四 crate，职责边界清晰 |
-| 代码规模 | 主 crate `src/` 23 个文件（17 个 `.rs` + 6 个前端资源：4 个注入脚本 + 2 个页面）+ 4 个 crate + 7 条 CI/打包工作流（其中 2 条只服务 Electron 壳：`electron-build-custom.yml` / `electron-ci.yml`） |
-| 当前状态 | 单测全绿（`cargo test --all`：13 + 7 + 32 + 99 = 151 通过，另有 3 + 3 条 ignored）；Electron 纯函数单测 47 条（**2026-10-07 实跑**）、双壳契约探针 138/138、多页签 33/33（2026-09-27 实跑）。⚠️ 计数随版本演进，以实跑输出为准 |
+| 代码规模 | 主 crate `src/` **26 个文件**（19 个 `.rs` 共约 14,062 行 + 7 个前端资源：4 个注入脚本 + 3 个页面）+ 4 个 crate + 7 条 CI/打包工作流（其中 2 条只服务 Electron 壳：`electron-build-custom.yml` / `electron-ci.yml`）；Electron 侧另有 `src/main/` 31 个 TS 模块（含 5 个探针 / 编排文件）约 8,444 行 + `src/renderer/` 5 个 preload |
+| 当前状态 | 单测全绿（**2026-10-12 实跑** `cargo test --all`：工作区 **240 通过 / 6 ignored** = resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 167）；Electron 纯函数单测 **96/96**（2026-10-12 实跑）、双壳契约探针 **150/150**、多页签 **39/39**（后两项为 v1.76 时点实测值；本机 Electron GUI 起不来，未复跑）。⚠️ 计数随版本演进，以实跑输出为准 |
 
 ### crate 职责
 
@@ -47,6 +47,10 @@
 | `settings.rs` | 设置结构 + 设置窗口（持久化委托 `store`） | 全平台 | 快捷键/托盘副作用锁外执行；Android 不取 parent 目录 |
 | `dnd_polyfill.js` | WebView2 拖拽 bug polyfill | Windows | 鼠标事件合成完整 HTML5 DnD 序列（**效果待真机验证，见「遗留问题」**） |
 | `tab_title.js` | 多页签真实标题回传 | Windows | MutationObserver + 轮询兜底 |
+| `web_data.rs` | 清除浏览数据（缓存 / Cookie 全清） | Windows | `ICoreWebView2Profile2::ClearBrowsingDataAll`；⚠️ 完成回调实测**不可靠**（10+ 次一次没执行）、数据照清 ⇒ 只在回调带回错误时报失败；重载前刻意留 `RELOAD_SETTLE` |
+| `debug_log.rs` | 诊断日志（`dlog!` 宏 / 落盘 / 1 MiB 轮转 / `mask_url` 去凭据） | 全平台 | 零依赖手写 ISO-8601；关闭时宏**直接短路**不拼字符串（代理是热路径） |
+| `floatwin.rs` + `floaticon.html` | 桌面悬浮球（球窗建窗 / 拖动 / 边缘吸附 / 圆形命中） | Windows | **v1.80 起**球窗走**真逐像素 alpha**（`.transparent(true).no_redirection_bitmap(true)`，需 tauri 2.12+），**删除 `SetWindowRgn` / `CreateEllipticRgn`**，命中改 `WM_NCHITTEST` 子类化（`install_circle_hit_test`）；`show_ball()` 是唯一显示入口且**顺序硬要求**（`show → unminimize → 补样式 → DeleteTab`） |
+| `floatprobe.rs` | 悬浮球真机合成指针 harness（`--float-probe`，仅 Windows） | Windows | 真实令牌 + 真实 `handle_event` + 真实窗口操作；⚠️ 探针模式必须跳过单实例插件与全局快捷键（否则已有实例在跑 ⇒ 零输出 + 退出码 0 的**假绿**） |
 
 ---
 
@@ -79,7 +83,7 @@
 | 优先级 | 建议 | 状态 |
 |---|---|---|
 | ~~P1~~ | 标签栏恢复「新建页签」入口 | 已确认有意移除（新 tab 改由页面内 `target="_blank"` / `window.open()` 触发），不再排期 |
-| P1 | 窗口标题同步页面 title | 单窗口模式自绘标题栏已跟随 `document.title`；**原生窗口标题**仍固定编译期常量 `TITLE`（定义在 `config.rs:315`，2026-09-22 由 `WINDOW_TITLE` 改名；建窗处消费在 `lib.rs:288`）。**复核：仍未落地** |
+| P1 | 窗口标题同步页面 title | 单窗口模式自绘标题栏已跟随 `document.title`；**原生窗口标题**仍固定编译期常量 `TITLE`（`config.rs` 的 `pub(crate) const TITLE: &str = env_str!("TITLE", APP_NAME)`，2026-09-22 由 `WINDOW_TITLE` 改名；建窗处消费在 `lib.rs` 的 `.title(config::TITLE)`）。**复核（2026-10-12）：仍未落地** |
 | P2 | 标签页右键菜单 | 关闭其他 / 关闭右侧 / 刷新 / 复制链接 |
 | P2 | 标签页会话持久化 | 重启恢复上次打开的 tabs（`window_state` 已有持久化基建） |
 | P2 | 下载进度 / 取消 | 下载已走原生「另存为」对话框且可取消；**进度 UI 仍未做** |

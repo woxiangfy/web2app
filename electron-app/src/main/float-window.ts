@@ -158,14 +158,12 @@ export function registerFloatWindow(d: FloatWindowDeps): void {
   // sx/sy 是指针的屏幕绝对坐标（DIP，来自页面 screenX/screenY），不是增量。
   ipcMain.handle('web2app:float-down', (e, sx: unknown, sy: unknown) => {
     assertFloatSender(e.sender.id)
-    const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
-    onDown(n(sx), n(sy))
+    onDown(finiteCoord(sx), finiteCoord(sy))
     return null
   })
   ipcMain.handle('web2app:float-move', (e, sx: unknown, sy: unknown) => {
     assertFloatSender(e.sender.id)
-    const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
-    onMove(n(sx), n(sy))
+    onMove(finiteCoord(sx), finiteCoord(sy))
     return null
   })
   ipcMain.handle('web2app:float-cancel', (e) => {
@@ -203,6 +201,11 @@ export function registerFloatWindow(d: FloatWindowDeps): void {
     deps?.toggleMainWindow()
     return null
   })
+}
+
+/** 页面上报的指针坐标只接受有限数；缺省 / 非法一律按 0（异常 IPC 载荷下也不让球乱飞）。 */
+function finiteCoord(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
 /** 特权 IPC 闸门：只有悬浮球窗自己的 webContents 能驱动它（仿 app-ipc.ts 的 assertShell）。 */

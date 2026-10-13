@@ -1,7 +1,7 @@
 # Tauri 侧硬契约（从 MEMORY.md 迁出，内容未改）
 
 > 全量细节另见 `archive-2026-09-16-thinbefore.md`。本文件是「动手前必读」的浓缩版。
-> ⚠️ 本文属**单一真源清单的一部分**：`webview-app/src/{titlebar.js,loading.js,splash.html,shell.html}`、`dist/settings.html`、`icons/*`、`src/{proxy.rs,resolve.rs}`→sidecar `w2a-proxy.exe`；改任一 ⇒ 必跑 Electron `probe`(134) + `probe --tabs`(31) + Tauri 页面探针。
+> ⚠️ 本文属**单一真源清单的一部分**：`webview-app/src/{titlebar.js,loading.js,tab_title.js,dnd_polyfill.js,floaticon.html,splash.html,shell.html}`、`dist/settings.html`、`icons/*`、`src/{proxy.rs,resolve.rs}`→sidecar `w2a-proxy.exe`；改任一 ⇒ 必跑 Electron `probe` + `probe --tabs` + Tauri 页面探针。⚠️ 探针条数**随版本漂移、以实跑输出为准**（早期本文写 `probe`(134) + `probe --tabs`(31)，2026-09-27 为 138/33，**现为单窗口 150 / 多页签 39**）。
 
 1. 远程 origin 走 IPC 必过 ACL；`remote.urls` 必为 `["http://*:*","https://*:*"]`（缺端口通配 ⇒ 窗口按钮**静默**全失效）。注入 = `whenHostReady` + 重试到 20s，失败置 `__web2appTitlebar=false` 供补挂。禁空 `.catch`；注入脚本禁 invoke 自定义命令 —— 想在远程页面里触发「应用级动作」只能发**核心插件的事件**（如标题栏「设置」按钮的 `web2app:open-settings`，配 `core:event:allow-emit`），见 §11。
 2. ⚠️⚠️ 顶部空间 = **`html` 不滚、`body` 滚**：`html{height:100%;overflow:hidden}` + `body{margin-top:38px;min-height:0;height:calc(100vh-38px);overflow-y:auto}`（必须 `margin-top` 非 padding；`min-height:0` 防 `min-height:100vh` 撑高）。配 `shimWindowScroll()` 转发 scrollY/pageYOffset/scrollTo/scroll 及 `Document.scrollingElement`→body，`ensureScrollRoot()` 三段探测须在样式表挂载之后，失败退回 html 留白旧模式。判据成对：`intrudeRows==[]` ∧ `bodyScrollbarW>0` ∧ `bodyScrollable` ∧ `scrollTo(0,200)→scrollY≈200`；**禁用** `rect.width==innerWidth`。

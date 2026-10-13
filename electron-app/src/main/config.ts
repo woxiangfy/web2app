@@ -26,7 +26,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** Windows 壳可用的 15 个字段；`android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
+/** Windows 壳可用的 15 个字段 + 1 个移动端专用字段（`mobile_bar`：接受但**忽略**，本壳在 Windows）；
+ *  `android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
 export interface AppConfig {
   /**
    * 目标地址。两种形态（与打包配置 JSON 的类型一一对应）：
@@ -57,6 +58,15 @@ export interface AppConfig {
   proxy_bypass: string
   /** 多页签开关：true 时走多页签模式（壳页面 + 子 WebContentsView） */
   tabs_enabled: boolean
+  /**
+   * 移动端底栏开关：true 时在**移动端**屏幕底部常驻一条导航条（首页 / 后退 / 前进 / 列表）。
+   *
+   * ⚠️ 本壳是 **Windows 绿色版**，这个字段在契约里存在、这里**接受但完全忽略**
+   * （移动端能力只由 Tauri 壳承载，Rust 侧常量按 `#[cfg(mobile)]` 编译）。
+   * 放在 `AppConfig` 里而不是丢进 `IGNORED_KEYS`，是为了让「契约里有哪些字段」这件事
+   * 只有 `DEFAULTS` 一个答案 —— 未知字段的判定直接读它（见 `rejectUnknownKeys`）。
+   */
+  mobile_bar: boolean
   /** DNS TXT 解析模式下的 Ed25519 公钥（数组模式必填） */
   public_key: string
   /**
@@ -140,6 +150,8 @@ export const DEFAULTS: AppConfig = {
   //    必须**逐字相同**（三处同一个串）。留空 = 不下发 proxy-bypass-list。
   proxy_bypass: 'localhost;127.0.0.1;<-loopback>',
   tabs_enabled: false,
+  // 移动端底栏：本壳（Windows）不接受这个模式，仅按契约接收并忽略（字段说明见 AppConfig）。
+  mobile_bar: false,
   public_key: '',
   resolve_secret: '',
   // 诊断日志开关：默认关（开着就会在用户数据目录里留下 startup.log，那不是期望行为）
@@ -485,6 +497,8 @@ export function loadConfig(root: string): LoadedConfig {
     proxy_https: toStr(raw.proxy_https),
     proxy_bypass: toStr(raw.proxy_bypass, DEFAULTS.proxy_bypass),
     tabs_enabled: mustBool(raw.tabs_enabled, 'tabs_enabled', DEFAULTS.tabs_enabled),
+    // 移动端专用：本壳（Windows）只读不消费，保留字段是为了契约的完整与未知字段判定。
+    mobile_bar: mustBool(raw.mobile_bar, 'mobile_bar', DEFAULTS.mobile_bar),
     public_key: publicKey,
     resolve_secret: toStr(raw.resolve_secret),
     debug: mustBool(raw.debug, 'debug', DEFAULTS.debug),

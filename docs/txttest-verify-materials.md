@@ -1,13 +1,22 @@
 # txttest 动态解析验证材料（Ed25519 签名 + AES-256-GCM 方案）
 
-> 记录日期 2026-09-03 ｜ 现状核对 2026-09-25、复核 **2026-10-07（v1.49）**（单测 172 通过 / 6 ignored；
-> 真机 DNS 用例因测试域名/记录失效暂红，见下文「域名 TXT 现状」）。
+> 记录日期 2026-09-03 ｜ 现状核对 2026-09-25、复核 2026-10-07（v1.49）、**2026-10-12（v1.80）**。
+>
+> ⚠️ **2026-10-12 复核：`webview-app/txttest_keys/` 目录在当前工作区已不存在**（私钥本就被 `.gitignore`
+> 忽略，目录后来整体被移除）。下文的密钥对仅作**历史记录**，别指望能从仓库里取回；要重新签发 TXT，
+> 先用 `cargo run -p resolve-tool -- genkey --out txttest_keys` **重建密钥对 —— 此时公钥会变**，
+> 客户端的 `PUBLIC_KEY` / `public_key` 必须同步改。`resolve-core` 里的 v4 固定向量是**硬编码密文**
+> （不读磁盘私钥），所以该目录缺失**不影响单测**，只影响「重新生成同公钥密文」这件事。
+>
+> 单测基线：**2026-10-12 实跑** `cargo test --all` = 工作区 **240 通过 / 6 ignored**
+> （resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 167）。
+> 真机 DNS 用例（3 条 `--ignored`）因测试域名 / 记录 / 密钥三重失效而红，**与代码无关**（见下文「域名 TXT 现状」）。
 > 历史 RSA 方案已废弃，其密文仅保留作容错用例；v1/v2/v3 密文格式不再被解密端接受。
 
 ## 用途
 验证 `app_url` 为域名数组时，通过 DNS TXT + Ed25519 验签 + AES-GCM 解密获取真实 URL 的逻辑。
 
-## 密钥对（`webview-app/txttest_keys/`）
+## 密钥对（`webview-app/txttest_keys/` —— ⚠️ 当前工作区已不存在，见文首说明）
 | 文件 | 说明 |
 |------|------|
 | `private_key.pem` | 私钥（**服务端持有**，用于签名 + 加密，切勿公开） |
@@ -68,7 +77,7 @@ TXT 值    = base64( Nonce(12B) || Cipher )
 | `txttest3.lcjm.cloudns.biz` | （旧 RSA 密文） | 解密失败 | ⚠️ 故意保留，用于验证容错 |
 
 ## 验证结论
-- **单元测试全过**（2026-10-07 v1.49 实测：`cargo test --all` 172 通过 / 6 ignored，其中
+- **单元测试全过**（**2026-10-12 实跑**：`cargo test --all` 工作区 240 通过 / 6 ignored，其中
   resolve-core 19、resolve-tool 22）：覆盖 `normalize_domain`、`parse_domains`、v4 `parse_payload`
   （有效/边界/过期/`ttl_days=0`/缺分隔符）、`parse_payload_rejects_legacy_and_bad_tails`
   （v3/v2/v1/20B/15B/3B/5B 尾部全部拒绝）、`rejects_out_of_range_days`（>65535 报错）、

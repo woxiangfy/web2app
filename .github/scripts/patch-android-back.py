@@ -19,17 +19,27 @@ gen/android 每次构建现生成（见 build-custom.yml / release.yml 的
 `cargo t android init` 步骤），所以两个 workflow 都必须在 init 之后调用本脚本。
 
 用法：
-    python3 .github/scripts/patch-android-back.py            # 打补丁（默认 webview-app/gen/android）
+    python3 .github/scripts/patch-android-back.py            # 打补丁（工程根自动探测）
     python3 .github/scripts/patch-android-back.py --selftest # 离线自测
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import sys
 import tempfile
+
+# 工程根解析走 android_gen（单一真源）；见该模块头部关于 2026-10-13
+# 「android job 静默中断」缺陷的完整说明。此处 re-export 供自测/调用点直接引用。
+from android_gen import (  # noqa: E402
+    GEN_ROOT_CANDIDATES,
+    find_main_activity,
+    gen_root_candidates_str,
+    resolve_gen_root,
+)
 
 # 幂等标记：已打过补丁的文件不再重复注入。
 MARKER = "web2app-android-back-guard"
@@ -119,17 +129,6 @@ def patch_src(src: str) -> str:
     return src[:insert_at] + "\n\n" + block + "\n" + src[insert_at:]
 
 
-def find_main_activity(gen_root: pathlib.Path) -> pathlib.Path:
-    """在 gen/android 工程下定位 MainActivity.kt。"""
-    java_root = gen_root / "app" / "src" / "main" / "java"
-    candidates = sorted(java_root.rglob("MainActivity.kt")) if java_root.exists() else []
-    if not candidates:
-        raise FileNotFoundError(
-            f"未找到 {java_root}/**/MainActivity.kt（请确认已先执行 cargo tauri android init）"
-        )
-    return candidates[0]
-
-
 def selftest() -> int:
     """离线自测：用合成源码验证补丁的正确性与幂等性。"""
     pristine = (
@@ -203,7 +202,40 @@ def selftest() -> int:
             missing_raised = True
         assert missing_raised, "工程缺失时应报错"
 
-    print("patch-android-back.py 自测通过 ✓（6 组场景）")
+    # 7) 工程根解析（2026-10-13 修复的回归守卫）。
+    #    CI 的形态：cwd = <repo>/webview-app，正确路径就是 `gen/android`；
+    #    本机在仓库根手跑：正确路径是 `webview-app/gen/android`。两者都必须命中。
+    assert GEN_ROOT_CANDIDATES[0] == "gen/android", (
+        "首选候选必须是 cwd 相对的 gen/android —— 这正是 CI（cwd=webview-app）的形态；"
+        "写死 webview-app/gen/android 会让 android job 在补丁步静默中断"
+    )
+    assert "webview-app/gen/android" in GEN_ROOT_CANDIDATES, "必须保留仓库根形态的候选"
+
+    def _mk(root: pathlib.Path, cand: str) -> None:
+        kt = root / cand / "app/src/main/java/com/web2app/app/MainActivity.kt"
+        kt.parent.mkdir(parents=True)
+        kt.write_text(pristine, encoding="utf-8")
+
+    cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # 7a) 只有 gen/android（CI 形态）→ 命中首个候选
+            _mk(pathlib.Path(tmp), GEN_ROOT_CANDIDATES[0])
+            os.chdir(tmp)
+            assert resolve_gen_root(None).as_posix() == GEN_ROOT_CANDIDATES[0]
+            os.chdir(cwd)
+        with tempfile.TemporaryDirectory() as tmp:
+            # 7b) 只有 webview-app/gen/android（仓库根手跑形态）→ 回落到第二个候选
+            _mk(pathlib.Path(tmp), GEN_ROOT_CANDIDATES[1])
+            os.chdir(tmp)
+            assert resolve_gen_root(None).as_posix() == GEN_ROOT_CANDIDATES[1]
+            os.chdir(cwd)
+        # 7c) 显式给定优先于任何候选
+        assert resolve_gen_root("custom/gen").as_posix() == "custom/gen"
+    finally:
+        os.chdir(cwd)
+
+    print("patch-android-back.py 自测通过 ✓（7 组场景）")
     return 0
 
 
@@ -211,8 +243,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="给 Android MainActivity 注入返回键守卫")
     parser.add_argument(
         "--gen-root",
-        default="webview-app/gen/android",
-        help="Android 工程根（默认 webview-app/gen/android）",
+        default=None,
+        help="Android 工程根（缺省按候选自动探测：" + gen_root_candidates_str() + "）",
     )
     parser.add_argument("--selftest", action="store_true", help="运行离线自测")
     args = parser.parse_args()
@@ -220,7 +252,7 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    gen_root = pathlib.Path(args.gen_root)
+    gen_root = resolve_gen_root(args.gen_root)
     path = find_main_activity(gen_root)
     src = path.read_text(encoding="utf-8")
     patched = patch_src(src)

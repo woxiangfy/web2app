@@ -54,7 +54,7 @@
 > `probe.ts`（入口编排，断言组拆在 `probe-single.ts` / `probe-tabs.ts` / `probe-infra.ts` /
 > `probe-server.ts`）等（启动参数装配在 `scripts/launch.cjs`，不在 src 下）；
 > `src/renderer/` 为 `preload.ts` / `settings-preload.ts` / `shell-preload.ts` /
-> `tabs-probe-preload.ts`（4 个）。
+> `tabs-probe-preload.ts` / `float-preload.ts`（5 个，`float-preload.ts` 随悬浮球 v1.67+ 新增）。
 
 - **进程模型**：main（Node，全权）＋ 每个窗口一个 sandboxed renderer ＋ 1 个 Rust sidecar（代理+加密）。
 - **技术选型**：TypeScript + `tsc`（TS 7，`module: node16`），设置页/标签栏用原生 HTML（不引框架），与「低依赖」风格一致。
@@ -80,7 +80,7 @@
       └ 有外部代理 → commandLine.appendSwitch('proxy-server', <复用 build_proxy_args()>)
       └ 否则启动 sidecar 本地反向代理，取回 127.0.0.1:<port>
 7. 就绪 → loadURL(代理地址 or 真实地址)
-8. 托盘 / 全局快捷键（Alt+4、Shift+F1）/ 页面事件钩子挂载
+8. 托盘 / 全局快捷键（唤醒键**默认未设置**、`Shift+F1` 固定）/ 页面事件钩子挂载
 ```
 
 ---
@@ -89,12 +89,12 @@
 
 | # | 契约项 | 要求 |
 |---|---|---|
-| 1 | **`config.json` 字段** | 沿用现有 18 字段（2026-09-22 起），不增不改名；`android_*` 四个字段**静默忽略**；⚠️ 布尔**只认真 `bool`**（字符串写法已硬失败，"接受字符串形式"是 2026-09-22 之前的旧行为） |
+| 1 | **`config.json` 字段** | 沿用现有 19 字段（2026-09-22 起为 18，后新增 `version`；不增不改名），不增不改名；`android_*` 四个字段**静默忽略**；⚠️ 布尔**只认真 `bool`**（字符串写法已硬失败，"接受字符串形式"是 2026-09-22 之前的旧行为） |
 | 2 | **顶部留白 38px** | 自绘标题栏 + 顶部让位 38px + `applyChromeFit()` 三件事全保留，与 Tauri 版逐像素一致。⚠️ 让位的**现行写法**是「**`html` 不滚、`body` 滚**」：`html{height:100%;overflow:hidden}` + `body{margin-top:38px;height:calc(100vh - 38px);overflow-y:auto}` —— 旧的 `html,body{padding-top:38px}` 会让滚动条越过标题栏，已废弃（见 `../electron-app/AGENTS.md`「自绘标题栏与页面滚动条」） |
 | 3 | **标题栏按钮** | 后退 / 前进 / **设置** / 最小化 / 最大化（双击标题栏最大化）/ 关闭，行为与位置一致（2026-09-23 起「设置」紧挨最小化**左侧**，探针按几何钉住） |
 | 4 | **Basic 鉴权** | 覆盖 HTTP **与 WebSocket**；`Set-Cookie` 的 `Domain=真实host` → `127.0.0.1` 重写；`X-Forwarded-Proto` 透传上游 scheme |
 | 5 | **新窗口策略** | `target="_blank"` / `window.open()` → 单窗口模式原地导航、多页签模式新开 tab |
-| 6 | **快捷键** | `Alt+4` 显隐（可在设置改）、`Shift+F1` 打开设置（固定） |
+| 6 | **快捷键** | 唤醒键显隐主窗：**默认未设置**（设计早期曾定为 `Alt+4`，实现改为「设置里捕获或从下拉选，不设就不注册」）；`Shift+F1` 打开设置（固定） |
 | 7 | **托盘语义** | 左键显隐；「关闭到托盘」受设置控制 |
 | 8 | **单实例** | 第二实例聚焦已有窗口；数据目录在同级 `data\`，锁也跟随 |
 | 9 | **数据目录** | 见 §1.1 语义映射；文档需明示两版差异 |
@@ -116,7 +116,7 @@
 | **M2 代理接入** | `w2a-proxy` sidecar、spawn+握手、鉴权端到端 | ✅ 完成 |
 | **M3 系统集成** | 托盘、全局快捷键、单实例、设置窗（Shift+F1）、窗口几何持久化 | ✅ 完成 |
 | **M4 页面行为** | 新窗口策略、下载另存为、右键菜单、F12、加载层、外链不泄漏凭据 | ✅ **已交付（2026-09-24）**：下载接管 / 右键菜单 / F12 三项补齐（实现在 `electron-app/src/main/page-behavior.ts`）；新窗口策略与加载层随 M1 已交付 |
-| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；探针**多页签 33/33、单窗口 138/138**，2026-09-27 实测；2026-09-18 真机目视 V1–V4 关闭） |
+| **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；2026-09-27 时点探针**多页签 33/33、单窗口 138/138**；**现为页签 39/39、单窗口 150/150**；2026-09-18 真机目视 V1–V4 关闭） |
 | **M6 打包** | 三形态出包、版本信息、config 注入、日志目录、SmartScreen 文案 | ✅ 完成 |
 | **M7 CI** | Windows workflow：build → lint → E2E → 产物上传 | ✅ **已落库（2026-09-24）**：`.github/workflows/electron-ci.yml`，lint（Ubuntu）+ e2e（Windows）+ package（非 PR，上传 zip / portable）三作业 |
 

@@ -1,9 +1,0 @@
-ball host rect = 1383,74 136x56
-cursor before = 409,1
-shot1 (no hover) -> C:\dev\rust\web-app\tests\float-frag-rc\hover-1-nohover.png
-shot2 (hover) -> C:\dev\rust\web-app\tests\float-frag-rc\hover-2-hover.png
---- visible windows overlapping ball rect (hover state) ---
-  overlap VISIBLE hwnd=0x1E05FE pid=9864(osfipin.mark) rect=1383,74 136x56 ex=0x8000198 cls=Tauri Window title=[]
-  overlap VISIBLE hwnd=0x1CD031E pid=2516(WorkBuddy) rect=-7,-7 1718x902 ex=0x100 cls=Chrome_WidgetWin_1 title=[WorkBuddy]
-  overlap VISIBLE hwnd=0x1E06AE pid=3664(explorer) rect=0,0 1704x888 ex=0x200100 cls=ApplicationFrameWindow title=[]
-  overlap VISIBLE hwnd=0x10120 pid=3664(explorer) rect=0,0 1704x928 ex=0x80 cls=Progman title=[Program Manager]

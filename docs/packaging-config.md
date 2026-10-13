@@ -34,7 +34,7 @@
 
 ## 2. 字段总表
 
-共 **19 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
+共 **20 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
 
 | 字段 | 类型 | 默认值 | 平台 | 含义 |
 |---|---|---|---|---|
@@ -50,6 +50,7 @@
 | `proxy_bypass` | string | `"localhost;127.0.0.1;<-loopback>"` | 仅 Windows | 不走代理的地址，**分号分隔** |
 | `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。运行期文件（`settings.json` / `logs\`）都落在这个目录下。见 §4.3 |
 | `tabs_enabled` | **`bool`** | `false` | 仅 Windows | 多页签模式（Electron 亦可）；Android 忽略 |
+| `mobile_bar` | **`bool`** | `false` | 仅移动端 | 移动端底栏模式（底部常驻导航条：首页 / 后退 / 前进 / 列表）。桌面端忽略。见 §3.7 |
 | `debug` | **`bool`** | `false` | 全平台 | 诊断日志开关：`true` = 写 `<数据目录>\logs\startup.log` 并同时打印；`false` = **不建目录、不写文件，控制台输出也一并静默**。见 §3.5 |
 | `public_key` | string | `""` | 全平台 | Ed25519 公钥（裸 base64 或 SPKI PEM）。**`app_url` 为数组时必填** |
 | `resolve_secret` | string | `""` → 代码内置默认 | 全平台 | AES 对称 Secret，须与服务端生成密文时一致。⚠️ **编译期**注入 |
@@ -141,7 +142,7 @@ AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自�
 同一份配置里写 `"on"`，两个壳的判定**相反**。这类缺陷不报错、只在运行时表现为行为差异，
 是最难查的一类。**现在字符串一律拒绝**，歧义在打包期就消灭。
 
-哪些字段是布尔：`proxy_enabled`、`tabs_enabled`、`debug`。
+哪些字段是布尔：`proxy_enabled`、`tabs_enabled`、`mobile_bar`、`debug`。
 
 > 注：真 bool 经打包解析器写入环境变量时是 Python 风格的 `True` / `False`（首字母大写，
 > CI 的 `write_env` 与本地 Node 复刻同源），Tauri 的 `env_bool!` 按 **ASCII 大小写不敏感**
@@ -251,6 +252,34 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
 > 文件名、轮转阈值两处常量与 Electron 侧刻意**同值**（`debug_log.rs::LOG_FILE_NAME` /
 > `MAX_BYTES` ↔ `startup-log.ts::LOG_FILE_NAME` / `MAX_BYTES`）——「同一份契约」不能只写在文档里。
 
+### 3.8 `mobile_bar` —— 移动端底栏模式（仅移动端）
+
+`true` 时移动端屏幕**底部**常驻一条导航条，四个入口：
+
+| 按钮 | 行为 | 备注 |
+|---|---|---|
+| 首页 | 回到入口地址 `app_url` | 已在首页时**重新加载**；未就绪（还在启动页）时重走一次完整 bootstrap |
+| 后退 / 前进 | 驱动当前文档的浏览历史 | 落点守卫与桌面端标题栏**同一条规则**：上/下一条不是真实网页（或是内置启动页）时不动作，按钮同时置灰；移动端的系统返回键同样受这条规则约束（见 `.github/scripts/patch-android-back.py`） |
+| 列表 | 展开所有已打开的页签并切换 | **只在当前平台真的有页签可切时才渲染** |
+
+三条必须一起记住的约束：
+
+1. **仅移动端生效**：Rust 侧常量 `config.rs::MOBILE_BAR` 整体是 `#[cfg(mobile)]` —— 桌面目标
+   （Windows Tauri / Electron）**连这个常量都不存在**，所以「配了 `true` 却在桌面端长出一条
+   底栏」不可能发生，也不会退化成一条看不见的静默行为。
+2. **列表按钮不是无条件画的**：它只在壳下发的「本构建是否有页签能力」为真时才渲染。
+   移动端目前**没有多页签**（`tabs_enabled` 在 Android 仍被忽略，`mod tabs` 为 `#[cfg(windows)]`），
+   因此 `mobile_bar=true` + `tabs_enabled=true` 在移动端也**只画前三个按钮** ——
+   宁可少一个按钮，也不要一个点了没反应的死按钮。将来移动端有了页签，只需放宽
+   `mobilebar.rs::tabs_available` 的 cfg，前端一行不用改。
+3. **底栏会占掉屏幕底部空间**：注入脚本按「底部空间契约」把 `body` 缩高一格底栏并让出
+   `env(safe-area-inset-bottom)`（手势导航条），同时把页面自己的「贴底固定条」上移，
+   否则页面页脚会被底栏盖住 —— 与桌面端标题栏的「顶部空间契约」是镜像关系。
+
+> 底栏高度与按钮清单的**真源在 `webview-app/src/mobilebar.js`**，由
+> `webview-app/src/mobilebar.rs` 把「高度 / 是否有页签」两个值注入给它；
+> 契约测试 `mobile_bar_contract` 钉住按钮顺序、列表按钮的渲染条件与底部空间契约。
+
 ---
 
 ## 4. 多端行为对照
@@ -264,6 +293,7 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
 | `app_name` | 安装包名 / 数据目录名 / **Android 包名**（派生） | 同左 | `productName` / `%APPDATA%` 子目录名 |
 | `title` | 窗口标题 + 托盘提示 + 「设置」窗标题 | **应用名称**（桌面 label） | 窗口标题 + 托盘提示 |
 | `tabs_enabled` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
+| `mobile_bar` | ❌ 忽略（常量为 `#[cfg(mobile)]`，桌面目标无此代码路径） | ✅ 有效（底栏模式） | ❌ 忽略 |
 | `debug` | ✅ 写 `<数据目录>\logs\startup.log` | ✅ 写应用私有目录下的 `logs\startup.log` | ✅ 写 `<数据目录>\logs\startup.log`；探针 / 冒烟**强制开** |
 | `proxy_*` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
 | `data_dir` | 见 §4.3 | ❌ 忽略（始终私有目录） | 见 §4.3 |
@@ -286,6 +316,18 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
    改 workflow 里那一行 `pkg = "com.web2app." + seg`。
 3. `android_*` 4 个字段落盘成 `release.keystore` + `ANDROID_KEYSTORE_*` 环境变量，
    并 `::add-mask::` 掩码密码。keystore 由 **CI 一次性生成的专用 keystore** 兜底（未提供时）。
+4. **`version` 写成 `tauri.conf.json.version`（android init 之前）** ⇒ 烘焙成 Android 的
+   `versionName`（`versionCode` 由其派生）。两条流水线都有这个能力：
+   - `build-custom.yml`：取配置 JSON 的 `version`（解析器缺省注入 `0.0.1`）；
+   - `release.yml`：取仓库变量 `VERSION`；为空则回落本次 Release 的 tag（自动剥前导 `v`）；再为空
+     则**不改写**（保留 `tauri.conf.json` 里的值）。
+
+> ⚠️ **所有 `gen/android` 改写都是 `.github/scripts/` 下的共享脚本，两个 workflow 只调用它们**
+> （2026-10-13 起）：`prepare-android-conf.py`（上面第 2、4 条）、`apply-android-labels.py`（第 1 条）、
+> `patch-android-insets.py`、`set-android-apk-name.py`、`patch-android-back.py`、
+> `install-android-ndk.sh`。它们各自带 `--selftest`，由 CI 的 `config-contract` 作业执行；
+> 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
+> 在此之前，前四条改写曾以**内联 python** 的形式在两个 workflow 里各存一份，只靠人肉同步。
 
 ### 4.3 `data_dir`：四种取值，两壳同一套规则
 
@@ -473,7 +515,7 @@ Windows 上 PATH 里的 `python` 来自会话注入（`~/.workbuddy/binaries/pyt
 | `node scripts/pack-local.mjs --selftest` | 契约自测（字段/默认值/废弃字段报错/类型拒绝/近似名建议） | 否 |
 | `node scripts/pack-local.mjs --parity` | 与 Python 解析器**逐项比对**：退出码 / `::warning::` 序列 / 错误文案 / `config.json` 字节 | **是**（缺失时明确报「跳过」，不假装通过） |
 
-**⚠️ 改任何一侧的解析语义，都必须同步另一侧，并跑 `--parity`。** 它比对的是 39 个 payload
+**⚠️ 改任何一侧的解析语义，都必须同步另一侧，并跑 `--parity`。** 它比对的是 43 个 payload
 （含全部错误分支与边界），任一项不同即失败。
 
 ```bash
@@ -517,7 +559,8 @@ node scripts/pack-local.mjs --parity
   （托盘图标走 `extraResources`，只设 `-c.win.icon` 对托盘无效），Tauri 侧跑 `cargo tauri icon`
   重新生成整套图标。要**刻意**跳过用 `--no-icon`（逃逸口，不是默认路径）。
 - 输出目录：本地打包的**交付产物一律落到仓库根 `tests/` 下** —— 那是根 `AGENTS.md` §3.2 约定的本地测试
-  产物目录，根 `.gitignore` 的 `/tests/` 整目录忽略，**不会进版本库**；CI 不受影响（工作区一次性，
+  产物目录，根 `.gitignore` 已**逐条锚定**忽略 `/tests/pack/`、`/tests/json/`（⚠️ **不是** `/tests/` 整目录，
+  往 `tests/` 下写其它一次性文件不会被自动忽略），**不会进版本库**；CI 不受影响（工作区一次性，
   仍走各自默认路径）。两壳默认**分子目录**（绿色版都叫 `<app_name>.exe`，混放会互相覆盖）：
   - **Electron → `tests/pack/electron/`**：win-unpacked/ 整树、zip/portable 与 NSIS setup exe（单次约 150MB）
     由 electron-builder 直接输出到这里；CI 里仍走 `electron-builder.yml` 指定的 `electron-app/release/`。
@@ -586,7 +629,7 @@ node scripts/pack-local.mjs --parity
 | `public_key` | `PUBLIC_KEY`（Secret 优先） |
 | `resolve_secret` | `RESOLVE_SECRET`（Secret 优先） |
 | `proxy_enabled` / `proxy_http` / `proxy_https` / `proxy_bypass` | 同名大写 |
-| `data_dir` / `tabs_enabled` / `debug` | 同名大写（`DEBUG` 未配置 = 关闭） |
+| `data_dir` / `tabs_enabled` / `mobile_bar` / `debug` | 同名大写（`DEBUG` 未配置 = 关闭） |
 | `android_*` | `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` |
 
 > ⚠️ `EXTRA` 与 `ICON_URL` 历史上在 `release.yml` 里**缺失**，等于 Release 路径下
@@ -608,7 +651,7 @@ node scripts/pack-local.mjs --parity
 2. **`data_dir_default` 改成 `data_dir`（字符串）** —— `false` → `"data"`、`true` → `""`。
    旧字段出现会**直接报错**并给出这个对应关系，照报错改即可。
 3. **布尔去掉引号** —— `"false"` → `false`、`"true"` → `true`
-   （现在有三个布尔字段：`proxy_enabled` / `tabs_enabled` / `debug`）。
+   （现在有四个布尔字段：`proxy_enabled` / `tabs_enabled` / `mobile_bar` / `debug`）。
 4. **`app_url` 数组改成真数组** —— `"[\"a.com\",\"b.com\"]"` → `["a.com","b.com"]`。
 
 **模板**：

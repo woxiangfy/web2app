@@ -17,10 +17,15 @@
  *
  * 本文件只负责「页签集合」的增删切换与几何；导航/代理/钩子由 index.ts 注入
  * （onSpawn 回调），避免在这里反向依赖主进程的 bootstrap 链路。
+ *
+ * **首页页签**：集合里的**第一个**（打开 app_url 的那一签）固定在第一位且**不允许关闭**，
+ * 条目里以 `home: true` 下发给标签栏（→ 名字前画房子图标、不画 ×）。判定规则在
+ * `tab-order.ts::isPinnedHome`，与 Tauri `tabs.rs::is_home_index` 同一口径。
  */
 import { WebContentsView, type BrowserWindow } from 'electron'
-// 页签关闭后的邻接选择是纯顺序规则，抽在无 Electron 依赖的 tab-order.ts 里（可直接 node:test）。
-import { nextActiveLabelAfterClose } from './tab-order'
+// 页签的纯顺序 / 归属规则（关闭后的邻接选择、首页判定）抽在无 Electron 依赖的 tab-order.ts
+// 里，可直接 node:test 钉住（tabs.ts 顶层 import electron，node 下加载必炸）。
+import { isPinnedHome, nextActiveLabelAfterClose } from './tab-order'
 
 /** 标签栏高度（逻辑像素）。与 shell.html 的 `--bar-h`、Tauri 的 `TAB_BAR_HEIGHT` 一致，勿改。 */
 export const TAB_BAR_HEIGHT = 38
@@ -43,6 +48,14 @@ export interface TabItem {
   label: string
   title: string
   active: boolean
+  /**
+   * 是否首页页签（多页签列表里的**第一个**，即入口 app_url 那一签）。
+   *
+   * 首页固定在第一位、**不允许关闭**，标签栏里名字前带房子图标作标记 —— shell.html 靠这个
+   * 字段决定「画不画图标 / 画不画 ×」。判定规则见 `tab-order.ts::isPinnedHome`（与 Tauri
+   * `tabs.rs::is_home_index` 同一条：位次 0）。
+   */
+  home: boolean
 }
 
 export interface TabsOptions {
@@ -178,7 +191,13 @@ export class TabManager {
     this.pushToShell()
   }
 
-  /** 关闭页签；返回是否真的关了（label 不存在返回 false）。 */
+  /**
+   * 关闭页签；返回是否真的关了。
+   *
+   * 返回 `false` 有两种含义（调用方只需知道「没关掉」，日志/探针靠本注释区分）：
+   *   · label 不在集合里；
+   *   · label 是**首页页签**（`isPinnedHome`）—— 固定第一位、不允许关闭。
+   */
   closeTab(label: string): boolean {
     const tab = this.tabs.get(label)
     if (!tab) return false
@@ -188,6 +207,14 @@ export class TabManager {
     // 邻接选择会退化成「永远激活第一个幸存页签」（见 nextActiveLabelAfterClose 注释）。
     const labelsBefore = [...this.tabs.keys()]
     const removedIndex = labelsBefore.indexOf(label)
+
+    // ⚠️⚠️ 首页拦截必须排在**一切副作用之前**（不删登记、不销毁视图、不推壳），与 Tauri
+    //    `close_tab_inner` 的第 ① 步同一条纪律：先动后判会留下「登记没了、窗口还在」的半具
+    //    残骸 —— 而标签栏本就不给首页渲染 ×，用户既点不开也关不掉它。
+    if (isPinnedHome(labelsBefore, label)) {
+      console.warn(`[web2app] 拒绝关闭首页页签（固定在第一位、不可关）：${label}`)
+      return false
+    }
 
     this.tabs.delete(label)
     try {
@@ -202,7 +229,9 @@ export class TabManager {
     }
 
     if (this.tabs.size === 0) {
-      // 关掉最后一个页签 → 关闭宿主窗口（走 index.ts 的统一退出语义）
+      // 关掉最后一个页签 → 关闭宿主窗口（走 index.ts 的统一退出语义）。
+      // ⚠️ 首页固定第一位且不可关闭 ⇒ 正常运行期走不到这里；保留它是为了兜住
+      //    「首页视图异常未建立 / 集合被外部清空」这类非正常态（不兜会留个关不掉的空壳）。
       this.activeLabel = null
       this.host.close()
       return true
@@ -264,28 +293,35 @@ export class TabManager {
 
   /** 当前页签列表（对象形态，供 pushToShell 的 render() 消费）。 */
   list(): TabItem[] {
+    const labels = [...this.tabs.keys()]
     return [...this.tabs.values()].map((t) => ({
       label: t.label,
       title: t.title || t.label,
       active: t.label === this.activeLabel,
+      // 首页 = 位次 0（见 tab-order.ts::isPinnedHome 的文档：固定第一位 + 不可关）。
+      // 等价简写是 `i === 0`，但这里刻意走 isPinnedHome —— 「首页判定」全项目只有这一份实现。
+      home: isPinnedHome(labels, t.label),
     }))
   }
 
   /**
-   * get_tabs IPC 的返回契约：**元组数组** `[label, title, active]`。
+   * get_tabs IPC 的返回契约：**元组数组** `[label, title, active, home]`。
    *
    * ⚠️ 与 `list()`（对象形态）刻意分开：Tauri 侧 `get_tabs` 返回
-   *   `Vec<(String, String, bool)>`，序列化成 JSON 后是 `[[label,title,active], ...]`；
-   *   `shell.html` 用 `list.map(([label, title, active]) => …)` 解构（见 shell.html:266）。
-   *   若这里返回对象数组，解构会得到 `[undefined, undefined, undefined]`，标签栏渲染空白。
-   *   而 `pushToShell` 走的是 `render({label,title,active})` 对象契约（shell.html:211），
-   *   两者不能混用 —— 这是双壳单一真源下「同一份 shell.html 两套消费形态」的硬约束。
+   *   `Vec<(String, String, bool, bool)>`，序列化成 JSON 后是
+   *   `[[label,title,active,home], ...]`；
+   *   `shell.html` 用 `list.map(([label, title, active, home]) => …)` 解构（见 shell.html:345）。
+   *   若这里返回对象数组，解构会得到 `[undefined, undefined, undefined, undefined]`，标签栏渲染空白。
+   *   而 `pushToShell` 走的是 `render({label,title,active,home})` 对象契约，两者不能混用
+   *   —— 这是双壳单一真源下「同一份 shell.html 两套消费形态」的硬约束。
    */
-  listForIpc(): [string, string, boolean][] {
+  listForIpc(): [string, string, boolean, boolean][] {
+    const labels = [...this.tabs.keys()]
     return [...this.tabs.values()].map((t) => [
       t.label,
       t.title || t.label,
       t.label === this.activeLabel,
+      isPinnedHome(labels, t.label),
     ])
   }
 

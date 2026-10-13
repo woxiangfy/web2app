@@ -87,6 +87,7 @@ export function selftest() {
     assertThat(m.title === 'Web2App', 'title 空 → 回落 app_name')
     assertThat(m.proxy_enabled === 'False' && m.tabs_enabled === 'False', '布尔默认 False')
     assertThat(m.debug === 'False', 'debug 默认必须关闭（默认开启＝往用户数据目录里塞日志文件）')
+    assertThat(m.mobile_bar === 'False', 'mobile_bar 默认必须关闭（默认＝无移动端底栏）')
     assertThat(m.data_dir === 'data', 'data_dir 默认是相对路径 data')
     assertThat(m.proxy_bypass === 'localhost;127.0.0.1;<-loopback>', 'proxy_bypass 默认串')
 
@@ -113,6 +114,11 @@ export function selftest() {
     assertThat(buildMerged({ app_url: 'https://a.com', proxy_enabled: true }).proxy_enabled === 'True', '真 true 通过')
     assertThat(buildMerged({ app_url: 'https://a.com', debug: true }).debug === 'True', 'debug 真 true 通过')
     expectError({ app_url: 'https://a.com', debug: 'true' }, '必须是布尔值')
+    assertThat(
+      buildMerged({ app_url: 'https://a.com', mobile_bar: true }).mobile_bar === 'True',
+      'mobile_bar 真 true 通过',
+    )
+    expectError({ app_url: 'https://a.com', mobile_bar: 'true' }, '必须是布尔值')
     for (const bad of ['true', 'false', '1', 'yes', 'on', '']) {
       expectError({ app_url: 'https://a.com', proxy_enabled: bad }, '必须是布尔值')
     }
@@ -172,12 +178,14 @@ export function selftest() {
       app_url: ['a.com'],
       public_key: 'AAAA',
       tabs_enabled: true,
+      mobile_bar: true,
       debug: true,
       data_dir: '',
       android_keystore_base64: 'eHh4',
     })
     const cfg = toConfigJson(merged)
     assertThat(cfg.tabs_enabled === true, 'config.json 里必须是真 bool')
+    assertThat(cfg.mobile_bar === true, 'mobile_bar 在 config.json 里也必须是真 bool')
     assertThat(cfg.debug === true, 'debug 在 config.json 里也必须是真 bool')
     assertThat(Array.isArray(cfg.app_url) && cfg.app_url[0] === 'a.com', 'config.json 里数组要保持数组')
     assertThat(!('android_keystore_base64' in cfg), 'android_* 不应进 Windows 包的 config.json')

@@ -307,7 +307,7 @@ test('v1.70 拖动协议：页面上报屏幕绝对坐标，主进程按抓取�
   // 窗口首帧纹丝不动）：down 通道 → press 暂存 → 首帧 move 用 press 算 anchor。
   assert.ok(floatIconHtml.includes("send('down', e.screenX, e.screenY)"), 'pointerdown 必须立即发 down')
   assert.ok(floatPreload.includes('floatDown: (sx: number, sy: number)'))
-  assert.ok(floatWin.includes('onDown(n(sx), n(sy))'), 'float-down 通道必须把按下点交给 onDown')
+  assert.ok(floatWin.includes('onDown(finiteCoord(sx), finiteCoord(sy))'), 'float-down 通道必须把按下点交给 onDown')
   assert.ok(floatWin.includes('let press'), '主进程必须有按下点暂存 press')
   assert.ok(floatWin.includes('const p = press ?? { x: sx, y: sy }'), '首帧 move 必须取走 press（缺失才回退当前帧）')
   assert.ok(floatWin.includes('anchor = { x: p.x - b0.x, y: p.y - b0.y }'), '锚点必须按下点 − 展开后原点')
@@ -316,7 +316,7 @@ test('v1.70 拖动协议：页面上报屏幕绝对坐标，主进程按抓取�
   assert.ok(floatWin.includes("ipcMain.handle('web2app:float-cancel'"), '未拖动的 pointercancel 必须有 cancel 通道')
   // preload / 主进程参数名同步为 sx/sy。
   assert.ok(floatPreload.includes('floatMove: (sx: number, sy: number)'))
-  assert.ok(floatWin.includes('onMove(n(sx), n(sy))'), 'float-move 通道必须把屏幕坐标交给 onMove')
+  assert.ok(floatWin.includes('onMove(finiteCoord(sx), finiteCoord(sy))'), 'float-move 通道必须把屏幕坐标交给 onMove')
   // 主进程必须有拖动中软钳制 + 松手自由态钳制。
   assert.ok(floatWin.includes('clampVisible('), '拖动中必须软钳制（留窄边、可跨屏、不甩丢）')
   assert.ok(floatWin.includes('clampFreeInside('), '自由态松手必须把球完整钳回显示器')

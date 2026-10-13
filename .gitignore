@@ -56,3 +56,7 @@ node_modules/
 # v1.59 真机验证「保存密码」气泡/自动填充的一次性夹具、截图与 WebView2 数据目录（不入库）
 /tests/pw-fixture/
 /tests/pw-udd-*/
+# v1.79/v1.80 悬浮球「背景异形」取证工作区，也是 `electron-app/scripts/diag/float-ring-lab.cjs` 的
+# 默认输出目录。⚠️ 2026-10-12 前本条**缺失** ⇒ 该目录的一次性产物被 `git add -A` 收进版本库（79 个
+# 文件），事后才清空。补上本条后重启该取证脚本不会再污染版本库。
+/tests/float-frag-rc/

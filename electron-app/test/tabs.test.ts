@@ -9,7 +9,29 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { nextActiveLabelAfterClose } from '../src/main/tab-order.ts'
+import { isPinnedHome, nextActiveLabelAfterClose } from '../src/main/tab-order.ts'
+
+test('首页 = 列表第一项：只有首位是首页', () => {
+  // 首页固定第一位（tab-order.ts::isPinnedHome）—— 与 Tauri tabs.rs::is_home_index 同口径。
+  const labels = ['tab-1', 'tab-2', 'tab-3']
+  assert.equal(isPinnedHome(labels, 'tab-1'), true)
+  assert.equal(isPinnedHome(labels, 'tab-2'), false)
+  assert.equal(isPinnedHome(labels, 'tab-3'), false)
+})
+
+test('首页判定：列表里不存在的 label / 空列表都不是首页（绝不误判成「关不掉」）', () => {
+  assert.equal(isPinnedHome(['a'], 'zz'), false)
+  assert.equal(isPinnedHome([], 'a'), false)
+})
+
+test('首页关不掉 ⇒ 关别家之后它仍固定在首位（不变式）', () => {
+  const labels = ['home', 'b', 'c']
+  assert.equal(isPinnedHome(labels, 'home'), true, '首页必须被拦下（closeTab 直接返回 false）')
+  const afterCloseB = labels.filter((l) => l !== 'b')
+  assert.equal(isPinnedHome(afterCloseB, 'home'), true, '关掉别的页签不会把首页顶走')
+  // 关掉最后一个非首页后，首页仍是唯一且仍是首页（不会被「关到空 ⇒ 关宿主」带走）。
+  assert.equal(isPinnedHome(labels.filter((l) => l !== 'b' && l !== 'c'), 'home'), true)
+})
 
 test('关闭中间页签 → 激活右邻', () => {
   // [a,b,c] 关 b(1) → c；旧实现删除后 findIndex 恒 -1，会错误激活 a

@@ -57,11 +57,22 @@ export interface SidecarHandle {
 /** 握手超时。DNS 解析要走网络（可能几秒），代理启动本身很快，30s 足够宽松。 */
 const HANDSHAKE_TIMEOUT_MS = 30_000
 
+/** 失败阶段分类（与 sidecar 握手失败行的 kind 字段一一对应；新增分类只改这一处）。 */
+export const SIDECAR_ERROR_KINDS = [
+  'missing',
+  'spawn',
+  'args',
+  'resolve',
+  'proxy',
+  'protocol',
+  'timeout',
+] as const
+
 export class SidecarError extends Error {
   constructor(
     message: string,
     /** 区分失败阶段，便于上层给出准确文案（对齐 sidecar 的 kind 字段） */
-    readonly kind: 'missing' | 'spawn' | 'args' | 'resolve' | 'proxy' | 'protocol' | 'timeout',
+    readonly kind: (typeof SIDECAR_ERROR_KINDS)[number],
   ) {
     super(message)
     this.name = 'SidecarError'
@@ -194,9 +205,8 @@ export function startSidecar(opts: StartSidecarOptions): Promise<SidecarHandle> 
 
       if (v.ok !== true) {
         // 只认 sidecar 契约里的失败分类；任意字符串直接透传会让上层的文案收敛失效。
-        const known = ['missing', 'spawn', 'args', 'resolve', 'proxy', 'protocol', 'timeout'] as const
         const rawKind = typeof v.kind === 'string' ? v.kind : ''
-        const kind = (known as readonly string[]).includes(rawKind)
+        const kind = (SIDECAR_ERROR_KINDS as readonly string[]).includes(rawKind)
           ? (rawKind as SidecarError['kind'])
           : 'protocol'
         finish(() => {

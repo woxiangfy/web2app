@@ -75,7 +75,7 @@
 //! 宽度只用于算活柱偏移 [`live_offset`]。页面侧由 `push_state` 下发 `anchor`（`'l'`/`'r'`），
 //! floaticon.html 把球摆进对应活柱。
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
@@ -1028,12 +1028,7 @@ unsafe extern "system" fn hit_test_wndproc(
 }
 
 /// 调回被替换前的原窗口过程；找不到记录（理论上不会发生）时用 DefWindowProcW 兜底。
-unsafe fn call_original_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe fn call_original_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let old = {
         let guard = subclasses()
             .lock()

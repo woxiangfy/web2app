@@ -1,9 +1,10 @@
 # electron-app（Windows 绿色版 Electron 壳）— 详细笔记
 
-> 索引在 `MEMORY.md` §10。方案 `electron-app/PLAN.md`，命令与差异 `electron-app/README.md`。
+> 索引见 `MEMORY.md`（「契约 E 悬浮窗/球」段与「状态」段；早期引用写作「§10」，该编号现已不存在）。方案在 `docs/electron-plan.md`（原 `electron-app/PLAN.md`，已迁走），命令与差异见 `electron-app/AGENTS.md`（原 `electron-app/README.md`，2026-10-07 更名）。
 > 定位：**仅 Windows · Win10+ · 绿色版（目录 zip + 单文件 portable 都要）· 数据写 exe 同级 `data\` · 不做代码签名**。
 > Tauri 版（webview-app）继续维护，兼管 Android → **双壳长期并行**。
-> 进度：**M0–M7 ✅（双壳契约全面对齐；契约探针单窗口 134 / 多页签 31，2026-09-26 实测）**。
+> 进度：**M0–M7 ✅（双壳契约全面对齐）**。⚠️ 探针条数**随版本漂移，以实跑输出为准**：
+> 2026-09-26 时为单窗口 134 / 多页签 31 → 2026-09-27 为 138 / 33 → **现行单窗口 150（v1.76 起）/ 多页签 39（v1.58 起）**。
 
 ## ⚠️⚠️ 宿主注入 `ELECTRON_RUN_AS_NODE=1`（2026-09-16 在这上面绕了很久）
 

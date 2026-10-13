@@ -141,13 +141,10 @@ jobs:
           packages: 'platform-tools'
 
       - name: Install NDK
-        # setup-android 会预置一个更新的 NDK 并写好 ANDROID_NDK_ROOT；若只设
-        # ANDROID_NDK_HOME 会与它不一致，cargo-ndk 报 "doesn't match" 警告。
-        # 这里把两个变量统一指向同一个（版本锁定的）NDK，消除歧义。
-        run: |
-          yes | sdkmanager "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+        # 版本单一真源见 .github/scripts/install-android-ndk.sh —— 3 个 workflow 共用同一份
+        #（原先三处各写死一遍同一个版本号，模板换 NDK 时必然漂移）。脚本除安装外还会
+        # 校验目录存在（装不上即硬失败），并导出 ANDROID_NDK_HOME / NDK_HOME / ANDROID_NDK_ROOT。
+        run: bash ../.github/scripts/install-android-ndk.sh
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -206,6 +203,19 @@ jobs:
 
       - name: 解析器契约自测（唯一真源不漂移）
         run: python3 .github/scripts/parse-packaging-config.py --selftest
+
+      - name: 安卓共享脚本自测（工程根解析 / 包名派生 / 应用名 / insets / APK 名 / 返回键）
+        # 这些脚本原先各是 build-custom.yml 与 release.yml 里的**内联 python**（两壳各一份），
+        # 现抽成共享脚本；它们只在 Android 打包时才被执行，不挂门禁就等于「本地不跑、CI 不跑」。
+        # ⚠️ 必须在仓库根跑：`from android_gen import ...` 靠脚本所在目录进 sys.path。
+        # android_gen.py 是纯模块（无 --selftest），由下面各脚本的 import 顺带覆盖。
+        run: |
+          set -euo pipefail
+          for s in prepare-android-conf apply-android-labels \
+                   patch-android-insets set-android-apk-name patch-android-back; do
+            echo "── $s.py --selftest ──"
+            python3 ".github/scripts/$s.py" --selftest
+          done
 
       - name: 本地打包入口（Node 版）自测 + 与解析器对等性比对
         # ubuntu-latest 自带 node（≥18 即可，脚本零第三方依赖）；python3 也在 ⇒ --parity 能真跑。

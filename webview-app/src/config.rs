@@ -18,6 +18,7 @@
 //!   PROXY_HTTPS      外部 HTTPS 代理地址（留空=同 HTTP）
 //!   PROXY_BYPASS     不走代理的地址（分号分隔）
 //!   TABS_ENABLED     true/false 是否启用多页签（tab）模式（仅 Windows）
+//!   MOBILE_BAR       true/false 是否启用移动端底部导航栏（仅移动端；桌面目标无此常量）
 //!   PUBLIC_KEY       Ed25519 公钥（APP_URL 为域名数组时必填）
 //!   EXTRA            注入给页面的 JSON 文本（→ window.web2appExtra）
 //!   DEBUG            true/false 诊断日志开关（默认 false：不落盘、也不打诊断）
@@ -408,6 +409,20 @@ pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.
 // `TABS_ENABLED=true` 也不会在 Android 上启用多页签（`mod tabs` 本身也是 `#[cfg(windows)]`）。
 // 保留常量定义只为让 `#[cfg(windows)]` 分支的引用有处可依，且避免非 Windows 下的 dead_code 警告。
 pub(crate) const TABS_ENABLED: bool = cfg!(windows) && env_bool!("TABS_ENABLED", false);
+
+// ---------- 移动端底栏（mobile_bar，仅移动端）----------
+// true  = 屏幕底部常驻一条导航条：**首页**（回到 app_url）/ 后退 / 前进 / 列表。
+//         其中「列表」按钮只在**当前构建真的有页签可切**时才渲染（判定见
+//         `mobilebar::tabs_available`，下发到页面后由 `mobilebar.js` 决定是否画它）——
+//         否则会出现一个点了没有任何反应的死按钮。
+// false = 移动端不画任何壳自绘控件（默认），与历史行为一致。
+//
+// ⚠️ 常量整体 `#[cfg(mobile)]`（而不是像 TABS_ENABLED 那样用 `cfg!(windows) &&` 把值压成
+//    false）：本模式只在移动端实现，桌面目标上**连这个常量都不存在** —— 「打包时配了
+//    mobile_bar=true，桌面端却静默长出一条底栏」这类「配了但不该生效」的情形因此不可能发生。
+//    （TABS_ENABLED 在桌面端仍被引用，才需要保留常量并把值压成 false。）
+#[cfg(mobile)]
+pub(crate) const MOBILE_BAR: bool = env_bool!("MOBILE_BAR", false);
 
 // ---------- 诊断日志开关 ----------
 // true  = 每次启动写 `<数据目录>\logs\startup.log`，并把 `dlog!` 的诊断同时打到 stderr；

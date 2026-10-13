@@ -140,6 +140,7 @@ jobs:
               "proxy_bypass": "localhost;127.0.0.1;<-loopback>",
               "data_dir": "data",
               "tabs_enabled": False,
+              "mobile_bar": False,
               "public_key": "",
               "resolve_secret": "",
               "debug": False,                      # 诊断日志开关，默认关（开启才写 logs\startup.log）

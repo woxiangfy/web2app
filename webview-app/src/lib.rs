@@ -18,6 +18,10 @@
 
 // 允许各平台下未被使用的编译期常量（例如 Android 上不使用的 DEVTOOLS_ENABLED 等），
 // 避免出现 dead_code 警告导致 `cargo clippy -D warnings` 在 CI 中失败。
+// ⚠️ 纪律（架构审查 P1-3）：这是给「本机无法验证的 Android 目标」留的兜底，**新增代码一律
+//    不得依赖它** —— 平台分叉 item 应自行挂精确 cfg（如 `#[cfg(any(not(windows), test))]`）
+//    或行级 `#[allow(dead_code)]` 并注明该目标为何用不到。改完可用「临时注释本行 →
+//    cargo check --all-targets」复查是否还有被豁免毯掩盖的真死代码。
 #![allow(dead_code)]
 
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -85,6 +89,11 @@ mod save_dialog;
 // 多页签（tab）模式（仅 Windows）。
 #[cfg(windows)]
 mod tabs;
+
+// 移动端底部导航栏（`mobile_bar`，仅移动端；`test` 那一半让本机也能跑它的纯逻辑单测）。
+// ⚠️ 模块头写了完整的 cfg 理由（生产只在移动端编译，桌面端连这条路径都不存在）。
+#[cfg(any(mobile, test))]
+mod mobilebar;
 
 // 桌面悬浮球（仅 Windows）：透明置顶小球，点击调出主窗 / 可拖动 / 靠边半隐藏 / 悬停展开。
 #[cfg(windows)]
@@ -360,6 +369,12 @@ pub fn run() {
             });
         }
 
+        // ---------- 移动端底栏（仅移动端）：注册首页导航缓存 + 三个核心事件监听 ----------
+        // ⚠️ 必须在 bootstrap 之前就绪：首页按钮在「启动还没解析出地址」时也会被调用
+        //    （用户停在启动页就点了），那时它要走「重跑一次 bootstrap」那条分支。
+        #[cfg(mobile)]
+        crate::mobilebar::setup(app.handle());
+
         // 载入持久化设置（文件不存在时使用默认值），写入托管状态供运行时读取。
         let initial_settings = settings::load_settings(app.handle());
         *app.state::<SettingsState>()
@@ -486,6 +501,20 @@ pub fn run() {
                 );
             });
 
+            // ---------- 移动端底栏（`mobile_bar=true`）----------
+            // ⚠️⚠️ cfg 脚本**必须**排在 mobilebar.js **之前**：初始化脚本按注册顺序执行，
+            //    而 mobilebar.js 开头要读 `window.__web2appMobileBarCfg`（高度 / 是否有页签）。
+            //    顺序反了它只会落进「默认值」分支 —— 底栏照画，但高度与按钮清单不再由壳决定，
+            //    是最难从表象反推的一类错位（与上面「模式标记必须排在 OVERLAY_SCRIPT 之前」
+            //    同一条契约，由 contract_tests::mobile_bar_contract 钉住）。
+            #[cfg(mobile)]
+            let wb = if crate::config::MOBILE_BAR {
+                wb.initialization_script(crate::mobilebar::config_script())
+                    .initialization_script(include_str!("mobilebar.js"))
+            } else {
+                wb
+            };
+
             wb.build().expect("创建主窗口失败")
         };
 
@@ -563,9 +592,10 @@ pub fn run() {
             }
         }
 
-        // 启动信息（落地位置见 debug_log 模块）：与 Electron 侧 `index.ts::logStartup()`
-        // 一一对应，便于两壳的日志互相印证。默认 debug=false 时这里什么都没发生。
-        log_startup(app.handle(), &initial_settings);
+        // 启动信息（实现已迁至 debug_log 模块：架构审查 P1-1）：与 Electron 侧
+        // `index.ts::logStartup()` 一一对应，便于两壳的日志互相印证。
+        // 默认 debug=false 时这里什么都没发生。
+        debug_log::log_startup(app.handle(), &initial_settings);
 
         Ok(())
     });
@@ -641,132 +671,6 @@ pub fn run() {
                 _ => {}
             }
         });
-}
-
-/// 启动信息（写进诊断日志；默认 `debug=false` 时整段是空操作）。
-///
-/// 与 Electron 侧 `electron-app/src/main/index.ts::logStartup()` **一一对应**，目的是让两壳的
-/// 日志能互相印证（同一个用户报同一个问题，换壳排查时不用重新学一遍字段名）。
-///
-/// ⚠️⚠️ **绝不记凭据**：地址一律经 `debug_log::mask_url()`（隐去 `user:pass@`），
-///    Secret 只报「已配置 / 未配置」，公钥只报状态不报内容。
-fn log_startup(app: &tauri::AppHandle, settings: &settings::Settings) {
-    dlog!("[web2app] 启动信息");
-    dlog!("  分发形态      : Tauri（配置是编译期常量 —— 改配置必须重新编译/打包）");
-    dlog!("  应用名 / 标题 : {} / {}", config::APP_NAME, config::TITLE);
-    dlog!("  目标地址      : {}", describe_target());
-    #[cfg(windows)]
-    dlog!(
-        "  数据目录      : {}",
-        match config::data_dir(app) {
-            Some(d) => d.display().to_string(),
-            None => "(不可用，改用 WebView2 自身默认位置)".to_string(),
-        }
-    );
-    #[cfg(not(windows))]
-    dlog!("  数据目录      : (非 Windows：由平台自行管理)");
-    dlog!("  代理          : {}", describe_proxy());
-    dlog!("  多页签        : {}", describe_tabs());
-    dlog!(
-        "  开发者工具    : {}",
-        if config::DEVTOOLS_ENABLED {
-            "已启用（按 F12 打开）"
-        } else {
-            "未启用"
-        }
-    );
-    dlog!(
-        "  配置文件      : {}（设置 + 窗口几何）",
-        store::path(app)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(取不到配置目录)".to_string())
-    );
-    dlog!(
-        "  唤醒快捷键    : {}",
-        settings::hotkey_label(&settings.wake_hotkey)
-    );
-    dlog!(
-        "  托盘 / 关闭行为: {} / {}",
-        if settings.tray_enabled {
-            "已启用"
-        } else {
-            "未启用"
-        },
-        if settings.tray_enabled && settings.minimize_on_close {
-            "关闭时隐藏到托盘"
-        } else {
-            "关闭即退出"
-        }
-    );
-    dlog!(
-        "  加解密 Secret : {}",
-        if resolve_core::secret_is_configured() {
-            "已由配置提供"
-        } else {
-            "未配置（用内置默认串：域名数组模式下安全门槛较低）"
-        }
-    );
-    dlog!(
-        "  日志文件      : {}",
-        debug_log::log_file_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(debug 已开启但不可写，本次只有 stderr)".to_string())
-    );
-    dlog!("  web2appExtra  : {}", config::extra_json());
-}
-
-/// 目标地址的一行描述（**脱敏**）：域名数组只报「几个 / 都是谁」，普通 URL 隐去 userinfo。
-fn describe_target() -> String {
-    if let Some(domains) = resolve::parse_domains(config::APP_URL) {
-        let list: Vec<String> = domains
-            .iter()
-            .map(|d| resolve::normalize_domain(d.as_str()))
-            .collect();
-        return format!(
-            "{} 个跳板域名（DNS TXT 解析 + 验签解密）：{}；公钥{}",
-            list.len(),
-            list.join("、"),
-            if config::PUBLIC_KEY.trim().is_empty() {
-                "未配置（数组模式必须配，否则解析必然失败）"
-            } else {
-                "已配置"
-            }
-        );
-    }
-    debug_log::mask_url(config::APP_URL)
-}
-
-/// 代理模式的一行描述。判据与 `bootstrap::local_proxy_enabled()` 同源，别各写一份。
-fn describe_proxy() -> String {
-    if !config::PROXY_ENABLED {
-        return "未启用（直连）".to_string();
-    }
-    if bootstrap::local_proxy_enabled() {
-        return "本地反向代理（HTTP + WebSocket 统一注入 Basic 鉴权）".to_string();
-    }
-    #[cfg(windows)]
-    {
-        match config::build_proxy_args() {
-            // ⚠️ 外部代理地址里可能带 `user:pass@`，同样要脱敏后才进日志
-            Some(args) => format!("外部代理：{}", debug_log::mask_url(&args)),
-            None => "已启用但没配任何代理地址（等价于直连）".to_string(),
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        "已启用（非 Windows 只有本地反向代理这一条路）".to_string()
-    }
-}
-
-/// 多页签是否启用（仅 Windows 有该能力）。
-fn describe_tabs() -> &'static str {
-    #[cfg(windows)]
-    {
-        if tabs::tabs_enabled() {
-            return "已启用";
-        }
-    }
-    "未启用"
 }
 
 /// 处理「主窗口关闭」：满足任一**驻留理由** → 隐藏窗口、应用继续驻留；否则允许关闭

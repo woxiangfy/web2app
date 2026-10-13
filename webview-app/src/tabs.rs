@@ -9,6 +9,8 @@
 //!   坐标吸附在宿主窗口标签栏下方；宿主窗口拖动 / 缩放时，所有 tab 窗口批量跟随。
 //! - 标签栏由「宿主窗口」渲染（`shell://localhost/` 自定义协议，前端 HTML），tab 的增删切换通过
 //!   IPC 命令回调 Rust；宿主窗口本身不承载网页内容，只画标签栏。
+//! - **首页页签**：第一个 tab（打开 app_url 的那一签）固定在第一位且**不允许关闭**，标签栏里
+//!   名字前带房子图标作标记。判定规则见 [`is_home_index`]，渲染在 `shell.html::render`。
 //! - 本地反向代理保持**单实例单端口**（所有 tab 访问同一上游 + 同一账号），`ProxyTask` 无需改动。
 //! - 首个 tab 的域名解析 / 代理启动完成后，结果缓存到 `TabManager`，后续新建 tab 直接复用，
 //!   不再重复 DNS TXT 查询。
@@ -52,7 +54,26 @@ pub(crate) const TAB_BAR_HEIGHT: i32 = 38;
 /// 建窗越慢 → 更多建窗被排队放大 → 直到把整机拖死。历史真凶是 WebView2 钩子被重复注册
 /// （见 `webview_hooks::HOOKS_REGISTERED`，一次点击打开 N 个窗口）。该 bug 已修，但这类
 /// 故障的代价是「用户电脑卡死」，值得兜一个硬上限：最坏情况下机器还活着、还能关掉多余页签。
+/// （首页占其中一个名额，见 [`is_home_index`]。）
 const MAX_TABS: usize = 32;
+
+/// 首页页签在标签栏里的**位次**：永远是第 0 个。
+///
+/// 业务含义：多页签模式下打开默认入口地址（app_url）的那一签是「首页」—— 它**固定在第一位**
+/// 且**不允许关闭**，页签名字前带一个房子图标作标记（标记的渲染在 `shell.html::render`）。
+///
+/// 为什么判「位次」而不是给 [`TabInfo`] 加一个 `home: bool` 字段：首页的定义就是「入口那一签」，
+/// 而入口那一签是本进程**第一个**建出来的 tab，且它不可关闭 ⇒ 它永远占着下标 0。写成位次判定
+/// 就同时拿到三条性质，不需要再多一份可能漂移的状态：
+///   · 固定第一位 —— 列表其余项只做尾部追加（`tabs.push`）与按位删除，0 号位不会被顶走；
+///   · 一定存在   —— 唯一的删除入口 [`close_tab_inner`] 对本位次直接拒绝；
+///   · 自动补齐   —— [`set_tabs_visible`] 在「一个 tab 都没有」时会补建一个，补出来的自然就是首页。
+///
+/// ⚠️ 双壳单一真源：Electron 侧必须给出同一个答案（`tabs.ts::isPinnedHome`）。改这里必须同步
+/// 改那边，并跑 Electron 侧 `probe --tabs`（它逐条断言首页的图标 / 无关闭按钮 / 拒绝关闭）。
+fn is_home_index(i: usize) -> bool {
+    i == 0
+}
 
 /// 一个 tab 的运行时信息。
 #[derive(Clone)]
@@ -578,8 +599,10 @@ fn activate_tab(app: &tauri::AppHandle, label: &str) {
 /// 关闭指定 tab：销毁窗口、移除记录，若关闭的是激活 tab 则激活相邻 tab。
 ///
 /// 关闭【最后一个】tab 等价于关闭宿主窗口（复用既有托盘/退出语义，见 [`close_host_window`]）。
+/// ⚠️ 首页那一签（[`is_home_index`]）**不参与**这条链路：它在第 ① 步就被拒绝，
+/// 「关到最后一个」在正常运行期永远不可达（首页关不掉 ⇒ 列表不可能被关空）。
 ///
-/// ⚠️ 三次踩坑都要靠本函数的顺序与 `destroy()` 兜住：
+/// ⚠️ 四次踩坑都要靠本函数的顺序与 `destroy()` 兜住：
 ///   1) 窗口必须用 `destroy()`（强制销毁、不派发 `CloseRequested`）。历史实现用 `close()`，
 ///      而 lib.rs 的 `CloseRequested` 处理会 `prevent_close()` 后再回调本函数 —— 于是
 ///      “close → CloseRequested → close_tab_inner → close …” 无限循环，主线程 100% 占用、
@@ -587,8 +610,23 @@ fn activate_tab(app: &tauri::AppHandle, label: &str) {
 ///   2) 必须先判断 label 是否在册：不在册说明是上一条链路的重复进入，直接返回，
 ///      不能再走一遍销毁/激活逻辑。
 ///   3) 窗口销毁要在**更新列表之前**发起，保证“界面看到的 tab 数”与“实际窗口”一致。
+///   4) **首页判定必须排在最前**：拒绝的语义是「什么都没发生」，任何「先摘登记/先销毁窗口、
+///      再判断是不是首页」的写法都会留下半个状态（登记没了、窗口还在），
+///      而标签栏那一侧根本不会给出关闭按钮 —— 用户看到的就是一具打不开也关不掉的残骸。
 pub(crate) fn close_tab_inner(app: &tauri::AppHandle, label: &str) {
-    // ① 摘掉登记（若存在），并快照剩余 label。
+    // ① 定位 label 的位次（含「不在册」＝ None），并拦下首页。
+    let idx = {
+        let state = app.state::<TabManager>();
+        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+        tabs.iter().position(|t| t.label == label)
+    };
+    if idx.is_some_and(is_home_index) {
+        dlog!("[tabs] 拒绝关闭首页页签（固定在第一位、不可关）：{label}");
+        push_tabs_to_shell(app);
+        return;
+    }
+
+    // ② 摘掉登记（若存在），并快照剩余 label。
     let (removed_idx, remaining) = {
         let state = app.state::<TabManager>();
         let mut tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
@@ -600,27 +638,27 @@ pub(crate) fn close_tab_inner(app: &tauri::AppHandle, label: &str) {
         (idx, remaining)
     };
 
-    // ② 强制销毁窗口（async 投递，不会在事件回调栈里同步销毁）。不在册也照销毁，
+    // ③ 强制销毁窗口（async 投递，不会在事件回调栈里同步销毁）。不在册也照销毁，
     //    确保任何“幽灵窗口”都被清掉。
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.destroy();
     }
     unregister_tab(app, label);
 
-    // ③ 重复进入（label 早已不在册）：到此为止，绝不能再走后面的激活流程。
+    // ④ 重复进入（label 早已不在册）：到此为止，绝不能再走后面的激活流程。
     let Some(removed_idx) = removed_idx else {
         purge_orphan_tabs(app);
         push_tabs_to_shell(app);
         return;
     };
 
-    // ④ 关闭的是最后一个 tab：交给宿主窗口的关闭语义（托盘最小化 / 退出）。
+    // ⑤ 关闭的是最后一个 tab：交给宿主窗口的关闭语义（托盘最小化 / 退出）。
     if remaining.is_empty() {
         close_host_window(app);
         return;
     }
 
-    // ⑤ 更新激活索引并激活相邻 tab（纯规则见 plan_active_after_close，与 Electron
+    // ⑥ 更新激活索引并激活相邻 tab（纯规则见 plan_active_after_close，与 Electron
     //    tab-order.ts 同一条：优先右邻，末位取左邻；关的是后台 tab 只前移索引）。
     let active = {
         let state = app.state::<TabManager>();
@@ -769,18 +807,20 @@ fn push_tabs_to_shell(app: &tauri::AppHandle) {
         return;
     };
 
-    // 组装成 JS 数组 [{label, title, active}]。快照在 `tab_rows` 内部取，
+    // 组装成 JS 数组 [{label, title, active, home}]。快照在 `tab_rows` 内部取，
     // `host.eval` 在任何锁之外调用（锁不跨 FFI）。
     let mut items = String::from("[");
-    for (i, (label, title, active)) in tab_rows(app).into_iter().enumerate() {
+    for (i, (label, title, active, home)) in tab_rows(app).into_iter().enumerate() {
         if i > 0 {
             items.push(',');
         }
         let label_js = crate::loading::js_str(&label);
         let title_js = crate::loading::js_str(&title);
         let active_js = if active { "true" } else { "false" };
+        // `home` 决定 shell.html 画不画房子图标、画不画「×」（见 shell.html::render）。
+        let home_js = if home { "true" } else { "false" };
         items.push_str(&format!(
-            "{{label:{label_js},title:{title_js},active:{active_js}}}"
+            "{{label:{label_js},title:{title_js},active:{active_js},home:{home_js}}}"
         ));
     }
     items.push(']');
@@ -917,14 +957,18 @@ pub(crate) fn close_tab(app: tauri::AppHandle, label: String) {
     close_tab_inner(&app, &label);
 }
 
-/// 前端：获取当前 tab 列表（label + title + active），用于初始化标签栏。
+/// 前端：获取当前 tab 列表（label + title + active + home），用于初始化标签栏。
+///
+/// ⚠️ 四元组而非三元组：第 4 位 `home` 是首页标记（见 [`is_home_index`]），shell.html 的
+/// 初始化映射 `list.map(([label,title,active,home]) => …)` 依赖它。Electron 侧
+/// `listForIpc()` 必须给出同形（探针逐字段验）。
 #[tauri::command]
-pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
+pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool, bool)> {
     // 与宿主标签栏（push_tabs_to_shell）共用同一份快照，保证 IPC 与界面永远一致。
     tab_rows(&app)
 }
 
-/// tab 列表的统一快照：`(label, 展示标题, 是否激活)`。
+/// tab 列表的统一快照：`(label, 展示标题, 是否激活, 是否首页)`。
 ///
 /// ⚠️ 为什么抽出来：[`get_tabs`]（IPC 命令）与 [`push_tabs_to_shell`]（宿主标签栏 eval）
 /// 此前各写了一遍「锁 tabs / active / titles → 标题取 `titles` 缓存、缺失回落 `TabInfo::title`
@@ -933,7 +977,7 @@ pub(crate) fn get_tabs(app: tauri::AppHandle) -> Vec<(String, String, bool)> {
 ///
 /// ⚠️ 三把锁的顺序必须固定为 `tabs → active → titles`：与[`set_tabs_visible`] 取锁的顺序
 /// 一致，避免两处反向加锁形成 AB-BA 死锁。
-fn tab_rows(app: &tauri::AppHandle) -> Vec<(String, String, bool)> {
+fn tab_rows(app: &tauri::AppHandle) -> Vec<(String, String, bool, bool)> {
     let state = app.state::<TabManager>();
     let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
     let active = *state.active.lock().unwrap_or_else(|p| p.into_inner());
@@ -947,7 +991,8 @@ fn tab_rows(app: &tauri::AppHandle) -> Vec<(String, String, bool)> {
                 .get(&t.label)
                 .cloned()
                 .unwrap_or_else(|| t.title.clone());
-            (t.label.clone(), title, i == active)
+            // 首页标记由位次推出（见 is_home_index 的文档：固定第一位 + 不可关 + 自动补齐）。
+            (t.label.clone(), title, i == active, is_home_index(i))
         })
         .collect()
 }
@@ -1095,6 +1140,83 @@ pub(crate) fn open_new_tab_from_request(app: &tauri::AppHandle, target_url: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 首页页签（固定第一位 + 不可关）的规则与下发链路守卫。
+    ///
+    /// 三处任何一处漏改都会**静默降级** —— 编译期零警告、clippy 与 CI 全绿，只有真机上才现形：
+    ///   · `is_home_index` 只在位次 0 为真 —— 「固定在第一位」这条不变式的全部依据；
+    ///   · `close_tab_inner` 必须**在摘登记 / 销毁窗口之前**拦下首页（否则留下半个状态：
+    ///     登记没了、窗口还在，而标签栏本就不给关闭按钮 ⇒ 一具打不开也关不掉的残骸）；
+    ///   · `tab_rows` / `push_tabs_to_shell` 必须把 home 下发给标签栏（否则 shell.html 画不出
+    ///     房子图标，还会给首页画上「×」）。
+    ///
+    /// ⚠️ 只统计 `#[cfg(test)]` 之前的生产代码段：否则断言自己的字面量会把自己满足掉（自引用）。
+    /// ⚠️ 用 `has_code_line` 而不是裸 `contains`：本项目的针被注释满足过不止一次。
+    #[test]
+    fn home_tab_is_the_first_index_and_cannot_be_closed() {
+        assert!(is_home_index(0), "位次 0 必须是首页（固定第一位）");
+        assert!(
+            !is_home_index(1) && !is_home_index(2) && !is_home_index(MAX_TABS - 1),
+            "首页只有位次 0 一个，其余位次都不是"
+        );
+
+        let full = include_str!("tabs.rs");
+        let src = full.split("#[cfg(test)]").next().unwrap_or(full);
+
+        // 下发链路：快照四元组 + push 里的 home 字段。
+        assert!(
+            has_code_line(src, "Vec<(String, String, bool, bool)>"),
+            "get_tabs / tab_rows 必须返回四元组（第 4 位 = home）"
+        );
+        assert!(
+            has_code_line(src, "active:{active_js},home:{home_js}"),
+            "push_tabs_to_shell 必须把 home 下发给 shell.html（漏了 ⇒ 首页没有图标、还带 ×）"
+        );
+
+        // 拒绝链路：拦截语句必须真的在 close_tab_inner 的函数体里，且排在销毁窗口【之前】。
+        // ⚠️ 位置断言一律在「只含代码行」的文本上做 —— 裸 `find` 会被注释里的同名字面量带偏。
+        let code = code_lines(src);
+        let body = {
+            let at = code
+                .find("pub(crate) fn close_tab_inner")
+                .expect("close_tab_inner 必须存在");
+            &code[at..]
+        };
+        let refuse = body
+            .find("is_some_and(is_home_index)")
+            .expect("close_tab_inner 必须拦截首页（is_some_and(is_home_index)）");
+        let destroy = body
+            .find("window.destroy()")
+            .expect("close_tab_inner 必须销毁 tab 窗口（destroy 而非 close，见函数文档）");
+        assert!(
+            refuse < destroy,
+            "首页拦截必须排在「摘登记 / 销毁窗口」之前：先动后判会留下半个状态"
+        );
+        let unregister = body
+            .find("unregister_tab(app, label);")
+            .expect("close_tab_inner 必须摘除登记");
+        assert!(
+            refuse < unregister,
+            "首页拦截必须排在 unregister_tab 之前（登记被摘掉 = 首页从列表里消失）"
+        );
+    }
+
+    /// 逐行取「代码行」（排除 `//` 注释行与 `*` 续行）拼回的文本，与 contract_tests.rs 的
+    /// `has_code_line` 同一姿势 —— 防「守卫的针被注释满足」。
+    fn code_lines(src: &str) -> String {
+        src.lines()
+            .filter(|line| {
+                let t = line.trim();
+                !t.starts_with("//") && !t.starts_with('*')
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 见 [`code_lines`]：源码里是否存在「位于代码行上」的这段文字。
+    fn has_code_line(src: &str, needle: &str) -> bool {
+        code_lines(src).contains(needle)
+    }
 
     /// 构造一个可单测的 Navigation（本地反向代理模式）。
     /// `entry`：代理入口（形如 http://127.0.0.1:PORT/）；`upstream`：上游真实**源**

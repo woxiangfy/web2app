@@ -97,7 +97,9 @@
          · 用户现场实例的窗口区域（只读 GetWindowRgn + PtInRegion 网格）：
            `GetRgnBox=(0,0)..(55,56)`，每行宽度两端递减、y=28 处最宽 55 ⇒ 内接于 56×56
            活柱的圆，区域圆 Ø56 而球只有 46 ⇒ 环带宽度 5 逻辑像素。
-       取证脚本：tests/float-frag-rc/region-probe.py（区域）、analyze-frag.py（截图）。 */
+       取证脚本（`region-probe.py` 量窗口区域、`analyze-frag.py` 量截图）都是**一次性产物**，
+       所在 `tests/` 工作目录已于 2026-10-12 清空 ⇒ 本文不再给出具体路径，需要时按上述
+       「量区域 / 量截图」两条思路重建即可。 */
     width: 56px;
     height: 56px;
     transform: translate(-50%, -50%);

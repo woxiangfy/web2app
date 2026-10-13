@@ -10,6 +10,7 @@
   "proxy_https": "",
   "proxy_bypass": "localhost;127.0.0.1;<-loopback>",
   "tabs_enabled": false,
+  "mobile_bar": false,
   "public_key": "",
   "resolve_secret": "",
   "debug": false,

@@ -1,7 +1,8 @@
 /**
  * 多页签模式断言组（探针四拆分之四）：`runTabsProbe`，
  * 对应 docs/electron-tabs-design.md §8 的 P1/P2/P4/P6/P7/P7b/P8/P9/P10/P10b/P11/P12
- *（P7b = 3 页签邻接选择，2 页签验不出；P10b = 新建页签加载完成前即激活）。
+ *（P7b = 3 页签邻接选择，2 页签验不出；P10b = 新建页签加载完成前即激活；
+ *  P1h/P7h = 首页页签「固定第一位 + 带主页图标 + 不可关」的成对判据）。
  *
  * 与 `runProbe` 分开的原因：单窗口断言组（节 0–17）假设「主窗口自身是远程页面」，
  * 而页签模式下主窗口自身是壳页面（shell.html），没有 titlebar.js 注入的按钮/留白，
@@ -52,6 +53,24 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
       true
     )) as string[]
 
+  /**
+   * 读壳页面标签栏每个 .tab 的**首页标记三件套**：home 类名 / 房子图标 / 关闭按钮。
+   *
+   * ⚠️ 判据成对（项目铁律）：只断言「首页有图标」会被「给所有页签都加图标」满足；只断言
+   * 「首页没有 ×」会被「谁都没有 ×」满足。所以图标与 × 必须在**同一批样本**上一起判。
+   */
+  const shellTabs = async (): Promise<
+    { label: string; home: boolean; hasIcon: boolean; hasClose: boolean }[]
+  > =>
+    (await win.webContents.executeJavaScript(
+      `Array.from(document.querySelectorAll('#tabs .tab')).map((el) => ({` +
+        ` label: el.dataset.label,` +
+        ` home: el.classList.contains('home'),` +
+        ` hasIcon: !!el.querySelector('.home-ico'),` +
+        ` hasClose: !!el.querySelector('.close') }))`,
+      true
+    )) as { label: string; home: boolean; hasIcon: boolean; hasClose: boolean }[]
+
   // ---------- 初始态 ----------
   p.check('页签初始为空（无视图）', tabs.count === 0 && children().length === 0,
     `count=${tabs.count} children=${children().length}`)
@@ -69,10 +88,34 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P2 视图存在性（children 数 = 页签数）', children().length === tabs.count,
     `children=${children().length} count=${tabs.count}`)
 
+  // ---------- P1h：首页页签（首签 = app_url 那一签，固定第一位、不可关） ----------
+  // 三件套成对断言：主进程侧 home 标记 + 壳标签栏的「有房子图标」+「没有 ×」。
+  const home = label1!
+  const rowsOne = tabs.listForIpc()
+  p.check('P1h get_tabs 首条 home=true（首页即列表第 0 位）',
+    rowsOne.length === 1 && rowsOne[0][0] === home && rowsOne[0][3] === true,
+    JSON.stringify(rowsOne))
+  const homeDomOk = await waitUntil(async () => {
+    const list = await shellTabs()
+    return list.length === 1 && list[0].label === home && list[0].home &&
+      list[0].hasIcon && !list[0].hasClose
+  }, 4000)
+  p.check('P1h 首页在标签栏带主页图标、且没有关闭按钮（固定第一位）',
+    homeDomOk, JSON.stringify(await shellTabs()))
+
   // ---------- P4：建第二个页签，验证切换后「仅激活页签可见」 ----------
   const label2 = await tabs.spawnTab(`${base}/tabs-b.html`)
   p.check('第二个页签创建成功并激活', label2 !== null && tabs.active?.label === label2,
     `label2=${label2}`)
+  // 成对判据的另一半：非首页必须有 ×、且没有房子图标（否则「所有页签都带图标」也能假绿）。
+  const pairOk = await waitUntil(async () => {
+    const list = await shellTabs()
+    return list.length === 2 &&
+      list[0].label === home && list[0].home && list[0].hasIcon && !list[0].hasClose &&
+      list[1].label === label2 && !list[1].home && !list[1].hasIcon && list[1].hasClose
+  }, 4000)
+  p.check('P1h 非首页页签带关闭按钮、无主页图标（与首页成对）',
+    pairOk, JSON.stringify(await shellTabs()))
   let views = children()
   let visible = views.filter((v) => v.getVisible())
   p.check('P4 新建后仅新页签可见（其余全隐藏）',
@@ -97,27 +140,49 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P6 页面标题回传到标签栏文本（页签B）', titleOk,
     `壳标签栏=${JSON.stringify(await shellLabels())}`)
 
-  // ---------- 契约：get_tabs 返回元组数组（对齐 Tauri Vec<(String,String,bool)>） ----------
-  // shell.html 初始化用 list.map(([label,title,active]) => …) 解构（shell.html:266），
-  // 若这里退回对象数组，解构得到 [undefined,undefined,undefined]，标签栏渲染空白。
+  // ---------- 契约：get_tabs 返回元组数组（对齐 Tauri Vec<(String,String,bool,bool)>） ----------
+  // shell.html 初始化用 list.map(([label,title,active,home]) => …) 解构（shell.html:345），
+  // 若这里退回对象数组（或漏掉第 4 位 home），解构得到 undefined —— 标签栏渲染空白 / 首页失去标记。
   const tuples = tabs.listForIpc()
-  p.check('get_tabs 契约：返回 [label,title,active] 元组数组（非对象）',
+  p.check('get_tabs 契约：返回 [label,title,active,home] 四元组数组（非对象）',
     tuples.length === tabs.count &&
       tuples.every((t) =>
-        Array.isArray(t) && t.length === 3 &&
-        typeof t[0] === 'string' && typeof t[1] === 'string' && typeof t[2] === 'boolean'
+        Array.isArray(t) && t.length === 4 &&
+        typeof t[0] === 'string' && typeof t[1] === 'string' &&
+        typeof t[2] === 'boolean' && typeof t[3] === 'boolean'
       ),
     JSON.stringify(tuples))
 
+  // ---------- P7h：首页不可关（关闭请求被拒 + 现场一点没动） ----------
+  // 当前列表 [home(=label1), label2]。激活放在 label2，这样「激活不受影响」也被钉住。
+  tabs.activate(label2!)
+  const beforeHomeClose = tabs.count
+  const homeCloseResult = tabs.closeTab(home)
+  p.check('P7h 关闭首页被拒（closeTab 返回 false）', homeCloseResult === false,
+    `返回=${homeCloseResult}`)
+  p.check('P7h 首页被拒后现场不变（集合数 / 首位 / 激活 / children 全不动）',
+    tabs.count === beforeHomeClose &&
+      tabs.listForIpc()[0][0] === home && tabs.listForIpc()[0][3] === true &&
+      tabs.active?.label === label2 && children().length === tabs.count,
+    `count=${tabs.count} active=${tabs.active?.label} children=${children().length}`)
+  // 首页在界面上根本没有 ×（用户无从触发关闭）—— 这是「前端没有入口 + 后端拒绝」的成对判据。
+  // ⚠️ 用 some(首页存在 且 无 ×) 而不是 every(...)：every 在「DOM 还没渲染出来」时空真，
+  //    会把「标签栏根本没画」也判成 PASS。
+  const domAfterHomeRefuse = await shellTabs()
+  p.check('P7h 首页在标签栏没有关闭按钮（用户点不到）',
+    domAfterHomeRefuse.some((t) => t.label === home && t.home && !t.hasClose),
+    JSON.stringify(domAfterHomeRefuse))
+
   // ---------- P7：关闭激活页签 → 激活态落到相邻（优先右侧），不悬空不全隐 ----------
-  // 当前激活是 label1；先激活 label1，再关闭它，激活应落到 label2（右侧相邻）。
-  tabs.activate(label1!)
+  // 当前激活是 label2；列表 [home, label2] 里 label2 是末位 ⇒ 没有右邻，激活必须落到左邻
+  // home。首页不可关这一点在这里反过来变成**兜底**：关掉最后一个普通页签也永远有页签可显示。
+  tabs.activate(label2!)
   const before = tabs.count
-  const closed = tabs.closeTab(label1!)
+  const closed = tabs.closeTab(label2!)
   p.check('P7 关闭激活页签成功', closed && tabs.count === before - 1,
     `count ${before} → ${tabs.count}`)
   p.check('P7 关闭后激活态落到相邻页签（不悬空）',
-    tabs.active?.label === label2 && tabs.count === 1,
+    tabs.active?.label === home && tabs.count === 1,
     `active=${tabs.active?.label} count=${tabs.count}`)
   views = children()
   visible = views.filter((v) => v.getVisible())
@@ -127,31 +192,41 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P7 关闭后 children 数同步减少（位置 + 存在性）',
     children().length === tabs.count, `children=${children().length} count=${tabs.count}`)
 
-  // ---------- P7b：三页签邻接选择（2 页签验不出的回归） ----------
+  // ---------- P7b：多页签邻接选择（2 页签验不出的回归）+ 首位不可关 ----------
   // 旧实现在【删除之后】的列表里 findIndex(被删 label)，恒为 -1 → Math.min(0,len-1)=0
   // ⇒ 无论关中间还是关末尾都跳回第一个幸存页签；而上面的 P7 只有 2 个页签，左右邻恰好
   // 是同一个，探针因此假绿。规则本体由 test/tabs.test.ts（nextActiveLabelAfterClose）毫秒级
-  // 钉住，这里补真实 TabManager 的端到端链路。当前 [label2]，再开 3 个：[label2,x1,x2,x3]。
+  // 钉住，这里补真实 TabManager 的端到端链路。当前 [home]，再开 3 个：[home,x1,x2,x3]。
   const x1 = await tabs.spawnTab('about:blank')
   const x2 = await tabs.spawnTab('about:blank')
   const x3 = await tabs.spawnTab('about:blank')
-  p.check('P7b 三个附加页签创建成功（顺序 [label2,x1,x2,x3]）',
+  p.check('P7b 三个附加页签创建成功（顺序 [home,x1,x2,x3]）',
     x1 !== null && x2 !== null && x3 !== null && tabs.count === 4,
     `x1=${x1} x2=${x2} x3=${x3} count=${tabs.count}`)
-  // 关中间：激活 x2 后关闭 → 必须落到右邻 x3（旧实现错误落 label2）
+  // 关中间：激活 x2 后关闭 → 必须落到右邻 x3（旧实现错误落回首位）
   tabs.activate(x2!)
   tabs.closeTab(x2!)
   p.check('P7b 关中间页签 → 激活右邻', tabs.active?.label === x3,
     `active=${tabs.active?.label} 期望=${x3}`)
-  // 关末尾：[label2,x1,x3] 里 x3 是末位 → 必须落到左邻 x1
+  // 关末尾：[home,x1,x3] 里 x3 是末位 → 必须落到左邻 x1
   tabs.closeTab(x3!)
   p.check('P7b 关末尾页签 → 激活左邻', tabs.active?.label === x1,
     `active=${tabs.active?.label} 期望=${x1}`)
-  // 关首位：激活 label2 后关闭 → 必须落到右邻 x1
-  tabs.activate(label2!)
-  tabs.closeTab(label2!)
-  p.check('P7b 关首位页签 → 激活右邻', tabs.active?.label === x1,
-    `active=${tabs.active?.label} 期望=${x1}`)
+  // 首位不可关：[home,x1] 里关闭首位（首页）必须被拒、且现场完全不动 —— 其余页签都关得掉、
+  // 首页关不掉，这就是「首页固定第一位」的全部保证（没有第二条重排路径）。
+  tabs.activate(x1!)
+  const beforeHomeRefuse = tabs.count
+  const refused = tabs.closeTab(home)
+  p.check('P7b 关闭首位（首页）被拒 → 顺序与激活都不动',
+    refused === false && tabs.count === beforeHomeRefuse &&
+      tabs.listForIpc()[0][0] === home && tabs.active?.label === x1,
+    `返回=${refused} count=${tabs.count} 首位=${tabs.listForIpc()[0][0]} active=${tabs.active?.label}`)
+  // 关掉最后一个非首页：[home,x1] 关 x1 → 激活必须落回首页，且**不能**走「关最后一个 ⇒ 关宿主」。
+  tabs.closeTab(x1!)
+  const winAliveAfterLastClose = !win.isDestroyed()
+  p.check('P7b 非首页全部关掉 → 激活落回首页（不悬空、不误关宿主）',
+    tabs.count === 1 && tabs.active?.label === home && winAliveAfterLastClose,
+    `count=${tabs.count} active=${tabs.active?.label} 窗口存活=${winAliveAfterLastClose}`)
   views = children()
   visible = views.filter((v) => v.getVisible())
   p.check('P7b 邻接切换后仅新激活页签可见（不靠 z-order 蒙混）',
@@ -166,9 +241,12 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
       `document.querySelectorAll('#tabs .tab').length`,
       true
     )) as number
+  // ⚠️ 首页不可关 ⇒ 锚点必须是**另一个**页签（首页永远占着首位，不能拿它当被关对象）。
+  // 当前 [home]，补锚点 y 与两个将被关掉的后台页签。
+  const y = await tabs.spawnTab('about:blank')
   const y1 = await tabs.spawnTab('about:blank')
   const y2 = await tabs.spawnTab('about:blank')
-  tabs.activate(x1!) // 激活固定在 x1：下面关的两个都是【后台页签】
+  tabs.activate(y!) // 激活固定在 y：下面关的两个都是【后台页签】
   const shellSynced = await waitUntil(
     async () => (await shellTabCount()) === tabs.count,
     4000
@@ -182,15 +260,15 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   )
   p.check('P7c 关闭后台页签后壳标签栏即时刷新（无幽灵页签）',
     shellAfterClose, `壳=${await shellTabCount()} 集合=${tabs.count}`)
-  tabs.closeTab(y2!) // 还原到 [x1] 单页签稳态
+  tabs.closeTab(y2!) // 还原到 [home, y] 双页签稳态
   await sleep(100)
 
-  // 此后只剩 [x1]（激活）。它建在 about:blank 上，而 P9 的 window.open('/opened.html')
+  // 此后 [home, y]（激活 y）。y 建在 about:blank 上，而 P9 的 window.open('/opened.html')
   // 依赖真实 http 源来解析相对 URL（about:blank 没有 base，Chromium 无法解析相对地址），
-  // 故先把幸存页签导航到夹具页，再作为 P9 的 opener（不再硬编码 label2）。
+  // 故先把 y 导航到夹具页，再作为 P9 的 opener（不再硬编码 label2）。
   await tabs.active!.view.webContents.loadURL(`${base}/tabs-b.html`)
   await sleep(200)
-  const opener = x1!
+  const opener = y!
 
   // ---------- P9 / P10：window.open 只新增 1 页签 + target path 保留 ----------
   // 从当前激活页签发起 window.open('/opened.html')，走 index.ts 的 setWindowOpenHandler
@@ -245,7 +323,12 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   // 期望值必须独立于 active 获取：新页签在 spawnTab 同步段就已登记进集合，
   // 而旧实现的病根恰恰是「此刻 active 还是旧页签」——直接拿 active 当期望值，
   // 旧实现会让下面的壳态断言与自己比较而假绿（实测踩过）。
-  const slowLabel = tabs.listForIpc().find(([l]) => l !== opener)?.[0]
+  // ⚠️ 必须同时排除 **opener 与首页**：集合是 [home, opener, slow]，旧写法 `find(l => l !== opener)`
+  //    取到的是**首页**（它永远在首位）—— 期望值当场错成首页，后面的断言全在自欺。
+  const slowLabel = tabs.listForIpc()
+    .map(([l]) => l)
+    .filter((l) => l !== opener && l !== home)
+    .pop()
   p.check('P10b spawnTab 返回时（页面远未加载完）新页签已在主进程侧激活',
     !!slowLabel && tabs.active?.label === slowLabel && tabs.count === countBeforeSlow + 1,
     `active=${tabs.active?.label} 新页签=${slowLabel} opener=${opener} count=${tabs.count}`)
@@ -370,7 +453,7 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
 
   // ---------- P8：熔断（连开至上限，第 N+1 次拒绝且 children 不增长） ----------
   // 用 about:blank 快速填充（不解析 target、不渲染），避免 32 个真实页拖慢探针。
-  // 此时幸存的首个页签是 opener（P7b 后 label2 已关）。
+  // 此时幸存页签 = [home, opener]；上限名额含首页（见 tabs.rs MAX_TABS 的注释）。
   const labels: string[] = [opener]
   while (tabs.count < MAX_TABS) {
     const l = await tabs.spawnTab('about:blank')
@@ -384,11 +467,17 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P8 超限后 children 不再增长', children().length === countAtLimit,
     `children=${children().length} count=${countAtLimit}`)
 
-  // ---------- 清理：关掉所有页签，验证「关最后一个 → 关闭宿主」的语义不在这里触发 ----------
-  // ⚠️ 不能真的关到最后一个（那会 host.close()，探针还没汇总）。留一个，其余 close。
-  const rest = labels.slice(1) // 去掉第一个（opener）
+  // ---------- 清理：关掉所有【非首页】页签，首页是唯一幸存者 ----------
+  // ⚠️ 首页关不掉 ⇒ 「关到最后一个 ⇒ 关宿主」在正常路径下不可达，本组不需要再刻意避开它。
+  const rest = labels.slice(1) // 去掉第一个（opener），剩下的都是 P8 填充的
   for (const l of rest) tabs.closeTab(l)
-  p.check('清理：关闭到只剩一个页签', tabs.count === 1, `count=${tabs.count}`)
+  tabs.closeTab(opener)
+  p.check('清理：非首页页签全部关闭后只剩首页（仍固定在首位、关闭仍被拒）',
+    tabs.count === 1 && tabs.active?.label === home &&
+      tabs.listForIpc()[0][0] === home && tabs.listForIpc()[0][3] === true &&
+      tabs.closeTab(home) === false && !win.isDestroyed(),
+    `count=${tabs.count} active=${tabs.active?.label} 窗口存活=${!win.isDestroyed()}`)
+  p.check('清理：关闭到只剩一个页签（首页）', tabs.count === 1, `count=${tabs.count}`)
 
   // ---------- 汇总 ----------
   const failed = p.results.filter((r) => !r.ok)
