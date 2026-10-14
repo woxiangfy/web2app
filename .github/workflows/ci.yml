@@ -204,7 +204,7 @@ jobs:
       - name: 解析器契约自测（唯一真源不漂移）
         run: python3 .github/scripts/parse-packaging-config.py --selftest
 
-      - name: 安卓共享脚本自测（工程根解析 / 包名派生 / 应用名 / insets / APK 名 / 返回键）
+      - name: 安卓共享脚本自测（工程根解析 / 包名派生 / 应用名 / insets / APK 名 / 返回键 / 下载 / JS 桥 / scheme / 全屏 / 权限）
         # 这些脚本原先各是 build-custom.yml 与 release.yml 里的**内联 python**（两壳各一份），
         # 现抽成共享脚本；它们只在 Android 打包时才被执行，不挂门禁就等于「本地不跑、CI 不跑」。
         # ⚠️ 必须在仓库根跑：`from android_gen import ...` 靠脚本所在目录进 sys.path。
@@ -212,7 +212,9 @@ jobs:
         run: |
           set -euo pipefail
           for s in prepare-android-conf apply-android-labels \
-                   patch-android-insets set-android-apk-name patch-android-back; do
+                   patch-android-insets set-android-apk-name patch-android-back \
+                   patch-android-download patch-android-extras patch-android-schemes \
+                   patch-android-fullscreen patch-android-permissions; do
             echo "── $s.py --selftest ──"
             python3 ".github/scripts/$s.py" --selftest
           done

@@ -30,7 +30,14 @@ export const DEFAULTS = {
   android_key_alias: '',
   android_keystore_password: '',
   android_key_password: '',
+  // 仅 Android：按需向 AndroidManifest.xml 注入运行时权限声明。
+  // 白名单三值 camera / microphone / location（见 parser.mjs::normalizeAndroidPermissions），
+  // 默认 [] = 不声明任何可选权限。由 patch-android-permissions.py 消费 ANDROID_PERMISSIONS。
+  android_permissions: [],
 }
+
+/** android_permissions 白名单（顺序即 Manifest 注入顺序；与 Python 侧元组逐字对齐）。 */
+export const ANDROID_PERMISSION_CHOICES = ['camera', 'microphone', 'location']
 
 export const BOOL_KEYS = new Set(['proxy_enabled', 'tabs_enabled', 'mobile_bar', 'debug'])
 // 需要保持 JSON 结构（对象/数组/标量）的字段：序列化成单行 JSON 文本进 env。

@@ -14,9 +14,15 @@
  *   · 后退 / 前进：驱动当前文档的 `window.history`，但**先判定落点**（与桌面端标题栏、
  *     Android 系统返回键同一条规则）：上/下一条不是真实网页、或落点是内置启动页时【不动作】，
  *     并把按钮置灰。移动端绝不允许退回到内置页面。
- *   · 列表：展开已打开的页签并切换。**只在壳告诉它「真的有页签可切」时才渲染**
- *     （`window.__web2appMobileBarCfg.tabs`，真源 `mobilebar.rs::tabs_available`）——
- *     移动端目前没有多页签（见下），宁可少一个按钮，也不要一个点了没反应的死按钮。
+ *   · 列表：展开已打开的页签并切换 / 关闭，面板顶部还有「新建标签」。**只在壳告诉它
+ *     「真的有页签可切」时才渲染**（`window.__web2appMobileBarCfg.tabs`，真源
+ *     `mobilebar.rs::tabs_available` = 打包配置 `tabs_enabled`）。
+ *     ⚠️ 移动端是【单 webview 页签记录】：Tauri/wry 在 Android 不支持同一窗口挂多个
+ *     子 webview，壳侧只维护每个标签的 url / 标题记录，真正存活的页面只有当前这一个 ——
+ *     切换标签 = 按记录的 url 重新加载（桌面端那种「多 webview 并行、状态保留」在
+ *     手机上不存在）；首页固定在 0 号位、不可关闭，与桌面端同一约定。
+ *     文档 url / 标题由本脚本经 `web2app:mobile-doc` 事件上报，面板数据由壳侧 eval
+ *     `__web2appMobileBar.setTabs(...)` 推回（四元组 [label,title,active,home]）。
  *
  * 为什么【不能】invoke 应用命令：主窗加载的是**远程页面**（直连上游域名，或本地反向代理的
  * `http://127.0.0.1:<port>`），Tauri 2 对非本地 origin 的 IPC 强制走 ACL，而应用命令没有
@@ -96,6 +102,43 @@
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M4 6h16M4 12h16M4 18h16"/></svg>';
+  // 「更多」：竖三点（Material/微信风格的「更多操作」通用符号）。
+  var ICO_MORE =
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+    '<circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/>' +
+    '<circle cx="12" cy="19" r="1.8"/></svg>';
+  // 「更多」面板各行图标（统一 18px 线性风格）。
+  var ICO_REFRESH =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M23 4v6h-6M1 20v-6h6"/>' +
+    '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+  var ICO_COPY =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
+    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  var ICO_SHARE =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>' +
+    '<line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>' +
+    '<line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>';
+  var ICO_EXTERNAL =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>' +
+    '<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+  var ICO_TRASH =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="3 6 5 6 21 6"/>' +
+    '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  var ICO_EXIT =
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>' +
+    '<polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>';
   var ICO_CLOSE =
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" aria-hidden="true">' +
@@ -151,6 +194,14 @@
     '-webkit-tap-highlight-color:transparent!important;touch-action:manipulation!important;}',
     '#__web2app_mobilebar__ .w2m-row:active{background:rgba(120,133,153,.22)!important;}',
     '#__web2app_mobilebar__ .w2m-row.active{font-weight:600!important;}',
+    /* 「新建标签」行：与列表行同高，但文案居中、不带关闭区（壳侧收到事件后新开一个标签）。 */
+    '#__web2app_mobilebar__ .w2m-newrow{',
+    'display:flex!important;align-items:center!important;justify-content:center!important;',
+    'width:100%!important;min-height:44px!important;padding:10px 14px!important;',
+    'border:0!important;border-bottom:1px solid rgba(0,0,0,.10)!important;',
+    'background:transparent!important;color:inherit!important;font:inherit!important;font-size:13px!important;',
+    '-webkit-tap-highlight-color:transparent!important;touch-action:manipulation!important;}',
+    '#__web2app_mobilebar__ .w2m-newrow:active{background:rgba(120,133,153,.22)!important;}',
     '#__web2app_mobilebar__ .w2m-row .w2m-label{',
     'flex:1!important;min-width:0!important;font-size:13px!important;',
     'white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;}',
@@ -162,6 +213,27 @@
     '#__web2app_mobilebar__ .w2m-close:active{background:rgba(120,133,153,.22)!important;}',
     '#__web2app_mobilebar__ .w2m-empty{',
     'padding:14px!important;font-size:12px!important;opacity:.6!important;}',
+    /* 「更多」面板：顶部一行当前地址（可截断），其余复用 .w2m-row 行样式。 */
+    '#__web2app_mobilebar__ .w2m-morehead{',
+    'padding:10px 14px!important;font-size:11px!important;line-height:1.3!important;opacity:.6!important;',
+    'white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;',
+    'border-bottom:1px solid rgba(0,0,0,.06)!important;}',
+    /* 危险动作（清除浏览数据二次确认态）：整行红色提示，暗色模式提亮。 */
+    '#__web2app_mobilebar__ .w2m-row.danger .w2m-ico,',
+    '#__web2app_mobilebar__ .w2m-row.danger .w2m-label{color:#d33f3f!important;opacity:1!important;}',
+    '@media (prefers-color-scheme:dark){#__web2app_mobilebar__ .w2m-row.danger .w2m-ico,',
+    '#__web2app_mobilebar__ .w2m-row.danger .w2m-label{color:#ff7a7a!important;}}',
+    /* Toast：浮在底栏上沿 12px，不参与点击（纯提示），层级压过 sheet/遮罩。 */
+    '#__web2app_mobilebar__ .w2m-toast{',
+    'position:fixed!important;left:50%!important;transform:translateX(-50%)!important;',
+    'bottom:calc(' + BAR_H + 'px + ' + SAFE + ' + 12px)!important;max-width:80vw!important;',
+    'padding:8px 14px!important;border-radius:18px!important;',
+    'background:rgba(20,24,30,.88)!important;color:#fff!important;',
+    'font-size:12px!important;line-height:1.4!important;',
+    'white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;',
+    'opacity:0!important;transition:opacity .18s ease!important;',
+    'pointer-events:none!important;z-index:2147483647!important;}',
+    '#__web2app_mobilebar__ .w2m-toast[data-show="1"]{opacity:1!important;}',
     /* ================== 底部空间契约 ==================
      * 与桌面端顶部那条镜像：`html` 不滚、`body` 滚，滚动矩形从底部让出一格底栏。
      * ⚠️ 必须用 margin-bottom 而不是 padding-bottom：padding 在盒子内部，滚动条仍从盒子
@@ -405,6 +477,23 @@
     return BAR_H;
   }
 
+  /// 贴底元素上移后的 bottom 值：在底栏预留高度之上【保留元素原本的底边距】。
+  /// 悬浮按钮（FAB）一般写 `bottom:16px`，直接顶到 RESERVE 会让它贴死底栏上沿、丢掉
+  /// 原本那口气；写成 calc 把原 px 数加回去。认不出（auto / 非 px 单位）就贴齐底栏上沿，
+  /// 与整宽底条（bottom:0）的处理一致。
+  function shiftedBottom(declared) {
+    try {
+      if (declared && declared !== 'auto') {
+        var m = /^(\d+(?:\.\d+)?)px$/.exec(declared.trim());
+        if (m) {
+          var n = parseFloat(m[1]);
+          if (n > 0) return 'calc(' + BAR_H + 'px + ' + SAFE + ' + ' + n + 'px)';
+        }
+      }
+    } catch (e) { /* noop */ }
+    return RESERVE;
+  }
+
   /// 让页面自己的「贴底固定条」上移、把「按视口高度定尺寸的容器」缩高一格底栏。
   /// 两阶段（先只读收集、再统一写）：边读边写会让每次 getBoundingClientRect 触发重排。
   function applyChromeFit() {
@@ -430,23 +519,29 @@
         if (!needShift && !needShrink) continue;
 
         var r = el.getBoundingClientRect();
-        if (r.width < vw * 0.5 || r.height <= 0) continue;
+        if (r.height <= 0) continue;
         // 贴底：底边落在视口底附近（含已被系统键盘 / 安全区推上来的余量）
         var atBottom = needShift && r.bottom >= vh - Math.max(reserve + 2, 8) && r.bottom <= vh + 2;
         // 整屏：高度≈视口高且底边已到/越过视口底（100vh 容器被顶出可视区）
-        var viewportTall = needShrink &&
+        var viewportTall = needShrink && r.width >= vw * 0.5 &&
           r.height >= vh - VH_TOL && r.height <= vh + VH_TOL && r.bottom >= vh - VH_TOL;
         if (!atBottom && !viewportTall) continue;
 
         var cs = window.getComputedStyle(el);
         var pos = cs.position;
-        if (atBottom && (pos === 'fixed' || pos === 'sticky' ||
-            // absolute 只认「底边真的压在视口底」的：有定位祖先时它的包含块不是视口，
-            // 放宽到一整格底栏的范围内会把页面内部的元素误判成贴底条（与 titlebar.js
-            // 处理顶部 absolute 时同一条谨慎规则）。
-            (pos === 'absolute' && r.bottom >= vh - 2))) {
+        // ⚠️⚠️ fixed 贴底元素【不设宽度门槛】：悬浮按钮（FAB）/ 客服球 / 回到顶部按钮
+        //    通常只有 40–64px 宽，旧实现「窄于半屏一律跳过」把它们整类漏掉 —— 真机上被
+        //    底栏切掉半截的正是这种按钮（fixed 的包含块就是视口，窄也能确定是贴底件）。
+        //    sticky / absolute 仍要求半屏宽：它们的包含块可能是页面内部容器，窄元素极易
+        //    误判（absolute 还额外要求底边真的压在视口底，与 titlebar.js 同一条谨慎规则）。
+        var bottomFixed = atBottom && pos === 'fixed';
+        var bottomWideBar = atBottom && r.width >= vw * 0.5 && (pos === 'sticky' ||
+          (pos === 'absolute' && r.bottom >= vh - 2));
+        if (bottomFixed || bottomWideBar) {
           // 声明式 bottom 已经比底栏高的（页面自己让开了）不动。
-          if (cs.bottom === 'auto' || parseFloat(cs.bottom) < reserve) shifts.push(el);
+          if (cs.bottom === 'auto' || parseFloat(cs.bottom) < reserve) {
+            shifts.push({ el: el, bottom: shiftedBottom(cs.bottom) });
+          }
         }
         if (needShrink && viewportTall && cs.bottom === 'auto') shrinks.push(el);
       }
@@ -460,8 +555,8 @@
       }
       for (var k = 0; k < shifts.length; k++) {
         try {
-          shifts[k].setAttribute(SHIFT_ATTR, '');
-          shifts[k].style.setProperty('bottom', RESERVE, 'important');
+          shifts[k].el.setAttribute(SHIFT_ATTR, '');
+          shifts[k].el.style.setProperty('bottom', shifts[k].bottom, 'important');
         } catch (e) { /* noop */ }
       }
     } catch (e) { /* 绝不把异常抛给宿主页面 */ }
@@ -489,13 +584,19 @@
     run();
     try { document.addEventListener('DOMContentLoaded', run); } catch (e) { /* noop */ }
     try { window.addEventListener('load', function () { run(); }); } catch (e) { /* noop */ }
+    // bfcache 恢复（后退回到本文档）：DOM 不重建，但贴底元素可能被页面脚本重置过 inline 样式。
+    try { window.addEventListener('pageshow', run); } catch (e) { /* noop */ }
     try {
       mo = new MutationObserver(run);
       mo.observe(document.documentElement, { childList: true, subtree: true });
     } catch (e) { /* 老引擎：靠上面的时机 + 定时器兜底 */ }
     try {
+      // 定长 20 拍由 MutationObserver 兜常规 SPA 改动；这两拍专门留给「首屏后很久才异步
+      // 挂出来」的贴底悬浮按钮（轮播 / 广告条 / 客服 SDK 常见 3–8s 才到）。
       setTimeout(run, 1000);
       setTimeout(run, 3000);
+      setTimeout(run, 5000);
+      setTimeout(run, 9000);
     } catch (e) { /* noop */ }
   }
 
@@ -504,6 +605,8 @@
   // ---------------------------------------------------------------------
   /// 按 cfg 生成按钮 HTML。⚠️「列表」按钮只在 HAS_TABS 时才出现 —— 移动端目前没有多页签，
   /// 无条件画它就是一个点了没反应的死按钮（本文件的核心约束之一）。
+  /// 「更多」无条件出现且固定在最后：刷新/复制/分享/浏览器打开/清数据/退出的唯一入口，
+  /// 与是否多页签无关。
   function barHtml() {
     var items = [
       btn('home', ICO_HOME, '首页', '首页'),
@@ -511,6 +614,7 @@
       btn('fwd', ICO_FWD, '前进', '前进')
     ];
     if (HAS_TABS) items.push(btn('list', ICO_LIST, '列表', '已打开的标签'));
+    items.push(btn('more', ICO_MORE, '更多', '更多操作'));
     return items.join('');
   }
 
@@ -522,29 +626,124 @@
   }
 
   /// 页签行数据（壳侧经 eval 推送）：[[label, title, active, home], …]，
-  /// 与多页签 `get_tabs` 的**四元组**同形（home = 首页标记：不可关闭、名字前带房子图标）。
+  /// 与多页签 `get_tabs` 的四元组同形（home = 首页标记：不可关闭、名字前带房子图标）。
   var tabRows = [];
+
+  /// 当前打开的面板：'tabs'（页签列表）| 'more'（更多操作）| null。同一时刻最多一个。
+  var activePanel = null;
 
   function setTabs(rows) {
     tabRows = Array.isArray(rows) ? rows : [];
-    if (sheetOpen) renderSheet();
+    if (activePanel === 'tabs') renderSheet();
   }
 
-  var sheetOpen = false;
+  // ---------------------------------------------------------------------
+  // Toast（面板操作的唯一反馈通道：原生侧不弹窗时由这里提示）
+  // ---------------------------------------------------------------------
+  var toastTimer = 0;
+  function toast(msg) {
+    try {
+      var bar0 = document.getElementById('__web2app_mobilebar__');
+      if (!bar0) return;
+      var el = bar0.querySelector('.w2m-toast');
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'w2m-toast';
+        bar0.appendChild(el);
+      }
+      el.textContent = String(msg == null ? '' : msg);
+      el.setAttribute('data-show', '1');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () {
+        try { el.removeAttribute('data-show'); } catch (e) { /* noop */ }
+      }, 2200);
+    } catch (e) { /* noop */ }
+  }
+
+  // ---------------------------------------------------------------------
+  // Android 原生桥（.github/scripts/patch-android-extras.py 注入）
+  // ---------------------------------------------------------------------
+  // window.__web2appAndroid：@JavascriptInterface 对象（分享/浏览器打开/清数据/退出）。
+  // window.__web2appAndroidKey：主框架每次 onPageFinished 轮换的一次性密钥；evaluateJavascript
+  // 只注主框架，跨源 iframe 读不到顶层变量 ⇒ 危险动作天然挡住第三方 iframe。
+  function inTopFrame() {
+    try { return window.top === window.self; } catch (e) { return false; }
+  }
+  function nativeBridge() {
+    try { return window.__web2appAndroid || null; } catch (e) { return null; }
+  }
+  function bridgeKey() {
+    try { return window.__web2appAndroidKey || ''; } catch (e) { return ''; }
+  }
+  /// 取桥方法；桥缺失 / 密钥未轮换 / iframe 内调用时 toast 提示并返回 null。
+  function requireNative(fnName) {
+    var b = nativeBridge();
+    if (!b || typeof b[fnName] !== 'function' || !bridgeKey()) {
+      toast('当前版本不支持该操作');
+      return null;
+    }
+    if (!inTopFrame()) {
+      toast('请在主页面操作');
+      return null;
+    }
+    return b;
+  }
+
+  /// 复制当前链接：Clipboard API 优先（HTTPS/WebView 现代内核），失败退回 execCommand。
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText =
+        'position:fixed!important;top:-9999px!important;left:-9999px!important;opacity:0!important;';
+      (document.body || document.documentElement).appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { ta.setSelectionRange(0, text.length); } catch (e) { /* noop */ }
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  }
+  function copyCurrentLink() {
+    var url = '';
+    try { url = location.href; } catch (e) { url = ''; }
+    function done(ok) { toast(ok ? '链接已复制' : '复制失败，请长按页面自行复制'); }
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        var p = navigator.clipboard.writeText(url);
+        if (p && typeof p.then === 'function') {
+          p.then(function () { done(true); }, function () { done(legacyCopy(url)); });
+          return;
+        }
+      }
+      done(legacyCopy(url));
+    } catch (e) { done(legacyCopy(url)); }
+  }
 
   function closeSheet(bar) {
-    sheetOpen = false;
+    activePanel = null;
+    clearArmedClear();
     try {
       var mask = bar.querySelector('.w2m-mask');
       if (mask) mask.remove();
       var sheet = bar.querySelector('.w2m-sheet');
       if (sheet) sheet.remove();
-      var listBtn = bar.querySelector('.w2m-list');
-      if (listBtn) listBtn.style.removeProperty('background');
+      ['.w2m-list', '.w2m-more'].forEach(function (sel) {
+        var btn0 = bar.querySelector(sel);
+        if (btn0) btn0.style.removeProperty('background');
+      });
     } catch (e) { /* noop */ }
   }
 
   function renderSheet() {
+    if (activePanel === 'more') renderMorePanel();
+    else renderTabsSheet();
+  }
+
+  function renderTabsSheet() {
     var bar = document.getElementById('__web2app_mobilebar__');
     if (!bar) return;
     var old = bar.querySelector('.w2m-sheet');
@@ -552,6 +751,18 @@
 
     var sheet = document.createElement('div');
     sheet.className = 'w2m-sheet';
+
+    // 「新建标签」固定在面板顶部：移动端没有桌面那条常驻标签栏，新增入口只能放这里。
+    var addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'w2m-newrow';
+    addBtn.textContent = '＋ 新建标签';
+    addBtn.addEventListener('click', function () {
+      emit('web2app:new-tab', null);
+      closeSheet(bar);
+    });
+    sheet.appendChild(addBtn);
+
     if (!tabRows.length) {
       var empty = document.createElement('div');
       empty.className = 'w2m-empty';
@@ -616,16 +827,150 @@
     bar.appendChild(sheet);
   }
 
-  function openSheet(bar) {
-    sheetOpen = true;
+  // ---------------------------------------------------------------------
+  // 「更多」面板（刷新 / 复制链接 / 分享 / 浏览器打开 / 清除浏览数据 / 退出）
+  // ---------------------------------------------------------------------
+  // 清除浏览数据两步确认状态：首次点击进入 armed（红字「再点一次确认清除」），
+  // 3s 内不二次点击自动撤防。清数据会删掉 Cookie / 登录态，不可逆，必须防误触。
+  var clearArmed = false;
+  var clearArmTimer = 0;
+  function clearArmedClear() {
+    clearArmed = false;
+    if (clearArmTimer) {
+      try { clearTimeout(clearArmTimer); } catch (e) { /* noop */ }
+      clearArmTimer = 0;
+    }
+  }
+
+  function moreRow(icon, text) {
+    var row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'w2m-row';
+    var ic = document.createElement('span');
+    ic.className = 'w2m-ico';
+    ic.innerHTML = icon;
+    var label = document.createElement('span');
+    label.className = 'w2m-label';
+    label.textContent = text;
+    row.appendChild(ic);
+    row.appendChild(label);
+    return row;
+  }
+
+  function renderMorePanel() {
+    var bar = document.getElementById('__web2app_mobilebar__');
+    if (!bar) return;
+    var old = bar.querySelector('.w2m-sheet');
+    if (old) old.remove();
+
+    var sheet = document.createElement('div');
+    sheet.className = 'w2m-sheet';
+
+    // 头部：当前地址（截断显示，长按可看全；原生动作也用这个地址）。
+    var head = document.createElement('div');
+    head.className = 'w2m-morehead';
+    var urlNow = '';
+    try { urlNow = location.href; } catch (e) { urlNow = ''; }
+    head.textContent = urlNow;
+    head.title = urlNow;
+    sheet.appendChild(head);
+
+    // ① 刷新 / ② 复制链接：纯页面内能力，不依赖原生桥。
+    var refreshRow = moreRow(ICO_REFRESH, '刷新');
+    refreshRow.addEventListener('click', function () {
+      closeSheet(bar);
+      try { window.location.reload(); } catch (e) { /* noop */ }
+    });
+    sheet.appendChild(refreshRow);
+
+    var copyRow = moreRow(ICO_COPY, '复制链接');
+    copyRow.addEventListener('click', copyCurrentLink);
+    sheet.appendChild(copyRow);
+
+    // ③ 分享 / ④ 在浏览器打开：原生桥（Intent.ACTION_SEND / ACTION_VIEW）。
+    var shareRow = moreRow(ICO_SHARE, '分享');
+    shareRow.addEventListener('click', function () {
+      var b = requireNative('share');
+      if (!b) return;
+      var titleNow = '';
+      try { titleNow = document.title || ''; } catch (e) { titleNow = ''; }
+      closeSheet(bar);
+      try {
+        b.share(bridgeKey(), urlNow, titleNow);
+      } catch (e) { toast('调起分享失败'); }
+    });
+    sheet.appendChild(shareRow);
+
+    var browserRow = moreRow(ICO_EXTERNAL, '在浏览器打开');
+    browserRow.addEventListener('click', function () {
+      var b = requireNative('openBrowser');
+      if (!b) return;
+      closeSheet(bar);
+      try {
+        b.openBrowser(bridgeKey(), urlNow);
+      } catch (e) { toast('无法打开浏览器'); }
+    });
+    sheet.appendChild(browserRow);
+
+    // ⑤ 清除浏览数据：两步确认后调原生桥（Cookie/WebStorage/缓存/历史/表单/库全清，
+    //    完成后原生侧 evaluateJavascript 触发一次整页 reload）。
+    var clearRow = moreRow(ICO_TRASH, '清除浏览数据');
+    clearRow.addEventListener('click', function () {
+      if (!clearArmed) {
+        clearArmed = true;
+        clearRow.classList.add('danger');
+        var label0 = clearRow.querySelector('.w2m-label');
+        if (label0) label0.textContent = '再点一次确认清除';
+        if (clearArmTimer) clearTimeout(clearArmTimer);
+        clearArmTimer = setTimeout(function () {
+          clearArmed = false;
+          clearArmTimer = 0;
+          try {
+            clearRow.classList.remove('danger');
+            var label1 = clearRow.querySelector('.w2m-label');
+            if (label1) label1.textContent = '清除浏览数据';
+          } catch (e) { /* noop */ }
+        }, 3000);
+        return;
+      }
+      clearArmedClear();
+      var b = requireNative('clearData');
+      if (!b) return;
+      closeSheet(bar);
+      try {
+        b.clearData(bridgeKey());
+        toast('正在清除浏览数据…');
+      } catch (e) { toast('清除失败'); }
+    });
+    sheet.appendChild(clearRow);
+
+    // ⑥ 退出应用：finishAndRemoveTask + killProcess（原生侧兜底）。
+    var exitRow = moreRow(ICO_EXIT, '退出应用');
+    exitRow.addEventListener('click', function () {
+      var b = requireNative('quitApp');
+      if (!b) return;
+      closeSheet(bar);
+      try { b.quitApp(bridgeKey()); } catch (e) { /* noop */ }
+    });
+    sheet.appendChild(exitRow);
+
+    bar.appendChild(sheet);
+  }
+
+  function openSheet(bar, which) {
+    activePanel = which;
     try {
       var mask = document.createElement('div');
       mask.className = 'w2m-mask';
       mask.addEventListener('click', function () { closeSheet(bar); });
       bar.appendChild(mask);
+      if (which === 'tabs') {
+        // 打开前先让壳侧推一份最新页签清单（tabRows 可能停留在上次打开时的旧标题）。
+        emit('web2app:request-tabs', null);
+      }
       renderSheet();
-      var listBtn = bar.querySelector('.w2m-list');
-      if (listBtn) listBtn.style.setProperty('background', 'rgba(120,133,153,.22)', 'important');
+      var activeBtn = bar.querySelector(which === 'tabs' ? '.w2m-list' : '.w2m-more');
+      if (activeBtn) activeBtn.style.setProperty('background', 'rgba(120,133,153,.22)', 'important');
     } catch (e) { /* noop */ }
   }
 
@@ -665,17 +1010,130 @@
       }
     } catch (e) { /* 不影响按钮点击本身 */ }
 
+    // 「列表」仅多页签模式存在；「更多」无条件存在（面板互斥：一个开时另一个先关）。
     var listBtn = bar.querySelector('.w2m-list');
     if (listBtn) {
       listBtn.addEventListener('click', function () {
-        if (sheetOpen) closeSheet(bar);
-        else openSheet(bar);
+        if (activePanel === 'tabs') closeSheet(bar);
+        else openSheet(bar, 'tabs');
+      });
+    }
+    var moreBtn = bar.querySelector('.w2m-more');
+    if (moreBtn) {
+      moreBtn.addEventListener('click', function () {
+        if (activePanel === 'more') closeSheet(bar);
+        else openSheet(bar, 'more');
       });
     }
   }
 
+  // ---------------------------------------------------------------------
+  // 页签文档状态上报（仅 HAS_TABS）
+  // ---------------------------------------------------------------------
+  // 移动端是【单 webview 页签记录】：壳侧只持有每个标签的 url/标题记录，真正的页面
+  // 只有当前这一个。标题 / URL 一变就得上报，壳侧才好把记录刷新、推回列表面板。
+  var docReportTimer = 0;
+  function reportDoc() {
+    if (docReportTimer) return;
+    docReportTimer = setTimeout(function () {
+      docReportTimer = 0;
+      try {
+        emit('web2app:mobile-doc', { title: document.title || '', url: location.href });
+      } catch (e) { /* noop */ }
+    }, 150);
+  }
+
+  function watchDoc() {
+    try { reportDoc(); } catch (e) { /* noop */ }
+    try { document.addEventListener('DOMContentLoaded', reportDoc); } catch (e) { /* noop */ }
+    try { window.addEventListener('load', reportDoc); } catch (e) { /* noop */ }
+    try { window.addEventListener('pageshow', reportDoc); } catch (e) { /* noop */ }
+    try { window.addEventListener('popstate', reportDoc); } catch (e) { /* noop */ }
+    try { window.addEventListener('hashchange', reportDoc); } catch (e) { /* noop */ }
+    // <title> 常被 SPA 在首屏后改写：盯住 title 元素本身，也盯 <head> 里 title 的插入。
+    try {
+      var titleMo = new MutationObserver(reportDoc);
+      var titleEl = document.querySelector ? document.querySelector('title') : null;
+      if (titleEl) titleMo.observe(titleEl, { childList: true, characterData: true, subtree: true });
+      titleMo.observe(document.documentElement, { childList: true, subtree: false });
+    } catch (e) { /* 老引擎：靠事件兜底 */ }
+    // pushState/replaceState 不触发 popstate：包一层，URL 变了也报（标签落点记的是 url）。
+    try {
+      ['pushState', 'replaceState'].forEach(function (name) {
+        var orig = history[name];
+        if (typeof orig !== 'function') return;
+        history[name] = function () {
+          var ret = orig.apply(this, arguments);
+          reportDoc();
+          return ret;
+        };
+      });
+    } catch (e) { /* 页面封死 history 时放弃 */ }
+  }
+
+  // ---------------------------------------------------------------------
+  // target=_blank / window.open 拦截 → 新页签（仅 HAS_TABS）
+  // ---------------------------------------------------------------------
+  // wry Android 没有多窗口（未覆写 onCreateWindow 通道）：网页里 target="_blank" 的
+  // <a> 点了静默没反应，window.open(url) 也开不出窗口。页签模式下把这两类请求改发
+  // web2app:open-tab {url}，由壳侧压成一条新页签记录并主导航过去（见 mobilebar.rs
+  // 的 create_tab_with_url）。非页签模式**不装**：没有承接记录，不假装支持多窗口。
+  // ⚠️ 只承接 http(s)：tel:/mailto:/weixin: 等外跳不拦，交给 patch-android-schemes.py
+  //    的主框架 shouldOverrideUrlLoading 拉系统应用打开。
+  function installBlankGuard() {
+    function isHttpUrl(u) {
+      return typeof u === 'string' && /^https?:\/\//i.test(u);
+    }
+
+    // ① 捕获阶段点击：向上找最近的 <a>，target 含 _blank（大小写不敏感、允许前后空白）
+    //    且 href 是 http(s) 时截下来发事件；在捕获阶段 stopPropagation，页面自己的
+    //    开窗脚本也拿不到这次点击。
+    try {
+      document.addEventListener('click', function (ev) {
+        var node = ev.target;
+        while (node && node.nodeType === 1) {
+          if (node.tagName === 'A') {
+            var tgt = node.target ? String(node.target).trim().toLowerCase() : '';
+            if (tgt && /(?:^|\s)_blank(?:\s|$)/.test(tgt) && isHttpUrl(node.href)) {
+              ev.preventDefault();
+              ev.stopPropagation();
+              emit('web2app:open-tab', { url: node.href });
+            }
+            return; // 最近的 <a> 拍板，不继续向外找
+          }
+          node = node.parentNode;
+        }
+      }, true);
+    } catch (e) { /* noop */ }
+
+    // ② window.open(url)：安卓开不出新窗口，http(s) 直接转新页签并返回 null
+    //    （Chromium 多窗口被拒时本来也返回 null）；非 http(s) 保留原调用，交给内核 /
+    //    scheme 拦截走外跳。
+    try {
+      var origOpen = window.open;
+      window.open = function (url) {
+        var u = url == null ? '' : String(url);
+        if (isHttpUrl(u)) {
+          emit('web2app:open-tab', { url: u });
+          return null;
+        }
+        if (typeof origOpen === 'function') {
+          try { return origOpen.apply(window, arguments); } catch (e) { /* noop */ }
+        }
+        return null;
+      };
+    } catch (e) { /* 页面封死 window.open 时放弃 */ }
+  }
+
   /// 宣告「底部已被底栏占用」（外部探针 / 同世界脚本读它，比全局变量更稳）。
   function markChromeReady() {
+    try {
+      // 加载层（loading.js）按这两个全局把遮罩缩到「顶栏与底栏之间」：顶部取
+      // __web2appChromeH（桌面 titlebar.js 下发），底部取本值。再广播 chrome-ready，
+      // 让先挂载的 loading 层重算一次 —— 加载转圈期间底栏仍可见、可点。
+      window.__web2appMobileBarH = reservePx();
+      window.dispatchEvent(new Event('web2app:chrome-ready'));
+    } catch (e) { /* noop */ }
     try {
       var de = document.documentElement;
       if (de) {
@@ -701,12 +1159,22 @@
   }
 
   // 立刻置位防重入：挂载是异步的（要等 DOM 宿主节点），期间可能被再次注入。
-  window.__web2appMobileBar = { setTabs: setTabs };
+  // notify：供外部探针 / 同世界脚本弹同一个 toast（与「更多」面板操作反馈同款）。
+  window.__web2appMobileBar = { setTabs: setTabs, notify: toast };
 
   // 启动页（内置页）不画底栏：那时还没有可前进 / 后退的真实页面，画出来只会误导。
   // ⚠️ 这里不 return 之前已置位的防重标记 —— 换文档后本脚本会被重新注入，新的 JS 环境里
   //    这段判断会重新跑一遍（导航到真实页面时 location 已不是内置页）。
   if (isBuiltinUrl(location.href)) return;
+
+  // 首帧近似高度：loading.js 与本脚本同批 document-start 注入且注册更早，它挂载时底栏
+  // 还没渲染、读不到实测高度（含安全区）。先给内容区高度 BAR_H 兜首帧，底栏挂好后
+  // markChromeReady() 再用 getBoundingClientRect 的实测值纠正。启动页没底栏，不给值。
+  try { window.__web2appMobileBarH = BAR_H; } catch (e) { /* noop */ }
+
+  // _blank / window.open 拦截必须**尽早**装：document 上的捕获监听 document-start 即可用，
+  // window.open 也要赶在页面脚本第一次调用它之前包好 ⇒ 不等 whenHostReady。
+  if (HAS_TABS) installBlankGuard();
 
   whenHostReady(function () {
     var mounted = null;
@@ -727,8 +1195,15 @@
 
     syncBarWidth(bar);
     try {
-      window.addEventListener('resize', function () { syncBarWidth(bar); }, { passive: true });
-      window.addEventListener('orientationchange', function () { syncBarWidth(bar); }, { passive: true });
+      window.addEventListener('resize', function () {
+        syncBarWidth(bar);
+        // 安全区 / 视口高度可能随旋转、折叠屏展开变化，重新上报给加载层与页面探针。
+        markChromeReady();
+      }, { passive: true });
+      window.addEventListener('orientationchange', function () {
+        syncBarWidth(bar);
+        markChromeReady();
+      }, { passive: true });
     } catch (e) { /* noop */ }
 
     try {
@@ -744,6 +1219,10 @@
     } catch (e) { /* noop */ }
 
     markChromeReady();
+
+    // 页签模式才上报文档 url / 标题（壳侧靠它维护列表面板的记录）；没有列表按钮时
+    // 这串事件没有消费者，一个都不发。
+    if (HAS_TABS) watchDoc();
 
     // ---------------------------------------------------------------------
     // 自愈守护（SPA 清空并重建 <body> 时把底栏挂回去）

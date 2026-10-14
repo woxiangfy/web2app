@@ -240,13 +240,25 @@
     iv = setInterval(attempt, 16);
   }
 
-  /// 自绘标题栏（titlebar.js）占据顶部 38px：加载层让出该区域，避免把它盖住。
-  /// 两脚本的注入顺序不固定，故用「全局标记 + 事件」双向同步。
+  /// 自绘标题栏（titlebar.js）占据顶部 __web2appChromeH；移动端底栏（mobilebar.js）
+  /// 占据底部 __web2appMobileBarH：加载层让出这两格，避免把它们盖住 —— 页面转圈期间
+  /// 用户仍可经底栏回首页 / 后退 / 前进 / 切换标签。
+  /// 两脚本的注入顺序不固定，故用「全局标记 + 事件」双向同步（顶 / 底两条各发各的
+  /// `web2app:chrome-ready`，这里同一个函数重算）。
+  /// ⚠️ height 必须显式改成 calc：top + height:100vh + bottom 三边过约束时 top 优先，
+  ///    只设 bottom 挡不住加载层继续铺满底部。
   function applyChromeOffset() {
     if (!root || !root.style) return;
-    var h = window.__web2appChromeH || 0;
+    var top = window.__web2appChromeH || 0;
+    var bottom = window.__web2appMobileBarH || 0;
     try {
-      root.style.setProperty('top', h ? h + 'px' : '0px', 'important');
+      root.style.setProperty('top', top ? top + 'px' : '0px', 'important');
+      root.style.setProperty('bottom', bottom ? bottom + 'px' : '0px', 'important');
+      root.style.setProperty(
+        'height',
+        'calc(100vh - ' + (top || 0) + 'px - ' + (bottom || 0) + 'px)',
+        'important'
+      );
     } catch (e) { /* noop */ }
   }
 

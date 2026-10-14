@@ -148,6 +148,9 @@ jobs:
               "android_key_alias": ALIAS,
               "android_keystore_password": storepass,
               "android_key_password": "",          # 空=回落同 storepass
+              # 可选运行时权限（仅 Android）：按需加 "camera"/"microphone"/"location"，
+              # 默认 [] = 不声明（未声明时 getUserMedia / geolocation 被系统直接 deny）。
+              "android_permissions": [],
           }
           assert set(cfg) == set(CONTRACT_KEYS), (
               "packaging-config 模板字段与契约不一致："

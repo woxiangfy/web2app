@@ -18,5 +18,6 @@
   "android_keystore_base64": "",
   "android_key_alias": "",
   "android_keystore_password": "",
-  "android_key_password": ""
+  "android_key_password": "",
+  "android_permissions": []
 }

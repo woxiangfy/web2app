@@ -77,31 +77,37 @@ name: 自定义打包
 #                                            //   ⚠️ 旧布尔字段 data_dir_default 已移除：
 #                                            //      false ⇒ "data"、true ⇒ ""（写了会直接报错）
 #                                            //   对照表见 docs/packaging-config.md §4.3
-#     "tabs_enabled": false,                 // 布尔，**不带引号**（默认 false，仅 Windows 生效）：
-#                                            //   true = 宿主窗口 + 顶部标签栏，每个 tab 是独立 WebView
-#                                            //   且共享同一数据目录（同账号，cookie/localStorage 互通），
-#                                            //   target="_blank" / window.open() 直接新开一个 tab；
-#                                            //   Android 端忽略此开关（无多页签能力）。
+#     "tabs_enabled": false,                 // 布尔，**不带引号**（默认 false）：
+#                                            //   Windows true = 宿主窗口 + 顶部标签栏，每个 tab 是独立
+#                                            //   WebView 且共享同一数据目录（同账号，cookie/localStorage
+#                                            //   互通），target="_blank" / window.open() 直接新开 tab；
+#                                            //   Android true = 底栏内单 webview 页签记录（列表/新建/
+#                                            //   切换/关闭；切换按记录 url 重载，状态不保留），需同时
+#                                            //   开 mobile_bar 才有入口。
 #     "mobile_bar": false,                   // 布尔，**不带引号**（默认 false，仅移动端生效）：
 #                                            //   true = 移动端屏幕底部常驻一条导航条 ——
 #                                            //     首页（回到 app_url）/ 后退 / 前进 / 列表；
 #                                            //   false = 移动端没有任何壳自绘控件（默认）。
 #                                            //   Windows / Electron 桌面端忽略此开关
 #                                            //   （底栏只在移动端实现，桌面端连代码路径都没有）。
-#                                            //   ⚠️「列表」按钮只在当前平台真的有页签可切时才渲染：
-#                                            //     移动端目前没有多页签 ⇒ 只画前三个按钮，
+#                                            //   ⚠️「列表」按钮只在 tabs_enabled=true 时才渲染
+#                                            //     （移动端单 webview 页签记录），否则只画前三个按钮，
 #                                            //     不会出现点了没反应的死按钮。
 #     "android_keystore_base64": "...",      // Android 签名 keystore(.jks/.keystore) 的 base64（可选，
 #                                            //   优先于仓库 secrets；正式签名，跨构建可覆盖升级）
 #     "android_key_alias": "my-alias",       // keystore 别名（配了 keystore 时必填）
 #     "android_keystore_password": "****",   // keystore 密码（配了 keystore 时必填）
-#     "android_key_password": ""             // key 密码（可选，默认同 keystore 密码）
+#     "android_key_password": "",            // key 密码（可选，默认同 keystore 密码）
+#     "android_permissions": []              // 字符串数组（可选，仅 Android；默认 [] = 不声明）：
+#                                            //   按需加入 "camera" / "microphone" / "location"，
+#                                            //   打包期映射进 AndroidManifest.xml；未声明时网页
+#                                            //   getUserMedia / geolocation 会被系统直接 deny。
 #   }
 #
 # 字段名拼错 / 类型不对 / 写了已移除的字段 ⇒ **直接失败**（不是警告）。
 # 曾经只打 ::warning:: 就跳过，于是「拼错」与「不生效」表现完全一样，只能靠猜。
 #
-# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 20 个字段）
+# 配置模板：webview-app/config.example.json（Tauri / Android 侧，含全部 21 个字段）
 #           electron-app/config.example.json（Electron 绿色版侧，省略仅 Android 用的 android_*）
 #   ⚠️ 两份模板覆盖同一份契约，字段名与类型完全一致；差异只在「本端不用的字段是否列出」。
 #      JSON 标准不支持注释，故模板保持纯 JSON，各字段含义见上面这份说明与 docs/packaging-config.md。
@@ -311,9 +317,10 @@ jobs:
           CONFIG_URL: ${{ github.event.inputs.config_url }}
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
+        # --target android：启用安卓专属组合校验（内嵌账号密码必须走代理，否则真机必 401）。
         run: |
           python3 "$GITHUB_WORKSPACE/.github/scripts/parse-packaging-config.py" \
-            --env-out "$GITHUB_ENV" --android-keystore
+            --target android --env-out "$GITHUB_ENV" --android-keystore
 
       - name: 预写 tauri.conf.json（version / productName / identifier）
         # 逻辑在 .github/scripts/prepare-android-conf.py —— 与 release.yml 调用**同一个脚本**，
@@ -426,6 +433,42 @@ jobs:
         # 落点是真实网页才 goBack；没有可退的真实页面时 finish()（与无历史的系统默认
         # 同手感：回桌面/后台）。gen/android 每次现生成，故每轮 init 后都必须打。
         run: python3 ../.github/scripts/patch-android-back.py
+
+      - name: 接管网页下载（附件下载 / 长按存图 → 系统 DownloadManager）
+        # 逻辑（含自测）见 .github/scripts/patch-android-download.py：wry 0.57 Android
+        # 没有任何下载通道（RustWebViewClient 未挂 DownloadListener），不补丁则下载链接
+        # 与长按保存图片全部静默无反应。同时补 Manifest 的存储（maxSdk=28）/ 通知权限。
+        run: python3 ../.github/scripts/patch-android-download.py
+
+      - name: 挂 JS 原生桥（分享 / 浏览器打开 / 清除浏览数据 / 退出）
+        # 逻辑（含自测）见 .github/scripts/patch-android-extras.py：给 MainActivity 的
+        # WebView addJavascriptInterface（__web2appAndroid），并补丁 wry 的
+        # RustWebViewClient.onPageFinished —— 主框架每页轮换一次性密钥 __web2appAndroidKey，
+        # 跨源 iframe 读不到 ⇒ 危险动作无法被第三方页面冒调。清数据补 wry 0.57 漏掉的
+        # Cookie / WebStorage（其 clearAllBrowsingData 只清缓存/历史/表单/库），清完 reload。
+        run: python3 ../.github/scripts/patch-android-extras.py
+
+      - name: 外部链接交系统应用打开（tel/mailto/weixin/intent 等）
+        # 逻辑（含自测）见 .github/scripts/patch-android-schemes.py：补丁 wry 生成的
+        # RustWebViewClient.shouldOverrideUrlLoading，非 http(s) scheme 用 Intent 外跳，
+        # 无应用可处理时 toast 兜底，避免 ERR_UNKNOWN_URL_SCHEME 白页。
+        run: python3 ../.github/scripts/patch-android-schemes.py
+
+      - name: 支持网页视频全屏（H5 <video> / requestFullscreen）
+        # 逻辑（含自测）见 .github/scripts/patch-android-fullscreen.py：wry 0.57 的
+        # RustWebChromeClient.onShowCustomView 是「立即 onCustomViewHidden」空实现，
+        # 视频全屏按钮点了没反应。整体替换 onShow/onHideCustomView：custom view 铺满
+        # content、隐藏 WebView、锁横屏 + 沉浸式（API30+ WindowInsetsController，
+        # 低版本 systemUiVisibility），退出时逐项还原。
+        run: python3 ../.github/scripts/patch-android-fullscreen.py
+
+      - name: 按需声明运行时权限（camera / microphone / location）
+        # 逻辑（含自测）见 .github/scripts/patch-android-permissions.py：打包配置的
+        # android_permissions 白名单数组经解析器落 GITHUB_ENV（ANDROID_PERMISSIONS，
+        # 默认 []），本步据此向 AndroidManifest.xml 注入 <uses-permission>；空数组直接跳过。
+        # 未声明时 wry 对 getUserMedia（摄像头/麦克风）/ geolocation 一律 deny
+        #（连运行时授权弹窗都不会弹）；运行时申请弹窗本身 wry 已实现，这里只补 Manifest。
+        run: python3 ../.github/scripts/patch-android-permissions.py
 
       - name: Allow cleartext HTTP (localhost proxy)
         # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，
@@ -552,6 +595,7 @@ jobs:
             MOBILE_BAR_VAL="${MOBILE_BAR:-false}" \
             PUBLIC_KEY_VAL="${PUBLIC_KEY:-}" RESOLVE_SECRET_VAL="${RESOLVE_SECRET:-}" \
             DEBUG_VAL="${DEBUG:-false}" \
+            ANDROID_PERMISSIONS_VAL="${ANDROID_PERMISSIONS:-[]}" \
             CONTRACT_KEYS="$CONTRACT_KEYS" \
             python3 -c '
           import json, os, sys, datetime
@@ -590,6 +634,8 @@ jobs:
               "android_key_alias": alias,
               "android_keystore_password": storepass,
               "android_key_password": "",
+              # 可选运行时权限：env 里是紧凑 JSON 数组文本（默认 "[]"），模板还原成真数组。
+              "android_permissions": json.loads(env["ANDROID_PERMISSIONS_VAL"]),
           }
           # ⚠️ 契约里的字段必须一个不漏 —— 曾经这份模板只写 14 个键，用户拿它复用会静默丢掉
           #    extra / public_key / resolve_secret，表现为「前端读不到 web2appExtra」「解密回落

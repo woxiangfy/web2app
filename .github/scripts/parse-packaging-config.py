@@ -36,6 +36,7 @@ r"""打包配置 JSON 的**唯一解析实现**（Tauri / Android / Electron 三
 | android_key_alias        | string                | ""（仅 Android）                    |
 | android_keystore_password| string                | ""（仅 Android）                    |
 | android_key_password     | string                | ""（仅 Android）                    |
+| android_permissions      | string[]              | []（仅 Android，白名单三值）        |
 
 `data_dir` 三种取值（两壳行为一致，见 docs/packaging-config.md §4.3）：
 
@@ -71,8 +72,9 @@ cwd，用它会让同一个包在不同启动方式下把数据落到不同地�
     # 从字符串 / URL 读配置，把编译期环境变量写进 GITHUB_ENV
     python3 .github/scripts/parse-packaging-config.py --json '<JSON>' --env-out "$GITHUB_ENV"
 
-    # Android：额外把 keystore 落盘并注入 ANDROID_KEYSTORE_* 变量
-    ... --android-keystore
+    # Android：额外把 keystore 落盘并注入 ANDROID_KEYSTORE_* 变量，并启用目标校验
+    # （内嵌账号密码必须走代理，否则真机必 401，见 validate_for_target）
+    ... --target android --android-keystore
 
     # Electron：额外把**规范化后的** config.json 落盘（进 asar 的那一份）
     ... --config-out electron-app/config.json
@@ -139,6 +141,12 @@ DEFAULTS: dict[str, object] = {
     "android_key_alias": "",
     "android_keystore_password": "",
     "android_key_password": "",
+    # 仅 Android：按需向生成工程的 AndroidManifest.xml 注入运行时权限声明。
+    #   白名单三值 "camera" / "microphone" / "location"（见 normalize_android_permissions），
+    #   默认 [] = 不声明任何可选权限（wry 对 Manifest 未声明的 resource 一律 deny，
+    #   而全量声明会让 Play 审核额外解释用途 ⇒ 按需声明，不做一刀切）。
+    #   由 patch-android-permissions.py 消费经 GITHUB_ENV 下发的 ANDROID_PERMISSIONS。
+    "android_permissions": [],
 }
 
 BOOL_KEYS = {"proxy_enabled", "tabs_enabled", "mobile_bar", "debug"}
@@ -306,6 +314,44 @@ def normalize_extra(value: object) -> str:
         raise ConfigError(f"extra 无法序列化为 JSON：{e}") from e
 
 
+# android_permissions 白名单：打包配置里只接受这三个名字，Manifest 注入脚本再把它们
+# 映射成真正的 <uses-permission>。在这里限定取值，拼错权限名就不可能静默产出一份
+# 「装上了但授权弹窗永远被 deny」的 APK。
+ANDROID_PERMISSION_CHOICES: tuple[str, ...] = ("camera", "microphone", "location")
+
+
+def normalize_android_permissions(value: object) -> str:
+    """android_permissions 归一为**去重保序**的紧凑 JSON 数组文本（默认 []）。
+
+    只接受字符串数组，元素去首尾空白后必须在白名单内；重复值去重但保留首次出现顺序。
+    出口形态与 extra 一致（单行 JSON 文本进 env，写 config.json 时再还原成真数组）。
+    """
+    if not isinstance(value, list):
+        raise ConfigError(
+            "字段 android_permissions 必须是权限名字符串数组"
+            '（如 ["camera","microphone","location"]），'
+            f"当前是 {type(value).__name__}"
+        )
+    choices = "/".join(ANDROID_PERMISSION_CHOICES)
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ConfigError(
+                f"字段 android_permissions 的元素必须是字符串（允许：{choices}），"
+                f"当前元素是 {type(item).__name__}：{item!r}"
+            )
+        name = item.strip()
+        if not name:
+            raise ConfigError(f"字段 android_permissions 的元素不能为空（允许：{choices}）")
+        if name not in ANDROID_PERMISSION_CHOICES:
+            raise ConfigError(
+                f"字段 android_permissions 含未知权限 {name!r}，只允许：{choices}"
+            )
+        if name not in result:
+            result.append(name)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
 # 版本号：三段纯数字（semver 的 x.y.z 基础形态，**不接受** v 前缀 / 四段 / 预发布标签）。
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
@@ -380,6 +426,55 @@ def mask(u: str) -> str:
     return re.sub(r"(://[^/@\s]+)@", "://***@", str(u))
 
 
+# ---------------------------------------------------------------------------
+# 按打包目标的跨字段校验（解析器本身与目标无关；只有 CI 的 Android 调用传 --target android）
+# ---------------------------------------------------------------------------
+_USERINFO_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^/@\s]+@")
+
+
+def url_contains_userinfo(text: str) -> bool:
+    """单 URL 文本是否内嵌了 `user:pass@`（scheme://userinfo@host[/...]）。"""
+    return bool(_USERINFO_RE.match(text.strip()))
+
+
+def validate_for_target(target: str | None, merged: dict[str, str]) -> None:
+    """打包目标相关的组合校验。目前只有 Android 有必须在打包期挡住的组合。
+
+    **Android + 内嵌账号密码 + 关代理 = 必然 401**：
+      · `bootstrap.rs` 的 `#[cfg(not(windows))]` 导航分支不做任何鉴权注入
+        （nav.user/nav.pass 被 `let _ =` 压掉），鉴权只靠本地反向代理；
+      · wry 0.57 的 `RustWebChromeClient` 未覆写 `onReceivedHttpAuthRequest`，
+        默认取消 Basic Auth 弹窗 ⇒ 直连内嵌凭据在真机上必然 401 / 卡启动失败卡。
+    Windows 直连有 WebView2 原生鉴权钩子（webview_hooks.rs），不受此限。
+    """
+    if target != "android":
+        return
+    app_url = str(merged["app_url"]).strip()
+    proxy_on = str(merged["proxy_enabled"]).strip().lower() == "true"
+
+    # 域名数组模式：解密结果静态不可知，只能提示（真实地址若含账号密码同样必须走代理）。
+    if app_url.startswith("["):
+        if not proxy_on:
+            print("::warning::目标为 Android 且 proxy_enabled=false：域名数组模式下若解密出的"
+                  "真实地址包含账号密码（user:pass@host），Android 无法注入 Basic 鉴权"
+                  "（只有本地反向代理能注入），真机将 401。目标站需要登录时请改配 "
+                  '"proxy_enabled": true。')
+        return
+
+    if url_contains_userinfo(app_url) and not proxy_on:
+        raise ConfigError(
+            "Android 目标不支持「URL 内嵌账号密码 + 直连（proxy_enabled=false）」组合：\n"
+            f"  app_url 内嵌了 user:pass@（{mask(app_url)}）。\n"
+            "  Android 壳没有 HTTP Basic 鉴权钩子（bootstrap.rs 的非 Windows 分支不注入 "
+            "Authorization，wry 0.57 也未覆写 onReceivedHttpAuthRequest），"
+            "该组合在真机上必然 401 / 卡在启动失败卡。\n"
+            "  修复（任选其一）：\n"
+            '    1) 开启本地反向代理："proxy_enabled": true'
+            "（由代理统一注入 Authorization，推荐，与 Windows 鉴权链路同源）；\n"
+            "    2) 若站点本身不依赖 Basic Auth，删掉 app_url 里的 user:pass@。"
+        )
+
+
 def build_merged(data: dict) -> dict[str, str]:
     """把用户配置合并进默认值，输出「已规范化的字符串表」。"""
     reject_unknown_keys(data)
@@ -392,6 +487,7 @@ def build_merged(data: dict) -> dict[str, str]:
     raw_app_url: object = DEFAULTS["app_url"]
     raw_extra: object = DEFAULTS["extra"]
     raw_data_dir: object = DEFAULTS["data_dir"]
+    raw_android_permissions: object = DEFAULTS["android_permissions"]
     for key, value in data.items():
         if value is None:
             continue  # 显式 null = 用默认值
@@ -404,6 +500,9 @@ def build_merged(data: dict) -> dict[str, str]:
         if key == "data_dir":
             raw_data_dir = value
             continue
+        if key == "android_permissions":
+            raw_android_permissions = value
+            continue
         if key in BOOL_KEYS:
             merged[key] = normalize_bool(key, value)
         else:
@@ -414,6 +513,7 @@ def build_merged(data: dict) -> dict[str, str]:
     merged["app_url"] = normalize_app_url(raw_app_url, str(merged["public_key"]))
     merged["extra"] = normalize_extra(raw_extra)
     merged["data_dir"] = normalize_data_dir(raw_data_dir)
+    merged["android_permissions"] = normalize_android_permissions(raw_android_permissions)
     merged["icon_url"] = str(merged["icon_url"]).strip()
     merged["resolve_secret"] = str(merged["resolve_secret"]).strip()
 
@@ -494,6 +594,10 @@ def write_config_json(path: str, merged: dict[str, str], data: dict) -> None:
                 out[key] = json.loads(value)
             else:
                 out[key] = value
+        elif key == "android_permissions":
+            # merged 里是紧凑 JSON 数组文本（"[]" / "[\"camera\"]"），config.json 要保持真数组；
+            # 本壳（Electron/Windows）不消费它（config.ts 的 ANDROID_ONLY_KEYS 接受并忽略）。
+            out[key] = json.loads(value)
         else:
             out[key] = value
     # android_* 是仅 Android 使用的字段，不进 Windows 绿色版的 config.json ——
@@ -667,6 +771,32 @@ def _selftest_cases() -> None:
     assert build_merged({"app_url": "https://a.com", "extra": {"k": "v"}})["extra"] == '{"k":"v"}'
     assert build_merged({"app_url": "https://a.com"})["extra"] == "{}"
 
+    # ---- android_permissions：默认 []；白名单三值；去空白 + 去重保序；非法形态硬失败 ----
+    assert build_merged({"app_url": "https://a.com"})["android_permissions"] == "[]", \
+        "android_permissions 默认必须是 []（不声明任何可选权限）"
+    m = build_merged({"app_url": "https://a.com",
+                      "android_permissions": ["camera", "microphone", "location"]})
+    assert json.loads(m["android_permissions"]) == ["camera", "microphone", "location"]
+    # 去首尾空白；重复值去重但保留首次顺序
+    m = build_merged({"app_url": "https://a.com",
+                      "android_permissions": [" camera ", "camera", "location", "location "]})
+    assert json.loads(m["android_permissions"]) == ["camera", "location"]
+    # 显式 null = 用默认值
+    assert build_merged({"app_url": "https://a.com",
+                         "android_permissions": None})["android_permissions"] == "[]"
+    # 非数组（字符串 / 布尔 / 对象）→ 硬失败
+    _expect_error({"app_url": "https://a.com", "android_permissions": "camera"}, "权限名字符串数组")
+    _expect_error({"app_url": "https://a.com", "android_permissions": True}, "权限名字符串数组")
+    _expect_error({"app_url": "https://a.com", "android_permissions": {"camera": True}},
+                  "权限名字符串数组")
+    # 数组里的坏元素：未知权限名 / 非字符串 / 空串
+    _expect_error({"app_url": "https://a.com", "android_permissions": ["gps"]}, "未知权限")
+    _expect_error({"app_url": "https://a.com", "android_permissions": ["camera", "gps"]},
+                  "只允许：camera/microphone/location")
+    _expect_error({"app_url": "https://a.com", "android_permissions": [123]}, "元素必须是字符串")
+    _expect_error({"app_url": "https://a.com", "android_permissions": [""]}, "元素不能为空")
+    _expect_error({"app_url": "https://a.com", "android_permissions": ["   "]}, "元素不能为空")
+
     # resolve_secret 去空白
     assert build_merged({"app_url": "https://a.com", "resolve_secret": " s "})["resolve_secret"] == "s"
 
@@ -709,6 +839,7 @@ def _selftest_cases() -> None:
             "mobile_bar": True,
             "debug": True,
             "data_dir": "",
+            "android_permissions": ["camera", "location"],
             "android_keystore_base64": "eHh4",
         })
         write_config_json(p, merged, {})
@@ -717,8 +848,46 @@ def _selftest_cases() -> None:
         assert out["mobile_bar"] is True, "mobile_bar 在 config.json 里也必须是真 bool"
         assert out["debug"] is True, "debug 在 config.json 里也必须是真 bool（Electron 侧按真 bool 解析）"
         assert out["app_url"] == ["a.com"], "config.json 里数组要保持数组"
-        assert "android_keystore_base64" not in out, "android_* 不应进 Windows 包的 config.json"
+        assert out["android_permissions"] == ["camera", "location"], \
+            "android_permissions 在 config.json 里必须是真数组（不是 JSON 文本）"
+        assert "android_keystore_base64" not in out, "签名 4 字段不应进 Windows 包的 config.json"
         assert out["data_dir"] == "", "空串必须原样落到 config.json（不被改成默认值）"
+
+    # ---- 按打包目标的跨字段校验（--target android）----
+    # 内嵌凭据 + 关代理：Windows 允许（WebView2 鉴权钩子），Android 必须硬失败。
+    assert url_contains_userinfo("https://u:p@host/path")
+    assert url_contains_userinfo("  http://a@host  ")
+    assert not url_contains_userinfo("https://host/p@th")
+    assert not url_contains_userinfo("host/u@x")
+    m = build_merged({"app_url": "https://u:p@host", "proxy_enabled": True})
+    validate_for_target("android", m)  # 开了代理：放行
+    validate_for_target("windows", build_merged({"app_url": "https://u:p@host"}))  # Windows 直连放行
+    validate_for_target(None, build_merged({"app_url": "https://u:p@host"}))  # 未指定目标不校验
+    validate_for_target("android", build_merged({"app_url": "https://plain.host"}))  # 无凭据直连放行
+    _expect_error_android = build_merged({"app_url": "https://u:p@host"})
+    try:
+        validate_for_target("android", _expect_error_android)
+        raise AssertionError("Android + 内嵌凭据 + 直连应硬失败")
+    except ConfigError as e:
+        assert "proxy_enabled" in str(e) and "401" in str(e), f"报错要给修法与后果：{e}"
+        assert "***@" in str(e), "报错里的 URL 必须脱敏"
+    # 域名数组 + Android + 关代理：只 warning（解密结果静态不可知），不硬失败
+    m = build_merged({"app_url": ["a.com"], "public_key": "K"})
+    import io as _io
+
+    buf = _io.StringIO()
+    import contextlib as _cl
+
+    with _cl.redirect_stdout(buf):
+        validate_for_target("android", m)
+    assert "::warning::" in buf.getvalue() and "proxy_enabled" in buf.getvalue()
+    # 数组 + 开代理：不应再有本校验的代理警告（数组模式仍可能有 resolve_secret 的既有警告，
+    # 那是 build_merged 的职责，这里只按代理关键词判定）。
+    buf2 = _io.StringIO()
+    with _cl.redirect_stdout(buf2):
+        validate_for_target("android", build_merged(
+            {"app_url": ["a.com"], "public_key": "K", "proxy_enabled": True}))
+    assert "proxy_enabled" not in buf2.getvalue()
 
     # write_env：空串必须写成 `DATA_DIR=`（而不是整行消失），否则 Rust 侧读不到「用系统目录」这个意图
     with tempfile.TemporaryDirectory() as d:
@@ -732,11 +901,21 @@ def _selftest_cases() -> None:
         assert "DEBUG=False\n" in env_text, f"debug 默认必须写出一行 DEBUG=False，实际：{env_text!r}"
         # mobile_bar 同理：Rust 侧的编译期常量靠这一行拿到取值（桌面目标读不到就等于关闭）
         assert "MOBILE_BAR=False\n" in env_text, f"默认必须写出一行 MOBILE_BAR=False，实际：{env_text!r}"
+        # android_permissions 默认落 ANDROID_PERMISSIONS=[]（Manifest 补丁脚本读它决定注入项）
+        assert "ANDROID_PERMISSIONS=[]\n" in env_text, \
+            f"默认必须写出一行 ANDROID_PERMISSIONS=[]，实际：{env_text!r}"
         with open(env_path, "w", encoding="utf-8"):
             pass
         write_env(env_path, build_merged({"app_url": "https://a.com", "debug": True}))
         assert "DEBUG=True\n" in pathlib.Path(env_path).read_text(encoding="utf-8"), \
             "debug=true 必须落成 DEBUG=True（落成 1/on 之类会被 Rust 侧 env_bool! 白名单挡下）"
+        with open(env_path, "w", encoding="utf-8"):
+            pass
+        write_env(env_path, build_merged(
+            {"app_url": "https://a.com", "android_permissions": ["camera", "location"]}))
+        env_text2 = pathlib.Path(env_path).read_text(encoding="utf-8")
+        assert 'ANDROID_PERMISSIONS=["camera","location"]\n' in env_text2, \
+            f"权限数组必须以紧凑 JSON 单行落 env，实际：{env_text2!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -751,6 +930,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--env-out", default=os.environ.get("GITHUB_ENV"),
                     help="把编译期环境变量追加到该文件（CI 里就是 $GITHUB_ENV）")
     ap.add_argument("--config-out", help="额外写出规范化后的 config.json（Electron 进 asar 的那份）")
+    ap.add_argument("--target", choices=("android", "windows", "electron"), default=None,
+                    help="打包目标：启用目标相关的跨字段校验（目前仅 android 有额外硬规则："
+                         "URL 内嵌账号密码必须走代理）。CI 的 android job 必传。")
     ap.add_argument("--android-keystore", action="store_true",
                     help="处理 android_keystore_base64：落盘并注入 ANDROID_KEYSTORE_* 变量")
     ap.add_argument("--keystore-out-dir",
@@ -778,6 +960,8 @@ def main(argv: list[str]) -> int:
     try:
         data = parse_json(read_raw(args.json, args.url))
         merged = build_merged(data)
+        # 目标相关组合校验放在任何落盘 / 注入之前：硬失败时不写 GITHUB_ENV、不落 keystore。
+        validate_for_target(args.target, merged)
 
         signing: dict[str, str] = {}
         if args.android_keystore:

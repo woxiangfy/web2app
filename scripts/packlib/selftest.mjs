@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ConfigError, captureOutput, emit } from './diagnostic.mjs'
-import { buildMerged, toConfigJson } from './parser.mjs'
+import { buildMerged, toConfigJson, urlContainsUserInfo, validateForTarget } from './parser.mjs'
 import { getCloseMatches } from './pycompat.mjs'
 import { DEFAULTS } from './constants.mjs'
 import { ELECTRON_OUT_DEFAULT, TAURI_OUT_DEFAULT, isDeleteBlocked, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
@@ -54,6 +54,10 @@ export const PARITY_PAYLOADS = [
   { app_url: 'https://user:pass@a.com/Path' },
   { app_url: 'ftp://a.com' },
   { app_url: 'https://a.com', android_keystore_base64: 'eHh4' },
+  { app_url: 'https://a.com', android_permissions: ['camera', 'microphone', 'location'] },
+  { app_url: 'https://a.com', android_permissions: [] },
+  { app_url: 'https://a.com', android_permissions: [' camera ', 'camera', 'location', 'location '] },
+  { app_url: 'https://a.com', android_permissions: null },
   { app_url: 'https://a.com', version: '2.3.4' },
   { app_url: 'https://a.com', version: ' 255.255.65535 ' },
   // ---- 以下以「必须报错」为主（`app_url: 123` 例外：它只产生 warning，仍会成功）----
@@ -74,6 +78,14 @@ export const PARITY_PAYLOADS = [
   { app_url: 'https://a.com', window_title: 'X' },
   { app_url: 'https://a.com', data_dir_default: false },
   { app_url: 'https://a.com', proxy_enable: true },
+  { app_url: 'https://a.com', android_permissions: 'camera' },
+  { app_url: 'https://a.com', android_permissions: true },
+  { app_url: 'https://a.com', android_permissions: { camera: true } },
+  { app_url: 'https://a.com', android_permissions: ['gps'] },
+  { app_url: 'https://a.com', android_permissions: ['camera', 'gps'] },
+  { app_url: 'https://a.com', android_permissions: [123] },
+  { app_url: 'https://a.com', android_permissions: [''] },
+  { app_url: 'https://a.com', android_permissions: ['   '] },
 ]
 
 export function selftest() {
@@ -155,6 +167,40 @@ export function selftest() {
     assertThat(buildMerged({ app_url: 'https://a.com', extra: { k: 'v' } }).extra === '{"k":"v"}', 'extra 序列化')
     assertThat(buildMerged({ app_url: 'https://a.com' }).extra === '{}', 'extra 默认 {}')
 
+    // android_permissions：默认 []；白名单归一；去空白 + 去重保序；非法形态硬失败
+    assertThat(buildMerged({ app_url: 'https://a.com' }).android_permissions === '[]', 'android_permissions 默认 []')
+    assertThat(
+      JSON.parse(
+        buildMerged({ app_url: 'https://a.com', android_permissions: ['camera', 'microphone', 'location'] })
+          .android_permissions,
+      ).join(',') === 'camera,microphone,location',
+      '三个白名单值按序归一',
+    )
+    assertThat(
+      JSON.parse(
+        buildMerged({
+          app_url: 'https://a.com',
+          android_permissions: [' camera ', 'camera', 'location', 'location '],
+        }).android_permissions,
+      ).join(',') === 'camera,location',
+      '去首尾空白 + 去重保序',
+    )
+    assertThat(
+      buildMerged({ app_url: 'https://a.com', android_permissions: null }).android_permissions === '[]',
+      '显式 null 回落默认 []',
+    )
+    expectError({ app_url: 'https://a.com', android_permissions: 'camera' }, '权限名字符串数组')
+    expectError({ app_url: 'https://a.com', android_permissions: true }, '权限名字符串数组')
+    expectError({ app_url: 'https://a.com', android_permissions: { camera: true } }, '权限名字符串数组')
+    expectError({ app_url: 'https://a.com', android_permissions: ['gps'] }, '未知权限')
+    expectError(
+      { app_url: 'https://a.com', android_permissions: ['camera', 'gps'] },
+      '只允许：camera/microphone/location',
+    )
+    expectError({ app_url: 'https://a.com', android_permissions: [123] }, '元素必须是字符串')
+    expectError({ app_url: 'https://a.com', android_permissions: [''] }, '元素不能为空')
+    expectError({ app_url: 'https://a.com', android_permissions: ['   '] }, '元素不能为空')
+
     assertThat(buildMerged({ app_url: 'https://a.com', resolve_secret: ' s ' }).resolve_secret === 's', 'secret 去空白')
 
     // resolve_secret 提示**只在域名数组模式**出现
@@ -173,6 +219,38 @@ export function selftest() {
       assertThat(!out.includes('resolve_secret'), '配了 Secret 时两种模式都安静（连说明行也不出现）')
     }
 
+    // ---- 按打包目标的跨字段校验（validateForTarget，与 Python validate_for_target 对齐）----
+    // 内嵌凭据 + 关代理：Windows 允许，Android 必须硬失败。
+    assertThat(urlContainsUserInfo('https://u:p@host/path'), '内嵌凭据识别')
+    assertThat(urlContainsUserInfo('  http://a@host  '), '去首尾空白后识别')
+    assertThat(!urlContainsUserInfo('https://host/p@th'), '路径里的 @ 不算凭据')
+    assertThat(!urlContainsUserInfo('host/u@x'), '无 scheme 不算')
+    validateForTarget('android', buildMerged({ app_url: 'https://u:p@host', proxy_enabled: true }))
+    validateForTarget('windows', buildMerged({ app_url: 'https://u:p@host' }))
+    validateForTarget(null, buildMerged({ app_url: 'https://u:p@host' }))
+    validateForTarget('android', buildMerged({ app_url: 'https://plain.host' }))
+    try {
+      validateForTarget('android', buildMerged({ app_url: 'https://u:p@host' }))
+      throw new Error('Android + 内嵌凭据 + 直连应硬失败')
+    } catch (e) {
+      assertThat(e instanceof ConfigError, '必须是 ConfigError')
+      assertThat(e.message.includes('proxy_enabled') && e.message.includes('401'), `报错要给修法与后果：${e.message}`)
+      assertThat(e.message.includes('***@'), '报错 URL 必须脱敏')
+    }
+    // 域名数组 + Android + 关代理：只 warning
+    let vout = captureOutput(() =>
+      validateForTarget('android', buildMerged({ app_url: ['a.com'], public_key: 'K' })),
+    ).lines.join('\n')
+    assertThat(vout.includes('::warning::') && vout.includes('proxy_enabled'), '数组模式应只告警')
+    // 数组 + 开代理：无本校验警告
+    vout = captureOutput(() =>
+      validateForTarget(
+        'android',
+        buildMerged({ app_url: ['a.com'], public_key: 'K', proxy_enabled: true }),
+      ),
+    ).lines.join('\n')
+    assertThat(!vout.includes('proxy_enabled'), '数组 + 开代理不应有代理警告')
+
     // toConfigJson：bool 保持真 bool、数组保持数组、android_* 不落盘
     const merged = buildMerged({
       app_url: ['a.com'],
@@ -181,6 +259,7 @@ export function selftest() {
       mobile_bar: true,
       debug: true,
       data_dir: '',
+      android_permissions: ['camera', 'location'],
       android_keystore_base64: 'eHh4',
     })
     const cfg = toConfigJson(merged)
@@ -188,7 +267,11 @@ export function selftest() {
     assertThat(cfg.mobile_bar === true, 'mobile_bar 在 config.json 里也必须是真 bool')
     assertThat(cfg.debug === true, 'debug 在 config.json 里也必须是真 bool')
     assertThat(Array.isArray(cfg.app_url) && cfg.app_url[0] === 'a.com', 'config.json 里数组要保持数组')
-    assertThat(!('android_keystore_base64' in cfg), 'android_* 不应进 Windows 包的 config.json')
+    assertThat(
+      Array.isArray(cfg.android_permissions) && cfg.android_permissions.join(',') === 'camera,location',
+      'android_permissions 在 config.json 里必须是真数组（不是 JSON 文本）',
+    )
+    assertThat(!('android_keystore_base64' in cfg), '签名 4 字段不应进 Windows 包的 config.json')
     assertThat(cfg.data_dir === '', '空串必须原样落到 config.json（不被改成默认值）')
 
     // 安装名清洗（与 CI 逐字一致）

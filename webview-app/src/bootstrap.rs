@@ -108,6 +108,10 @@ pub(crate) fn on_page_load(app: &tauri::AppHandle, label: &str, finished: bool) 
     let ready = app.state::<BootReady>();
     if finished {
         ready.mark(label);
+        // 移动端单 webview 页签：每次真实文档加载完成，把最终 url 记进活动标签
+        //（标题由 mobilebar.js 的 web2app:mobile-doc 事件另补；启动页 url 在其内部被忽略）。
+        #[cfg(mobile)]
+        crate::mobilebar::on_page_finished(app);
     } else {
         ready.clear(label);
     }

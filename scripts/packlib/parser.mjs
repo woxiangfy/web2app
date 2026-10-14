@@ -4,7 +4,15 @@
  */
 import { ConfigError, emit } from './diagnostic.mjs'
 import { getCloseMatches, pyRepr, pyStr, pyTypeName } from './pycompat.mjs'
-import { BOOL_KEYS, DATA_DIR_BAD, DEFAULTS, JSON_KEYS, REMOVED_KEYS, SIGNING_KEYS } from './constants.mjs'
+import {
+  ANDROID_PERMISSION_CHOICES,
+  BOOL_KEYS,
+  DATA_DIR_BAD,
+  DEFAULTS,
+  JSON_KEYS,
+  REMOVED_KEYS,
+  SIGNING_KEYS,
+} from './constants.mjs'
 
 // ===========================================================================
 // 读取
@@ -161,6 +169,40 @@ function normalizeExtra(value) {
 }
 
 /**
+ * android_permissions 归一为**去重保序**的紧凑 JSON 数组文本（默认 []）。
+ * 与 Python 侧 normalize_android_permissions 逐字对应（改规则必须两侧同步 + 跑 --parity）。
+ * 只接受字符串数组，元素去空白后必须在白名单内；拼错权限名在打包期就硬失败。
+ */
+function normalizeAndroidPermissions(value) {
+  if (!Array.isArray(value)) {
+    throw new ConfigError(
+      '字段 android_permissions 必须是权限名字符串数组' +
+        '（如 ["camera","microphone","location"]），' +
+        `当前是 ${pyTypeName(value)}`,
+    )
+  }
+  const choices = ANDROID_PERMISSION_CHOICES.join('/')
+  const result = []
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      throw new ConfigError(
+        `字段 android_permissions 的元素必须是字符串（允许：${choices}），` +
+          `当前元素是 ${pyTypeName(item)}：${pyRepr(item)}`,
+      )
+    }
+    const name = item.trim()
+    if (!name) {
+      throw new ConfigError(`字段 android_permissions 的元素不能为空（允许：${choices}）`)
+    }
+    if (!ANDROID_PERMISSION_CHOICES.includes(name)) {
+      throw new ConfigError(`字段 android_permissions 含未知权限 ${pyRepr(name)}，只允许：${choices}`)
+    }
+    if (!result.includes(name)) result.push(name)
+  }
+  return JSON.stringify(result)
+}
+
+/**
  * 打包产物版本：只接受 "主.次.补丁" 三段纯数字字符串。
  *
  * 为什么比 semver 更严：两条打包链路的 Windows 产物版本最终都要过 Windows 自己的规则 ——
@@ -235,6 +277,56 @@ function mask(u) {
   return pyStr(u).replace(/(:\/\/[^\/@\s]+)@/g, '://***@')
 }
 
+// ===========================================================================
+// 按打包目标的跨字段校验（Python validate_for_target 的 Node 复刻）
+// 解析器本身与目标无关；CI 的 Android 调用传 --target android。
+// 本地 pack-local 目前只出 Windows / Electron 包，不传 target ⇒ 不做该校验，
+// 但纯函数与自测双侧对齐，供将来本机出 Android 包时直接复用。
+// ===========================================================================
+const USERINFO_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/@\s]+@/
+
+/** 单 URL 文本是否内嵌了 `user:pass@`（scheme://userinfo@host[/...]）。 */
+export function urlContainsUserInfo(text) {
+  return USERINFO_RE.test(pyStr(text).trim())
+}
+
+/**
+ * 打包目标相关的组合校验。目前只有 Android 有必须在打包期挡住的组合：
+ * 内嵌账号密码 + proxy_enabled=false（Android 无 Basic 鉴权钩子 ⇒ 真机必 401）。
+ * 抛 ConfigError = 硬失败；其余情况静默或 emit 一条 ::warning::。
+ */
+export function validateForTarget(target, merged) {
+  if (target !== 'android') return
+  const appUrl = pyStr(merged.app_url).trim()
+  const proxyOn = pyStr(merged.proxy_enabled).trim().toLowerCase() === 'true'
+
+  // 域名数组模式：解密结果静态不可知，只能提示。
+  if (appUrl.startsWith('[')) {
+    if (!proxyOn) {
+      emit(
+        '::warning::目标为 Android 且 proxy_enabled=false：域名数组模式下若解密出的' +
+          '真实地址包含账号密码（user:pass@host），Android 无法注入 Basic 鉴权' +
+          '（只有本地反向代理能注入），真机将 401。目标站需要登录时请改配 "proxy_enabled": true。',
+      )
+    }
+    return
+  }
+
+  if (urlContainsUserInfo(appUrl) && !proxyOn) {
+    throw new ConfigError(
+      'Android 目标不支持「URL 内嵌账号密码 + 直连（proxy_enabled=false）」组合：\n' +
+        `  app_url 内嵌了 user:pass@（${mask(appUrl)}）。\n` +
+        '  Android 壳没有 HTTP Basic 鉴权钩子（bootstrap.rs 的非 Windows 分支不注入 ' +
+        'Authorization，wry 0.57 也未覆写 onReceivedHttpAuthRequest），' +
+        '该组合在真机上必然 401 / 卡在启动失败卡。\n' +
+        '  修复（任选其一）：\n' +
+        '    1) 开启本地反向代理："proxy_enabled": true' +
+        '（由代理统一注入 Authorization，推荐，与 Windows 鉴权链路同源）；\n' +
+        '    2) 若站点本身不依赖 Basic Auth，删掉 app_url 里的 user:pass@。',
+    )
+  }
+}
+
 /** 把用户配置合并进默认值，输出「已规范化的字符串表」。 */
 export function buildMerged(data) {
   rejectUnknownKeys(data)
@@ -247,6 +339,7 @@ export function buildMerged(data) {
   let rawAppUrl = DEFAULTS.app_url
   let rawExtra = DEFAULTS.extra
   let rawDataDir = DEFAULTS.data_dir
+  let rawAndroidPermissions = DEFAULTS.android_permissions
 
   for (const [key, value] of Object.entries(data)) {
     if (value === null) continue // 显式 null = 用默认值
@@ -262,6 +355,10 @@ export function buildMerged(data) {
       rawDataDir = value
       continue
     }
+    if (key === 'android_permissions') {
+      rawAndroidPermissions = value
+      continue
+    }
     if (BOOL_KEYS.has(key)) merged[key] = normalizeBool(key, value)
     else merged[key] = typeof value === 'boolean' ? value : pyStr(value)
   }
@@ -273,6 +370,7 @@ export function buildMerged(data) {
   merged.app_url = normalizeAppUrl(rawAppUrl, pyStr(merged.public_key))
   merged.extra = normalizeExtra(rawExtra)
   merged.data_dir = normalizeDataDir(rawDataDir)
+  merged.android_permissions = normalizeAndroidPermissions(rawAndroidPermissions)
   merged.icon_url = pyStr(merged.icon_url).trim()
   merged.resolve_secret = pyStr(merged.resolve_secret).trim()
 
@@ -337,6 +435,10 @@ export function toConfigJson(merged) {
       out[key] = value.trim().toLowerCase() === 'true'
     } else if (key === 'app_url') {
       out[key] = value.trimStart().startsWith('[') ? JSON.parse(value) : value
+    } else if (key === 'android_permissions') {
+      // merged 里是紧凑 JSON 数组文本，config.json 要保持真数组；
+      // 本壳（Electron/Windows）不消费它（config.ts 的 ANDROID_ONLY_KEYS 接受并忽略）。
+      out[key] = JSON.parse(value)
     } else out[key] = value
   }
   // android_* 仅 Android 使用，不进 Windows 绿色版的 config.json ——

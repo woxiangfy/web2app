@@ -17,7 +17,7 @@
 //!   PROXY_HTTP       外部 HTTP 代理地址（留空=走自身代理）；仅 Windows
 //!   PROXY_HTTPS      外部 HTTPS 代理地址（留空=同 HTTP）
 //!   PROXY_BYPASS     不走代理的地址（分号分隔）
-//!   TABS_ENABLED     true/false 是否启用多页签（tab）模式（仅 Windows）
+//!   TABS_ENABLED     true/false 是否启用多页签（Windows 完整多 webview；移动端为单 webview 页签记录）
 //!   MOBILE_BAR       true/false 是否启用移动端底部导航栏（仅移动端；桌面目标无此常量）
 //!   PUBLIC_KEY       Ed25519 公钥（APP_URL 为域名数组时必填）
 //!   EXTRA            注入给页面的 JSON 文本（→ window.web2appExtra）
@@ -400,15 +400,19 @@ pub(crate) const PROXY_HTTPS: &str = env_str!("PROXY_HTTPS", "");
 // 留空 = 不下发 --proxy-bypass-list（即沿用 Chromium 自身默认）。
 pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.0.1;<-loopback>");
 
-// ---------- 多页签（tab）模式（仅 Windows）----------
-// true  = 启用多页签：一个宿主窗口 + 顶部标签栏，每个 tab 是独立 WebView（同账号共享数据目录），
-//         可随时新建/切换/关闭；target="_blank" / window.open() 直接新开一个 tab。
+// ---------- 多页签（tab）模式 ----------
+// true  = 启用多页签。
+//   · Windows（桌面端完整形态）：一个宿主窗口 + 顶部标签栏，每个 tab 是独立 WebView
+//     （同账号共享数据目录），可随时新建/切换/关闭；target="_blank" / window.open()
+//     直接新开一个 tab —— 实现见整体 `#[cfg(windows)]` 的 `mod tabs`。
+//   · Android（移动端形态，配 `mobile_bar=true` 才有入口）：Tauri/wry 不支持同窗口多
+//     子 webview，由 `mobilebar.rs` 维护【单 webview 页签记录】—— 列表 / 新建 / 切换 /
+//     关闭都在，但切换是按记录的 url 重新加载（页面状态不保留），首页固定 0 号位。
 // false = 单窗口（默认），行为与历史版本一致。
-// 该能力仅在 Windows 实现（依赖多 WebviewWindow 叠放 + WebView2 共享数据目录），移动端
-// **显式忽略**：`cfg!(windows) &&` 让非 Windows 恒为 false —— 即使打包链路误注入
-// `TABS_ENABLED=true` 也不会在 Android 上启用多页签（`mod tabs` 本身也是 `#[cfg(windows)]`）。
-// 保留常量定义只为让 `#[cfg(windows)]` 分支的引用有处可依，且避免非 Windows 下的 dead_code 警告。
-pub(crate) const TABS_ENABLED: bool = cfg!(windows) && env_bool!("TABS_ENABLED", false);
+// ⚠️ 不再用 `cfg!(windows) &&` 把值在非 Windows 上压成 false：移动端底栏要按这个开关
+//    决定是否渲染「列表」按钮（`mobilebar::tabs_available`）。桌面端引用本常量的只有
+//    `mod tabs` 与 mobilebar（后者仅 test 形态编译），语义不变。
+pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
 
 // ---------- 移动端底栏（mobile_bar，仅移动端）----------
 // true  = 屏幕底部常驻一条导航条：**首页**（回到 app_url）/ 后退 / 前进 / 列表。
@@ -417,10 +421,10 @@ pub(crate) const TABS_ENABLED: bool = cfg!(windows) && env_bool!("TABS_ENABLED",
 //         否则会出现一个点了没有任何反应的死按钮。
 // false = 移动端不画任何壳自绘控件（默认），与历史行为一致。
 //
-// ⚠️ 常量整体 `#[cfg(mobile)]`（而不是像 TABS_ENABLED 那样用 `cfg!(windows) &&` 把值压成
-//    false）：本模式只在移动端实现，桌面目标上**连这个常量都不存在** —— 「打包时配了
-//    mobile_bar=true，桌面端却静默长出一条底栏」这类「配了但不该生效」的情形因此不可能发生。
-//    （TABS_ENABLED 在桌面端仍被引用，才需要保留常量并把值压成 false。）
+// ⚠️ 常量整体 `#[cfg(mobile)]`（而 TABS_ENABLED 是跨平台保留常量）：本模式只在移动端
+//    实现，桌面目标上**连这个常量都不存在** —— 「打包时配了 mobile_bar=true，桌面端却
+//    静默长出一条底栏」这类「配了但不该生效」的情形因此不可能发生。
+//    （TABS_ENABLED 桌面端由 `mod tabs` 引用、移动端由 mobilebar 引用，两端都要保留常量。）
 #[cfg(mobile)]
 pub(crate) const MOBILE_BAR: bool = env_bool!("MOBILE_BAR", false);
 

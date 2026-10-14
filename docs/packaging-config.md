@@ -34,7 +34,7 @@
 
 ## 2. 字段总表
 
-共 **20 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
+共 **21 个字段**。除 `app_url` 必填外，其余全部可省略并自动合并默认值。
 
 | 字段 | 类型 | 默认值 | 平台 | 含义 |
 |---|---|---|---|---|
@@ -49,8 +49,8 @@
 | `proxy_https` | string | `""` | 仅 Windows | 外部 HTTPS 代理地址（留空 = 复用 `proxy_http`） |
 | `proxy_bypass` | string | `"localhost;127.0.0.1;<-loopback>"` | 仅 Windows | 不走代理的地址，**分号分隔** |
 | `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。运行期文件（`settings.json` / `logs\`）都落在这个目录下。见 §4.3 |
-| `tabs_enabled` | **`bool`** | `false` | 仅 Windows | 多页签模式（Electron 亦可）；Android 忽略 |
-| `mobile_bar` | **`bool`** | `false` | 仅移动端 | 移动端底栏模式（底部常驻导航条：首页 / 后退 / 前进 / 列表）。桌面端忽略。见 §3.7 |
+| `tabs_enabled` | **`bool`** | `false` | Windows / Electron / **Android**（形态不同） | 多页签模式。Win/Electron = 多 webview；Android = 底栏内单 webview 页签记录（需同时开 `mobile_bar`）。见 §3.8 |
+| `mobile_bar` | **`bool`** | `false` | 仅移动端 | 移动端底栏模式（底部常驻导航条：首页 / 后退 / 前进 / 列表）。桌面端忽略。见 §3.8 |
 | `debug` | **`bool`** | `false` | 全平台 | 诊断日志开关：`true` = 写 `<数据目录>\logs\startup.log` 并同时打印；`false` = **不建目录、不写文件，控制台输出也一并静默**。见 §3.5 |
 | `public_key` | string | `""` | 全平台 | Ed25519 公钥（裸 base64 或 SPKI PEM）。**`app_url` 为数组时必填** |
 | `resolve_secret` | string | `""` → 代码内置默认 | 全平台 | AES 对称 Secret，须与服务端生成密文时一致。⚠️ **编译期**注入 |
@@ -58,6 +58,7 @@
 | `android_key_alias` | string | `""` | 仅 Android | keystore 别名（给了 keystore 则必填） |
 | `android_keystore_password` | string | `""` | 仅 Android | keystore 密码（给了 keystore 则必填） |
 | `android_key_password` | string | `""` | 仅 Android | key 密码（可空 = 同 keystore 密码） |
+| `android_permissions` | **`string[]`** | `[]` | 仅 Android（桌面端接受但忽略） | 按需声明的运行时权限，白名单三值 `camera` / `microphone` / `location`（映射到 4 条 Manifest 权限）。空数组 = 零额外权限。见 §3.9 |
 
 ### 已移除的字段
 
@@ -260,25 +261,65 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
 |---|---|---|
 | 首页 | 回到入口地址 `app_url` | 已在首页时**重新加载**；未就绪（还在启动页）时重走一次完整 bootstrap |
 | 后退 / 前进 | 驱动当前文档的浏览历史 | 落点守卫与桌面端标题栏**同一条规则**：上/下一条不是真实网页（或是内置启动页）时不动作，按钮同时置灰；移动端的系统返回键同样受这条规则约束（见 `.github/scripts/patch-android-back.py`） |
-| 列表 | 展开所有已打开的页签并切换 | **只在当前平台真的有页签可切时才渲染** |
+| 列表 | 打开页签面板：新建 / 切换 / 关闭标签 | **只在 `tabs_enabled=true` 时才渲染**（见约束 2） |
 
 三条必须一起记住的约束：
 
 1. **仅移动端生效**：Rust 侧常量 `config.rs::MOBILE_BAR` 整体是 `#[cfg(mobile)]` —— 桌面目标
    （Windows Tauri / Electron）**连这个常量都不存在**，所以「配了 `true` 却在桌面端长出一条
    底栏」不可能发生，也不会退化成一条看不见的静默行为。
-2. **列表按钮不是无条件画的**：它只在壳下发的「本构建是否有页签能力」为真时才渲染。
-   移动端目前**没有多页签**（`tabs_enabled` 在 Android 仍被忽略，`mod tabs` 为 `#[cfg(windows)]`），
-   因此 `mobile_bar=true` + `tabs_enabled=true` 在移动端也**只画前三个按钮** ——
-   宁可少一个按钮，也不要一个点了没反应的死按钮。将来移动端有了页签，只需放宽
-   `mobilebar.rs::tabs_available` 的 cfg，前端一行不用改。
+2. **列表按钮 = `tabs_enabled` 开关**（2026-10-13 起）：移动端页签落地为【单 webview 页签记录】
+   —— Tauri/wry 在 Android 不支持同一窗口挂多个子 webview，壳侧（`mobilebar.rs`）只维护每个
+   标签的 `{label,url,title}`：
+   · 面板顶部「＋ 新建标签」：压一条记录并导航到首页地址；
+   · 切换：按目标标签记录的 url **重新加载**（与桌面端「多 webview 并行、状态保留」不同，
+     移动端切换后页面状态不保留，这是平台限制下的刻意取舍）；
+   · 关闭：关当前标签则导航到左邻；**首页固定在位次 0、不可关闭**（与桌面端同一约定）；
+   · 当前文档的 url / 标题由 `mobilebar.js` 经 `web2app:mobile-doc` 事件上报（DCL/load/
+     pageshow/popstate/hashchange/title 变化/pushState 包装），壳侧经 eval `setTabs` 推回面板。
+
+   只开 `tabs_enabled`、不开 `mobile_bar` 时移动端**没有任何入口**（按钮画在底栏里）；
+   只开 `mobile_bar` 则只画前三个按钮 —— 两种错配都不会产生死按钮或异常界面。
 3. **底栏会占掉屏幕底部空间**：注入脚本按「底部空间契约」把 `body` 缩高一格底栏并让出
    `env(safe-area-inset-bottom)`（手势导航条），同时把页面自己的「贴底固定条」上移，
    否则页面页脚会被底栏盖住 —— 与桌面端标题栏的「顶部空间契约」是镜像关系。
+   · 贴底识别对 `position:fixed` 元素**不设宽度门槛**：悬浮按钮（FAB）/ 客服球通常只有
+     40–64px 宽，半屏宽门槛会把它们整类漏掉（真机上被底栏切掉半截的就是 FAB）；元素原有的
+     px `bottom` 边距会以 `calc(52px + safe-area + Npx)` 保留，不会把悬浮按钮顶死在栏边上。
+   · **加载转圈层会让出底栏**：`mobilebar.js` 挂好后设置 `window.__web2appMobileBarH` 并
+     广播 `web2app:chrome-ready`，`loading.js` 据此把遮罩的 `bottom` / `height` 缩到「底栏
+     之上」—— 页面转圈期间底栏始终可见、可直接操作（回首页 / 后退 / 切换标签）。
 
 > 底栏高度与按钮清单的**真源在 `webview-app/src/mobilebar.js`**，由
 > `webview-app/src/mobilebar.rs` 把「高度 / 是否有页签」两个值注入给它；
 > 契约测试 `mobile_bar_contract` 钉住按钮顺序、列表按钮的渲染条件与底部空间契约。
+
+### 3.9 `android_permissions` —— 按需声明运行时权限（仅 Android）
+
+wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策略是
+**Manifest 没声明就直接 deny**（不弹系统授权框）；但全量声明又会在应用商店审核时被要求
+逐项解释用途。因此权限**不做一刀切**，由打包配置按需声明：
+
+```json
+{ "android_permissions": ["camera", "microphone", "location"] }
+```
+
+- 白名单只有三值（trim、去重保序；非数组 / 元素非字符串 / 白名单外一律打包期硬失败），
+  映射到 4 条 Manifest 权限：
+
+| 配置值 | 注入的 `<uses-permission>` |
+|---|---|
+| `camera` | `android.permission.CAMERA` |
+| `microphone` | `android.permission.RECORD_AUDIO` |
+| `location` | `android.permission.ACCESS_FINE_LOCATION` + `ACCESS_COARSE_LOCATION` |
+
+- 缺省 / `[]` = **零额外权限**（补丁步直接跳过）；运行时授权弹窗本身仍由系统在网页
+  首次调用时弹出，本字段只决定「有没有资格弹」。
+- 非敏感字段：会写进 Electron 包内 `config.json`（桌面壳接受但忽略），
+  与 4 个 `android_*` 签名字段（不进 config.json）不同。
+- 注入由 `.github/scripts/patch-android-permissions.py` 在 fullscreen 补丁之后执行，
+  与下载接管的权限块各用各的 marker，可共存；详见
+  `docs/android-improvements.md` #5。
 
 ---
 
@@ -292,17 +333,18 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
 | 改配置 | 重新编译 | 重新编译 | 重新打包 |
 | `app_name` | 安装包名 / 数据目录名 / **Android 包名**（派生） | 同左 | `productName` / `%APPDATA%` 子目录名 |
 | `title` | 窗口标题 + 托盘提示 + 「设置」窗标题 | **应用名称**（桌面 label） | 窗口标题 + 托盘提示 |
-| `tabs_enabled` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
+| `tabs_enabled` | ✅ 有效（多 WebView 标签栏） | ✅ 有效（底栏内单 webview 页签记录；需同时开 `mobile_bar`） | ✅ 有效（多 WebContentsView） |
 | `mobile_bar` | ❌ 忽略（常量为 `#[cfg(mobile)]`，桌面目标无此代码路径） | ✅ 有效（底栏模式） | ❌ 忽略 |
 | `debug` | ✅ 写 `<数据目录>\logs\startup.log` | ✅ 写应用私有目录下的 `logs\startup.log` | ✅ 写 `<数据目录>\logs\startup.log`；探针 / 冒烟**强制开** |
 | `proxy_*` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
 | `data_dir` | 见 §4.3 | ❌ 忽略（始终私有目录） | 见 §4.3 |
 | `icon_url` | 构建期 `cargo tauri icon` | 同左 | 构建期交给 electron-builder 转 ico |
-| `android_*` | ❌ 忽略 | ✅ 用于签名 | ❌ 忽略（且不写进包内 config.json） |
+| `android_*`（4 个签名字段） | ❌ 忽略 | ✅ 用于签名 | ❌ 忽略（且不写进包内 config.json） |
+| `android_permissions` | ❌ 忽略（写进 config.json 但无消费方） | ✅ 按需注入 Manifest 权限（见 §3.9） | ❌ 忽略（形态校验照做） |
 | `public_key` | ✅ 数组模式必填 | ✅ 同左 | ✅ 同左 |
 | `resolve_secret` | 编进主程序 | 编进主程序 | 编进 sidecar `w2a-proxy.exe` |
 
-### 4.2 Android 侧的三个额外动作
+### 4.2 Android 侧的额外动作
 
 1. **应用名称（桌面图标下的 label）取 `title`** —— `init` 之后打补丁覆盖 `strings.xml` 与
    Manifest 内联 label（未配 `title` 时回落 `app_name`）；
@@ -321,11 +363,21 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
    - `build-custom.yml`：取配置 JSON 的 `version`（解析器缺省注入 `0.0.1`）；
    - `release.yml`：取仓库变量 `VERSION`；为空则回落本次 Release 的 tag（自动剥前导 `v`）；再为空
      则**不改写**（保留 `tauri.conf.json` 里的值）。
+5. **运行时权限按 `android_permissions` 按需注入**（见 §3.9）：补丁步把白名单值映射成
+   `<uses-permission>` 块，空数组跳过；另有 `patch-android-fullscreen.py`
+   （H5 视频全屏，无配置项，固定执行）整体替换 wry 0.57 的空实现 onShow/onHide。
 
 > ⚠️ **所有 `gen/android` 改写都是 `.github/scripts/` 下的共享脚本，两个 workflow 只调用它们**
 > （2026-10-13 起）：`prepare-android-conf.py`（上面第 2、4 条）、`apply-android-labels.py`（第 1 条）、
 > `patch-android-insets.py`、`set-android-apk-name.py`、`patch-android-back.py`、
-> `install-android-ndk.sh`。它们各自带 `--selftest`，由 CI 的 `config-contract` 作业执行；
+> `patch-android-download.py`（下载接管 + 存储/通知权限）、`patch-android-extras.py`
+> （JS 原生桥：分享/浏览器打开/清除浏览数据/退出 + 主框架密钥轮换）、
+> `patch-android-schemes.py`（外部 scheme 外跳）、`patch-android-fullscreen.py`
+> （H5 视频全屏）、`patch-android-permissions.py`（上面第 5 条），
+> 详见 `docs/android-improvements.md` #1/#2/#4/#5/#6/#8；
+> `install-android-ndk.sh`。
+> 补丁固定顺序：insets → back → download → extras → schemes → fullscreen → permissions。
+> 它们各自带 `--selftest`，由 CI 的 `config-contract` 作业执行；
 > 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
 > 在此之前，前四条改写曾以**内联 python** 的形式在两个 workflow 里各存一份，只靠人肉同步。
 
@@ -434,6 +486,8 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
 | `app_url` 是「JSON 数组文本」写法 | warning（建议改真数组） |
 | `icon_url` 非 http(s) | warning（打包时下载失败会回落默认图标） |
 | `resolve_secret` 未配置 | ⚠️ **仅当 `app_url` 是域名数组**才 warning（共享默认密钥，安全门槛较低）；单 URL 字符串模式只打一行说明、**不告警**——该模式运行期不解密 TXT，`SECRET` 没有任何调用点 |
+| **Android**：`app_url` 单 URL 内嵌 `user:pass@` 且 `proxy_enabled=false` | **硬失败**（仅 CI android job 传 `--target android` 时校验）：Android 壳没有 Basic 鉴权钩子，该组合真机必 401；报错给出「开代理 / 删凭据」两种修法。Windows 直连有 WebView2 鉴权钩子，不受此限 |
+| **Android**：域名数组 + `proxy_enabled=false` | warning（解密结果静态不可知：若真实地址需要 Basic Auth 同样必须开代理） |
 | `android_*` 出现在 Electron 侧 | 忽略并提示（同一份契约，本壳不实现） |
 | 字段值为 `null` | 视为**用默认值** |
 
@@ -630,7 +684,8 @@ node scripts/pack-local.mjs --parity
 | `resolve_secret` | `RESOLVE_SECRET`（Secret 优先） |
 | `proxy_enabled` / `proxy_http` / `proxy_https` / `proxy_bypass` | 同名大写 |
 | `data_dir` / `tabs_enabled` / `mobile_bar` / `debug` | 同名大写（`DEBUG` 未配置 = 关闭） |
-| `android_*` | `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` |
+| `android_*`（4 个签名字段） | `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEY_ALIAS` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_PASSWORD` |
+| `android_permissions` | `ANDROID_PERMISSIONS`（紧凑 JSON 数组字符串，未配置 = `'[]'` 零权限，见 §3.9） |
 
 > ⚠️ `EXTRA` 与 `ICON_URL` 历史上在 `release.yml` 里**缺失**，等于 Release 路径下
 > `window.web2appExtra` 恒为 `{}`、且不能用自定义图标。现已补齐（两条 job 都有）。

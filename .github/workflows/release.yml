@@ -69,7 +69,8 @@ jobs:
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
-      # 多页签（tab）模式（仅 Windows 生效；Android 端忽略）。仓库变量 TABS_ENABLED=true 开启。
+      # 多页签（tab）模式。Windows = 多 WebView 完整形态；Android = 底栏内的单 webview
+      # 页签记录（需同时开 MOBILE_BAR 才有入口）。仓库变量 TABS_ENABLED=true 开启。
       TABS_ENABLED: ${{ vars.TABS_ENABLED }}
       # 移动端底栏（仅移动端生效；桌面端忽略）。仓库变量 MOBILE_BAR=true 开启。
       MOBILE_BAR: ${{ vars.MOBILE_BAR }}
@@ -205,15 +206,21 @@ jobs:
       PROXY_HTTP: ${{ vars.PROXY_HTTP }}
       PROXY_HTTPS: ${{ vars.PROXY_HTTPS }}
       PROXY_BYPASS: ${{ vars.PROXY_BYPASS }}
-      # 多页签是 Windows 专属：Android 端不实现（`mod tabs` 为 #[cfg(windows)]，且 config.rs 的
-      # TABS_ENABLED 经 cfg!(windows) 在非 Windows 恒为 false）。这里注入只为两 job 环境变量对称，
-      # 值为 true 也会被 Android 忽略。
+      # 多页签在 Android 的形态是【单 webview 页签记录】（mobilebar.rs 维护，底栏「列表 /
+      # 新建 / 切换 / 关闭」入口；切换=按记录 url 重新加载，页面状态不保留）。桌面端那套
+      # `mod tabs`（#[cfg(windows)] 多 WebView）不参与，但 TABS_ENABLED 在此同样生效：
+      # 只开 TABS_ENABLED、不开 MOBILE_BAR 时移动端没有页签入口（按钮画在底栏里）。
       TABS_ENABLED: ${{ vars.TABS_ENABLED }}
       # 移动端底栏：与上面的 Windows job 对称注入（本 job 是 Android，是这个字段唯一生效的地方；
       # 桌面 job 注入了也恒被忽略——Rust 侧常量为 #[cfg(mobile)]）。
       MOBILE_BAR: ${{ vars.MOBILE_BAR }}
       # 诊断日志开关（默认关），与 Windows 版同义。见上面 windows job 的说明。
       DEBUG: ${{ vars.DEBUG }}
+      # 可选运行时权限（仅 Android）：仓库变量填紧凑 JSON 数组，如
+      # ANDROID_PERMISSIONS=["camera","microphone","location"]；未设置/空 = [] 不声明。
+      # 由 patch-android-permissions.py 读此变量映射进 AndroidManifest.xml
+      #（未声明时网页 getUserMedia / geolocation 被系统直接 deny）。
+      ANDROID_PERMISSIONS: ${{ vars.ANDROID_PERMISSIONS || '[]' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -320,6 +327,31 @@ jobs:
         # 落点是真实网页才 goBack；没有可退的真实页面时 finish()（与无历史的系统默认
         # 同手感：回桌面/后台）。gen/android 每次现生成，故每轮 init 后都必须打。
         run: python3 ../.github/scripts/patch-android-back.py
+
+      - name: 接管网页下载（附件下载 / 长按存图 → 系统 DownloadManager）
+        # 与 build-custom.yml 调用同一个脚本（含自测）；wry 0.57 Android 无下载通道，
+        # 不补丁则下载 / 长按存图静默无反应。同时补 Manifest 存储（maxSdk=28）/通知权限。
+        run: python3 ../.github/scripts/patch-android-download.py
+
+      - name: 挂 JS 原生桥（分享 / 浏览器打开 / 清除浏览数据 / 退出）
+        # 与 build-custom.yml 调用同一个脚本（含自测）：__web2appAndroid 桥 + 主框架
+        # 一次性密钥轮换；清数据补 wry 0.57 漏掉的 Cookie / WebStorage，清完 reload。
+        run: python3 ../.github/scripts/patch-android-extras.py
+
+      - name: 外部链接交系统应用打开（tel/mailto/weixin/intent 等）
+        # 与 build-custom.yml 调用同一个脚本（含自测）：非 http(s) scheme 用 Intent 外跳，
+        # 无应用可处理时 toast 兜底，避免 ERR_UNKNOWN_URL_SCHEME 白页。
+        run: python3 ../.github/scripts/patch-android-schemes.py
+
+      - name: 支持网页视频全屏（H5 <video> / requestFullscreen）
+        # 与 build-custom.yml 调用同一个脚本（含自测）：整体替换 wry 的空 onShow/
+        # onHideCustomView，实现 custom view 铺满 + 锁横屏 + 沉浸式，退出逐项还原。
+        run: python3 ../.github/scripts/patch-android-fullscreen.py
+
+      - name: 按需声明运行时权限（camera / microphone / location）
+        # 与 build-custom.yml 调用同一个脚本（含自测）：读 job 环境变量 ANDROID_PERMISSIONS
+        #（本 workflow 取自仓库变量，默认 []），按需向 AndroidManifest.xml 注入权限；空则跳过。
+        run: python3 ../.github/scripts/patch-android-permissions.py
 
       - name: Allow cleartext HTTP (localhost proxy)
         # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，

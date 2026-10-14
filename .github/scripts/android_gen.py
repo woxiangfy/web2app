@@ -76,6 +76,24 @@ def find_main_activity(gen_root: pathlib.Path) -> pathlib.Path:
     return cands[0]
 
 
+def find_kotlin_file(gen_root: pathlib.Path, filename: str) -> pathlib.Path:
+    """按文件名定位 wry 生成到 java 根下的 Kotlin 文件（如 `RustWebViewClient.kt`）。
+
+    `cargo tauri android init` 会把 wry 的 kotlin 模板（包名占位符替换后）复制进
+    `app/src/main/java/<包名路径>/`，与 MainActivity 同目录但包名来自 identifier，
+    调用方不应硬编码包名路径 —— 统一 rglob。
+    模板升级后文件若被移动 / 改名，这里抛错让补丁步显式失败（android job 不允许静默跳过）。
+    """
+    jroot = java_root(gen_root)
+    cands = sorted(jroot.rglob(filename)) if jroot.exists() else []
+    if not cands:
+        raise FileNotFoundError(
+            f"未找到 {jroot}/**/{filename}（请确认已先执行 cargo tauri android init；"
+            f"若 wry 模板升级调整了该文件，需要更新对应补丁脚本）"
+        )
+    return cands[0]
+
+
 def app_gradle(gen_root: pathlib.Path) -> pathlib.Path | None:
     """模板的 app 级 gradle 文件（优先 `.kts`；Tauri 2.12 起为 Kotlin DSL）。"""
     app = gen_root / "app"

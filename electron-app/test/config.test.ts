@@ -25,6 +25,7 @@ import {
   normalizePublicKey,
   rejectUnknownKeys,
   sanitizeDirName,
+  toAndroidPermissions,
   toAppUrl,
   toDataDir,
   toVersion,
@@ -52,6 +53,26 @@ test('toDataDir：缺省回落默认值；空串原样保留；trim；非字符�
   assert.equal(toDataDir('D:\\app\\store'), 'D:\\app\\store')
   assert.throws(() => toDataDir(true), ConfigError, '布尔不能被宽容转成 "true" 目录名')
   assert.throws(() => toDataDir(1), ConfigError)
+})
+
+// ---------- toAndroidPermissions：仅 Android 字段，本壳只做形态校验后忽略 ----------
+
+test('toAndroidPermissions：缺省回落 []；trim + 去重保序；空元素丢弃', () => {
+  assert.deepEqual(toAndroidPermissions(undefined), [])
+  assert.deepEqual(toAndroidPermissions(null), [])
+  assert.deepEqual(toAndroidPermissions([]), [])
+  assert.deepEqual(toAndroidPermissions(['camera', ' microphone ', 'camera', '']), [
+    'camera',
+    'microphone',
+  ])
+})
+
+test('toAndroidPermissions：非数组 / 元素非字符串一律抛 ConfigError（白名单判定在打包解析器）', () => {
+  assert.throws(() => toAndroidPermissions('camera'), ConfigError, '字符串不是数组')
+  assert.throws(() => toAndroidPermissions(true), ConfigError)
+  assert.throws(() => toAndroidPermissions({}), ConfigError)
+  assert.throws(() => toAndroidPermissions(['camera', 123]), ConfigError, '数字元素报错')
+  assert.throws(() => toAndroidPermissions(['camera', null]), ConfigError, 'null 元素报错')
 })
 
 // ---------- toVersion：三段数字 + Windows 取值范围（对齐打包解析器 normalize_version） ----------

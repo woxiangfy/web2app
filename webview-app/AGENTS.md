@@ -25,14 +25,20 @@ Web2App 启动后直接内嵌并打开你预设的网址，可最小化到系统
 | WebSocket 鉴权 | 本地反向代理对 WS 握手统一注入凭据，覆盖实时同步场景 | Windows / Android |
 | 外部 HTTP/HTTPS 代理 | 可配置系统级代理（仅 Windows WebView2 生效；2026-09-27 起多页签的宿主与 tab 窗口同样挂载，避免整组页签绕过代理） | Windows |
 | 新窗口拦截 | `target="_blank"` / `window.open()` 强制在当前窗口打开 | Windows |
-| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；**首个 tab（入口 app_url）是「首页」：固定在第一位、不允许关闭，名字前带主页图标**（判定单一真源 `tabs.rs::is_home_index` ∥ Electron `tab-order.ts::isPinnedHome`，两者必须同答案；`get_tabs` / `listForIpc` 下发四元组 `[label,title,active,home]`，`shell.html` 据此画图标 / 不画 ×；守卫 `contract_tests::tab_home_marker_contract` + 探针 P1h/P7h。见 `docs/changes/2026-10-13.md`）；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。新 tab 落点：与入口同源（含上游真实主机）的链接映射到入口地址的对应路径，跨域外链**直接打开目标地址**（与 Electron 壳一致，v1.52）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；标题回传与 token 注入**只在主框架生效**（v1.55：WebView2 初始化脚本会注入所有 iframe，子框架（如 bilibili 页内广告 frame，其标题为 "Leader Iframe" 等）曾顶掉标签栏真实标题；契约测试 `tab_title_script_runs_in_top_frame_only` 钉住）；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`）。**顶部标签栏与单窗口标题栏为同一套配色/按钮样式**（v1.54：`shell.html` 复用 `titlebar.js` 的浅/深底色、下沿分隔线、按钮盒模型与 hover 色；静态契约测试 `tab_bar_palette_matches_titlebar` 钉住），且 `shell.html` 是双壳共用的单一真源，Tauri / Electron 表现一致 | Windows |
+| 多页签（tab） | 编译期开关 `TABS_ENABLED=true` 开启（默认关）：宿主窗口 + 顶部标签栏，每个 tab 独立 WebView、共享同一份数据目录（同账号），可切换/关闭；**首个 tab（入口 app_url）是「首页」：固定在第一位、不允许关闭，名字前带主页图标**（判定单一真源 `tabs.rs::is_home_index` ∥ Electron `tab-order.ts::isPinnedHome`，两者必须同答案；`get_tabs` / `listForIpc` 下发四元组 `[label,title,active,home]`，`shell.html` 据此画图标 / 不画 ×；守卫 `contract_tests::tab_home_marker_contract` + 探针 P1h/P7h。见 `docs/changes/2026-10-13.md`）；`target="_blank"` / `window.open()` 直接新开 tab（标签栏无「+」按钮，有意移除）。新 tab 落点：与入口同源（含上游真实主机）的链接映射到入口地址的对应路径，跨域外链**直接打开目标地址**（与 Electron 壳一致，v1.52）。真实网页标题由远程页经核心事件 `web2app:tab-title`（建窗时注入一次性 token 防伪）回传——远程 origin 无法调用应用命令；标题回传与 token 注入**只在主框架生效**（v1.55：WebView2 初始化脚本会注入所有 iframe，子框架（如 bilibili 页内广告 frame，其标题为 "Leader Iframe" 等）曾顶掉标签栏真实标题；契约测试 `tab_title_script_runs_in_top_frame_only` 钉住）；首屏失败有错误态与「重试」事件（`web2app:retry-bootstrap`）。**顶部标签栏与单窗口标题栏为同一套配色/按钮样式**（v1.54：`shell.html` 复用 `titlebar.js` 的浅/深底色、下沿分隔线、按钮盒模型与 hover 色；静态契约测试 `tab_bar_palette_matches_titlebar` 钉住），且 `shell.html` 是双壳共用的单一真源，Tauri / Electron 表现一致。⚠️ **Android 形态不同**：wry 不支持同窗口多子 webview，`tabs_enabled=true` 在移动端落地为底栏内的【单 webview 页签记录】（列表/新建/切换/关闭，切换按 url 重载、状态不保留），入口在底栏、需同时开 `mobile_bar`，见下「移动端底栏」行与 `mobilebar.rs` 模块头 | Windows（Android 为底栏页签记录形态） |
 | 单实例 | 避免多开：第二个实例启动会把已存在窗口带到前台，而非再开一个 | Windows |
 | 开发者工具 | WebView2 下按 **F12** 打开 DevTools 排查问题（debug 开 / release 关） | Windows |
 | 优雅关闭 | 关闭行为由设置决定（两个**驻留理由**并列，任一成立即隐藏、不退出）：①启用托盘且开启“最小化到托盘”→ 隐藏到托盘；②启用桌面悬浮图标（v1.75）→ 隐藏到球（点球即唤回）。两者都不成立则退出应用。⚠️ 理由②不可省：少了它，只启用悬浮球时关窗走 `else` 分支 ⇒ 主窗被**真销毁**、球窗却还活着 ⇒ ①球窗挡住「所有窗口关闭 ⇒ 退出」，进程留成既无界面也退不掉的僵尸；②点球时 `toggle_window` 的 `get_webview_window("main")` 返回 `None`，一个动作都不做 ⇒「点了悬浮图标不回窗口」（2026-10-11 真机实测） | Windows |
 | Cookie 会话保持 | 自动把上游 `Set-Cookie` 的 `Domain=真实host` 重写为 `127.0.0.1`，避免 localhost 下丢 cookie | Windows / Android |
 | 自绘标题栏 | 无系统装饰：前进 / 后退 / **设置** / 最小化 / 最大化 / 关闭内嵌于 38px 标题栏，随页面深浅色切换（「设置」紧挨最小化**左侧**）。**前进/后退带落点守卫（v1.66）**：经 Chromium Navigation API 判定相邻条目，没有真实历史或落点是内置 splash 启动页时按钮置灰、不触发导航。**顶部通栏为 Windows 专属**：Android 端（有系统标题栏）不注入、启动页也不内联，避免叠成双通栏 | Windows |
-| 移动端底栏 | 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**。后退前进的**落点守卫与桌面端标题栏同一条规则**（没有真实上/下一条、或落点是内置 splash 时不动作并置灰），与 Android 系统返回键的判定同源。**「列表」按钮只在当前构建真的有页签可切时才渲染**（移动端目前无多页签 ⇒ 只画前三个按钮，绝不出现点了没反应的死按钮；判定单一真源 `mobilebar.rs::tabs_available`，将来移动端有了页签只需放宽它的 cfg，前端一行不用改）。底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移，否则页面页脚会被底栏盖住。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径 | Android |
+| 移动端底栏 | 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**（仅多页签）/ **更多**（恒在最后，无条件渲染）。**「更多」面板（2026-10-14 起）** 从底栏升起，六行：刷新 / 复制链接（Clipboard + execCommand 兜底）/ 分享 / 在浏览器打开 / **清除浏览数据（两步确认，3s 撤防）** / 退出；后四个动作经打包期注入的 Kotlin 桥 `__web2appAndroid` 直达（见下「Android 更多面板原生桥」行），带主框架一次性密钥、iframe 调不到，操作反馈走面板 toast。后退前进的**落点守卫与桌面端标题栏同一条规则**（没有真实上/下一条、或落点是内置 splash 时不动作并置灰），与 Android 系统返回键的判定同源。**「列表」按钮只在 `tabs_enabled=true` 时渲染**（2026-10-13 起移动端落地【单 webview 页签记录】：面板可新建 / 切换 / 关闭，首页固定 0 号位；wry 不支持同窗口多子 webview，切换 = 按记录 url 重新加载，页面状态不保留；判定单一真源 `mobilebar.rs::tabs_available`），关闭时只画前三个按钮，绝不出现死按钮。底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移（**含窄幅悬浮按钮 FAB**：fixed 贴底件无宽度门槛，且保留元素原 px 底边距），否则页面页脚 / FAB 会被底栏切掉半截。加载转圈层经 `__web2appMobileBarH` + `web2app:chrome-ready` 让出底栏，加载期间底栏仍可见可点。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径 | Android |
 | Android 返回键 | **系统返回键不允许回到内置 splash 启动页（v1.66）**：CI 在 `tauri android init` 后经 `.github/scripts/patch-android-back.py` 给 MainActivity 注入回调，用 `WebView.copyBackForwardList()` 判定上一条历史 —— 是真实网页才 `goBack()`，落点内置或无历史时走 `finish()` 回桌面 | Android |
+| Android 下载接管 | **wry 0.57 的 Android 无任何下载通道**（`RustWebViewClient.kt` 未挂 `DownloadListener`，Rust 侧 handler 在 attributes 解构里被丢弃）：CI 经 `.github/scripts/patch-android-download.py`（2026-10-14 起）在 `onWebViewCreate` 挂监听 → 系统 `DownloadManager` 落公共 Download 目录，Cookie/UA 透传、`URLUtil.guessFileName`；Manifest 随补丁注入 `WRITE_EXTERNAL_STORAGE`（`maxSdkVersion=28`，首次下载申请）与 `POST_NOTIFICATIONS`（API 33+，拒绝不阻断下载）；`blob:`/`data:` 链接 toast 明示。详见 `docs/android-improvements.md` #1 | Android |
+| Android 外部链接 | **非 http(s) scheme 交系统应用处理**（2026-10-14 起）：CI 经 `.github/scripts/patch-android-schemes.py` 补丁 wry 生成的 `RustWebViewClient.shouldOverrideUrlLoading`（方法体首行守卫，先于 wry 原决策）：http/https/about/data/blob/javascript/file/content 放行；`intent://` 走 `Intent.parseUri(URI_INTENT_SCHEME)` 并支持 `browser_fallback_url`；`market://` 无市场时回落 Play Store 网页；tel/mailto/weixin/alipays 等 ACTION_VIEW 外跳；无应用可处理时 toast 并吞掉导航（不再 `ERR_UNKNOWN_URL_SCHEME` 白页）。详见 `docs/android-improvements.md` #2 | Android |
+| Android 更多面板原生桥 | **「更多」面板四个原生动作的桥接**（2026-10-14 起）：CI 经 `.github/scripts/patch-android-extras.py` 在 `onWebViewCreate`（download 之后）挂 `addJavascriptInterface(object{ share / openBrowser / clearData / quitApp }, "__web2appAndroid")`，并补丁 wry `RustWebViewClient.onPageFinished` —— 主框架每页轮换一次性 UUID 密钥 `window.__web2appAndroidKey`（evaluateJavascript 只注主框架，跨源 iframe 拿不到；桥方法首参核密钥）。`clearData` 不走 `web_data.rs` tauri 命令（tauri Android `PlatformWebview` 只暴露 `jni_handle()`），且 wry 0.57 自带 `clearAllBrowsingData()` 漏清 Cookie/WebStorage，桥内配方补全：clearCache/History/FormData/deleteDatabase + `WebStorage.deleteAllData()` + `CookieManager.removeAllCookies{flush}`，回调内 `location.reload()`。`quitApp` = `finishAndRemoveTask()` + 300ms 后 killProcess。详见 `docs/android-improvements.md` #4/#8 | Android |
+| Android H5 视频全屏 | **wry 0.57 的 `onShowCustomView` 是「进来就 `onCustomViewHidden()`」的立即取消空实现**（2026-10-14 起）：CI 经 `.github/scripts/patch-android-fullscreen.py` **整体替换** `RustWebChromeClient` 的 onShow/onHide 两方法 —— custom view 用 MATCH_PARENT FrameLayout 铺满（webview 置 GONE）、锁传感器横屏、API30+ insetsController / 低版本 systemUiVisibility 沉浸；退出时逆序还原后最后回调 Chromium；模板若已自带真全屏则补丁显式报错。详见 `docs/android-improvements.md` #6 | Android |
+| Android 运行时权限 | **权限按需声明、默认零权限**（2026-10-14 起）：打包字段 `android_permissions`（白名单 `camera`/`microphone`/`location`，非敏感、写进 config.json，桌面壳忽略）经 CI `patch-android-permissions.py` 注入 4 条 Manifest 权限（CAMERA / RECORD_AUDIO / ACCESS_FINE+COARSE_LOCATION），空数组跳过；Manifest 没声明时 wry 对 H5 权限请求直接 deny。详见 `docs/android-improvements.md` #5 | Android |
+| Android 新窗口链接 | **`target="_blank"` / `window.open()` 进移动页签**（2026-10-14 起，仅多页签模式）：`mobilebar.js` document-start 装 blank guard —— 捕获阶段 click 向上找最近 `<a>` 命中 `_blank` 且 http(s) 即拦，`window.open` 同拦（非 http(s) 回落原实现交 schemes 外跳），统一发 `web2app:open-tab` `{url}`；`mobilebar.rs` 新事件（与无 payload 落首页的 `web2app:new-tab` 区分）只承接 http(s) 并复用单 webview 页签记录开新页。单页签包不装 guard。详见 `docs/android-improvements.md` #7 | Android |
 | 启动过渡 | 解析真实地址期间显示启动页 + 加载层，避免白屏；目标页加载失败时加载层转失败卡（含「重试」）。**Android 导航后另发一次 Rust 侧可达性探测**（v1.60），把 DNS/连接/超时/TLS 的具体原因提前显示在失败卡上；**v1.61 起失败卡自带「现场诊断」**（当前地址 / readyState / HTTP 状态 / 资源数 / WebView UA / 页面脚本错误），截图即可区分「没离开启动页」与「外链没渲染」，无需 adb；**v1.62 修正启动页的加载层语义与重试落点**：①模式标记改由建窗时的初始化脚本在 `OVERLAY_SCRIPT` **之前**注入（`lib.rs::build_main_window`，此前只有 `tabs.rs` 有）——启动页不再被当成目标页跑，正常偏慢的启动不会被 overlay 的 15s 空白硬上限误报成失败；②启动页判定加改写后的 hostname（`splash.localhost`），重试改用**相对路径** `/retry`（此前 `location.protocol === 'splash:'` 在 wry 把协议改写成 `http://splash.localhost/` 后恒不成立，重试退化为只刷新 `/` 的死循环）；**v1.64 修启动期「发得太早」**：Android 上壳侧操作走 wry main-pipe，而 `LoadUrl` / `Eval` 在 webview 未就绪时**静默丢弃**，且初始 splash 导航是 `post{}` 异步、后续 `navigate` 是同步 ⇒ 直连配置下导航先发、随后**被那条 post 出去的 splash 加载覆盖**，同期进度 `eval` 又落在 document-start 之前被短路（真机表象：地址仍是 `splash.localhost` **且**零进度行，同一机制）；改为非 Windows 启动期**先等首个文档加载完成**（`bootstrap::BootReady`，就绪信号来自建窗时注册的 `on_page_load`）再解析 / 推送 / 导航；**v1.65 再加「落点校验 + 有限重发」**：`navigate()` 恒返回 `Ok(())`、返回值不能证明导航生效，故导航后隔 500ms 读一次真实地址（`is_splash_url` 同时认 `splash://` 与改写后的 `http://splash.localhost/`），仍停在启动页就重发（最多 2 次）—— v1.64 是预防、v1.65 是检验与自愈 | Windows / Android |
 | 下载接管 | 网页发起的下载走 Windows 原生「另存为」对话框，可取消 | Windows |
 | 登录密码保存 | 网页登录表单提交后弹出「保存密码？」气泡，保存后下次访问自动填充（v1.59 起显式开启 WebView2 `IsPasswordAutosaveEnabled`——该开关默认 **false**，与 Electron 壳的 Chromium 默认行为对齐；老运行时不支持 `ICoreWebView2Settings4` 时静默跳过，不影响其它钩子）；已保存密码随设置页「清除全部浏览数据」一并清除 | Windows |
@@ -215,7 +221,7 @@ const TITLE: &str = APP_NAME;         // 显示名 / 窗口标题，缺省回落
 // 额外参数：编译期内联成 window.web2appExtra = {...}，页面 JS 可直接读；非法 JSON 自动回落 {}
 const EXTRA: &str = "{}";
 
-// 多页签（仅 Windows）：默认关闭
+// 多页签：默认关闭。Windows = 多 WebView 标签栏；Android = 底栏内单 webview 页签记录（需同时开 MOBILE_BAR）
 const TABS_ENABLED: bool = false;
 
 // 诊断日志（全平台）：**默认关闭**。true = 写 <数据目录>\logs\startup.log 并同时打印；
@@ -354,7 +360,16 @@ cargo tauri android build --target aarch64 --apk
 > workflow 只调用它们，不各自内联（避免漂移）：`prepare-android-conf.py`（init 前写
 > version / productName / identifier）、`apply-android-labels.py`（应用名）、
 > `patch-android-insets.py`（系统栏 insets）、`set-android-apk-name.py`（APK 文件名）、
-> `patch-android-back.py`（返回键守卫）、`install-android-ndk.sh`（NDK 版本单一真源）。
+> `patch-android-back.py`（返回键守卫）、`patch-android-download.py`（下载接管 + Manifest 权限）、
+> `patch-android-extras.py`（更多面板 JS 原生桥 + 主框架密钥轮换）、
+> `patch-android-schemes.py`（外部 scheme 外跳）、
+> `patch-android-fullscreen.py`（H5 视频全屏：整体替换 wry 0.57 空实现的 onShow/onHide）、
+> `patch-android-permissions.py`（按打包字段 `android_permissions` 按需声明相机/麦克风/定位权限）、
+> `install-android-ndk.sh`（NDK 版本单一真源）。
+> 补丁执行顺序固定为 insets → back → download → extras → schemes → fullscreen → permissions
+> （download 复用 back 新建的 `onWebViewCreate` override 只插一行；extras 排在 download
+> 调用之后，改 client 的 onPageFinished，与改 shouldOverride 的 schemes 互不耦合；
+> fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6）。
 > 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
 
 ---
@@ -505,13 +520,14 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 > 粘贴到 `config_json` 输入框时必须是**单行 JSON**；用 `config_url` 指向 RAW 文件（如 GitHub raw 链接）则无此限制。
 
-`tabs_enabled`（可选，**真布尔**，默认 `false`，不带引号）—— 多页签（tab）模式开关，**仅 Windows 生效**：
+`tabs_enabled`（可选，**真布尔**，默认 `false`，不带引号）—— 多页签（tab）模式开关，**Windows 与 Android 均生效但形态不同**：
 
 - 设为 `true` 后，应用不再是一个单一窗口，而是「一个宿主窗口 + 顶部标签栏」，每个 tab 是独立的 WebView、**共享同一份数据目录**（同账号，cookie / localStorage 天然互通）。
 - tab 可切换、可关闭；新 tab 由网页里的 `target="_blank"` / `window.open()` **直接新开**（标签栏的「+」按钮已有意移除，见 `src/shell.html` 注释；程序化建窗仍可走 `create_tab` 命令）。
 - **新 tab 落点**（v1.52）：链接与入口**同源**（含上游真实主机）时，取目标的 path/query/fragment 拼到入口地址（本地反向代理会把所有 path 转发到同一上游）；**跨域外链直接打开目标地址**，不再回落首页。首个 tab 就绪后导航信息缓存到 `TabManager`、后续新 tab 复用；首屏未就绪时由首个到达者启动 bootstrap（`bootstrap_started` 标志判定），不再空等 30s 超时。
-- Android 端忽略此字段（移动端无多页签能力）：`mod tabs` 整体 `#[cfg(windows)]`，且编译期常量 `TABS_ENABLED` 以 `cfg!(windows) && …` 在非 Windows **恒为 false**（v1.53 起），打包链路即使误注入 `TABS_ENABLED=true` 也不会在 Android 上启用多页签。
-- 该开关等价于编译期环境变量 `TABS_ENABLED`；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。打包解析器写入环境变量的是 Python 风格 `True` / `False`（首字母大写），Rust 侧 `env_bool!` 按 ASCII 大小写不敏感识别（v1.50 起；此前只认小写，`True` 会静默回落 `false` —— 配置写了多页签、产物仍是单窗口）。
+- **Windows**：即上面这套多 WebView 完整形态（`mod tabs` 整体 `#[cfg(windows)]`）。
+- **Android**（2026-10-13 起生效）：wry 在 Android 不支持同窗口多子 webview，落地为 `mobilebar.rs` 的【单 webview 页签记录】—— 底栏「列表」面板里可新建 / 切换 / 关闭标签，首页固定 0 号位不可关；切换 = 按记录的 url **重新加载**（页面状态不保留）。入口画在底栏里，**必须同时开 `mobile_bar=true`**；只开 `tabs_enabled` 不会有任何界面变化。
+- 该开关等价于编译期环境变量 `TABS_ENABLED`（v1.53–v1.81 曾以 `cfg!(windows) && …` 在非 Windows 恒为 false，移动端页签落地后该钳制已移除）；`release.yml` 模式下对应仓库变量 `TABS_ENABLED`。打包解析器写入环境变量的是 Python 风格 `True` / `False`（首字母大写），Rust 侧 `env_bool!` 按 ASCII 大小写不敏感识别（v1.50 起；此前只认小写，`True` 会静默回落 `false` —— 配置写了多页签、产物仍是单窗口）。
 - ⚠️ 字符串形式（`"true"`）会被打包解析器直接拒绝（布尔字段只认真 `bool`，见 `docs/packaging-config.md`）。
 
 ```json

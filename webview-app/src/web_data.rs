@@ -12,6 +12,12 @@
 //!   注册表），但会返回明确的「不支持」错误。宁可报错，也不要做成「点了显示已清除、其实
 //!   什么都没清」——那正是本项目最忌讳的失败形态。补充：Android 上设置窗本身也不可达
 //!   （打开它的入口是桌面专属的 Shift+F1 全局快捷键，见 `settings::open_settings_window`）。
+//!   Android 用户清浏览数据走**另一条独立通道**（2026-10-14 起）：底栏「更多」面板
+//!   →「清除浏览数据」→ `mobilebar.js` 调打包期注入的 Kotlin JS 桥
+//!   （`.github/scripts/patch-android-extras.py` 的 `__web2appAndroid.clearData`）。
+//!   不经本 tauri 命令的原因：tauri Android `PlatformWebview` 只暴露 `jni_handle()`，
+//!   没有 wry 清数据入口；且 wry 0.57 自带的 `clearAllBrowsingData()` 漏清 Cookie /
+//!   WebStorage，桥内按完整配方补全。详见 `docs/android-improvements.md` §2 #4/#8。
 //!
 //! ## ⚠️ 调用链的线程约束（踩过的坑，务必保持）
 //!

@@ -26,8 +26,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** Windows 壳可用的 15 个字段 + 1 个移动端专用字段（`mobile_bar`：接受但**忽略**，本壳在 Windows）；
- *  `android_*` 4 个字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
+/** Windows 壳可用的 15 个字段 + 2 个移动端专用字段（`mobile_bar`、`android_permissions`：
+ *  接受但**忽略**，本壳在 Windows）；`android_*` 签名 4 字段在本壳中忽略（见 ANDROID_ONLY_KEYS）。 */
 export interface AppConfig {
   /**
    * 目标地址。两种形态（与打包配置 JSON 的类型一一对应）：
@@ -99,6 +99,16 @@ export interface AppConfig {
    * 实际解析与「不可写自动回退」在 portable.ts（与 webview-app config.rs 同规则）。
    */
   data_dir: string
+  /**
+   * 【仅 Android】按需声明的运行时权限名数组，白名单 `camera` / `microphone` / `location`
+   * （打包期由 patch-android-permissions.py 映射进 AndroidManifest.xml）。
+   *
+   * ⚠️ 本壳是 **Windows 绿色版**，这个字段在契约里存在、这里**接受但完全忽略**，
+   *    与 mobile_bar 同理（不放 ANDROID_ONLY_KEYS，是因为它非敏感、随 config.json 正常分发，
+   *    契约完整性由 DEFAULTS 单一真源表达）。打包解析器已保证取值在白名单内，
+   *    这里只做「必须是字符串数组」的类型校验，不重复白名单判定。
+   */
+  android_permissions: string[]
 }
 
 export interface LoadedConfig {
@@ -159,6 +169,8 @@ export const DEFAULTS: AppConfig = {
   // 数据目录：默认 "data" = exe 所在目录下的 data\，跟着程序走（真绿色）；
   // 空串 = %APPDATA%\<app_name>（系统默认程序目录，不受程序位置影响）。
   data_dir: 'data',
+  // 仅 Android：本壳（Windows）不消费，仅按契约接收并忽略（字段说明见 AppConfig）。
+  android_permissions: [],
 }
 
 /** 布尔字段：只接受真 bool。字符串一律拒绝（见文件头第 1 条）。 */
@@ -200,6 +212,36 @@ export function toDataDir(v: unknown): string {
     )
   }
   return v.trim()
+}
+
+/**
+ * `android_permissions`（仅 Android，本壳忽略）：只做类型/形态校验。
+ *
+ * 打包解析器（parse-packaging-config.py）已按白名单 `camera/microphone/location`
+ * 归一过去重保序的真数组；运行期再挡一道是为了让手改 asar 内 config.json 的
+ * 形态错误（写成字符串 / 数组里塞数字）在启动期就暴露，而不是静默吞掉。
+ * 这里**不重复白名单判定**：本壳不消费这些值，白名单若将来扩展也不应让 Windows 壳拒载。
+ */
+export function toAndroidPermissions(v: unknown): string[] {
+  if (v === undefined || v === null) return DEFAULTS.android_permissions
+  if (!Array.isArray(v)) {
+    throw new ConfigError(
+      `config.json 字段 android_permissions 必须是权限名字符串数组（如 ["camera"]），` +
+        `当前是 ${typeof v}：${JSON.stringify(v)}`,
+    )
+  }
+  const result: string[] = []
+  for (const item of v) {
+    if (typeof item !== 'string') {
+      throw new ConfigError(
+        'config.json 字段 android_permissions 的元素必须是字符串（camera / microphone / location），' +
+          `当前元素是 ${typeof item}：${JSON.stringify(item)}`,
+      )
+    }
+    const name = item.trim()
+    if (name && !result.includes(name)) result.push(name)
+  }
+  return result
 }
 
 /**
@@ -503,6 +545,8 @@ export function loadConfig(root: string): LoadedConfig {
     resolve_secret: toStr(raw.resolve_secret),
     debug: mustBool(raw.debug, 'debug', DEFAULTS.debug),
     data_dir: toDataDir(raw.data_dir),
+    // 仅 Android：本壳（Windows）不消费，按契约接收、校验形态后忽略。
+    android_permissions: toAndroidPermissions(raw.android_permissions),
   })
 
   return { config, path, warnings }
