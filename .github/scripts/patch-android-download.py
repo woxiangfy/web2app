@@ -28,8 +28,12 @@
 
 与 `patch-android-back.py` 的关系：两个脚本都在 `onWebViewCreate` 上做文章 ——
 返回键补丁**新增**该 override；本脚本只往「已存在的 override 函数体」里插一行调用，
-若 override 尚不存在（单独运行 / 模板变化）也能自己补出完整 override。CI 调用顺序：
-insets → back → download → schemes。
+若 override 尚不存在（单独运行 / 模板变化）也能自己补出完整 override。
+
+补丁链固定顺序（见 docs/android-improvements.md §0）：
+insets → back → download → extras → schemes → fullscreen → permissions → cleartext sed。
+本脚本排第三：复用 back 新建的 override；其后的 extras 又复用本脚本，它的调用行必须
+排在本脚本之后。
 
 gen/android 每次构建现生成，两个 workflow（build-custom.yml / release.yml）
 都必须在 init 之后调用本脚本。

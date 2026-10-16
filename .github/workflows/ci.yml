@@ -212,6 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           for s in prepare-android-conf apply-android-labels \
+                   prepare-wry-kotlin inject-gradle-patch-task \
                    patch-android-insets set-android-apk-name patch-android-back \
                    patch-android-download patch-android-extras patch-android-schemes \
                    patch-android-fullscreen patch-android-permissions; do

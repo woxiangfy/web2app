@@ -141,7 +141,7 @@ warning: function `update_at` is never used
 
 ### 📋 P2-1 配置解析仍存在两份实现
 
-**依据**：`.github/scripts/parse-packaging-config.py`（2026-09-29 时点 37,721 字节 / 18 键；**现 42,168 字节 / 785 行 / 19 键**）与 `scripts/pack-local.mjs`（2026-09-29 时点是 1,510 行单文件；**现已拆成入口薄壳 `pack-local.mjs`（241 行）+ `packlib/` 10 个模块（≈1,626 行）**，仍是前者的**复刻**而非复用）。这是项目已知并已用 `--selftest` / `--parity` 护栏兜住的技术债。
+**依据**：`.github/scripts/parse-packaging-config.py`（2026-09-29 时点 37,721 字节 / 18 键；现行键数与规模以 `packaging-config.md` 与源码为准）与 `scripts/pack-local.mjs`（2026-09-29 时点是 1,510 行单文件；**现已拆成入口薄壳 `pack-local.mjs`（241 行）+ `packlib/` 10 个模块（≈1,626 行）**，仍是前者的**复刻**而非复用）。这是项目已知并已用 `--selftest` / `--parity` 护栏兜住的技术债。
 
 **方案**：把字段表抽成一份 JSON Schema，`pack-local.mjs` 读 JSON、Python 侧同样读 JSON + 保留 `str()` 等校验语义，让两侧从「复刻」变成「同源不同实现」。
 **收益**：消除 `为一侧加字段、另一侧同步遗漏` 这一类事故。建议在中大型配置变更窗口做，不要在功能开发中途动。

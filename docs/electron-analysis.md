@@ -53,7 +53,7 @@
 
 ## 3. 兼容性设计要点（让两个壳对外表现一致）
 
-1. **配置契约单一真源**：沿用现有 **20 个字段**（`app_url` / `app_name` / `title` / `version` / `extra` / `icon_url` / `proxy_*` / `data_dir` / `tabs_enabled` / `mobile_bar` / `debug` / `public_key` / `resolve_secret` / `android_*`×4，见 `packaging-config.md`）。⚠️ 布尔**只认真 `bool`**，字符串写法已拒绝（旧文「Electron 侧宽容接受字符串」已失效）。
+1. **配置契约单一真源**：沿用现有 **21 个字段**（`app_url` / `app_name` / `title` / `version` / `extra` / `icon_url` / `proxy_*` / `data_dir` / `tabs_enabled` / `mobile_bar` / `debug` / `public_key` / `resolve_secret` / `android_*`×4 签名字段 / `android_permissions`（仅 Android，本壳接受但忽略），完整清单与计数以 `packaging-config.md` 为准）。⚠️ 布尔**只认真 `bool`**，字符串写法已拒绝（旧文「Electron 侧宽容接受字符串」已失效）。
 2. **注入脚本物理复用**：`titlebar.js` / `loading.js` / `shell.html` / `settings.html` 从 `webview-app/` 引用（构建期拷贝），避免两份分叉。
 3. **行为契约写成断言测试**：38px 顶部留白、标题栏按钮、Basic 鉴权覆盖 HTTP+WS、`Set-Cookie` Domain 重写、`target="_blank"` 策略、快捷键、托盘语义、单实例、绿色版免安装 —— 全部收敛进 `pnpm run probe`：**单窗口 138 条（2026-09-27 实测；v1.76 起 150 条）**；多页签另 **33 条**（v1.58 起 39 条）。
 4. **产物命名对齐**：与 `build-custom.yml` 既有约定一致，让部署脚本不感知壳的差异。

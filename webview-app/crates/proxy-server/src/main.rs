@@ -51,7 +51,11 @@ macro_rules! dlog {
 
 // 零重写复用：直接以上层 crate 的源文件为本模块（见文件头说明）。
 // 路径相对本文件所在目录：crates/proxy-server/src/ → ../../../src/
+// ⚠️ `random_hex_token` 是给主 crate 的 tabs / floatwin 用的一次性令牌生成器，本 bin 没有调用点
+// ⇒ 触发 dead_code。它是共享源码（主 crate 与 sidecar 同源），删掉会破坏主 crate 的公开 API，
+// 故用**模块级 allow** 精确豁免，而不是去改共享源码（那会让主 crate 也丢掉 lint 保护）。
 #[path = "../../../src/proxy.rs"]
+#[allow(dead_code)]
 mod proxy;
 // ⚠️ `resolve.rs` 里的 `pub use resolve_core::{...}` 是 re-export 一批 API 给主 crate 用的
 // （主 crate 是 lib，公开 API 不会被判 unused）。在**本 bin** 里它变成了私有模块的 re-export，
@@ -378,11 +382,9 @@ fn wait_host_exit() {
 ///
 /// ⚠️ 这不是洁癖：握手 JSON 会被宿主写进日志文件、错误弹窗、甚至用户截图发给我们排障。
 /// 上游地址里嵌的就是 Basic 账号密码，泄漏一次就等于把站点拱手让人。
+/// ⚠️ 复用 `proxy::strip_userinfo`（与主 crate 同源，经 `#[path]` 共享），不再本地重复实现。
 fn strip_userinfo(u: &Url) -> String {
-    let mut clean = u.clone();
-    let _ = clean.set_username("");
-    let _ = clean.set_password(None);
-    clean.to_string()
+    proxy::strip_userinfo(u)
 }
 
 /// 解析命令行。返回 `Ok(None)` 表示「已输出 --help / --version，正常结束」。

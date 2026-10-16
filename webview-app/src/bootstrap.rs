@@ -304,11 +304,9 @@ pub(crate) fn sync_tabs_visibility(app: &tauri::AppHandle, visible: bool) {
 /// 去掉 URL 中的 userinfo（用户名:密码），返回“干净”地址。
 /// 用于直连 / 外部代理场景下 WebView 的导航地址（鉴权由 WebView2 原生事件或本地代理注入，
 /// 不应把密码写进浏览器地址栏 / 交给外部代理字符串）。
+/// ⚠️ 复用 [`crate::proxy::strip_userinfo`]（sidecar 共享的单一真源），不再本地重复实现。
 fn strip_userinfo(url: &Url) -> String {
-    let mut u = url.clone();
-    let _ = u.set_username("");
-    let _ = u.set_password(None);
-    u.to_string()
+    crate::proxy::strip_userinfo(url)
 }
 
 /// 计算源（origin）：`scheme://host[:端口]`，端口做默认值归一化。

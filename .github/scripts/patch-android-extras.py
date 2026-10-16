@@ -31,8 +31,10 @@
      无法伪造调用清数据 / 退出；同源 frame 与主页面同属被封装站点，等同可信。
      所有桥方法第一件事都是核密钥，不匹配直接 return。
 
-gen/android 每次构建现生成，两个 workflow 都必须在 init 之后、按
-insets → back → download → extras → schemes 顺序调用本脚本。
+补丁链固定顺序（见 docs/android-improvements.md §0）：
+insets → back → download → extras → schemes → fullscreen → permissions → cleartext sed。
+gen/android 每次构建现生成，两个 workflow 都必须在 init 之后按此顺序调用本脚本
+（本脚本排第四：`onWebViewCreate` 里的调用行必须插在 download 调用之后）。
 
 用法：
     python3 .github/scripts/patch-android-extras.py            # 打补丁（工程根自动探测）

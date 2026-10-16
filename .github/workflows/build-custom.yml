@@ -421,6 +421,27 @@ jobs:
         # Manifest 内联 android:label；app_name 只负责「安装名」。
         run: python3 ../.github/scripts/apply-android-labels.py
 
+      - name: 预生成 wry Android Kotlin 模板（补丁链前置）
+        # ⚠️ 2026-10-15 新增。根因：wry 的 Kotlin 文件（RustWebViewClient 等）
+        # 不是在 `tauri android init` 时生成到 gen/android，而是在 `tauri android build`
+        # 的 Rust 编译阶段由 wry build.rs 动态生成到 `java/<pkg>/generated/`。
+        # 我们的补丁脚本（extras / schemes / fullscreen）需要修改这些文件，
+        # 但它们在 build 之前执行——那时 generated/ 目录不存在 → FileNotFoundError。
+        # 本脚本提前触发一次 wry build.rs 做的事：读取 wry crate src/android/kotlin/
+        # 模板，替换占位符，写到 generated/。让后续补丁脚本能正常找到文件。
+        # wry build.rs 后续在 cargo build 时会重新生成并覆盖——没关系，
+        # 下面的 gradle task 会在编译前重新应用补丁（见下一步）。
+        run: python3 ../.github/scripts/prepare-wry-kotlin.py
+
+      - name: 注入 gradle task（确保补丁在 wry build.rs 覆盖后重新应用）
+        # ⚠️ 2026-10-15 新增。wry build.rs 在每次 cargo build 时会重新生成
+        # java/<pkg>/generated/ 里的 Kotlin 文件（覆盖我们提前打的补丁）。
+        # 本脚本往 gen/android/app/build.gradle.kts 追加一个 patchWryKotlin task：
+        #   dependsOn rustBuildUniversal*   ← 先让 wry build.rs 跑完
+        #   compile*Kotlin dependsOn patchWryKotlin ← Kotlin 编译前重打补丁
+        # task 里重新运行 extras / schemes / fullscreen 三个补丁脚本。
+        run: python3 ../.github/scripts/inject-gradle-patch-task.py
+
       - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
         # 逻辑在 .github/scripts/patch-android-insets.py —— 两壳共用（两份内联逻辑实测逐字节相同）。
         # 模板 MainActivity 调用了 enableEdgeToEdge()，WebView 会绘制到系统栏下方；脚本按

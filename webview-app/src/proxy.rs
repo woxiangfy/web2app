@@ -84,6 +84,22 @@ pub fn build_basic_auth(upstream: &Url) -> Option<String> {
     ))
 }
 
+/// 去掉 URL 中的 userinfo（用户名:密码），返回“干净”地址（保留 scheme/host/port/路径/查询/片段）。
+///
+/// 用于直连 / 外部代理场景下 WebView 的导航地址，以及日志 / 握手 JSON 里的上游展示 ——
+/// 鉴权由 WebView2 原生事件或本地代理注入，**绝不能**把密码写进浏览器地址栏、日志或
+/// 交给外部代理字符串（泄漏一次等于把站点拱手让人）。
+///
+/// ⚠️ 放在本模块是因为它是 sidecar（`crates/proxy-server`）经 `#[path]` 复用的单一真源：
+/// 主 crate（`bootstrap`）与 sidecar（`main.rs`）都复用这里，杜绝“同一份配置两种落点”
+/// 的三处重复实现（历史：bootstrap.rs / proxy-server main.rs / 本文件 start_proxy 内联）。
+pub fn strip_userinfo(u: &Url) -> String {
+    let mut clean = u.clone();
+    let _ = clean.set_username("");
+    let _ = clean.set_password(None);
+    clean.to_string()
+}
+
 /// 生成一次代理生命周期内的入口门禁密钥：256-bit 随机数 → URL 安全 base64（43 字符，无填充）。
 ///
 /// 用 OS CSPRNG（`getrandom`）：密钥是「谁能借代理访问入口账号」的唯一凭据，
@@ -93,6 +109,19 @@ fn generate_access_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).expect("OS 随机源不可用，无法生成代理入口密钥");
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// 生成 128-bit 一次性令牌（32 字符小写 hex），供“远程页面 → 壳”事件回传的防伪校验使用。
+///
+/// CSPRNG 取随机数失败属于环境级故障：返回 None，调用方据此**拒绝继续**（宁可开不出功能，
+/// 也不接受「任何页面都能回传」的降级 —— 那等于没有令牌）。
+///
+/// ⚠️ 放本模块（而非 tabs / floatwin 各自一份）是因为两者**逐字节相同**，且本模块是 sidecar
+/// 经 `#[path]` 复用的单一真源，天然适合承载“安全随机”类小工具（与 [`generate_access_token`] 并列）。
+pub fn random_hex_token() -> Option<String> {
+    let mut buf = [0u8; 16];
+    getrandom::getrandom(&mut buf).ok()?;
+    Some(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// 判断请求是否通过入口门禁：query 或 Cookie 中任一带上正确密钥即可。
@@ -189,6 +218,7 @@ pub async fn start_proxy(
     let auth_header = build_basic_auth(&upstream);
 
     // 清理上游 URL，避免 reqwest / tungstenite 又按 URL 里的 userinfo 自动发一份 Basic 头。
+    // （就地变异 `&mut Url` 语义，与 [`strip_userinfo`] 的 `&Url -> String` 共享同一套清理规则。）
     let _ = upstream.set_username("");
     let _ = upstream.set_password(None);
 

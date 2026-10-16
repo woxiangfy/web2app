@@ -1508,10 +1508,9 @@ fn monitor_bounds_at(w: &WebviewWindow, px: i32, py: i32) -> Option<(i32, i32, i
 }
 
 /// 生成 128-bit 一次性令牌（32 字符小写 hex）；随机源失败返回 None（调用方沿用旧令牌）。
+/// ⚠️ 复用 [`crate::proxy::random_hex_token`]（sidecar 共享的单一真源），不再本地重复实现。
 fn new_token() -> Option<String> {
-    let mut buf = [0u8; 16];
-    getrandom::getrandom(&mut buf).ok()?;
-    Some(buf.iter().map(|b| format!("{b:02x}")).collect())
+    crate::proxy::random_hex_token()
 }
 
 #[cfg(test)]

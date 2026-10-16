@@ -14,7 +14,7 @@
 
 - **P0-1 `resolve_secret` 在 Electron 绿色版不生效**：旧 `w2a-proxy` 无 `--secret` 通道、`config.ts` 读入后无使用点。已改为经 stdin 贯通两壳（Secret 走 `--secret-stdin`，与 URL 同规避命令行对同用户进程可见）。
 - **P0-2 `data_dir_default` 同名反义**：同 `config-fields` 快照，已改枚举 `data_dir`。
-- **P0-3 复用 CI 生成的 `packaging-config.json` 静默丢字段**：已统一为解析器单一真源（当时 18 键，**现 19 键**），模板列全契约键、缺的留 `""` / `{}`；签名四项拆到独立文件，避免密钥随包分发。
+- **P0-3 复用 CI 生成的 `packaging-config.json` 静默丢字段**：已统一为解析器单一真源（当时 18 键，现行键数以 `packaging-config.md` 为准），模板列全契约键、缺的留 `""` / `{}`；签名四项拆到独立文件，避免密钥随包分发。
 - **P1 系列已落地**：未知字段硬失败 + 拼写建议（`difflib.get_close_matches`，未知字段 = 打包失败）；布尔白名单校验并归一（删 Electron 的 `'on'` 分支）；`app_url` scheme 校验（`^https?://` / 纯域名）；`icon_url` PNG IHDR 正方形且 ≥256×256 校验；新增 `data_dir_name`（解耦数据目录名与 `app_name`，发布后不可变更）、`android_package`、`allow_ephemeral_keystore`；一次性 keystore 的 warning 升级为 `::error::`；CI 增 `config-contract` 类门禁对齐多实现。
 
 ## 做得好的部分（保持）

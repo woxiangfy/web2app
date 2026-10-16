@@ -143,10 +143,9 @@ fn next_tab_label(app: &tauri::AppHandle) -> String {
 ///
 /// CSPRNG 取随机数失败属于环境级故障：返回 None，调用方据此**拒绝建 tab**
 ///（宁可开不出来，也不接受「任何页面都能回传标题」的降级 —— 那等于没有令牌）。
+/// ⚠️ 复用 [`crate::proxy::random_hex_token`]（sidecar 共享的单一真源），不再本地重复实现。
 fn new_tab_token() -> Option<String> {
-    let mut buf = [0u8; 16];
-    getrandom::getrandom(&mut buf).ok()?;
-    Some(buf.iter().map(|b| format!("{b:02x}")).collect())
+    crate::proxy::random_hex_token()
 }
 
 /// 宿主窗口的标签栏页地址。

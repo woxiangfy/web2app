@@ -18,11 +18,22 @@
    任何对生成工程（`MainActivity.kt`、wry 的 `RustWebViewClient.kt`、`AndroidManifest.xml`）的
    修改都必须落在 `.github/scripts/patch-android-*.py`，并被 **两个** workflow
    （`build-custom.yml`、`release.yml`）的 android job 在 init 后依次调用。
-   **固定顺序（2026-10-14 起）**：insets → back → download → **extras** → schemes →
+   **固定顺序（2026-10-15 起）**：
+   **prepare-wry-kotlin → 注入 gradle 补丁任务链**（两个前置环节，2026-10-15 新增，见下）→
+   insets → back → download → **extras** → schemes →
    **fullscreen → permissions**（extras 复用 download 建好的 `onWebViewCreate` 且调用必须排在其后；
    它改的是 `onPageFinished`，与改 `shouldOverrideUrlLoading` 的 schemes 互不耦合；
    fullscreen 整体替换 `RustWebChromeClient` 的 onShow/onHide 两方法；permissions 只动
    AndroidManifest 且与 download 各用各的 marker，先后仅以脚本假设为准）。
+   - **为什么需要两个前置环节**：wry 的 Kotlin 文件（RustWebViewClient 等）不是 init 产物，
+     而是 wry `build.rs` 在 **Rust 编译期**才生成到 `java/<包名>/generated/`，补丁脚本在
+     build 之前跑会 `FileNotFoundError`；且 build.rs 编译时还会覆盖提前打的补丁。
+     `prepare-wry-kotlin.py` 先复刻 build.rs 把 9 个模板生成到 `generated/`（让首轮补丁可跑），
+     `inject-gradle-patch-task.py` 往 `app/build.gradle.kts` 注入任务链，在 build.rs 覆盖后、
+     Kotlin 编译前用内置 `Exec` 任务（Gradle 9 已移除 `Project#exec`，且模板开了
+     configuration-cache）按 `rustBuild<变体> → patchWry<变体>Step0..2 → compile<变体>Kotlin`
+     的同名变体配对重放 extras → schemes → fullscreen（MainActivity 系补丁不被覆盖，无需重放）。
+     细节与排障全过程见 `docs/changes/2026-10-15.md`。
 2. **每个补丁脚本必须带 `--selftest`**（合成源码夹具 + 幂等断言），并登记进
    `ci.yml` 的 `config-contract` 作业门禁。
 3. 工程根解析只允许用 `.github/scripts/android_gen.py` 的 `resolve_gen_root()`，
