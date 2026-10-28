@@ -95,6 +95,7 @@ import os
 import pathlib
 import re
 import sys
+import urllib.error
 import urllib.request
 
 # ---------------------------------------------------------------------------
@@ -167,16 +168,72 @@ class ConfigError(Exception):
 # ---------------------------------------------------------------------------
 # 读取
 # ---------------------------------------------------------------------------
+# 带 scheme 的 URL（http:// https:// file:// …）。**必须**用这个判断而不是
+# 「is_file() / urlopen() 试试看」：`{ "app_url": … }` 这种误填会让 urlopen 抛
+# `unknown url type`，把「填错框」伪装成「程序坏了」。
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+# 误填的判据：config_url 的值以 `{` / `[` 开头 —— URL 不可能这样开头，JSON 只可能这样开头。
+_JSON_START = re.compile(r"^[\[{]")
 def read_raw(json_text: str | None, url: str | None) -> str:
+    """把 `config_json` / `config_url` 归一成**一段待解析的 JSON 文本**。
+
+    三种输入形态（顺序即优先级，与「都填以 config_json 为准」一致）：
+      ① `config_json` 有内容 ⇒ 原样（不做任何裁剪以外的处理）；
+      ② `config_url` 里其实是 **JSON 正文** ⇒ 当成 ①（见下方 _JSON_START 注释）；
+      ③ `config_url` 是真 URL（带 scheme）或仓库内的 `.json` 路径 ⇒ 读出来。
+
+    ⚠️ 失败一律是 `ConfigError`（`::error::` + 可照做的文案），**绝不能把 urllib 的栈
+    抛给用户**：真实踩过的坑是把 JSON 粘进了 `config_url`，日志只留一行
+    `unknown url type: {     "app_url"`，栈里全是 urllib，看不出是自己填错了框。
+    """
     raw = (json_text or "").strip()
+    if raw:
+        return raw
     u = (url or "").strip()
-    if not raw and u:
-        req = urllib.request.Request(u, headers={"User-Agent": "web2app-ci"})
+    if not u:
+        raise ConfigError(
+            "必须提供 config_json 或 config_url，二者至少填一个\n"
+            "  config_json：把配置 JSON 整段粘进这个输入框（推荐）\n"
+            "  config_url ：一个能返回该 JSON 的 http(s) 地址，或仓库内 .json 的相对路径"
+        )
+    if _JSON_START.match(u):
+        # 误填的典型形态：两个输入框在 Actions 表单里挨着、都叫「配置…」，粘错不会有提示。
+        # 这里直接当成 config_json 用（语义 = 「都填则以 config_json 为准」的等价放宽），
+        # 让这一次构建能出包，同时把「下次粘对框」作为 warning 留在日志里。
+        print("::warning::config_url 里填的是 JSON 内容而不是 URL —— 本次已按 config_json 处理；"
+              "下次请把它粘到 config_json 输入框。")
+        return u
+    if _URL_SCHEME.match(u):
+        return _fetch_url(u)
+    # 无 scheme：仓库内 .json 相对路径（文档里的「指向仓库里那份 config.example.json」用法）。
+    # 基准是 GITHUB_WORKSPACE（CI 的 cwd 可能是 webview-app/），不是进程 cwd。
+    p = pathlib.Path(u).expanduser()
+    if not p.is_absolute():
+        p = pathlib.Path(os.environ.get("GITHUB_WORKSPACE") or os.getcwd()) / p
+    if p.is_file():
+        return p.read_text(encoding="utf-8").strip()
+    raise ConfigError(
+        f"config_url 既不是 http(s) 地址，也不是存在的文件路径：{u!r}\n"
+        f"  本应是 URL 或仓库内 .json 路径，实际解析为：{p}\n"
+        '  正确写法："config_url": "https://example.com/app.json"，'
+        '或 "webview-app/config.example.json"（相对仓库根）\n'
+        "  想直接给 JSON 内容 ⇒ 请填 config_json 输入框，不要填在 config_url"
+    )
+
+
+def _fetch_url(u: str) -> str:
+    """下载 config_url 指向的 JSON；任何网络/编码失败都转成可操作的 ConfigError。"""
+    req = urllib.request.Request(u, headers={"User-Agent": "web2app-ci"})
+    try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            raw = r.read().decode("utf-8").strip()
-    if not raw:
-        raise ConfigError("必须提供 config_json 或 config_url，二者至少填一个")
-    return raw
+            return r.read().decode("utf-8").strip()
+    except OSError as e:  # URLError / HTTPError / 超时 / DNS 失败都是 OSError 子类
+        raise ConfigError(
+            f"拉取配置失败：{u}\n  {type(e).__name__}: {e}\n"
+            "  常见原因：地址不可公开访问（私有仓库请用 raw 链接或临时公开）、拼错、超时"
+        ) from e
+    except UnicodeDecodeError as e:
+        raise ConfigError(f"配置内容不是 UTF-8 文本：{u}\n  {e}") from e
 
 
 def parse_json(raw: str) -> dict:
@@ -902,6 +959,44 @@ def _selftest_cases() -> None:
         env_text2 = pathlib.Path(env_path).read_text(encoding="utf-8")
         assert 'ANDROID_PERMISSIONS=["camera","location"]\n' in env_text2, \
             f"权限数组必须以紧凑 JSON 单行落 env，实际：{env_text2!r}"
+
+    # ---- read_raw：三种输入形态 + 误填的救命路径 ----
+    # ① config_json 优先（都填时不去拉 URL、不碰文件系统）
+    assert read_raw('{"app_url":"https://a.com"}', "https://ignored.example/x.json") == \
+        '{"app_url":"https://a.com"}'
+    # ② config_url 里粘了 JSON 正文：真实事故是 Android job 崩在
+    #    `urllib.error.URLError: unknown url type: {     "app_url"`，用户只看到一坨
+    #    urllib 栈，看不出是自己填错了框。这里必须当成 config_json 用（能出包 + warning）。
+    assert read_raw(None, '  { "app_url": "https://a.com" }  ') == '{ "app_url": "https://a.com" }'
+    assert read_raw("", '["a.com"]') == '["a.com"]', "以 [ 开头（数组形态）同样按 JSON 处理"
+    # ③ 仓库内路径：绝对路径直接读；相对路径以 GITHUB_WORKSPACE 为基准（不是进程 cwd）
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "cfg.json"
+        p.write_text('{"app_url":"https://a.com"}\n', encoding="utf-8")
+        assert read_raw(None, str(p)) == '{"app_url":"https://a.com"}', "绝对路径直接读文件"
+        _old_ws = os.environ.get("GITHUB_WORKSPACE")
+        os.environ["GITHUB_WORKSPACE"] = d
+        try:
+            assert read_raw(None, "cfg.json") == '{"app_url":"https://a.com"}', \
+                "相对路径的基准必须是 GITHUB_WORKSPACE（CI 的 cwd 可能是 webview-app/）"
+        finally:
+            if _old_ws is None:
+                os.environ.pop("GITHUB_WORKSPACE", None)
+            else:
+                os.environ["GITHUB_WORKSPACE"] = _old_ws
+    # ④ 缺参 / 路径不存在 / 未知 scheme：一律 ConfigError（文案要能照做），且不许抛 urllib 的裸栈
+    for _args, _needle in (
+        ((None, None), "至少填一个"),
+        (("   ", "  "), "至少填一个"),
+        ((None, "no-such-file-xyz.json"), "不是存在的文件路径"),
+        ((None, "nonsense-scheme://x/y.json"), "拉取配置失败"),
+    ):
+        try:
+            read_raw(*_args)
+        except ConfigError as e:
+            assert _needle in str(e), f"报错文案应包含 {_needle!r}，实际：{e}"
+        else:
+            raise AssertionError(f"应当报错但通过了：{_args}")
 
 
 # ---------------------------------------------------------------------------

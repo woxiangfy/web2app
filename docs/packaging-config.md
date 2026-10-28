@@ -552,10 +552,18 @@ python3 .github/scripts/check-workflows.py                                # work
 **配置怎么给**：
 
 - `config_json`：直接粘贴单行 JSON。JSON 标准不支持注释，**粘贴时请去掉注释**。
-- `config_url`：填一个公开可访问、返回该 JSON 的 URL（可指向仓库内 `.json` 的 raw 链接）。
+- `config_url`：填一个公开可访问、返回该 JSON 的 URL（可指向仓库内 `.json` 的 raw 链接），
+  或**仓库内 `.json` 的相对路径**（相对仓库根，如 `webview-app/config.example.json`）。
   「想一键生成某个固定应用」就把 `config_url` 固定指向仓库里那份 `.json`。
 
 > `config_json` 与 `config_url` 都填时，**以 `config_json` 为准**。
+
+⚠️ **别把 JSON 内容填进 `config_url`**：两个输入框在 Actions 表单里挨着、都叫「配置…」，粘错位置
+不会有任何提示。2026-10-28 真实踩过：Android job 崩在 `urllib.error.URLError: unknown url type:
+{     "app_url`，栈里全是 urllib，看不出是填错了框。现在解析器会：
+① 见 `config_url` 以 `{` / `[` 开头 ⇒ **按 `config_json` 处理**并打 `::warning::`（本次照常出包）；
+② 无 scheme 且不是存在的文件 ⇒ 报「既不是 http(s) 地址，也不是存在的文件路径」并指出解析后的绝对路径；
+③ URL 拉取失败（私有仓库 / 拼错 / 超时）⇒ 报 `::error::` + 原因，不再抛裸栈。
 
 ### 7.2 本地打包（`scripts/pack-local.mjs`）
 

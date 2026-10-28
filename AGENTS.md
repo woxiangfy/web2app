@@ -69,11 +69,11 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 
 | 日期 | 摘要 |
 | --- | --- |
+| 2026-10-28 | 修 Android 打包 `config_url` 误填 JSON 导致的 `URLError: unknown url type`：解析器改「先判形态再取内容」（JSON⇒按 config_json / 带 scheme⇒下载 / 无 scheme⇒仓库内路径），网络与路径失败一律 `::error::` 可操作文案；`--selftest` +4 组、两份 workflow 输入框描述与 §7.1 同步 → `docs/changes/2026-10-28.md` |
 | 2026-10-27 | 悬浮球 v1.81 根治边缘毛刺：Tauri 球弃 WebView2 改 **Win32 分层窗口**（`UpdateLayeredWindow` 预乘 ARGB + 4×4 超采样圆盘，像素 alpha 穿透），Electron 球改 canvas 超采样 alpha 位图；盘面弃蓝色渐变改跟随系统深浅色白/黑；吸附扩为**四边**就近择一（`DockEdge` 增 top/bottom），`floaticon.html` 转 Electron 专属、`capabilities/float-icon.json` 退役 → `docs/changes/2026-10-27.md` |
 | 2026-10-25 | webview-app 架构审查落盘 + 优化批次①②③④（P1–P4 全落地）：contract_tests.rs 拆 13 个领域子模块、打包配置字段表单源化（`scripts/packaging-fields.json`）、新建 `nav.rs` 切断 bootstrap 双向耦合（六模块归零）、electron 样例 17 键差异定性、debug_log/floatprobe 口径钉死、floatwin/tabs/proxy 三大文件垂直拆分（子模块化，proxy `#[path]` 双壳同源不破），Rust 282 全绿 / parity 55/55 → `docs/changes/2026-10-25.md` |
 | 2026-10-24 | electron-app 架构审查优化批次①–⑤ 落地（updateDocument 统一读-改-写 / index.ts 装配化 / probe-single 19 段函数化 / 设置页命令名三方守卫 / util.ts 与 protocols.ts 依赖收口 / 悬浮球决策纯函数化），unit 115/115、probe 149/150（预存环境项）、tabs 47/47 → `docs/changes/2026-10-24.md` |
 | 2026-10-15 | 修 Android 打包 `patch-android-extras.py` 的 `FileNotFoundError`（补丁链前置 `prepare-wry-kotlin.py` + build 后重放 task），连带修 Gradle API / 变体配对 / cargo metadata 缺陷；selftest 12/12 → `docs/changes/2026-10-15.md` |
 | 2026-10-14 | Android 优化清单 P0×3 + P1×5 落地，契约扩到 21 键、补丁链 7 脚本，Rust 205 / Electron 101 全绿 → `docs/changes/2026-10-14.md` |
-| 2026-10-13 | 页签「首页」固定第一位不可关闭 + 外观对齐 Chrome + 移动端底栏 `mobile_bar`（20 键）及真机缺陷修复 → `docs/changes/2026-10-13.md` |
 
 > 完整历史（含 v1.0–v1.29 仓库搭建与文档体系建立）见 `docs/changes/`。

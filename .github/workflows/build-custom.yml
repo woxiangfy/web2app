@@ -121,7 +121,7 @@ on:
         description: '配置 JSON 字符串（单行）。与 config_url 二选一，都填则以本项为准'
         required: false
       config_url:
-        description: '或填一个返回上述 JSON 的 URL（公开可访问）'
+        description: '或填一个能返回上述 JSON 的 URL（公开可访问）/ 仓库内 .json 的相对路径 —— 不要把 JSON 内容填在这里（那是上一项）'
         required: false
       windows_installer:
         description: '打 Windows 安装版(MSI) —— 双击安装、写注册表的正式安装包'
