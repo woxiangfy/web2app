@@ -105,7 +105,7 @@ pub fn handle_splash(
     if req.uri().path().trim_end_matches('/') == RETRY_PATH {
         let app = ctx.app_handle().clone();
         let label = ctx.webview_label().to_string();
-        crate::bootstrap::bootstrap_for_label(app, label);
+        crate::nav::bootstrap_for_label(app, label);
     }
 
     let html = splash_html(crate::config::TITLE);

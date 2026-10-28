@@ -42,8 +42,8 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Listener, Manager};
 
-use crate::bootstrap::Navigation;
 use crate::config::TABS_ENABLED;
+use crate::nav::Navigation;
 
 /// 底栏内容区高度（**CSS 逻辑像素**，不含手势导航条的安全区）。
 ///
@@ -301,7 +301,7 @@ pub(crate) fn set_home_nav(app: &AppHandle, nav: &Navigation) {
     }
 }
 
-/// 主 webview 每次文档加载完成时调用（`bootstrap::on_page_load`，仅移动端）：
+/// 主 webview 每次文档加载完成时调用（由 `lib.rs` 的 on_page_load 闭包接线，仅移动端）：
 /// 把最终落点 url 记进活动标签（标题由页面事件另补），变了就推回列表面板。
 pub(crate) fn on_page_finished(app: &AppHandle) {
     if !tabs_available() {
@@ -380,7 +380,7 @@ pub(crate) fn setup(app: &AppHandle) {
 
 /// 取主窗（移动端永远只有一个 webview 窗口；桌面测试构建里 label 为 "main"）。
 fn main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
-    app.get_webview_window(crate::bootstrap::main_window_label())
+    app.get_webview_window(crate::nav::main_window_label())
 }
 
 /// 缓存的首页地址（新建标签的落点）。
@@ -415,7 +415,7 @@ fn create_tab(app: &AppHandle) {
     let Some(home) = home_url(app) else {
         // 启动尚未成功就点了新建：与「首页」按钮同策略，重走一次完整 bootstrap。
         dlog!("[mobilebar] 首页导航信息尚未就绪，重走一次完整启动流程");
-        crate::bootstrap::bootstrap(app.clone());
+        crate::nav::bootstrap(app.clone());
         return;
     };
     bind_current_url(app, &window);
@@ -638,7 +638,7 @@ fn unsupported_tab_action(kind: &str, label: Option<&str>) {
 ///   3. **还没解析过**（用户停在启动页时就点了）→ 重走一次完整 bootstrap。
 ///      这是唯一会重新解析 / 重启代理的分支，代价可接受：它本来就是「启动尚未成功」的场景。
 fn navigate_home(app: &AppHandle) {
-    let label = crate::bootstrap::main_window_label();
+    let label = crate::nav::main_window_label();
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
@@ -648,7 +648,7 @@ fn navigate_home(app: &AppHandle) {
     let Some(nav) = cached else {
         // ③ 未就绪：完整重来一次（bootstrap 内部会先终止上一轮残留的代理任务）。
         dlog!("[mobilebar] 首页导航信息尚未就绪，重走一次完整启动流程");
-        crate::bootstrap::bootstrap(app.clone());
+        crate::nav::bootstrap(app.clone());
         return;
     };
 

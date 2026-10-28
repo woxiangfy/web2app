@@ -9,7 +9,8 @@
 //! - [`loading`]       启动过渡（本地启动页 + 注入式加载层）
 //! - [`proxy`]         本地反向代理（HTTP + WebSocket 统一注入 Basic 鉴权）
 //! - [`resolve`]       DNS TXT 查询 + 验签解密的解析层
-//! - [`bootstrap`]     后台准备真实地址 → 就绪后导航
+//! - [`nav`]           导航 / 窗口会话登记数据枢纽（Navigation / BootReady / label 登记 / 导航原语）
+//! - [`bootstrap`]     启动编排（后台准备真实地址 → 就绪后导航；入口经 `nav` 回调转发）
 //! - [`webview_hooks`] Windows WebView2 原生事件钩子（鉴权/新窗口/下载/右键菜单）
 //! - [`save_dialog`]   Windows 原生「另存为」对话框（下载落盘位置由用户决定）
 //! - [`tray`]          系统托盘 + 设置命令 + 窗口切换
@@ -74,9 +75,14 @@ mod web_data;
 // 启动过渡：本地启动页（splash 自定义协议）+ 注入到每个文档的加载层脚本。
 mod loading;
 
-// 后台准备真实地址 → 就绪后导航（bootstrap / prepare_navigation / navigate_main / ProxyTask）。
+// 导航 / 窗口会话登记数据枢纽（架构审查 2026-10-25 P2-1）：功能模块一律 `→ nav`，
+// 不再上行依赖 bootstrap；nav → config/store 单向。
+mod nav;
+use nav::ProxyTask;
+
+// 启动编排（boot_entry / prepare_navigation / navigate_main）：唯一对外入口 boot_entry
+// 反向经 nav 的 boot 回调转发（接线见 setup 里的 register_boot_entry）。
 mod bootstrap;
-use bootstrap::ProxyTask;
 
 // Windows 专属：WebView2 原生事件钩子。
 #[cfg(windows)]
@@ -227,20 +233,20 @@ pub fn run() {
         ]);
 
     // 多页签模式（仅 Windows）：注册 shell 标签栏协议 + TabManager 状态。
-    // 悬浮球（仅 Windows）：注册 floaticon 内置球页协议 + FloatState（拖动 / 吸附 / 令牌）。
+    // 悬浮球（仅 Windows）：只托管 FloatState（吸附 / 拖动 / 单击去抖）。v1.81 起球窗是
+    // Win32 分层窗口（见 floatwin/native.rs），不再有球页 ⇒ floaticon 协议一并退役。
     // ⚠️ IPC 命令已并入上面**唯一一次** `invoke_handler`（见那段注释），别再在这里开第二次。
     #[cfg(windows)]
     let builder = builder
         .register_uri_scheme_protocol(tabs::SHELL_SCHEME, tabs::handle_shell)
-        .register_uri_scheme_protocol(floatwin::FLOATICON_SCHEME, floatwin::handle_floaticon)
         .manage(tabs::TabManager::default())
         .manage(floatwin::FloatState::default());
 
     // 首个文档「加载完成」登记表：非 Windows（Android）启动期必须等它再导航 ——
-    // 不等就会被 wry「post 出去的 splash 加载」覆盖掉导航（根因见 `bootstrap::BootReady` 长注释）。
+    // 不等就会被 wry「post 出去的 splash 加载」覆盖掉导航（根因见 `nav::BootReady` 长注释）。
     // Windows 不加此等待，故把状态一起 cfg 掉（留着会变成无人使用的死代码）。
     #[cfg(not(windows))]
-    let builder = builder.manage(bootstrap::BootReady::default());
+    let builder = builder.manage(nav::BootReady::default());
 
     // 桌面插件（全局快捷键 / 单实例）。
     // ⚠️ 探针模式（`--float-probe`）**必须**跳过这两个插件，尤其是单实例：本机已有实例在跑
@@ -286,7 +292,7 @@ pub fn run() {
             // （仅桌面端；Android 无此概念，故按 target_os 剔除。）
             .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
                 // 多页签模式聚焦宿主窗口，单窗口模式聚焦 "main"。
-                let label = bootstrap::main_window_label();
+                let label = nav::main_window_label();
                 if let Some(w) = app.get_webview_window(label) {
                     let _ = w.unminimize();
                     let _ = w.show();
@@ -294,7 +300,7 @@ pub fn run() {
                 }
                 // 多页签模式：tab 窗口是独立顶层窗口，宿主恢复显示时要一并把当前 tab 显示出来
                 // （否则只看到标签栏，内容区是空的）。
-                bootstrap::sync_tabs_visibility(app, true);
+                tray::sync_tabs_visibility(app, true);
             }))
     };
 
@@ -302,6 +308,13 @@ pub fn run() {
         // ⚠️ 诊断日志要**尽早**初始化：越早越能捕获启动早期的日志。
         //    默认（debug=false）时它是空操作 —— 不建目录、不落文件、也不打印任何东西。
         debug_log::init(app.handle());
+
+        // ---------- 控制反转接线（架构审查 P2-1）：nav 保存上层动作的回调 ----------
+        // 装配层是唯一允许「认识所有人」的地方：`nav` 只持有 fn 指针，启动编排入口与
+        // WebView2 钩子装配在此登记（不接线则 nav 侧静默降级并留 dlog，理由见 nav 模块头）。
+        nav::register_boot_entry(bootstrap::boot_entry);
+        #[cfg(windows)]
+        nav::register_attach_hooks(webview_hooks::attach_webview_hooks);
 
         // ---------- 悬浮球真机探针模式（`--float-probe`，仅 Windows）----------
         // 只跑悬浮球 harness，其余一律不建：不建主窗（探针自己建一个 label="main" 的假主窗
@@ -419,7 +432,7 @@ pub fn run() {
             .inner_size(1100.0, 650.0)
             .min_inner_size(400.0, 300.0)
             // 窗口/WebView 的默认底色取加载层的底色：盖住 WebView 初始化与导航提交瞬间的白闪。
-            .background_color(bootstrap::SPLASH_BG)
+            .background_color(nav::SPLASH_BG)
             // ⚠️⚠️ 模式标记必须排在 OVERLAY_SCRIPT【之前】（初始化脚本按注册顺序执行），
             // 与 `tabs.rs::create_tab_window` 同一条契约（那里钉的是 tauri.localhost）。
             //
@@ -488,17 +501,22 @@ pub fn run() {
             };
 
             // ⚠️⚠️ 非 Windows（Android）：注册**首个文档加载完成**信号 —— 启动期必须先等它
-            // 再解析 / 推送 / 导航（根因与真机证据见 `bootstrap::BootReady` 的长注释）。
+            // 再解析 / 推送 / 导航（根因与真机证据见 `nav::BootReady` 的长注释）。
             // 为什么用 `on_page_load` 而不是别的判据：wry Android 的 `ON_LOAD_HANDLER` 正是由
             // `RustWebViewClient.onPageStarted / onPageFinished` 驱动的，这是 Android 侧唯一
             // 可靠的「文档已就绪」信号；而 `GetUrl` 之类同样走 main-pipe，webview 未就绪时拿不到结果。
             #[cfg(not(windows))]
             let wb = wb.on_page_load(|window, payload| {
-                bootstrap::on_page_load(
-                    window.app_handle(),
-                    window.label(),
-                    matches!(payload.event(), tauri::webview::PageLoadEvent::Finished),
-                );
+                let finished = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
+                nav::on_page_load(window.app_handle(), window.label(), finished);
+                // 移动端单 webview 页签：每次真实文档加载完成，把最终 url 记进活动标签
+                //（标题由 mobilebar.js 的 web2app:mobile-doc 事件另补；启动页 url 在其内部被忽略）。
+                // ⚠️ 顺序与旧实现（原 bootstrap::on_page_load 内联）一致：先经 nav::on_page_load
+                //    置位 BootReady，再记页签；这里不放回 nav 是为避免 nav → mobilebar 的层级环。
+                #[cfg(mobile)]
+                if finished {
+                    crate::mobilebar::on_page_finished(window.app_handle());
+                }
             });
 
             // ---------- 移动端底栏（`mobile_bar=true`）----------
@@ -540,7 +558,7 @@ pub fn run() {
                 window_state::apply(&window, &st);
             }
             let _ = window.show();
-            bootstrap::bootstrap(app.handle().clone());
+            nav::bootstrap(app.handle().clone());
         }
 
         // 非 Windows（Android 等）：单窗口逻辑（tabs 能力不存在）。
@@ -553,15 +571,14 @@ pub fn run() {
                 window_state::apply(&window, &st);
             }
             let _ = window.show();
-            bootstrap::bootstrap(app.handle().clone());
+            nav::bootstrap(app.handle().clone());
         }
 
         // ---------- 桌面悬浮球（仅 Windows）----------
-        // 注册内置球页 → Rust 的核心事件（点击调出主窗 / 拖动 / 拖动结束 / 悬停进出 / 隐藏），
-        // 并在设置勾选时建球。悬浮球只加载本地内置页，不参与 bootstrap / 导航 / 本地代理。
+        // 设置勾选时建球。v1.81 起球窗是 Win32 分层窗口，交互全在它自己的 WndProc 里，
+        // 不再需要「球页 → Rust」的事件监听注册（register_float_listeners 已退役）。
         #[cfg(windows)]
         {
-            floatwin::register_float_listeners(app.handle());
             if initial_settings.float_enabled {
                 floatwin::show_float_window(app.handle());
             }
@@ -613,17 +630,9 @@ pub fn run() {
                     event: WindowEvent::CloseRequested { api, .. },
                     ..
                 } => {
-                    // 悬浮球（仅 Windows）：Alt+F4 / 系统关闭不销毁，改成隐藏（可再从设置页 /
-                    // 托盘显示），并顺手落盘当前几何。
-                    // ⚠️ 球上**右键**不走这里（v1.76 起：右键走球页事件 float-hide →
-                    //    `floatwin::disable_float_from_icon`，语义是「关功能 + 销毁球窗 + 唤回主窗」）。
-                    //    这里保持「只隐藏」是因为它还有别的入口，且都发生在用户主动收起球的场景。
-                    #[cfg(windows)]
-                    if label == floatwin::FLOAT_LABEL {
-                        api.prevent_close();
-                        floatwin::hide_float_window(app_handle);
-                        return;
-                    }
+                    // ⚠️ 悬浮球的 Alt+F4 / 系统关闭不再经过这里（v1.81 球窗是原生 Win32 窗口）：
+                    //    `WM_CLOSE` 在 floatwin/native.rs 的 WndProc 里拦成「隐藏 + 落盘几何」；
+                    //    球上右键走 `floatwin::disable_float_from_icon`（关功能 + 销毁 + 唤回主窗）。
 
                     // 多页签模式（仅 Windows）：区分宿主窗口 / tab 窗口 / 主窗口三种关闭语义。
                     #[cfg(windows)]
@@ -653,7 +662,7 @@ pub fn run() {
                     #[cfg(desktop)]
                     {
                         // 多页签模式持久化宿主窗口几何，单窗口模式持久化 "main"。
-                        window_state::persist_label(app_handle, bootstrap::main_window_label());
+                        window_state::persist_label(app_handle, nav::main_window_label());
                     }
                     // 悬浮球几何（吸附边 + 展开态坐标），仅 Windows 有该窗口。
                     #[cfg(windows)]
@@ -695,7 +704,7 @@ pub fn run() {
 /// SettingsState 判断托盘语义（托盘未启用时等价于允许关闭）。只有「窗口几何持久化」
 /// 依赖的 `window_state` 模块才是桌面端专属，故 cfg 下沉到那一行。
 fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi) {
-    let target_label = bootstrap::main_window_label().to_string();
+    let target_label = nav::main_window_label().to_string();
 
     // 记录主窗口当前大小/位置，供下次启动恢复（仅桌面端；Android 无窗口几何持久化）。
     #[cfg(desktop)]
@@ -718,7 +727,9 @@ fn handle_main_close(app_handle: &tauri::AppHandle, api: tauri::CloseRequestApi)
         }
         // 多页签模式：tab 窗口是独立顶层窗口，宿主隐藏时**必须一并隐藏**，
         // 否则桌面上会残留没有标签栏的“孤儿内容窗口”，用户会以为应用卡死了。
-        bootstrap::sync_tabs_visibility(app_handle, false);
+        //（`tray` 是 cfg(desktop)；Android 无 tabs，本就是空操作，行为不变。）
+        #[cfg(desktop)]
+        tray::sync_tabs_visibility(app_handle, false);
     } else {
         // 允许关闭（不隐藏到托盘）：tab 窗口同样不会随宿主销毁，必须显式清掉，
         // 否则「标签栏关了、内容还在」且 Tauri 因为仍有窗口而不触发退出。
@@ -802,6 +813,7 @@ fn history_nav(app: tauri::AppHandle, direction: String) -> Result<(), String> {
 }
 
 // 静态契约测试（IPC 注册表唯一调用点 / capability 授权 / 跨文件事件字面量）整组迁出至
-// contract_tests.rs：入口只留生产代码（架构评审 P1-1）。两文件同处 src/，include_str! 路径不变。
+// contract_tests/（2026-10-25 按领域拆为 12 个子模块）：入口只留生产代码（架构评审 P1-1）。
+// 子模块位于 src/contract_tests/（比被测文件低一级），include_str! 路径统一带一层 ../。
 #[cfg(test)]
 mod contract_tests;

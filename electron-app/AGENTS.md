@@ -81,9 +81,9 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 
 | 日期 | 摘要 |
 |---|---|
+| 2026-10-24 | 架构审查优化批次①–⑤：`updateDocument` 读-改-写统一入口 / index.ts 装配化 / `probe-single` 19 段函数化 / 设置页命令名三方守卫 / `util.ts` + `protocols.ts` 依赖收口 + 悬浮球 `planDrop` / `planPeekCollapse` 纯函数化（unit 115/115、probe 149/150 预存环境项、tabs 47/47） |
 | 2026-10-11 | v1.75 修「只启用悬浮球时关窗 → 点球不回窗口」：驻留判据纳入 `float_enabled` + 入口统一 `requestQuit` + 设置页新增「退出程序」 |
 | 2026-10-11 | v1.72 悬浮球四角穿透（`circleShapeRects` + `win.setShape` 包 try/catch）+ 250ms 双击去抖；真机 harness 17 项 |
-| 2026-10-10 | v1.70 悬浮球拖动协议重写（屏幕绝对坐标）+ 悬停抖动 / 边界钳制 + `thickFrame:false` |
 
 ## 专项文档
 

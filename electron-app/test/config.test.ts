@@ -17,19 +17,18 @@ import {
   ConfigError,
   DEFAULTS,
   debugFlagTruthy,
-  editDistance,
   extraJson,
   loadConfig,
   mustBool,
-  nearestKey,
   normalizePublicKey,
   rejectUnknownKeys,
-  sanitizeDirName,
   toAndroidPermissions,
   toAppUrl,
   toDataDir,
   toVersion,
 } from '../src/main/config.ts'
+// 纯工具函数 2026-10-24 自 config.ts 抽到 util.ts（批次⑤ P2-5），测试随实现走。
+import { editDistance, nearestKey, sanitizeDirName } from '../src/main/util.ts'
 
 // ---------- mustBool：只认真 bool（历史上字符串宽容规则让两个壳判定相反） ----------
 

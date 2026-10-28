@@ -1,5 +1,11 @@
 //! 诊断日志（**默认关闭**）：开启时写 `<数据目录>\logs\startup.log`，并同时打 stderr。
 //!
+//! **模块定位（架构审查 2026-10-25 P3 钉死）**：本模块 = 「`dlog!` 基础设施 + 启动报告组装」两件事。
+//! 2026-10-03（P1-1）把 `log_startup` / `describe_target` / `describe_proxy` / `describe_tabs`
+//! 从 `lib.rs` 迁进来后，它就不再是单纯的日志基建，而是**诊断与启动报告**的归属地 ——
+//! 新增启动期描述信息一律住这里，`lib.rs` 只做装配；归属由
+//! `contract_tests/startup_log_placement_contract.rs` 静态守卫钉住。
+//!
 //! ## 为什么要有它
 //!
 //! 本程序在 Windows 上是 **GUI 子系统**程序（见 `main.rs` 的 `windows_subsystem = "windows"`），
@@ -331,12 +337,12 @@ fn describe_target() -> String {
     mask_url(crate::config::APP_URL)
 }
 
-/// 代理模式的一行描述。判据与 `bootstrap::local_proxy_enabled()` 同源，别各写一份。
+/// 代理模式的一行描述。判据与 `nav::local_proxy_enabled()` 同源，别各写一份。
 fn describe_proxy() -> String {
     if !crate::config::PROXY_ENABLED {
         return "未启用（直连）".to_string();
     }
-    if crate::bootstrap::local_proxy_enabled() {
+    if crate::nav::local_proxy_enabled() {
         return "本地反向代理（HTTP + WebSocket 统一注入 Basic 鉴权）".to_string();
     }
     #[cfg(windows)]

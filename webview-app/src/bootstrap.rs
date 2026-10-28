@@ -1,121 +1,22 @@
-//! 启动引导：后台准备真实地址 → 就绪后导航。
+//! 启动编排：后台准备真实地址 → 就绪后导航。
 //!
 //! `run()`（lib.rs）只负责「建窗 + 加载本地启动页」，真正的耗时操作（域名解析、启动本地反向代理）
 //! 放到这里的后台线程：这样"加载中…"从窗口出现的第一帧就可见，而不是等准备全部做完。
 //! 准备完成后回到主线程发起导航；失败则在启动页上展示错误与重试入口。
+//!
+//! ⚠️ 本模块**只留编排职责**（架构审查 2026-10-25 P2-1）：导航会话数据（[`crate::nav`]：
+//! Navigation / ProxyTask / BootReady / label 登记 / origin 白名单等）已抽成数据枢纽，
+//! 功能模块一律走 `→ nav`，不再上行依赖本模块；本模块的对外入口 [`boot_entry`] 也反向经
+//! `nav` 的 boot 回调转发（接线在 `lib.rs`），依赖方向保持
+//! `bootstrap → nav / 功能模块 / config` 的单向形态。
 
 use tauri::Manager;
 use url::Url;
 
-#[cfg(windows)]
-use crate::config::build_proxy_args;
-use crate::config::{APP_URL, PROXY_ENABLED, PUBLIC_KEY};
-
-/// 窗口/WebView 的默认底色，与加载层（src/loading.js）的浅色底一致。
-/// 用于盖住 WebView 初始化与导航提交瞬间的白闪，使"启动页 → 加载层 → 正式页面"全程平滑。
-pub(crate) const SPLASH_BG: tauri::window::Color = tauri::window::Color(0xf7, 0xf8, 0xfa, 255);
-
-/// 启动期在后台线程准备出来的导航信息。
-///
-/// `Clone`：多页签模式下，首次启动解析出的导航信息会被缓存到 `TabManager.navigation`，
-/// 新建 tab 时克隆复用（本地代理单实例共享，`proxy_abort` 仍由 `ProxyTask` 唯一持有，
-/// 此处克隆出的句柄仅作导航用途、不重复入库，见 `navigate_window`）。
-#[derive(Clone)]
-pub(crate) struct Navigation {
-    /// WebView 最终要访问的地址（启用本地反向代理时形如 http://127.0.0.1:<port>）。
-    pub(crate) url: String,
-    /// Basic 鉴权账号密码（从网址 userinfo 中拆出，供 Windows WebView2 钩子兜底）。
-    pub(crate) user: String,
-    pub(crate) pass: String,
-    /// 是否走了本地反向代理（决定 Windows 上是否还需要注册原生鉴权钩子）。
-    pub(crate) use_local_proxy: bool,
-    /// 本地反向代理任务的终止句柄，存入 ProxyTask 以便退出或重试时优雅关闭。
-    pub(crate) proxy_abort: Option<tokio::task::AbortHandle>,
-    /// 入口上游的**源（origin）**：`scheme://host[:非默认端口]`，默认端口归一化
-    ///（https://h 与 https://h:443 视为同源）。供两类主机白名单使用：
-    /// ①WebView2 直连钩子只给上游请求注入 Authorization / 应答 401
-    ///（见 `webview_hooks`，Electron 侧 login 事件是同一条规则）；
-    /// ②多页签 `resolve_popup_url_for` 判断弹窗是否与上游同源（端口也参与比对）。
-    pub(crate) upstream_origin: Option<String>,
-}
-
-/// 托管本地反向代理任务的 AbortHandle，便于应用退出时优雅终止它（释放 127.0.0.1 监听端口）。
-pub(crate) struct ProxyTask(pub(crate) std::sync::Mutex<Option<tokio::task::AbortHandle>>);
-
-impl Default for ProxyTask {
-    fn default() -> Self {
-        ProxyTask(std::sync::Mutex::new(None))
-    }
-}
-
-/// 「首个文档是否已加载完成」的登记表（label → 已完成过一次页面加载）。
-///
-/// ⚠️⚠️ **这是 Android 启动期一切壳侧动作的前置条件**（2026-10-09 第二次真机取证定到的根因）。
-///
-/// Android 上壳侧对 WebView 的操作全部走 wry 的 main-pipe 消息队列
-///（`wry/src/android/main_pipe.rs`），而队列里两条关键消息在**目标未就绪时被静默丢弃**：
-///   · `WebViewMessage::LoadUrl` 与 `WebViewMessage::Eval` 的处理体都是
-///     `if let Some(webview) = get_webview(activity_id) { … }` —— 取不到就什么也不做，
-///     既不报错也不重试；
-///   · 那个 webview 只在 `CreateWebView`（建窗时发出）**处理完之后**才写入登记表。
-///
-/// 更关键的是**初始 splash 导航是异步排队的**：`CreateWebView` 内部走
-/// `load_url(…, main_thread = true)` → Kotlin `loadUrlMainThread`（`RustWebView.kt` 里是
-/// `post { loadUrl(url) }`，排到视图消息队列尾）；而之后的 `navigate` 走的是**同步** `loadUrl`。
-/// 直连配置下 `prepare_navigation` 只需毫秒级（无域名解析、无本地代理），于是「导航」几乎必然
-/// **先于**那条 post 出去的 splash 加载执行 —— 随后 splash 加载把导航**整体覆盖**，页面永远停在
-/// 启动页。真机截图与之逐条吻合：`地址: http://splash.localhost/`、`元素 3`、HTTP 200。
-/// 同一时刻那几条进度 `eval` 落在 splash 文档 document-start 脚本**之前**，
-/// `window.__web2appLoading` 尚未定义 ⇒ `try{window.__web2appLoading&&…}` 静默短路
-///（真机证据：40s 卡上四条阶段进度**一条都没有**）。
-///
-/// 因此非 Windows（Android）启动期必须先等**首个文档加载完成**，再做解析 / 推送 / 导航。
-/// Windows 不需要也不该加：WebView2 路径的脚本注入与导航时序由 wry 自己保证，凭空加等待只会
-/// 推迟启动，还引入一个新的时序假设。
+use crate::config::{APP_URL, PUBLIC_KEY};
 #[cfg(not(windows))]
-#[derive(Default)]
-pub(crate) struct BootReady(std::sync::Mutex<std::collections::HashSet<String>>);
-
-#[cfg(not(windows))]
-impl BootReady {
-    fn mark(&self, label: &str) {
-        if let Ok(mut g) = self.0.lock() {
-            g.insert(label.to_string());
-        }
-    }
-
-    /// ⚠️ `Started` 必须清标记：`/retry` 会**重新加载启动页**，若沿用第一次的就绪标记，
-    /// 重试时又会把导航发在 splash 之前 —— 变成「首启修好了、重试仍然卡死」。
-    fn clear(&self, label: &str) {
-        if let Ok(mut g) = self.0.lock() {
-            g.remove(label);
-        }
-    }
-
-    fn is_ready(&self, label: &str) -> bool {
-        self.0.lock().map(|g| g.contains(label)).unwrap_or(false)
-    }
-}
-
-/// 页面加载事件的落点（由建窗时注册的 `on_page_load` 调用；非 Windows 才有意义）。
-///
-/// wry Android 的 `ON_LOAD_HANDLER` 由 `RustWebViewClient.onPageStarted / onPageFinished`
-/// 驱动（`tauri-runtime-wry` 里是**无条件** `with_on_page_load_handler`），所以 Android 上这个
-/// 信号真实可用 —— 这是本项目在 Android 侧唯一可靠的「文档已就绪」判据（轮询 URL 不行：
-/// `GetUrl` 同样走 main-pipe，webview 未就绪时拿不到结果）。
-#[cfg(not(windows))]
-pub(crate) fn on_page_load(app: &tauri::AppHandle, label: &str, finished: bool) {
-    let ready = app.state::<BootReady>();
-    if finished {
-        ready.mark(label);
-        // 移动端单 webview 页签：每次真实文档加载完成，把最终 url 记进活动标签
-        //（标题由 mobilebar.js 的 web2app:mobile-doc 事件另补；启动页 url 在其内部被忽略）。
-        #[cfg(mobile)]
-        crate::mobilebar::on_page_finished(app);
-    } else {
-        ready.clear(label);
-    }
-}
+use crate::nav::BootReady;
+use crate::nav::{local_proxy_enabled, origin_of, Navigation, ProxyTask};
 
 /// 启动期等待「首个文档加载完成」的预算（毫秒）。
 ///
@@ -248,59 +149,6 @@ fn ensure_navigation_committed(app: &tauri::AppHandle, label: &str, target: &Url
     });
 }
 
-/// 是否启用【本地反向代理】。
-///
-/// Windows：需“启用代理且没有配置外部代理”（有外部代理时走 `--proxy-server`）。
-/// 移动端 / 其它平台：不支持 `--proxy-server`，因此只要“启用代理”就一律走本地反向代理。
-/// 由编译期常量决定，纯计算、零开销；setup（建窗参数）与 bootstrap（后台准备）共用。
-#[cfg(windows)]
-pub(crate) fn local_proxy_enabled() -> bool {
-    PROXY_ENABLED && build_proxy_args().is_none()
-}
-#[cfg(not(windows))]
-pub(crate) fn local_proxy_enabled() -> bool {
-    PROXY_ENABLED
-}
-
-/// 「主窗口」的 label：多页签模式下是宿主窗口，单窗口模式下是 `"main"`。
-///
-/// ⚠️⚠️ **这是唯一真源** —— 历史上「多页签 → 宿主窗口，否则 → main」这条判断在 lib.rs
-/// （单实例聚焦 / 退出 Geometry 持久化 / 主窗关闭语义）与 tray.rs 里各写了一遍，
-/// 共 4 处相同逻辑。改一处忘另一处的表象是「托盘点开、或第二次启动聚焦到的是另一个窗口」
-/// 这类难定位的错位，所以收敛到这里。
-///
-/// 为什么放在本模块而不是 `tray` / `tabs`：判断的两侧都**不是桌面端专属** —— 主窗关闭语义
-/// （`crate::handle_main_close`）在 Android 上同样要走，而 `tray` 是 `cfg(desktop)`、
-/// `tabs` 是 `cfg(windows)`，放进它们会让非桌面目标拿不到这个函数。本模块无条件编译，
-/// 平台差异用内部的 `#[cfg(windows)]` 吸收（与 [`local_proxy_enabled`] 同一写法）。
-pub(crate) fn main_window_label() -> &'static str {
-    #[cfg(windows)]
-    {
-        if crate::tabs::tabs_enabled() {
-            return crate::tabs::HOST_LABEL;
-        }
-    }
-    "main"
-}
-
-/// 主窗口显隐后，同步多页签模式下各 tab 窗口的可见性。
-///
-/// 多页签模式里每个 tab 都是独立顶层窗口，宿主隐藏不会连带隐藏它们，桌面上会残留
-/// “没有标签栏的内容窗口”。非 Windows / 非多页签模式为空操作。
-///
-/// 与 [`main_window_label`] 同理由（`tabs` 是 `cfg(windows)`，桌面端之外也要能调用），
-/// 平台和模式的双重开关都收在本函数内部。
-pub(crate) fn sync_tabs_visibility(app: &tauri::AppHandle, visible: bool) {
-    #[cfg(windows)]
-    {
-        if crate::tabs::tabs_enabled() {
-            crate::tabs::set_tabs_visible(app, visible);
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = (app, visible);
-}
-
 /// 去掉 URL 中的 userinfo（用户名:密码），返回“干净”地址。
 /// 用于直连 / 外部代理场景下 WebView 的导航地址（鉴权由 WebView2 原生事件或本地代理注入，
 /// 不应把密码写进浏览器地址栏 / 交给外部代理字符串）。
@@ -309,61 +157,25 @@ fn strip_userinfo(url: &Url) -> String {
     crate::proxy::strip_userinfo(url)
 }
 
-/// 计算源（origin）：`scheme://host[:端口]`，端口做默认值归一化。
-///
-/// - 省略端口的 https/http 与显式 443/80 **同源**（`https://h` == `https://h:443`）；
-/// - 非默认端口保留（`https://h:8443` ≠ `https://h`）——旧实现只比 host 会把它们误判同源；
-/// - 无 host（非法 / 非层次化 URL）返回 None。
-pub(crate) fn origin_of(u: &Url) -> Option<String> {
-    let host = u.host_str()?;
-    let effective = match (u.scheme(), u.port()) {
-        ("https", Some(443)) | ("http", Some(80)) => None,
-        (_, p) => p,
-    };
-    Some(match effective {
-        Some(p) => format!("{}://{host}:{p}", u.scheme()),
-        None => format!("{}://{host}", u.scheme()),
-    })
-}
-
-/// 白名单判定：请求 URL 是否属于入口上游源。
-///
-/// 直连模式（不走本地代理）下，Authorization 注入与 401 自动应答都必须先过这道闸 ——
-/// 页面里的第三方子资源 / 被注入内容诱导出的外域请求一律不发凭据。`upstream` 为 None
-/// （解析不出源）时**失败关闭**：拒绝注入，而不是盲发。
-pub(crate) fn is_upstream_request(upstream: Option<&str>, request_url: &str) -> bool {
-    let Some(upstream) = upstream else {
-        return false;
-    };
-    match Url::parse(request_url) {
-        Ok(u) => origin_of(&u).as_deref() == Some(upstream),
-        Err(_) => false,
-    }
-}
-
-/// 启动流程入口：后台准备 → 主线程导航 / 报错。
+/// 启动编排入口（`nav::bootstrap` / `nav::bootstrap_for_label` 经登记的回调转发到这里，
+/// 接线在 `lib.rs` 的 setup —— 控制反转的理由见 [`crate::nav`] 模块头）。
 ///
 /// 允许被重复调用（启动页上的"重试"即 splash://localhost/retry → 这里），
 /// 因此进入时先终止上一轮残留的本地反向代理，避免端口泄漏。
 ///
-/// 单窗口模式：导航到 `"main"` 窗口。
-/// 多页签模式：导航到首个 tab（label 由调用方传入，见 `bootstrap_for_label`）。
-pub(crate) fn bootstrap(app: tauri::AppHandle) {
-    bootstrap_inner(app, "main".to_string(), true);
-}
-
-/// 启动/重试流程入口，参数化目标窗口 label。
+/// `label = None` = 单窗口模式（目标窗 `"main"`）；`Some(label)` = 导航到指定窗口
+///（多页签首个 tab / splash `/retry` 传入）。
 ///
-/// ⚠️ 与 [`bootstrap`] 一样**必须缓存**解析结果（`cache_navigation = true`）。多页签模式下
-/// 首个 tab 恰恰是由 `tabs::spawn_tab` 走这条路径创建的（`bootstrap()` 只在单窗口模式被调用），
+/// ⚠️ 一律**必须缓存**解析结果（`cache_navigation = true`）。多页签模式下
+/// 首个 tab 恰恰是由 `tabs::spawn_tab` 走这条路径创建的（单窗口模式走 `label = None`），
 /// 曾经这里传 `false` 导致 `TabManager.navigation` **永远为 None**，连锁后果三连：
 ///   1) [`crate::tabs::resolve_popup_url`] 拿不到入口/上游主机 → 一律返回 None →
 ///      `target="_blank"` 新 tab 全部落在主地址（用户反馈的“弹窗打开的网址一直是 app_url”）；
 ///   2) 每新建一个 tab 都重新 DNS 解析 + 重新起一个本地反向代理（新端口），
 ///      而 `bootstrap_inner` 开头又会 abort 掉 ProxyTask 里的旧代理 → 已在用的旧 tab 断连；
 ///   3) 新建 tab 明显变慢。
-pub(crate) fn bootstrap_for_label(app: tauri::AppHandle, label: String) {
-    bootstrap_inner(app, label, true);
+pub(crate) fn boot_entry(app: tauri::AppHandle, label: Option<String>) {
+    bootstrap_inner(app, label.unwrap_or_else(|| "main".to_string()), true);
 }
 
 /// 启动流程核心：后台准备 → 主线程导航 / 报错。
@@ -650,36 +462,6 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
     }
 }
 
-/// 对给定的窗口执行导航（挂 WebView2 钩子 + 导航）。
-///
-/// 与 `navigate_main` 的区别：不负责代理句柄入库（复用缓存时句柄已入过库），
-/// 供多页签模式新建 tab 时复用缓存导航信息。仅 Windows 有意义（tabs 模块整体 cfg(windows)）。
-#[cfg(windows)]
-pub(crate) fn navigate_window(
-    app: &tauri::AppHandle,
-    window: &tauri::WebviewWindow,
-    nav: Navigation,
-) {
-    // 1) 注册 WebView2 事件钩子（不含 Navigate）。
-    crate::webview_hooks::attach_webview_hooks(
-        app.clone(),
-        window,
-        nav.user,
-        nav.pass,
-        nav.use_local_proxy,
-        nav.upstream_origin,
-    );
-    // 2) 用 Tauri 的 `WebviewWindow::navigate` 真正导航——wry 内部会等 CoreWebView2
-    // controller 就绪再触发 WebView2 的 Navigation。
-    // 历史实现直接在 `attach_webview_hooks` 末尾调 `core.Navigate`，但此时 controller
-    // 可能未就绪（多页签模式新建 tab 时由 Rust 同步发起，与 wry 的就绪回调有时序差），
-    // `with_webview` 直接 return → 钩子没注册、Navigate 没触发，tab 停在 builder 默认入口
-    // —— 也就是用户看到的『弹窗新 tab 永远停在 app_url』。
-    if let Ok(parsed) = url::Url::parse(&nav.url) {
-        let _ = window.navigate(parsed);
-    }
-}
-
 // ===========================================================================
 // 非 Windows（Android 等）导航后的可达性探测
 // ===========================================================================
@@ -923,55 +705,8 @@ mod tests {
         assert_eq!(strip_userinfo(&u), "http://[::1]:8080/x");
     }
 
-    #[test]
-    fn origin_normalizes_default_ports_and_keeps_others() {
-        let o = |s| origin_of(&Url::parse(s).unwrap());
-        assert_eq!(o("https://h.example/a"), Some("https://h.example".into()));
-        assert_eq!(
-            o("https://h.example:443/"),
-            Some("https://h.example".into())
-        );
-        assert_eq!(o("http://h.example:80/"), Some("http://h.example".into()));
-        assert_eq!(
-            o("https://h.example:8443/"),
-            Some("https://h.example:8443".into())
-        );
-        assert_eq!(
-            o("http://127.0.0.1:5123/"),
-            Some("http://127.0.0.1:5123".into())
-        );
-        assert_eq!(o("ftp://h/x"), Some("ftp://h".into()));
-    }
-
-    #[test]
-    fn is_upstream_request_host_whitelist() {
-        let up = Some("https://h.example");
-        assert!(is_upstream_request(up, "https://h.example/a?b=1"));
-        assert!(is_upstream_request(up, "https://h.example:443/a"));
-        assert!(
-            !is_upstream_request(up, "https://h.example:8443/a"),
-            "非默认端口不混同"
-        );
-        assert!(
-            !is_upstream_request(up, "http://h.example/a"),
-            "scheme 不同不混同"
-        );
-        assert!(!is_upstream_request(up, "https://evil.example/a"));
-        assert!(!is_upstream_request(up, "https://example/a"));
-        assert!(!is_upstream_request(up, "not a url"));
-        assert!(
-            !is_upstream_request(None, "https://h.example/a"),
-            "无上游源时失败关闭"
-        );
-    }
-
-    #[test]
-    fn non_http_scheme_prepared_navigation_rejected() {
-        // prepare_navigation 同时依赖编译期常量与 DNS 解析，难在此直接驱动；
-        // scheme 判定与 sidecar 同源（match http|https）——这里钉住 origin/白名单对
-        // 非 http(s) 输入的行为，真正的端到端报错由 sidecar 的 --help 探针覆盖。
-        assert_eq!(origin_of(&Url::parse("file:///c:/x").unwrap()), None);
-    }
+    // ⚠️ origin 归一化 / 上游主机白名单 / 非 http(s) 拒绝的用例已随 `origin_of` /
+    // `is_upstream_request` 迁往 `src/nav.rs`（P2-1，needle 跟随搬家，断言未改）。
 
     #[test]
     fn probe_failure_messages_include_host_and_distinct_reason() {

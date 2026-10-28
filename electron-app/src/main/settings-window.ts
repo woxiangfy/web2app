@@ -72,7 +72,9 @@ export function readSettingsHtml(appPath: string): string | null {
   }
 }
 
-/** 兜底设置页：只在 HTML 文件缺失时使用，让用户至少能改设置，而不是面对一个空白窗。 */
+/** 兜底设置页：只在 HTML 文件缺失时使用，让用户至少能改设置，而不是面对一个空白窗。
+ *  资源本体留在这里，经 `registerProtocols` 的 `fallbackHtml` deps 注入给 settings://
+ *  处理器（2026-10-24 批次⑤ P2-8：protocols.ts 不得反向依赖设置窗实现）。 */
 const FALLBACK_HTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>设置</title><style>
 body{font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif;margin:0;padding:22px 24px;color:#1f2937}

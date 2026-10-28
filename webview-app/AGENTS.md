@@ -12,10 +12,13 @@
 1. **单一真源**：`src/{titlebar.js,loading.js,tab_title.js,dnd_polyfill.js,shell.html,splash.html,floaticon.html}`、
    `src/{proxy.rs,resolve.rs}`、`dist/settings.html` 与 Electron 壳共用 —— 改动任一**必须双壳同步验证**。
    ⚠️ `mobilebar.js` **不在**此列（仅 Tauri 移动端），改它只需过本侧门禁。
-2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 241 通过 / 6 ignored）；`src/contract_tests.rs`
+2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 282 通过 / 6 ignored）；`src/contract_tests/`（按领域 13 个子模块）
    是静态契约守卫 —— 改 `capabilities/*.json` 或注入脚本的事件名会被它拦下。
 3. **配置是编译期常量**：所有运行期参数在 `src/config.rs` 由 `option_env!` 注入，**改完必须重新编译**；
    打包 workflow 通过环境变量注入。全文见 [docs/tauri-config.md](docs/tauri-config.md)。
+   ⚠️ 例：`const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.0.1;<-loopback>")`
+   的默认串是跨壳**单一字面量契约**，10 个入库文件必须一致（清单见 `../docs/packaging-config.md` §4.4，
+   `scripts/pack-local.mjs --selftest` 逐文件钉住）。
 4. **Android 补丁链顺序固定**：`prepare-wry-kotlin` → insets → back → download → extras → schemes → fullscreen → permissions。
 5. **悬浮球建窗必须显式 `.data_directory(config::data_dir(app))`**（v1.71 真机根因，有契约守卫）。
 6. **设置页命令名三处逐字一致**：`settings.html` 字面量 / `settings-preload.ts` 白名单 / 主进程 IPC 名 —— 漏一处即「按钮点了没反应」。
@@ -52,7 +55,9 @@ cargo test --all                                               # 单元测试 + 
 ```
 
 Windows / Android 的完整环境要求、Android 构建命令、测试分组计数、`--float-probe` 探针与常见问题，
-以及 `src/` 目录结构树 —— 见 [docs/build-test.md](docs/build-test.md)。
+以及 `src/` 目录结构树（含 `src/nav.rs` 导航 / 窗口会话登记数据枢纽、`src/bootstrap.rs` 启动编排
+的职责划分：功能模块一律 `→ nav`，`bootstrap` 只留编排并经 nav 的 boot 回调对外；`floatwin` / `tabs` /
+`proxy` 三个大模块已按功能垂直拆为根文件 + `src/xxx/` 子模块）—— 见 [docs/build-test.md](docs/build-test.md)。
 
 ## 专项文档
 

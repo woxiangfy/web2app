@@ -40,7 +40,7 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 
 ### 3.4 其它全局约定（硬约束，不知道就会踩坑）
 
-1. **单一真源 · 改一必双壳验证**：注入脚本与页面（`titlebar.js`、`loading.js`、`tab_title.js`、`dnd_polyfill.js`、`shell.html`、`splash.html`、`floaticon.html`、`dist/settings.html`、`icons/*`）及代理 / 解析链路（`proxy.rs` → sidecar）为两壳共用。⚠️ `mobilebar.js`（移动端底栏）**例外** —— Tauri 移动端专属，改它只需过 Tauri 侧门禁 + 契约测试。
+1. **单一真源 · 改一必双壳验证**：注入脚本与页面（`titlebar.js`、`loading.js`、`tab_title.js`、`dnd_polyfill.js`、`shell.html`、`splash.html`、`floaticon.html`、`dist/settings.html`、`icons/*`）及代理 / 解析链路（`proxy.rs` → sidecar）为两壳共用。⚠️ 两个**例外**（单壳专属，改它只需过对应壳门禁 + 契约测试）：`mobilebar.js`（移动端底栏，Tauri 移动端专属）；`floaticon.html`（悬浮球页，**Electron 专属** —— Tauri 球 v1.81 起是 Win32 分层窗口 + 位图 alpha，不再加载任何页面）。
 2. **文本编码**：文档统一 UTF-8（无 BOM）、LF 换行，避免混用导致整文件 diff。
 3. **路径引用**：跨目录引用一律相对仓库根目录书写（如 `docs/electron-plan.md`）；同目录内可直接写文件名。
 4. **敏感文件**：`signing/` 下 keystore、`secrets.env` 等凭据不得提交或外发（已由根 `.gitignore` 忽略）；提交前确认 `git status` 内不含 `signing/`。
@@ -52,6 +52,7 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 | 文档 | 路径 |
 | --- | --- |
 | 项目全盘分析与优化建议 / 架构与组织结构审查（2026-09-29） | `docs/project-analysis.md`、`docs/architecture-review-2026-09-29.md` |
+| webview-app 架构与组织结构审查（2026-10-25，模块/依赖/复用） | `docs/architecture-review-2026-10-25.md` |
 | **本地脚本说明** | **`docs/local-scripts.md`** |
 | **打包配置 JSON 契约（21 字段，跨壳唯一权威）** | **`docs/packaging-config.md`** |
 | **Android 端优化清单（唯一任务清单）** | **`docs/android-improvements.md`** |
@@ -68,11 +69,11 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 
 | 日期 | 摘要 |
 | --- | --- |
+| 2026-10-27 | 悬浮球 v1.81 根治边缘毛刺：Tauri 球弃 WebView2 改 **Win32 分层窗口**（`UpdateLayeredWindow` 预乘 ARGB + 4×4 超采样圆盘，像素 alpha 穿透），Electron 球改 canvas 超采样 alpha 位图；盘面弃蓝色渐变改跟随系统深浅色白/黑；吸附扩为**四边**就近择一（`DockEdge` 增 top/bottom），`floaticon.html` 转 Electron 专属、`capabilities/float-icon.json` 退役 → `docs/changes/2026-10-27.md` |
+| 2026-10-25 | webview-app 架构审查落盘 + 优化批次①②③④（P1–P4 全落地）：contract_tests.rs 拆 13 个领域子模块、打包配置字段表单源化（`scripts/packaging-fields.json`）、新建 `nav.rs` 切断 bootstrap 双向耦合（六模块归零）、electron 样例 17 键差异定性、debug_log/floatprobe 口径钉死、floatwin/tabs/proxy 三大文件垂直拆分（子模块化，proxy `#[path]` 双壳同源不破），Rust 282 全绿 / parity 55/55 → `docs/changes/2026-10-25.md` |
+| 2026-10-24 | electron-app 架构审查优化批次①–⑤ 落地（updateDocument 统一读-改-写 / index.ts 装配化 / probe-single 19 段函数化 / 设置页命令名三方守卫 / util.ts 与 protocols.ts 依赖收口 / 悬浮球决策纯函数化），unit 115/115、probe 149/150（预存环境项）、tabs 47/47 → `docs/changes/2026-10-24.md` |
 | 2026-10-15 | 修 Android 打包 `patch-android-extras.py` 的 `FileNotFoundError`（补丁链前置 `prepare-wry-kotlin.py` + build 后重放 task），连带修 Gradle API / 变体配对 / cargo metadata 缺陷；selftest 12/12 → `docs/changes/2026-10-15.md` |
 | 2026-10-14 | Android 优化清单 P0×3 + P1×5 落地，契约扩到 21 键、补丁链 7 脚本，Rust 205 / Electron 101 全绿 → `docs/changes/2026-10-14.md` |
 | 2026-10-13 | 页签「首页」固定第一位不可关闭 + 外观对齐 Chrome + 移动端底栏 `mobile_bar`（20 键）及真机缺陷修复 → `docs/changes/2026-10-13.md` |
-| 2026-10-12 | v1.78–v1.80 悬浮球「背景异形」四轮收口（弃 `SetWindowRgn` → 真逐像素 alpha + `WM_NCHITTEST` 子类化）；同日文档审计 + 代码优化（241 测试全绿）→ `docs/changes/2026-10-12.md` |
-| 2026-10-11 | v1.72–v1.77b 悬浮球 P0/P1/P2 收口（`--float-probe` harness、Electron `setShape` 四角穿透 + 双击去抖）→ `docs/changes/2026-10-11.md` |
-| 2026-10-10 | v1.67–v1.71 悬浮球纠正为图标形态 + 屏幕绝对坐标拖动 + 悬停延迟缩回；定位「球窗建不出」根因（漏 `.data_directory()`）→ `docs/changes/2026-10-10.md` |
 
 > 完整历史（含 v1.0–v1.29 仓库搭建与文档体系建立）见 `docs/changes/`。

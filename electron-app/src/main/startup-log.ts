@@ -36,6 +36,8 @@ import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'nod
 import { join } from 'node:path'
 import { format } from 'node:util'
 
+import { hotkeyLabel, type Hotkey } from './hotkey'
+
 export const LOG_FILE_NAME = 'startup.log'
 /** 轮转后的旧文件（只保留一代，启动日志不需要归档体系） */
 export const PREV_LOG_FILE_NAME = 'startup.prev.log'
@@ -178,4 +180,110 @@ export function startFileLogging(logDir: string): FileLogHandle {
 
   patchConsole(path)
   return { ok: true, path }
+}
+
+// ===========================================================================
+// 启动信息摘要（自 index.ts 的 logStartup 平移）—— 绿色版排障的第一现场
+// （**仅在 debug 打开时可见**）。本模块零 Electron 依赖的纪律不变：所有取值由
+// 调用方（index.ts）算好传进来，这里只负责布局与文案。
+// ===========================================================================
+
+/** 文件日志落点的一行描述（debug 关闭时如实说明，而不是打印一个并不存在的路径）。 */
+function describeFileLog(log: FileLogHandle | null): string {
+  if (!log) return '(debug 未开启，未落盘)'
+  return `${log.path}${log.ok ? '' : `  ✗ 不可写（${log.error ?? '未知原因'}）`}`
+}
+
+export interface StartupSummaryInfo {
+  /** 入口目录（portable.ts 定位的安装 / 解压根） */
+  root: string
+  /** 安装版（NSIS，强制系统数据目录） */
+  forcedSystem: boolean
+  /** 单文件自解压（portable） */
+  selfExtracting: boolean
+  /** 数据目录一行的三要素 */
+  dataDir: string
+  dataDirMode: string
+  dataDirFellBack: boolean
+  /** config.json 命中路径（null = 未找到，用默认值） */
+  configPath: string | null
+  appName: string
+  title: string
+  /** 注入脚本目录（单一真源定位结果） */
+  injectDir: string
+  /** 诊断开关是否开启 */
+  debugOn: boolean
+  fileLog: FileLogHandle | null
+  /** 外部代理服务器（null = 未启用） */
+  proxyServer: string | null
+  /** settings.json 的命中来源 / 写入位置（M3：两个几何段同住这一个文件） */
+  settingsSource: string | null
+  settingsWrite: string
+  /** 唤醒快捷键（文案由本模块用 `hotkeyLabel` 统一渲染） */
+  wakeHotkey: Hotkey
+  trayEnabled: boolean
+  minimizeOnClose: boolean
+  /** 悬浮图标是否生效（`float_enabled && win32`，由调用方算好） */
+  floatEffective: boolean
+  /**
+   * 需要本地代理组件时的定位结果：null = 未找到（打印求助文案）；
+   * **省略本字段 = 该配置不需要 sidecar，整行不打印**。
+   */
+  sidecarPath?: string | null
+  /** `extraJson(cfg)` 预格式化结果 */
+  extra: string
+  /** 非致命提示（配置 / 设置解析的 warnings，按顺序打在末尾） */
+  warnings: string[]
+}
+
+/** 打印启动摘要。⚠️ 内容与行序是排障契约（用户截图对照的就是它），改动须同步文档。 */
+export function printStartupSummary(info: StartupSummaryInfo): void {
+  console.log('[web2app] 启动信息')
+  console.log(`  入口目录      : ${info.root}`)
+  console.log(
+    `  分发形态      : ${
+      info.forcedSystem
+        ? '安装版 (NSIS，系统管理数据目录)'
+        : info.selfExtracting
+          ? '单文件自解压 (portable)'
+          : '解压目录 (zip/dir)'
+    }`,
+  )
+  console.log(
+    `  数据目录      : ${info.dataDir}  (mode=${info.dataDirMode}${
+      info.dataDirFellBack ? ', 已回退' : ''
+    }${info.forcedSystem ? ', 强制系统目录（忽略 data_dir）' : ''})`,
+  )
+  console.log(`  配置文件      : ${info.configPath ?? '(未找到，使用默认值)'}`)
+  console.log(`  应用名 / 标题 : ${info.appName} / ${info.title}`)
+  console.log(`  注入脚本目录  : ${info.injectDir}`)
+  // 诊断开关本身必须写进日志：否则「日志文件里怎么只有一行 header / 怎么压根没有日志文件」
+  // 这类追问会反复出现 —— 用户看不出是「开关没开」还是「写盘失败」。
+  console.log(
+    `  诊断日志      : ${info.debugOn ? '已开启' : '未开启（config.json 的 debug 或命令行 --debug）'}`,
+  )
+  // 文件日志是用户侧唯一能提供证据的东西，路径必须打在**第一行区域**（用户直接截图给我们）
+  console.log(`  日志文件      : ${describeFileLog(info.fileLog)}`)
+  console.log(`  外部代理      : ${info.proxyServer ?? '(未启用)'}`)
+  // M3：配置文件的落点必须写进日志 —— 「我明明勾了托盘，重启又没了」这类反馈，
+  // 只有靠这一行才能一眼看出是写到了哪儿、以及有没有读到旧版的文件。
+  // ⚠️ 这一个文件同时装着设置与窗口几何（2026-09-23 合并），所以「窗口尺寸没记住」
+  //    也看这一行 + 上面那条「窗口几何：<原因>」。
+  console.log(
+    `  配置文件      : ${info.settingsSource ?? '(未找到，使用默认值)'}` +
+      `  → 写入 ${info.settingsWrite}`,
+  )
+  console.log(`  唤醒快捷键    : ${hotkeyLabel(info.wakeHotkey)}`)
+  console.log(
+    `  托盘 / 关闭行为: ${info.trayEnabled ? '已启用' : '未启用'}` +
+      ` / ${info.trayEnabled && info.minimizeOnClose ? '关闭时隐藏到托盘' : '关闭即退出'}`,
+  )
+  console.log(`  悬浮图标      : ${info.floatEffective ? '已启用' : '未启用'}`)
+  // 需要 sidecar 时把它的位置和存在性写进日志：这一步「找不到」是最常见的配置类故障，
+  // 而失败文案是收敛过的（不暴露路径），所以启动日志是唯一能直接看到原因的地方。
+  if (info.sidecarPath !== undefined) {
+    console.log(`  本地代理组件  : ${info.sidecarPath ?? '(未找到！请先 cargo build --release -p w2a-proxy)'}`)
+  }
+  console.log(`  web2appExtra  : ${info.extra}`)
+  for (const w of info.warnings) console.warn(`  ⚠️ ${w}`)
 }

@@ -18,17 +18,11 @@ import {
   debugFlagTruthy,
   extraJson,
   loadConfigAny,
-  sanitizeDirName,
   type AppConfig,
 } from './config'
-import { needsSidecar, resolveTarget, type ResolveHow, type ResolvedTarget } from './navigate'
-import {
-  locateSidecar,
-  SidecarError,
-  startSidecar,
-  type SidecarHandle,
-  type SidecarRequest,
-} from './sidecar'
+import { sanitizeDirName } from './util'
+import { needsSidecar } from './navigate'
+import { locateSidecar } from './sidecar'
 import { runProbe, runTabsProbe, startProbeServer, type ProbeServer } from './probe'
 import {
   loadSettings,
@@ -37,9 +31,11 @@ import {
   storeLocation,
   type Settings,
 } from './settings'
-import { hotkeyLabel } from './hotkey'
 import { createSettingsController } from './settings-controller'
 import { registerProtocols } from './protocols'
+import { createNavigator } from './navigation'
+import { closeResidency } from './lifecycle'
+import { makeTabSpawn } from './tab-spawn'
 import {
   captureWindowState,
   loadWindowState,
@@ -58,6 +54,7 @@ import {
 import { applyWakeHotkey, registerSettingsShortcut, releaseShortcuts } from './shortcuts'
 import {
   closeSettingsWindow,
+  FALLBACK_HTML,
   getSettingsWindow,
   openSettingsWindow,
   readSettingsHtml,
@@ -66,7 +63,7 @@ import {
 } from './settings-window'
 import { MAX_TABS, TAB_BAR_HEIGHT, TabManager } from './tabs'
 import { hideShellStartupError, showShellStartupError } from './shell-overlay'
-import { rawConsole, silenceConsole, startFileLogging, type FileLogHandle } from './startup-log'
+import { printStartupSummary, rawConsole, silenceConsole, startFileLogging } from './startup-log'
 import { createSplashPage, SPLASH_BG } from './splash-page'
 import { runSmokeChecks } from './smoke'
 import { registerAppIpc } from './app-ipc'
@@ -245,7 +242,7 @@ if (PROBE) {
 const logDir = PROBE
   ? join(app.getPath('temp'), 'w2a-probe-store')
   : join(paths.dataDir, 'logs')
-const fileLog: FileLogHandle | null = DEBUG ? startFileLogging(logDir) : null
+const fileLog = DEBUG ? startFileLogging(logDir) : null
 
 const loadedSettings = loadSettings(storeLoc)
 /** 运行期当前生效的设置（设置窗保存后立即更新） */
@@ -288,19 +285,6 @@ const splashPage = createSplashPage({ title: cfg.title, readInject })
 const gotLock = app.requestSingleInstanceLock()
 
 let mainWindow: BrowserWindow | null = null
-let target: ResolvedTarget | null = null
-/** 目标地址解析 + 首次导航只允许发生一次（重试路径会显式重置） */
-let navStarted = false
-/**
- * 「splash 加载完成 → 自动 bootstrap」一生只允许自动发生**一次**。
- *
- * ⚠️ 没有它会出现紧密无限重试循环：bootstrap 失败分支会重新 `loadURL(splash://…)`
- * （为了把失败态刷给启动页），而 splash 每次 did-finish-load 又自动再 bootstrap ——
- * 失败 → 重载 → 再解析/再起 sidecar → 再失败……无计数、无退避，sidecar 缺失时是紧密
- * 循环，DNS 模式则每轮新 spawn 一个 w2a-proxy.exe。失败后必须**等用户点重试**
- *（splash /retry 处理器显式调 bootstrap，不经过这个自动名额）。
- */
-let splashAutoBootConsumed = false
 
 /** 多页签管理器（仅 tabs_enabled=true 时非空）。 */
 let tabManager: TabManager | null = null
@@ -323,134 +307,17 @@ let tabManager: TabManager | null = null
 const TABS_MODE = TABS_PROBE ? true : PROBE ? false : cfg.tabs_enabled
 
 /**
- * 当前活跃的 sidecar（本地反向代理 / DNS 解析）。
- * ⚠️ 必须显式回收：它常驻监听 127.0.0.1 端口，留着不管是「端口泄漏 + 孤儿进程」。
+ * 目标解析与导航装配：target 缓存 / 导航代际 / sidecar 生命周期 / 首次自动 bootstrap
+ * 的名额闸门全部收在 navigation.ts 的 createNavigator 里。
+ * ⚠️ 窗口与启动页经 deps 注入，这里只做装配 —— 导航状态一律经 nav 的方法触达。
  */
-let activeSidecar: SidecarHandle | null = null
-
-/** 停掉当前 sidecar（幂等）。 */
-function stopActiveSidecar(): void {
-  const s = activeSidecar
-  activeSidecar = null
-  if (!s) return
-  console.log(`[web2app] 停止 sidecar（pid=${s.pid}）`)
-  try {
-    s.stop()
-  } catch (e) {
-    console.warn(`[web2app] 停止 sidecar 失败：${(e as Error).message}`)
-  }
-}
-
-/**
- * 启动 sidecar；定位不到可执行文件时抛 `missing`。
- *
- * ⚠️ 这里**绝不**退回直连：需要 sidecar 的两种配置（本地代理 / 域名解析）一旦静默降级，
- * 表现就是「加密解析没生效但页面照常打开」，排查时根本不会往这个方向想。
- */
-function launchSidecar(req: SidecarRequest): Promise<SidecarHandle> {
-  const exe = locateSidecar(app.getAppPath(), process.resourcesPath)
-  if (!exe) {
-    return Promise.reject(
-      new SidecarError(
-        '未找到 w2a-proxy；开发态请先在 webview-app 下执行 ' +
-          '`cargo build --release -p w2a-proxy`（打包态应为 resources/sidecar/w2a-proxy.exe）',
-        'missing'
-      )
-    )
-  }
-  console.log(`[web2app] 启动 sidecar：${exe}`)
-  return startSidecar({
-    ...req,
-    exe,
-    // sidecar 的 stderr 直接并进主进程日志，排障时两条日志在同一个文件里前后相邻
-    log: (line) => console.log(line),
-  }).then((h) => {
-    activeSidecar = h
-    return h
-  })
-}
-
-/** 导航代际：并发触发 bootstrap 时，只有最后一次的结果算数（中途起的 sidecar 会被回收）。 */
-let navSeq = 0
-
-/** 解析路径 → 启动日志里的人类可读文案（单一真源，两处调用点共用）。 */
-function howLabel(how: ResolveHow): string {
-  return {
-    direct: '直连',
-    proxy: '本地反向代理',
-    dns: '域名解析后直连',
-    'dns+proxy': '域名解析 + 本地反向代理',
-  }[how]
-}
-
-/**
- * 解析并缓存目标地址，但**不导航任何窗口**。
- *
- * 多页签模式专用：首个内容视图需要拿到解析后的 target（可能起 sidecar），但导航目标是
- * **内容视图**，而不是壳页面（`bootstrap()` 末尾会把主窗口导航走，页签模式下会污染壳）。
- * 这里只做 bootstrap 的前半段（解析 + 缓存 target + 处理失败态），导航交给调用方。
- *
- * ⚠️ 与 bootstrap 共享 target 缓存：页签复用同一份解析结果，不重复起 sidecar。
- */
-async function resolveInitialTarget(): Promise<ResolvedTarget> {
-  if (target) return target
-  const r = await resolveTarget(cfg, { startSidecar: launchSidecar })
-  if (!r.ok) {
-    console.error(`[web2app] ${r.title}：${r.detail}`)
-    throw new Error(r.detail)
-  }
-  target = r
-  console.log(
-    `[web2app] 目标地址：${r.url}（${howLabel(r.how)}${r.user ? '，已记录 Basic 鉴权凭据' : ''}）`
-  )
-  return r
-}
-
-async function bootstrap(): Promise<void> {
-  const win = mainWindow
-  if (!win || win.isDestroyed()) return
-  const seq = ++navSeq
-
-  // 重试场景：上一轮的 sidecar 可能还占着端口，先收掉（幂等）
-  stopActiveSidecar()
-
-  const r = await resolveTarget(cfg, { startSidecar: launchSidecar })
-
-  if (seq !== navSeq) {
-    // 期间又发起了一次（重试连点）：本次结果作废，把它起的 sidecar 一并回收
-    if (r.ok) r.sidecar?.stop()
-    return
-  }
-
-  if (!r.ok) {
-    console.error(`[web2app] ${r.title}：${r.detail}`)
-    splashPage.setPendingFail({ title: r.title, detail: r.detail })
-    // 重新灌一遍启动页（带着失败态），用户至少能看到发生了什么并点重试
-    navStarted = false
-    void win.loadURL('splash://localhost/').catch(() => {})
-    return
-  }
-  // 注：曾经这里有一条 `if (target && target.url === r.url) return` 防重复导航，但
-  // bootstrap 的两个调用点（首次自动启动 / splash /retry[显式 target=null]）进入时
-  // target 恒为 null，该分支不可达；真正的并发去重由 splashAutoBootConsumed 负责。
-  target = r
-
-  console.log(
-    `[web2app] 目标地址：${r.url}（${howLabel(r.how)}${r.user ? '，已记录 Basic 鉴权凭据' : ''}）`
-  )
-  // 不 await：失败由 did-fail-load 统一处理（loadURL 的 rejection 在「被后续导航中断」时
-  // 也会触发，ERR_ABORTED 不是错误）。这里只记日志，绝不静默吞掉。
-  win.loadURL(r.url).catch((e: Error) => {
-    console.warn(`[web2app] loadURL 被拒绝（详情以 did-fail-load 为准）：${e.message}`)
-  })
-}
-
-/** 把加载层指令推给页面（真实页面走 preload 的隔离世界通道）。 */
-function sendOverlay(cmd: { kind: 'fail'; title: string; detail: string } | { kind: 'hide' }): void {
-  const win = mainWindow
-  if (!win || win.isDestroyed()) return
-  win.webContents.send('web2app:overlay', cmd)
-}
+const nav = createNavigator({
+  cfg,
+  splashPage,
+  getMainWindow: () => mainWindow,
+  appPath: app.getAppPath(),
+  resourcesPath: process.resourcesPath,
+})
 
 // ---------- 6. 窗口按钮 IPC / 新窗口拦截 ----------
 // 四组 IPC（win:* / tabs:* / web2app:bootstrap）与 app 'login' 鉴权注册已抽到
@@ -544,19 +411,8 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   registerWindowOpenHandler(win)
 
   /**
-   * 关闭按钮语义（对齐 `lib.rs` 的 `handle_main_close`）——两个**驻留理由**并列：
-   *   1. 「启用托盘」+「关闭时最小化到托盘」→ 隐藏窗口，应用继续驻留托盘；
-   *   2. 「启用悬浮图标」（仅 Windows，球窗只在那时才存在）→ 隐藏窗口，应用继续驻留悬浮球；
-   *   两者都不满足 → 正常关闭（最后一个窗口关闭后退出）。
-   *
-   * ⚠️⚠️ 第 2 条是**修一个真机缺陷**，不是锦上添花（2026-10-11 使用者实测：策略
-   *    `tray_enabled:false, minimize_on_close:false, float_enabled:true`）：
-   *     关闭窗口 → 主窗被**真销毁**，但球窗还活着 ⇒ ① 球窗挡住了
-   *     `window-all-closed`（它只在**所有**窗口关闭时才发）⇒ 进程留成一个既看不见界面、
-   *     也退不掉的僵尸；② 点球时 `toggleMainWindow → presentMainWindow → showMainWindow`
-   *     开头就 `if (!win || win.isDestroyed()) return` ⇒ **一个动作都不做**，
-   *     用户看到的就是「点了悬浮图标不回窗口」。球的产品语义就是「唤回主窗的入口」
-   *     （见 floaticon.html 的 aria-label），故「球在 ⇒ 应用驻留」必须成立。
+   * 关闭按钮语义（对齐 `lib.rs` 的 `handle_main_close`）：两个驻留理由（托盘 / 悬浮图标）
+   * 的判据与真机缺陷背景见 lifecycle.ts 的 `closeResidency`（已抽纯函数 + 单测）。
    *
    * ⚠️ `quitting` 标志不可省：托盘菜单「退出」走的是 `app.quit()`，
    *    它会触发窗口的 close 事件 —— 没有这个标志就会「点了退出，窗口只是藏起来了」。
@@ -565,15 +421,11 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   win.on('close', (e) => {
     persistGeometry(win)
     if (quitting) return
-    const trayResident = runtimeSettings.tray_enabled && runtimeSettings.minimize_on_close
-    // 与 float-window.ts 建球的前置条件同一个判据（非 Windows 永远不建球 ⇒ 不得驻留）。
-    const floatResident = process.platform === 'win32' && runtimeSettings.float_enabled
-    if (trayResident || floatResident) {
+    const decision = closeResidency(runtimeSettings, process.platform)
+    if (decision.action === 'hide') {
       e.preventDefault()
       win.hide()
-      console.log(
-        `[web2app] 关闭按钮 → 隐藏（驻留理由：${trayResident ? '托盘' : ''}${trayResident && floatResident ? ' + ' : ''}${floatResident ? '悬浮图标' : ''}）`,
-      )
+      console.log(`[web2app] 关闭按钮 → 隐藏（驻留理由：${decision.reasons.join(' + ')}）`)
     }
   })
 
@@ -583,7 +435,7 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
     if (!isMainFrame || code === -3) return
     const detail = `无法打开 ${url}（${desc}，${code}）`
     console.error(`[web2app] ${detail}`)
-    sendOverlay({ kind: 'fail', title: '加载失败', detail })
+    nav.sendOverlay({ kind: 'fail', title: '加载失败', detail })
   })
 
   // 下载接管（M4）：弹「另存为」让用户定落盘位置，对标 Tauri 的 save_dialog.rs。
@@ -598,13 +450,8 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
     const cur = win.webContents.getURL()
     if (cur.startsWith('splash:')) {
       if (PROBE) return // 探针自己控制导航节奏
-      if (navStarted) return
-      // 仅【首次】splash 加载自动解析；bootstrap 失败后重载 splash 走到这里时不再自动
-      // 续跑（否则失败→重载→自动重试构成无限循环），等用户点启动页上的「重试」。
-      if (splashAutoBootConsumed) return
-      splashAutoBootConsumed = true
-      navStarted = true
-      void bootstrap()
+      // 「仅首次 splash 自动解析」的名额闸门（splashAutoBootConsumed）见 navigation.ts。
+      nav.autoBootFromSplash()
       return
     }
   })
@@ -616,53 +463,17 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   })
 
   // ---------- 多页签模式：挂 TabManager + 首个内容视图 ----------
+  // 新建页签的回调实现（挂钩子 + 复用 target 缓存 + loadURL）平移在 tab-spawn.ts。
   if (TABS_MODE) {
     tabManager = new TabManager({
       host: win,
-      onSpawn: async (view, _label, url) => {
-        // ⚠️⚠️ 新页签**不得**调 bootstrap()（其开头 stopActiveSidecar 会掐掉在服页签的代理，
-        //   末尾会把主窗口导航走污染壳页面）。这里用 resolveInitialTarget 复用 target 缓存，
-        //   只解析、不导航壳页面；导航目标是本内容视图。
-        //   url 有值时（window.open 场景）直接用；否则用默认 target（首屏）。
-        const t = url ? { url, user: '', pass: '', how: 'direct' as const } : await resolveInitialTarget()
-        // 挂窗口打开处理器：内容页 window.open → 新建页签。
-        // ⚠️ 与单窗口版（registerWindowOpenHandler）看着像，实则两处刻意不同、勿强行合并：
-        //   1) 动作是「新建页签」（走 spawnTab → resolveTarget 的代理/DNS 完整链路），不是原地导航；
-        //   2) 不做 new URL 预校验 —— spawnTab 内部解析目标时自会失败（失败进页签标题 + 遮罩），
-        //      单窗口版那道校验是为了区分「原地导航失败交给 did-fail-load」才需要的。
-        //   两边共享的只有 about: 拒绝这一条（1 行表达式），抽 helper 反而要参数化行为分叉。
-        view.webContents.setWindowOpenHandler(({ url: opened }) => {
-          console.warn(`[web2app] 页签模式拦截到新窗口请求：${opened}`)
-          if (!opened || opened === 'about:blank' || opened.startsWith('about:')) {
-            return { action: 'deny' }
-          }
-          setImmediate(() => {
-            void tabManager?.spawnTab(opened).catch((e) =>
-              console.error(`[web2app] 新建页签失败：${(e as Error).message}`)
-            )
-          })
-          return { action: 'deny' }
-        })
-        // 标题回传：直接监听事件，无需注入脚本
-        view.webContents.on('page-title-updated', (_e, title) => {
-          tabManager?.setTabTitle(_label, title)
-        })
-        // 加载失败：内容视图没有加载层（不注入 loading.js），失败态只能体现在页签标题上。
-        // ⚠️ 与单窗口的 did-fail-load 对齐「不静默」原则：记日志 + 给用户可见提示。
-        //   -3 = ERR_ABORTED：正常重定向 / 被后续导航顶掉，不是错误。
-        view.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
-          if (!isMainFrame || code === -3) return
-          const detail = `无法打开 ${url}（${desc}，${code}）`
-          console.error(`[web2app] 页签加载失败：${detail}`)
-          tabManager?.setTabTitle(_label, '加载失败')
-        })
-        // M4 页面行为：F12 / 右键菜单（与单窗口模式同一套实现，逐视图挂）
-        attachDevtools(view.webContents, devtoolsEnabled(app.isPackaged, cfg.debug))
-        attachContextMenu(view.webContents, openSettings)
-        await view.webContents.loadURL(t.url).catch((e) => {
-          console.warn(`[web2app] 内容页 loadURL 被拒绝：${(e as Error).message}`)
-        })
-      },
+      onSpawn: makeTabSpawn({
+        // ⚠️ 只解析、不导航壳页面：新页签**不得**走 bootstrap()（会掐掉在服页签的代理）。
+        resolveInitialTarget: () => nav.resolveInitialTarget(),
+        getTabManager: () => tabManager,
+        devtools: devtoolsEnabled(app.isPackaged, cfg.debug),
+        openSettings: () => openSettings(),
+      }),
     })
 
     // 窗口 resize → 重排全部视图 bounds
@@ -851,11 +662,10 @@ if (!gotLock) {
       renderSplash: () => splashPage.render(),
       setSplashPendingFail: (f) => splashPage.setPendingFail(f),
       onSplashRetry: () => {
-        navStarted = false
-        target = null
-        void bootstrap()
+        nav.retryFromSplash()
       },
       readSettingsHtml: readSettingsPageHtml,
+      fallbackHtml: FALLBACK_HTML,
       readInject,
       readFloatIcon: () => {
         try {
@@ -887,7 +697,7 @@ if (!gotLock) {
       spawnFirstTab: () => void spawnFirstTab(),
       // chromeH 与标签栏同高（跨壳 38px 契约，唯一字面量在 tabs.ts 的 TAB_BAR_HEIGHT）。
       bootstrap: { chromeH: TAB_BAR_HEIGHT, extra: cfg.extra, readInject },
-      getTarget: () => target,
+      getTarget: () => nav.getTarget(),
       proxyHttp: cfg.proxy_http,
       proxyHttps: cfg.proxy_https,
     })
@@ -954,7 +764,34 @@ if (!gotLock) {
     )
 
     mainWindow = createWindow(!PROBE, plan)
-    logStartup()
+    // 启动摘要（布局与文案见 startup-log.ts；这里只把取值算好传进去）
+    printStartupSummary({
+      root: paths.root,
+      forcedSystem: paths.forcedSystem,
+      selfExtracting: paths.selfExtracting,
+      dataDir: paths.dataDir,
+      dataDirMode: paths.mode,
+      dataDirFellBack: paths.fellBack,
+      configPath: loaded.path,
+      appName: cfg.app_name,
+      title: cfg.title,
+      injectDir: injectDir(),
+      debugOn: DEBUG,
+      fileLog,
+      proxyServer: proxy.proxyServer ?? null,
+      settingsSource: loadedSettings.source,
+      settingsWrite: storeLoc.write,
+      wakeHotkey: runtimeSettings.wake_hotkey,
+      trayEnabled: runtimeSettings.tray_enabled,
+      minimizeOnClose: runtimeSettings.minimize_on_close,
+      floatEffective: runtimeSettings.float_enabled && process.platform === 'win32',
+      // 需要 sidecar 时把它的位置和存在性写进日志（不需要时省略 ⇒ 整行不打印）
+      ...(needsSidecar(cfg)
+        ? { sidecarPath: locateSidecar(app.getAppPath(), process.resourcesPath) }
+        : {}),
+      extra: extraJson(cfg),
+      warnings: [...loaded.warnings, ...loadedSettings.warnings],
+    })
 
     // ---------- M3：托盘 / 全局快捷键 ----------
     // ⚠️ 启动期在探针模式下**不**自动应用真实设置：否则探针一跑就创建托盘图标、抢占全局
@@ -1005,7 +842,7 @@ if (!gotLock) {
         // M2 的断言要看「上游实际收到了什么头」，所以夹具的观测点必须传进去
         seen: probeServer!.seen,
         // 真实 sidecar（不是 mock）：M2 要验的就是「同一份 Rust 代理能被 Electron 驱动起来」
-        startSidecar: launchSidecar,
+        startSidecar: nav.launchSidecar,
         // M3 断言用的真实入口（勾的是与设置窗完全相同的那些函数）
         m3: {
           storeLoc,
@@ -1098,68 +935,8 @@ if (!gotLock) {
     destroyTray()
     // 悬浮窗几何（吸附态展开坐标 / 尺寸）随退出落盘；随后其 BrowserWindow 随进程一起回收。
     persistFloatGeometry()
-    stopActiveSidecar()
+    nav.stopActiveSidecar()
     // 多页签：显式回收所有内容视图（官方明示视图不随窗口销毁自动回收）
     tabManager?.destroyAllTabs()
   })
-}
-
-// ---------- 7. 启动日志：绿色版排障的第一现场（**仅在 debug 打开时可见**） ----------
-/** 文件日志落点的一行描述（debug 关闭时如实说明，而不是打印一个并不存在的路径）。 */
-function describeFileLog(log: FileLogHandle | null): string {
-  if (!log) return '(debug 未开启，未落盘)'
-  return `${log.path}${log.ok ? '' : `  ✗ 不可写（${log.error ?? '未知原因'}）`}`
-}
-
-function logStartup(): void {
-  console.log('[web2app] 启动信息')
-  console.log(`  入口目录      : ${paths.root}`)
-  console.log(
-    `  分发形态      : ${
-      paths.forcedSystem
-        ? '安装版 (NSIS，系统管理数据目录)'
-        : paths.selfExtracting
-          ? '单文件自解压 (portable)'
-          : '解压目录 (zip/dir)'
-    }`,
-  )
-  console.log(
-    `  数据目录      : ${paths.dataDir}  (mode=${paths.mode}${
-      paths.fellBack ? ', 已回退' : ''
-    }${paths.forcedSystem ? ', 强制系统目录（忽略 data_dir）' : ''})`,
-  )
-  console.log(`  配置文件      : ${loaded.path ?? '(未找到，使用默认值)'}`)
-  console.log(`  应用名 / 标题 : ${cfg.app_name} / ${cfg.title}`)
-  console.log(`  注入脚本目录  : ${injectDir()}`)
-  // 诊断开关本身必须写进日志：否则「日志文件里怎么只有一行 header / 怎么压根没有日志文件」
-  // 这类追问会反复出现 —— 用户看不出是「开关没开」还是「写盘失败」。
-  console.log(`  诊断日志      : ${DEBUG ? '已开启' : '未开启（config.json 的 debug 或命令行 --debug）'}`)
-  // 文件日志是用户侧唯一能提供证据的东西，路径必须打在**第一行区域**（用户直接截图给我们）
-  console.log(`  日志文件      : ${describeFileLog(fileLog)}`)
-  console.log(`  外部代理      : ${proxy.proxyServer ?? '(未启用)'}`)
-  // M3：配置文件的落点必须写进日志 —— 「我明明勾了托盘，重启又没了」这类反馈，
-  // 只有靠这一行才能一眼看出是写到了哪儿、以及有没有读到旧版的文件。
-  // ⚠️ 这一个文件同时装着设置与窗口几何（2026-09-23 合并），所以「窗口尺寸没记住」
-  //    也看这一行 + 上面那条「窗口几何：<原因>」。
-  console.log(
-    `  配置文件      : ${loadedSettings.source ?? '(未找到，使用默认值)'}` +
-      `  → 写入 ${storeLoc.write}`
-  )
-  console.log(`  唤醒快捷键    : ${hotkeyLabel(runtimeSettings.wake_hotkey)}`)
-  console.log(
-    `  托盘 / 关闭行为: ${runtimeSettings.tray_enabled ? '已启用' : '未启用'}` +
-      ` / ${runtimeSettings.tray_enabled && runtimeSettings.minimize_on_close ? '关闭时隐藏到托盘' : '关闭即退出'}`
-  )
-  console.log(
-    `  悬浮图标      : ${runtimeSettings.float_enabled && process.platform === 'win32' ? '已启用' : '未启用'}`
-  )
-  // 需要 sidecar 时把它的位置和存在性写进日志：这一步「找不到」是最常见的配置类故障，
-  // 而失败文案是收敛过的（不暴露路径），所以启动日志是唯一能直接看到原因的地方。
-  if (needsSidecar(cfg)) {
-    const exe = locateSidecar(app.getAppPath(), process.resourcesPath)
-    console.log(`  本地代理组件  : ${exe ?? '(未找到！请先 cargo build --release -p w2a-proxy)'}`)
-  }
-  console.log(`  web2appExtra  : ${extraJson(cfg)}`)
-  for (const w of loaded.warnings) console.warn(`  ⚠️ ${w}`)
-  for (const w of loadedSettings.warnings) console.warn(`  ⚠️ ${w}`)
 }

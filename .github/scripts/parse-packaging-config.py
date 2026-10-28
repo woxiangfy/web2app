@@ -98,58 +98,44 @@ import sys
 import urllib.request
 
 # ---------------------------------------------------------------------------
-# 契约：默认值表。**顺序即打印顺序**，也等于写进 GITHUB_ENV 的顺序。
-# 布尔字段的默认值必须是真 bool（不是 "false" 字符串）—— 这是本文件的全部意义之一。
+# 契约：默认值表。**机器可读唯一真源是 `scripts/packaging-fields.json`**（21 字段：
+# name / kind / default / 需出现的真源），本文件与 Node 复刻（scripts/packlib/
+# constants.mjs）、契约守卫（webview-app/src/contract_tests/packaging_field_contract.rs）
+# 都从它加载 —— 加字段只改那一份 JSON + 各真源实现，不再逐处改字段表副本。
+#
+# **顺序即打印顺序**（= 写进 GITHUB_ENV 的顺序）= 字段表里的排列顺序。
+# 布尔字段（kind=「bool」）的默认值必须是真 bool（不是 "false" 字符串）——
+# 这是本文件的全部意义之一。
+#
+# 各字段语义速记（完整契约见 docs/packaging-config.md）：
+#   version            打包产物版本（Tauri 写入 tauri.conf.json 的 version；Electron 经
+#                      extraMetadata.version 覆盖 package.json）。只接受三段纯数字（见
+#                      normalize_version）—— Windows MSI ProductVersion 与 exe VERSIONINFO
+#                      都不认 semver 预发布标签 / v 前缀 / 四段。
+#   proxy_bypass       ⚠️ 两壳必须一致：webview-app 的 config.rs 编译期默认值、electron 的
+#                      DEFAULTS 都用这同一个串。留空 = 不下发 bypass 参数（即空值不覆盖
+#                      Chromium 默认）。
+#   data_dir           默认 "data" = 程序所在目录（exe 目录）下的 data\，跟着程序走；
+#                      空串 = 系统默认程序目录（%LOCALAPPDATA%\<app_name>）。
+#                      ⚠️ 空串在本字段里**是有含义的取值**，不是「未设置」——两壳的读取
+#                      都必须保留空串，Rust 侧因此不能用 env_str!（它把空串当未设置）。
+#   mobile_bar         移动端底栏（Android/iOS 专用）：桌面壳（Windows Tauri / Electron）
+#                      即使打包时注入了 true 也一律忽略（Rust 侧常量按 #[cfg(mobile)]
+#                      编译）。默认必须 false（默认开启 = 凭空给每个移动端包加一条底栏）。
+#   debug              诊断日志开关（默认关）：false = 两壳都不写启动日志、也不输出诊断；
+#                      true = 写 <数据目录>\logs\startup.log 并同时打印。详见文件头。
+#                      ⚠️ 默认必须是 false：默认开启会在用户的数据目录里留下交付物以外的
+#                      文件（非期望行为）。
+#   android_permissions 仅 Android：按需向 AndroidManifest.xml 注入运行时权限声明。白名单
+#                      三值 "camera" / "microphone" / "location"（见
+#                      normalize_android_permissions），默认 [] = 不声明任何可选权限。
+#                      由 patch-android-permissions.py 消费 GITHUB_ENV 的 ANDROID_PERMISSIONS。
 # ---------------------------------------------------------------------------
-DEFAULTS: dict[str, object] = {
-    "app_url": "",
-    "app_name": "Web2App",
-    "title": "",
-    # 打包产物版本（Tauri 写入 tauri.conf.json 的 version；Electron 经 extraMetadata.version
-    # 覆盖 package.json）。只接受三段纯数字（见 normalize_version）—— Windows MSI
-    # ProductVersion 与 exe VERSIONINFO 都不认 semver 预发布标签 / v 前缀 / 四段。
-    "version": "0.0.1",
-    "extra": {},
-    "icon_url": "",
-    "proxy_enabled": False,
-    "proxy_http": "",
-    "proxy_https": "",
-    # ⚠️ 两壳必须一致：webview-app 的 config.rs 编译期默认值、electron 的 DEFAULTS
-    #    都用这同一个串。留空 = 不下发 bypass 参数（即空值不覆盖 Chromium 默认）。
-    "proxy_bypass": "localhost;127.0.0.1;<-loopback>",
-    # 数据目录：默认 "data" = 程序所在目录（exe 目录）下的 data\，跟着程序走；
-    # 空串 = 系统默认程序目录（%LOCALAPPDATA%\<app_name>），不受程序位置影响。
-    # ⚠️ 空串在本字段里**是有含义的取值**，不是「未设置」——两壳的读取都必须保留空串，
-    #    Rust 侧因此不能用 env_str!（它把空串当未设置）。
-    "data_dir": "data",
-    "tabs_enabled": False,
-    # 移动端底栏（mobile_bar）：仅移动端（Android/iOS）生效的**底部导航栏**模式。
-    #   true  = 屏幕底部常驻一条导航条：首页（回到 app_url）/ 后退 / 前进 / 列表。
-    #           「列表」按钮只在**当前平台真的有页签可切**时才渲染（见下）。
-    #   false = 与历史一致：移动端没有任何壳自绘控件（默认）。
-    # ⚠️ 它是**移动端专用**：Windows / Electron 桌面壳即使打包时注入了 true 也一律忽略
-    #    （Rust 侧常量按 `#[cfg(mobile)]` 编译，桌面目标上不存在这条代码路径），
-    #    这样「配了但不生效」不会退化成一条看不见的静默行为。
-    "mobile_bar": False,
-    "public_key": "",
-    "resolve_secret": "",
-    # 诊断日志开关（默认关）：false = 两壳都不写启动日志、也不输出诊断到 stdout/stderr；
-    # true = 写 <数据目录>\logs\startup.log 并同时打印。详见文件头。
-    # ⚠️ 默认必须是 false：默认开启会在用户的数据目录里留下交付物以外的文件（非期望行为）。
-    "debug": False,
-    "android_keystore_base64": "",
-    "android_key_alias": "",
-    "android_keystore_password": "",
-    "android_key_password": "",
-    # 仅 Android：按需向生成工程的 AndroidManifest.xml 注入运行时权限声明。
-    #   白名单三值 "camera" / "microphone" / "location"（见 normalize_android_permissions），
-    #   默认 [] = 不声明任何可选权限（wry 对 Manifest 未声明的 resource 一律 deny，
-    #   而全量声明会让 Play 审核额外解释用途 ⇒ 按需声明，不做一刀切）。
-    #   由 patch-android-permissions.py 消费经 GITHUB_ENV 下发的 ANDROID_PERMISSIONS。
-    "android_permissions": [],
-}
+_FIELDS_PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "packaging-fields.json"
+_FIELDS: list[dict] = json.loads(_FIELDS_PATH.read_text(encoding="utf-8"))["fields"]
 
-BOOL_KEYS = {"proxy_enabled", "tabs_enabled", "mobile_bar", "debug"}
+DEFAULTS: dict[str, object] = {f["name"]: f["default"] for f in _FIELDS}
+BOOL_KEYS = {f["name"] for f in _FIELDS if f["kind"] == "bool"}
 # 需要保持 JSON 结构（对象/数组/标量）的字段：序列化成单行 JSON 文本进 env，
 # 供 Rust 侧以 EXTRA 编译期变量原样内联成 `window.web2appExtra = <JSON>;`。
 JSON_KEYS = {"extra"}

@@ -33,9 +33,9 @@
  * 旧的 `window-state.json` **不再读也不再写**（已确认不做迁移）—— 升级后窗口会回一次
  * 默认尺寸/位置，那个文件就此成为死文件，可手工删除。
  *
- * ⚠️⚠️ 合并后的唯一真风险是**两段互相覆盖**：写入方有两个（设置窗保存 vs 窗口关闭时记几何），
- * 从前各写各的文件天然隔离，现在共用一个文件。所以两个写入方**都必须**走
- * [`saveSettings`] / `saveWindowState` 这条「读盘 → 只替换自己那一段 → 写回」的路径
+ * ⚠️⚠️ 合并后的唯一真风险是**两段互相覆盖**：写入方有三个（设置窗保存 / 窗口关闭时记几何 /
+ * 悬浮球几何落盘），从前各写各的文件天然隔离，现在共用一个文件。所以三个写入方**都必须**走
+ * [`updateDocument`] 这条「读盘 → 只替换自己那一段 → 写回」的唯一路径
  * —— 拿内存里的整份文档直接 `writeFileSync` 会在「挪了下窗口 + 改了设置」同时发生时
  * 静默吃掉其中一方。（`window-state.ts` 的文件头正是用这个理由论证过「不该合并」；
  * 既然合并了，就用读-改-写把风险挡掉，并由探针钉住。）
@@ -53,7 +53,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { sanitizeDirName, toStr } from './config'
+import { sanitizeDirName, toStr } from './util'
 // Hotkey 类型 / accelerator 互转 / 文案规则归 hotkey.ts；本文件只负责文档持久化与宽容解析。
 import { DEFAULT_HOTKEY, type Hotkey } from './hotkey'
 
@@ -301,20 +301,35 @@ export function writeDocument(
 }
 
 /**
- * 保存设置。返回实际写入路径；写失败时抛出。
+ * 读-改-写的**唯一**入口：读盘 → 只替换 `patch` 里出现的段 → 写回。
  *
- * ⚠️⚠️ **读-改-写**：设置与窗口几何同住一个 `settings.json`，整体覆盖会把「挪窗口」
- * 那一方刚写进去的几何抹掉（这正是当初分成两个文件的理由；既然合并了，
- * 就必须在这里把风险挡掉）。`window-state.ts` 的 `saveWindowState` 同理。
+ * `patch` 里**出现**的键（含显式 `undefined`）表示「这一段要改」，缺省的键原样保留
+ * （`window` / `float_window` 保持 `unknown` 原样透传，语义解释归各自的模块）。
+ * 三个写入方（[`saveSettings`] / `window-state.ts::saveWindowState` /
+ * `float-window.ts::persistGeometry`）都收敛到这里，各自只替换自己那一段，
+ * 「挪窗口 + 改设置」同时发生时谁也不会吃掉谁。
  * ⚠️ 「读」走 [`readRawForUpdate`]（候选顺序，主位置优先）而不是写入位置：
  * 落点刚搬到数据目录时，写入位置还没有文件，老设置还在旧位置 —— 见那里的说明。
  */
-export function saveSettings(loc: StoreLocation, s: Settings): string {
+export function updateDocument(
+  loc: StoreLocation,
+  patch: { settings?: Settings; window?: unknown; float_window?: unknown }
+): string {
   const cur = readRawForUpdate(loc)
-  // 两段几何都原样保留：保存设置不能把主窗口 / 悬浮窗几何抹掉。
   return writeDocument(loc, {
-    settings: s,
-    window: cur[WINDOW_KEY],
-    float_window: cur[FLOAT_WINDOW_KEY],
+    settings: patch.settings ?? parseSettings(cur),
+    window: 'window' in patch ? patch.window : cur[WINDOW_KEY],
+    float_window: 'float_window' in patch ? patch.float_window : cur[FLOAT_WINDOW_KEY],
   })
+}
+
+/**
+ * 保存设置。返回实际写入路径；写失败时抛出。
+ *
+ * 只替换设置段；两段几何经 [`updateDocument`] 原样保留（整体覆盖会把「挪窗口」
+ * 那一方刚写进去的几何抹掉 —— 这正是当初分成两个文件的理由；既然合并了，
+ * 就必须在这里把风险挡掉）。`window-state.ts` 的 `saveWindowState` 同理。
+ */
+export function saveSettings(loc: StoreLocation, s: Settings): string {
+  return updateDocument(loc, { settings: s })
 }

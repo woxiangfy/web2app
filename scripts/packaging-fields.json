@@ -1,0 +1,152 @@
+{
+  "schema": 1,
+  "description": "打包配置 21 字段的**机器可读唯一真源**（name / kind / default / 需出现的真源）。Python 解析器（.github/scripts/parse-packaging-config.py）与 Node 复刻（scripts/packlib/constants.mjs）从本表加载 DEFAULTS / BOOL_KEYS；webview-app/src/contract_tests/packaging_field_contract.rs 按本表做数据驱动守卫。字段语义 / 取值链 / 校验规则见 docs/packaging-config.md。加字段 = 改本表 + 各真源实现，不再逐处改字段表副本。",
+  "kinds": {
+    "bool": "真布尔（禁止 \"true\" 字符串）",
+    "string": "字符串",
+    "list": "字符串数组",
+    "object": "任意 JSON 对象（extra：任意 JSON 结构）"
+  },
+  "sources": [
+    "python_parser",
+    "node_parser",
+    "electron_ts",
+    "example_tauri",
+    "example_electron"
+  ],
+  "source_notes": {
+    "python_parser": "parse-packaging-config.py 的 DEFAULTS/BOOL_KEYS（经本表加载）",
+    "node_parser": "scripts/packlib/constants.mjs 的 DEFAULTS/BOOL_KEYS（经本表加载）",
+    "electron_ts": "electron-app/src/main/config.ts（AppConfig + ANDROID_ONLY_KEYS，禁改，由守卫覆盖）",
+    "example_tauri": "webview-app/config.example.json（21 键全量样例，禁改）",
+    "example_electron": "electron-app/config.example.json（17 键样例：android_* 签名 4 键含明文密码，不随 Windows 包分发 ⇒ 不进本样例）"
+  },
+  "fields": [
+    {
+      "name": "app_url",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "app_name",
+      "kind": "string",
+      "default": "Web2App",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "title",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "version",
+      "kind": "string",
+      "default": "0.0.1",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "extra",
+      "kind": "object",
+      "default": {},
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "icon_url",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "proxy_enabled",
+      "kind": "bool",
+      "default": false,
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "proxy_http",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "proxy_https",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "proxy_bypass",
+      "kind": "string",
+      "default": "localhost;127.0.0.1;<-loopback>",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "data_dir",
+      "kind": "string",
+      "default": "data",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "tabs_enabled",
+      "kind": "bool",
+      "default": false,
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "mobile_bar",
+      "kind": "bool",
+      "default": false,
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "public_key",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "resolve_secret",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "debug",
+      "kind": "bool",
+      "default": false,
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    },
+    {
+      "name": "android_keystore_base64",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri"]
+    },
+    {
+      "name": "android_key_alias",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri"]
+    },
+    {
+      "name": "android_keystore_password",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri"]
+    },
+    {
+      "name": "android_key_password",
+      "kind": "string",
+      "default": "",
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri"]
+    },
+    {
+      "name": "android_permissions",
+      "kind": "list",
+      "default": [],
+      "sources": ["python_parser", "node_parser", "electron_ts", "example_tauri", "example_electron"]
+    }
+  ]
+}

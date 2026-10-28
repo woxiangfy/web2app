@@ -9,7 +9,7 @@
     "postinstall": "install-electron",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "build": "tsc",
-    "unit": "node --test \"test/**/*.test.ts\"",
+    "unit": "node --import ./test/ts-resolver.mjs --test \"test/**/*.test.ts\"",
     "sidecar": "cargo build --release --manifest-path ../webview-app/Cargo.toml -p w2a-proxy",
     "stage": "node scripts/stage-assets.cjs",
     "shot": "node scripts/diag/layout-shot.cjs",

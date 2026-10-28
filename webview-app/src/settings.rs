@@ -265,7 +265,7 @@ fn open_settings_window_on_main(app: &AppHandle) {
         .min_inner_size(460.0, 400.0)
         .resizable(true)
         .decorations(false)
-        .background_color(crate::bootstrap::SPLASH_BG)
+        .background_color(crate::nav::SPLASH_BG)
         .center()
         .build()
     {

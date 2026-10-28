@@ -157,6 +157,27 @@ export function safeName(raw) {
 }
 
 /**
+ * 安装名 → Electron 的 `appId`（必须**随应用变化**，不能沿用 electron-builder.yml 里的固定值）。
+ *
+ * 为什么必须唯一：NSIS 用 `UUID.v5(appId)` 算 `APP_GUID`，而 `APP_GUID` 决定
+ * `HKCU\Software\{GUID}` 这个安装登记键（`InstallLocation`）与卸载项。appId 写死 ⇒
+ * 本仓库出的每个应用共用同一 GUID ⇒ 先装 A、再装 B 时 B 的安装包读到 A 的安装目录，
+ * 接着被 `assistedInstaller.nsh::instFilesPre` 追加一层 `\<B 的 APP_FILENAME>`，
+ * 默认路径变成 `...\Programs\<A>\<B>` 这种套娃（2026-10-27 实测：
+ * `AppData\Local\Programs\osfipin.note\osfipin.mark`）。
+ *
+ * @param {string} name 已清洗的安装名（`safeName()` 的产物，如 `osfipin.note`）
+ * @returns {string} 形如 `com.web2app.osfipin.note`；只保留 `[a-z0-9.-]`
+ */
+export function appIdFor(name) {
+  const seg = String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+  return `com.web2app.${seg || 'web2app'}`
+}
+
+/**
  * 两壳本地打包的默认产物目录：仓库根 `tests/pack/electron/` 与 `tests/pack/tauri/`。
  * **刻意分子目录** —— 两壳的绿色版都叫 `<name>.exe`（electron-builder portable 同样产出
  * `<name>.exe`），混放会互相覆盖。整棵 `/tests/` 被根 .gitignore 忽略，产物不进版本库。

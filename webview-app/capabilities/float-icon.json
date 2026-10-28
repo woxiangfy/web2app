@@ -1,9 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "float-icon-content",
-  "description": "桌面悬浮球（窗口 label 为 float）加载的是内置本地页 floaticon://localhost/（见 src/floaticon.html），不是远程网页：单击球**切换主窗口显隐**（v1.71 起为 toggle，此前只是「调出来」）、拖动 / 吸附 / 悬停 / 右键关闭悬浮图标全部以核心事件上报（八个：float-down / float-move / float-cancel / float-drag-end / float-peek-enter / float-peek-leave / float-hide / float-click），窗口的实际移动与显隐由 Rust 完成（其中 float-hide = 球上右键：**关闭悬浮图标功能并唤回主窗口**，见 floatwin::disable_float_from_icon）。这里只授予最小权限 core:event:allow-emit 且只匹配 float 窗口；没有 remote 段（不接受任何远程 origin），窗口控制类权限一律不给。发送者伪造由事件 payload 的一次性 token 兜底（见 floatwin::handle_event）。",
-  "windows": ["float"],
-  "permissions": [
-    "core:event:allow-emit"
-  ]
-}

@@ -10,7 +10,6 @@
  */
 import { protocol } from 'electron'
 
-import { FALLBACK_HTML } from './settings-window'
 import type { PendingFail } from './splash-page'
 
 export interface ProtocolDeps {
@@ -25,6 +24,12 @@ export interface ProtocolDeps {
   onSplashRetry: () => void
   /** 读取设置页 HTML（单一真源 webview-app/dist/settings.html），缺失给 null。 */
   readSettingsHtml: () => string | null
+  /**
+   * 设置页资源缺失时的内置精简页（资源本体留在 settings-window.ts 的 FALLBACK_HTML，
+   * 经 deps 注入 —— 2026-10-24 批次⑤ P2-8：protocols 是底层协议分发，不得反向依赖
+   * 设置窗实现）。
+   */
+  fallbackHtml: string
   /** 读取注入资产（shell.html / floaticon.html 等），缺失给 null。 */
   readInject: (name: string) => string | null
   /**
@@ -56,7 +61,7 @@ export function registerProtocols(deps: ProtocolDeps): void {
     if (!html) {
       console.warn('[web2app] 未找到 settings.html，设置窗使用内置精简页')
     }
-    return new Response(html ?? FALLBACK_HTML, { headers: HTML_HEADERS })
+    return new Response(html ?? deps.fallbackHtml, { headers: HTML_HEADERS })
   })
 
   // shell:// → 多页签壳页面（单一真源：webview-app/src/shell.html，零改动）

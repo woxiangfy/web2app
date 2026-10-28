@@ -9,6 +9,7 @@ import { ELECTRON, ROOT, WEBVIEW, rel } from './paths.mjs'
 import { toConfigJson } from './parser.mjs'
 import {
   ELECTRON_OUT_DEFAULT,
+  appIdFor,
   have,
   isDeleteBlocked,
   pngToIco,
@@ -138,6 +139,12 @@ export async function doElectron(args, merged, env, name, rr) {
     '--win',
     ...forms,
     `-c.productName=${name}`,
+    // ⚠️⚠️ appId 必须随安装名走（不能沿用 electron-builder.yml 里写死的 com.example.web2app）：
+    //    NSIS 由 `UUID.v5(appId)` 生成 APP_GUID，它决定 HKCU\Software\{GUID}\InstallLocation
+    //    与卸载注册项。appId 固定 ⇒ 本仓库出的所有应用共用同一 GUID ⇒ 先装 Note 再装 Mark
+    //    时，第二个安装包继承第一个的安装目录，再被 assistedInstaller.nsh 的 instFilesPre
+    //    追加一层 APP_FILENAME ⇒ 默认路径套娃成 ...\Programs\osfipin.note\osfipin.mark。
+    `-c.appId=${appIdFor(name)}`,
     // 版本来自配置 JSON 的 version（默认 0.0.1）：extraMetadata 合并进打包用的
     // package.json，产物文件名（zip/portable/setup）与 exe 版本资源都取它。
     `-c.extraMetadata.version=${merged.version}`,

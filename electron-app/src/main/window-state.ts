@@ -8,7 +8,7 @@
  *     用户要求「只需要一个 JSON」）。旧的 `window-state.json` **不再读也不再写**，升级后
  *     窗口会回一次默认尺寸/位置。类型与读写入口都在 settings.ts。
  *
- * ⚠️⚠️ 所以写几何**必须走读-改-写**（`readRawForUpdate` → 改 `window` → `writeDocument`）：
+ * ⚠️⚠️ 所以写几何**必须走读-改-写**（`updateDocument` 统一收敛，只替换 `window` 段）：
  *     拿内存里的整份文档整体覆盖，会把用户刚在设置窗里保存的三个开关抹掉。
  *     反过来 `settings.ts::saveSettings` 同理保留 `window` 段 —— 两侧都靠这个约定活着。
  *
@@ -21,11 +21,8 @@
 import { screen, type BrowserWindow } from 'electron'
 
 import {
-  FLOAT_WINDOW_KEY,
   loadDocument,
-  parseSettings,
-  readRawForUpdate,
-  writeDocument,
+  updateDocument,
   type StoreLocation,
 } from './settings'
 
@@ -77,16 +74,10 @@ export function loadWindowState(loc: StoreLocation): { state: WindowState | null
 /** 写几何（失败只在控制台留痕：为了记个窗口尺寸让用户看到报错不值得）。 */
 export function saveWindowState(loc: StoreLocation, st: WindowState): void {
   try {
-    // ⚠️⚠️ 读-改-写，只替换 `window` 段：整体覆盖会把用户刚保存的设置抹掉。
-    // ⚠️ 「读」走 readRawForUpdate（候选顺序），不是写入位置 —— 落点刚搬到数据目录时
-    //    写入位置还没有文件，设置还在旧位置，只认写入位置会把它们清零。
-    const cur = readRawForUpdate(loc)
-    // 顺带保留悬浮窗几何段（否则挪主窗口落盘会把它抹掉）。
-    writeDocument(loc, {
-      settings: parseSettings(cur),
-      window: st,
-      float_window: cur[FLOAT_WINDOW_KEY],
-    })
+    // ⚠️⚠️ 读-改-写（updateDocument 统一收敛），只替换 `window` 段：整体覆盖会把用户
+    // 刚保存的设置抹掉。⚠️ 「读」走候选顺序（readRawForUpdate），不是写入位置 ——
+    // 落点刚搬到数据目录时写入位置还没有文件，设置还在旧位置，只认写入位置会把它们清零。
+    updateDocument(loc, { window: st })
   } catch (e) {
     console.warn(`[web2app] 保存窗口几何失败：${(e as Error).message}`)
   }

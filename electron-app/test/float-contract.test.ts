@@ -31,6 +31,7 @@ const floatLayout = readFileSync(join(main, 'float-layout.ts'), 'utf8')
 const protocols = readFileSync(join(main, 'protocols.ts'), 'utf8')
 const floatController = readFileSync(join(main, 'settings-controller.ts'), 'utf8')
 const indexTs = readFileSync(join(main, 'index.ts'), 'utf8')
+const lifecycleTs = readFileSync(join(main, 'lifecycle.ts'), 'utf8')
 const floatPreload = readFileSync(join(renderer, 'float-preload.ts'), 'utf8')
 const floatIconHtml = readFileSync(join(tauriSrc, 'floaticon.html'), 'utf8')
 const settingsHtml = readFileSync(join(tauriSrc, '..', 'dist', 'settings.html'), 'utf8')
@@ -38,7 +39,6 @@ const settingsPreload = readFileSync(join(renderer, 'settings-preload.ts'), 'utf
 const settingsWindow = readFileSync(join(main, 'settings-window.ts'), 'utf8')
 const smokeTs = readFileSync(join(main, 'smoke.ts'), 'utf8')
 const stage = readFileSync(join(scripts, 'stage-assets.cjs'), 'utf8')
-const capability = readFileSync(join(tauriCaps, 'float-icon.json'), 'utf8')
 
 /** 取引号内的 JS 字符串字面量出现次数（防止把同名子串误判）。 */
 const countQuoted = (src: string, lit: string): number =>
@@ -130,15 +130,132 @@ test('球必须铺满活柱：球径 == 窗宽（= 区域圆直径），否则�
     css.includes(`width: ${w}px;`) && css.includes(`height: ${w}px;`),
     `#w2f-ball 的宽高必须都等于 ${w}px（= DEFAULT_FLOAT_W = 区域圆直径）：比它小就会留出透明环带`
   )
-  assert.ok(
-    !css.includes('scale('),
-    '#w2f-ball 不得用 transform: scale() 放大：球已铺满活柱，放大只会被区域裁掉并重新露出环带'
-  )
-  // 半隐藏态的「压暗」必须用 filter —— opacity 会让整颗球半透明，等于把刚堵上的保护自己拆掉。
+  // 【改写旧断言①】`!css.includes('scale(')`（不得 transform: scale() 放大）→ v1.81 起
+  // 「变形」类属性在 #w2f-ball 全部规则里整体禁止（translate 百分比平移 / scale 放大都在内，
+  // 见下方「#w2f-ball 规则禁止合成」）：球面尺寸只由 layoutBall 按整数物理像素摆放。
+  // 【改写旧断言②③】半隐藏「filter: brightness() 压暗 / 不得 opacity」→ 压暗改由 collapsed
+  // 盘面位图变体承担，状态差异**只换 background-image 这一条声明**（合成滤镜压暗 / 半透明
+  // 变淡都会重新引入合成层毛刺或把窗口底色透出来）。
   const collapsed = floatIconHtml.slice(floatIconHtml.indexOf('html.w2f-collapsed #w2f-ball {'))
   const collapsedCss = collapsed.slice(0, collapsed.indexOf('}'))
-  assert.ok(collapsedCss.includes('filter: brightness('), '半隐藏态必须用 filter: brightness() 压暗')
-  assert.ok(!collapsedCss.includes('opacity'), '半隐藏态不得用 opacity（会把窗口底色透出来）')
+  const collapsedDecls = collapsedCss
+    .slice(collapsedCss.indexOf('{') + 1)
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  assert.deepEqual(
+    collapsedDecls,
+    ['background-image: var(--w2f-disc-collapsed)'],
+    '半隐藏态的样式差异必须只有「换 collapsed 盘面位图」一条声明（不得再靠合成滤镜压暗 / 半透明变淡）'
+  )
+})
+
+/** 剥 CSS 注释后取 <style> 里所有选择器含 `#w2f-ball` 的规则块（选择器 + 声明体）。 */
+const ballCssBlocks = (): string[] => {
+  const style = floatIconHtml.slice(floatIconHtml.indexOf('<style>'), floatIconHtml.indexOf('</style>'))
+  const bare = style.replace(/\/\*[\s\S]*?\*\//g, '')
+  return bare.match(/[^{}]*#w2f-ball[^{}]*\{[^{}]*\}/g) ?? []
+}
+
+test('#w2f-ball 规则禁止画圆：不得 border-radius / gradient（圆面由 canvas 超采样位图提供）', () => {
+  // v1.81 根治毛刺：CSS 画圆（圆角裁剪抗锯齿 + 渐变描边抖动）是三源毛刺里的两源，
+  // 盘面改由 canvas 超采样栅格化成一张带 alpha 的位图上屏，浏览器只做位图贴图。
+  // 注释里的解释文字不参与判定（先剥 /* */ 再取规则块）。
+  const blocks = ballCssBlocks()
+  assert.ok(blocks.length >= 4, `#w2f-ball 规则块解析异常（只取到 ${blocks.length} 块）`)
+  for (const b of blocks) {
+    for (const banned of ['border-radius', 'gradient(']) {
+      assert.ok(!b.includes(banned), `#w2f-ball 规则不得出现 ${banned}（画圆交给位图）：${b}`)
+    }
+  }
+})
+
+test('#w2f-ball 规则禁止合成：不得 filter / opacity / transform（状态差异只换 background-image）', () => {
+  // 合成滤镜 / 半透明 / 变形是毛刺源②③：强制合成层的渐变抖动 + 百分比平移在非整数 DPI 下
+  // 落到分数物理像素的阶梯毛刺。三态差异只允许 background-image 换图（三套预渲染位图）。
+  const blocks = ballCssBlocks()
+  assert.ok(blocks.length >= 4, `#w2f-ball 规则块解析异常（只取到 ${blocks.length} 块）`)
+  for (const b of blocks) {
+    for (const banned of ['filter', 'opacity', 'transform']) {
+      assert.ok(!b.includes(banned), `#w2f-ball 规则不得出现 ${banned}（状态差异只换位图）：${b}`)
+    }
+  }
+  // 三态换图接线在场：默认 idle，悬停 / 拖动 hover，半隐藏 collapsed。
+  assert.ok(floatIconHtml.includes('background-image: var(--w2f-disc);'), '默认盘面必须是 idle 变体')
+  assert.ok(floatIconHtml.includes('background-image: var(--w2f-disc-hover);'), '悬停 / 拖动必须换 hover 变体')
+  assert.ok(floatIconHtml.includes('background-image: var(--w2f-disc-collapsed);'), '半隐藏必须换 collapsed 变体')
+})
+
+test('v1.81 盘面位图：canvas 超采样栅格化 + data URL 换图 + 物理像素对齐 + 深浅色 / dpr 跟随', () => {
+  // 毛刺根治链路（三源全消）：超采样圆盘（覆盖率抗锯齿）→ 下采样到整数物理像素 →
+  // 图标 drawImage 烘进同一离屏画布 → toDataURL 作 background-image；摆放按整数物理
+  // 像素算完再 /dpr 回写。任一环节断掉都会退回 CSS 画圆的老毛病（肉眼看不出、单测不红）。
+  assert.ok(floatIconHtml.includes('var SUPERSAMPLE = 8;'), '必须有超采样倍率常量（圆缘覆盖率抗锯齿的来源）')
+  assert.ok(
+    floatIconHtml.includes('var sizeDev = Math.round(BALL_SIZE * dpr);'),
+    '位图边长必须是 Math.round(BALL_SIZE * dpr) 整数物理像素'
+  )
+  assert.ok(floatIconHtml.includes("toDataURL('image/png')"), '盘面必须导出 data URL 位图')
+  assert.ok(floatIconHtml.includes('g2.drawImage(c1, 0, 0, sizeDev, sizeDev)'), '超采样画布必须下采样到 sizeDev')
+  assert.ok(
+    floatIconHtml.includes('g2.drawImage(iconImg, off, off, iconDev, iconDev)'),
+    '图标必须 drawImage 烘进同一离屏画布（不是页面叠第二层）'
+  )
+  // 物理像素对齐：左 / 上 / 宽 / 高都按整数物理像素算完再 /dpr 回写 CSS 像素。
+  for (const lit of [
+    "ball.style.left = (xDev / dpr) + 'px';",
+    "ball.style.top = (yDev / dpr) + 'px';",
+    "ball.style.width = (sizeDev / dpr) + 'px';",
+    "ball.style.height = (sizeDev / dpr) + 'px';",
+  ]) {
+    assert.ok(floatIconHtml.includes(lit), `layoutBall 必须整数物理像素对齐（缺 ${lit}）`)
+  }
+  // 三套变体预渲染写自定义属性；hover 变体 = 图标 36→37px（不是合成提亮）。
+  assert.ok(floatIconHtml.includes("root.style.setProperty('--w2f-disc'"), '必须写 idle 盘面变体')
+  assert.ok(floatIconHtml.includes("root.style.setProperty('--w2f-disc-hover'"), '必须写 hover 盘面变体')
+  assert.ok(floatIconHtml.includes("root.style.setProperty('--w2f-disc-collapsed'"), '必须写 collapsed 盘面变体')
+  assert.ok(
+    floatIconHtml.includes('var ICON_IDLE = 36;') && floatIconHtml.includes('var ICON_HOVER = 37;'),
+    'hover 变体必须是图标 36→37px（不得再用合成滤镜提亮）'
+  )
+  // 跟随系统深浅色（平涂白 / 黑底盘 + 1px 描边）+ 切换整组重渲染。
+  assert.ok(floatIconHtml.includes("matchMedia('(prefers-color-scheme: dark)')"), '必须跟随系统深浅色')
+  assert.ok(
+    floatIconHtml.includes("mqDark.addEventListener('change', applyVariants)"),
+    '深浅色切换必须整组重渲染三变体'
+  )
+  // dpr 变化（跨屏拖到不同缩放显示器）→ 重渲染 + 重排（resolution 媒体查询 + 重挂）。
+  assert.ok(floatIconHtml.includes('function watchDpr('), '必须监听 devicePixelRatio 变化')
+  assert.ok(floatIconHtml.includes("matchMedia('(resolution: '"), 'dpr 监听用 resolution 媒体查询')
+  // 图标就绪 / 视口变化的重渲染、重排接线在场。
+  assert.ok(floatIconHtml.includes("iconImg.addEventListener('load', applyVariants)"), '图标就绪必须重渲染盘面')
+  assert.ok(floatIconHtml.includes("window.addEventListener('resize', layoutBall)"), '视口变化必须重排物理像素位置')
+})
+
+test('v1.81 四缘吸附：setState 认四值边 + 四个 dock 状态类，主进程几何按轴分派', () => {
+  // 吸附扩为四边（上 / 下沿 y 半隐藏）：页面状态机与主进程几何必须同时认识 top / bottom，
+  // 只改一边的表现是「拖到上 / 下缘不吸附，或半隐藏几何乱跳」。
+  assert.ok(
+    floatIconHtml.includes("s.edge === 'left' || s.edge === 'right' || s.edge === 'top' || s.edge === 'bottom'"),
+    'setState 必须认识四值边（未知值归 none）'
+  )
+  for (const cls of ['w2f-dock-left', 'w2f-dock-right', 'w2f-dock-top', 'w2f-dock-bottom', 'w2f-collapsed']) {
+    assert.ok(floatIconHtml.includes(`'${cls}'`), `floaticon.html 缺少状态类 ${cls}`)
+  }
+  // 主进程侧：恢复 / 松手都必须覆盖上 / 下吸附（缺一边 = 那边永远吸附不上）。
+  assert.ok(
+    floatWin.includes("saved.edge === 'top' || saved.edge === 'bottom'"),
+    'applyInitialGeometry 必须恢复上 / 下吸附态（按轴分派：y 半隐藏、x 钳回）'
+  )
+  assert.ok(floatWin.includes("plan.edge !== 'none'"), 'onDragEnd 必须对四缘吸附统一走吸附分支')
+  // 纯函数层：y 轴镜像与横向钳制在场（x 轴对应物由既有 expandedX / collapsedX 测试钉住）。
+  for (const sig of ['export function expandedY(', 'export function collapsedY(', 'export function clampX(']) {
+    assert.ok(floatLayout.includes(sig), `float-layout 缺少 ${sig}`)
+  }
+  assert.ok(
+    floatLayout.includes("'none' | 'left' | 'right' | 'top' | 'bottom'"),
+    'FloatEdge 必须含 top / bottom（落盘序列化为小写字符串）'
+  )
 })
 
 test('安全：七条特权 IPC 全部经 sender 校验，preload 有主框架门控，球窗透明隔离', () => {
@@ -250,23 +367,19 @@ test('设置页 / 设置 preload / stage：float 接线一处不漏', () => {
   assert.ok(!stage.includes('floatbar.js'), 'stage 清单不得再登记 floatbar.js')
 })
 
-test('Tauri capability：float-icon.json 只授权 float 窗口的核心事件 emit 且无 remote 段', () => {
-  const cap = JSON.parse(capability) as {
-    identifier?: string
-    windows?: string[]
-    permissions?: string[]
-    remote?: { urls?: string[] }
+test('Tauri capability 随球页退役：float-icon.json / float-remote.json 必须不存在', () => {
+  // 【改写旧断言】旧断言钉「float-icon.json 只授权 float 窗口的 event emit 且无 remote 段」——
+  // v1.81 起 Tauri 球改原生分层窗口（WndProc 直收鼠标，不再加载球页），capability 没有了
+  // 授权对象，文件随球页一起退役（与 Tauri 侧 contract_tests::float_capability_files_are_gone
+  // 同口径）；留着只会让权限表与现实漂移，故反向钉住「不得再加回来」。
+  // Electron 球的权限面不受影响：走 float-preload contextBridge 白名单 + sender 校验
+  // （见「安全」条），与 Tauri ACL 无关。
+  for (const name of ['float-icon.json', 'float-remote.json']) {
+    assert.ok(
+      !existsSync(join(tauriCaps, name)),
+      `capabilities/${name} 必须删除：球页已退役，capability 文件没有授权对象，留着就是漂移`
+    )
   }
-  assert.deepEqual(cap.windows, ['float'])
-  assert.ok(cap.permissions?.includes('core:event:allow-emit'))
-  for (const denied of ['core:window:allow-close', 'core:app:allow-invoke']) {
-    assert.ok(!cap.permissions?.includes(denied))
-  }
-  assert.equal(cap.remote, undefined, '球页是本地页，capability 不得再授任何远程 origin')
-  assert.ok(
-    !existsSync(join(tauriCaps, 'float-remote.json')),
-    'capabilities/float-remote.json 必须删除（已被 float-icon.json 取代）'
-  )
 })
 
 test('退出路径：悬浮球的 close 默认转隐藏，但 app 退出必须放行', () => {
@@ -317,16 +430,28 @@ test('v1.70 拖动协议：页面上报屏幕绝对坐标，主进程按抓取�
   // preload / 主进程参数名同步为 sx/sy。
   assert.ok(floatPreload.includes('floatMove: (sx: number, sy: number)'))
   assert.ok(floatWin.includes('onMove(finiteCoord(sx), finiteCoord(sy))'), 'float-move 通道必须把屏幕坐标交给 onMove')
-  // 主进程必须有拖动中软钳制 + 松手自由态钳制。
+  // 主进程必须有拖动中软钳制 + 松手自由态钳制。松手落点决策 P2-4 起收敛在
+  // float-layout.planDrop（纯函数），故钉两半：planDrop 内部仍用 clampFreeInside
+  // 把自由态松手的球钳回显示器（判据在）+ float-window 松手路径经 planDrop 取落点（接线在）。
   assert.ok(floatWin.includes('clampVisible('), '拖动中必须软钳制（留窄边、可跨屏、不甩丢）')
-  assert.ok(floatWin.includes('clampFreeInside('), '自由态松手必须把球完整钳回显示器')
+  assert.ok(floatWin.includes('planDrop(b, mon'), 'onDragEnd 必须经 planDrop 取松手落点')
+  assert.ok(
+    floatLayout.includes('clampFreeInside(b, mon)'),
+    'planDrop 必须用 clampFreeInside 把自由态松手的球完整钳回显示器'
+  )
 })
 
 test('v1.70 悬停缩回：延迟 + 代际 + 真实光标位置校验（治边缘抖动）', () => {
   assert.ok(floatWin.includes('COLLAPSE_DELAY_MS'), '必须经共享常量延迟缩回')
   assert.ok(floatWin.includes('finishPeekLeave'), '必须有延迟到期的统一收口函数')
   assert.ok(floatWin.includes('getCursorScreenPoint'), '到期必须读真实光标位置（在缩回后矩形内则不缩）')
-  assert.ok(floatWin.includes('pointInRect('), '光标位置必须做点包含判定')
+  // P2-4：缩回判定收敛在 float-layout.planPeekCollapse（纯函数），故钉两半：
+  // planPeekCollapse 里做光标点包含判定（判据在）+ finishPeekLeave 把真实光标交给它（接线在）。
+  assert.ok(floatWin.includes('planPeekCollapse('), 'finishPeekLeave 必须经 planPeekCollapse 判定是否缩回')
+  assert.ok(
+    floatLayout.includes('pointInRect(cursor'),
+    'planPeekCollapse 必须用 pointInRect 做光标点包含判定（在缩回后矩形内则不缩）'
+  )
   assert.ok(floatWin.includes('cancelPendingCollapse'), '展开 / 隐藏 / 销毁 / 起拖必须取消排队中的缩回')
 })
 
@@ -436,10 +561,14 @@ test('v1.72 球页 28px 必须等于球边长的一半（防与 PEEK_LOGICAL 数
   )
 })
 
-test('v1.72 capability description 与实现同步（八个事件 + toggle 语义）', () => {
-  const cap = JSON.parse(capability) as { description?: string }
-  const desc = cap.description ?? ''
-  assert.ok(desc.includes('切换主窗口显隐'), 'description 必须写明单击是 toggle 主窗显隐')
+test('v1.72 语义与实现同步（capability 退役后改钉球页）：单击 = 切换主窗显隐 + 八个事件名在场', () => {
+  // 【改写旧断言】旧断言钉 capability description 的文案（「切换主窗口显隐」+ 八个事件名 +
+  // 不得写「单击球调出主窗口」）；capability 随球页退役后（见上一条），这两条语义的
+  // 用户可见文案改钉球页 aria-label，事件面仍钉页面 ↔ 主进程两侧字面量。
+  assert.ok(
+    floatIconHtml.includes('单击显示 / 隐藏主窗口'),
+    '球页 aria-label 必须写明单击是「显示 / 隐藏」切换（不是只调出）'
+  )
   for (const ev of [
     'float-down',
     'float-move',
@@ -450,9 +579,9 @@ test('v1.72 capability description 与实现同步（八个事件 + toggle 语�
     'float-hide',
     'float-click',
   ]) {
-    assert.ok(desc.includes(ev), `capability description 缺事件 ${ev}`)
+    assert.ok(floatIconHtml.includes(`web2app:${ev}`), `球页缺事件 web2app:${ev}`)
   }
-  assert.ok(!desc.includes('单击球调出主窗口'), 'description 不得再写「单击球调出主窗口」')
+  assert.ok(!floatIconHtml.includes('单击球调出主窗口'), '球页不得再写「单击球调出主窗口」')
 })
 
 test('v1.72 球窗圆形区域：setShape(circleShapeRects(...)) 必须存在且必须包在 try/catch 里', () => {
@@ -495,6 +624,12 @@ test('v1.75 关窗驻留：只启用悬浮图标时点 ✕ 必须转隐藏（否
   // ⚠️ 必须**限定在 close 处理器内部**再匹配：`runtimeSettings.float_enabled` 在
   //    index.ts 的启动日志里也出现一次（`悬浮图标 : …`）。对全文 includes 的话，
   //    把 close 判据整段删掉照样能绿 —— 那是自我满足的假守卫。
+  //
+  // 2026-10-24（index.ts 拆分批次）：判据本体抽成了 lifecycle.ts 的纯函数
+  // `closeResidency`（行为由 lifecycle.test.ts 六个用例钉住），故本守卫分两半：
+  //   ① index.ts 的 close 块钉【接线】——必须把 runtimeSettings + process.platform
+  //      交给 closeResidency 并按结论 hide，不得绕开纯函数重新内联、也不得只调不听；
+  //   ② lifecycle.ts 钉【判据仍在】——两条驻留判据缺一即回归真机缺陷。
   const lines = indexTs.slice(indexTs.indexOf("win.on('close'")).split(/\r?\n/)
   const block: string[] = []
   for (const l of lines) {
@@ -502,22 +637,30 @@ test('v1.75 关窗驻留：只启用悬浮图标时点 ✕ 必须转隐藏（否
     if (l === '  })') break
   }
   // 先剥注释再匹配（注释里的解释文字不得满足守卫）。
-  const body = block
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^[ \t]*\/\/[^\n]*$/gm, '')
+  const strip = (src: string): string =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/[^\n]*$/gm, '')
+  const body = strip(block.join('\n'))
   assert.ok(body.includes('win.hide()'), 'close 处理器必须仍在（取块失败要立刻现形）')
   assert.ok(
-    /process\.platform === 'win32' && runtimeSettings\.float_enabled/.test(body),
+    body.includes('closeResidency(runtimeSettings, process.platform)'),
+    '关窗驻留判据必须经 lifecycle.closeResidency 纯函数（不得在 close 里内联/删掉调用）'
+  )
+  assert.ok(
+    body.includes("decision.action === 'hide'"),
+    'close 处理器必须按 closeResidency 的结论分支（hide → preventDefault + win.hide()）'
+  )
+  const life = strip(lifecycleTs)
+  assert.ok(
+    /platform === 'win32' && settings\.float_enabled/.test(life),
     '关窗驻留判据必须含「Windows 且 float_enabled」（与建球的前置条件同一个判据）'
   )
   assert.ok(
-    /runtimeSettings\.tray_enabled && runtimeSettings\.minimize_on_close/.test(body),
+    /settings\.tray_enabled && settings\.minimize_on_close/.test(life),
     '托盘驻留必须保持「两个开关都要」—— 不得被顺手放宽成只看 tray_enabled'
   )
   assert.ok(
-    /if \(trayResident \|\| floatResident\)/.test(body),
-    '两个驻留理由必须并列进同一个分支（任一成立即 preventDefault + hide）'
+    /reasons\.length > 0 \? 'hide' : 'quit'/.test(life),
+    '两个驻留理由必须并列进同一个决策（任一成立即 hide）'
   )
 })
 
@@ -552,6 +695,46 @@ test('v1.75 设置页「退出程序」：HTML 字面量 / 垫片白名单 / 主
       smokeTs.includes(`'${cmd}'`),
       `smoke.ts 的「命令契约」清单缺少 ${cmd}（ALLOWED 里有，清单里必须有）`
     )
+  }
+})
+
+test('设置页命令名三方一致：invoke 字面量 ⊆ 垫片 ALLOWED ⊆ 主进程处理器（六命令全量）', () => {
+  // 「页面字面量 / 垫片白名单 / 主进程 IPC 命令名」三处漏一，表现都只是「按钮点了没反应」——
+  // 编译、单测都不会红（v1.75 的退出按钮就吃过这个亏）。上面那条只钉了 quit_app 一条，
+  // 这里把**全量六命令**的子集契约钉住（来源：架构审查批次④）。
+  // 三边文本常量（settingsHtml / settingsPreload / settingsWindow）复用本文件顶部已加载的。
+  //
+  // 契约方向（缺一即回归）：
+  //   ① 页面 invoke("...") 字面量 ⊆ 垫片 ALLOWED —— 页面调的命令垫片必须放行；
+  //   ② 垫片 ALLOWED ⊆ 主进程 ipcMain.handle('tauri:...') —— 放行的命令必须有人接。
+  // 解析到的集合先做下限断言：正则失配会得到空集合，子集断言会全成真 —— 那是假守卫。
+  const htmlCmds = [...settingsHtml.matchAll(/invoke\("([a-z_]+)"/g)].map((m) => m[1])
+  const allowed = [...settingsPreload.matchAll(/^[ \t]*'([a-z_]+)',$/gm)].map((m) => m[1])
+  const handlers = [...settingsWindow.matchAll(/ipcMain\.handle\('tauri:([a-z_]+)'/g)].map((m) => m[1])
+  assert.ok(htmlCmds.length >= 6, `settings.html 的 invoke 字面量解析异常（只取到 ${htmlCmds.length} 个）`)
+  assert.ok(allowed.length >= 6, `settings-preload 的 ALLOWED 解析异常（只取到 ${allowed.length} 个）`)
+  assert.ok(handlers.length >= 6, `settings-window 的 tauri: 处理器解析异常（只取到 ${handlers.length} 个）`)
+
+  // 六命令全量在场：三边各自都要有（缺谁报谁，不用「集合相等」一刀切 ——
+  // 主进程多注册一条未放行的处理器是死代码，不构成「点了没反应」）。
+  for (const cmd of [
+    'get_settings',
+    'save_settings',
+    'close_settings_window',
+    'clear_web_data',
+    'show_float_window',
+    'quit_app',
+  ]) {
+    assert.ok(htmlCmds.includes(cmd), `settings.html 缺少 invoke("${cmd}")`)
+    assert.ok(allowed.includes(cmd), `settings-preload 的 ALLOWED 缺少 ${cmd}`)
+    assert.ok(handlers.includes(cmd), `settings-window 未注册 tauri:${cmd} 处理器`)
+  }
+
+  for (const cmd of htmlCmds) {
+    assert.ok(allowed.includes(cmd), `settings.html 调用的 ${cmd} 不在垫片 ALLOWED 里（点了没反应）`)
+  }
+  for (const cmd of allowed) {
+    assert.ok(handlers.includes(cmd), `垫片放行的 ${cmd} 没有主进程处理器（命令不存在）`)
   }
 })
 

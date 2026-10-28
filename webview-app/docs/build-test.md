@@ -16,26 +16,27 @@ webview-app/
 ├── src/
 │   ├── main.rs             # 桌面入口（薄壳，装配在 lib.rs）
 │   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
-│   ├── contract_tests.rs   # 静态契约测试（IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 加载层模式标记 / 启动日志归属；仅 cargo test 编译）
+│   ├── contract_tests/     # 静态契约测试（2026-10-25 按领域拆 13 个子模块：IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 页签首页 / 加载层模式标记 / 启动可见性 / 后退守卫 / Android 管线 / 悬浮球 / 启动日志归属 / 移动端底栏与打包字段；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
-│   ├── bootstrap.rs        # 后台解析真实地址 → 就绪后导航
-│   ├── proxy.rs            # 本地反向代理（HTTP + WebSocket 鉴权注入）+ 单元测试
+│   ├── nav.rs              # 导航 / 窗口会话登记数据枢纽（Navigation / BootReady / label 登记 / 导航原语；功能模块一律 → nav）
+│   ├── bootstrap.rs        # 启动编排（后台解析真实地址 → 就绪后导航；对外入口经 nav 的 boot 回调转发）
+│   ├── proxy.rs            # 本地反向代理根（ProxyState / start_proxy / proxy_handler）；子模块 proxy/{auth,ws,headers,tests}.rs（声明带显式 #[path]，sidecar 同源复用）
 │   ├── resolve.rs          # DNS TXT 查询 + 验签解密
 │   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
 │   ├── debug_log.rs        # 诊断日志（dlog! 宏 / 落盘 / 1 MiB 轮转 / mask_url 去凭据 / log_startup 启动信息格式化）
 │   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写；落点 = 数据目录）
 │   ├── settings.rs         # 设置结构、快捷键转换、设置窗口/命令（持久化委托 store）
-│   ├── tabs.rs             # 多页签（宿主窗口 + shell 标签栏 + tab 窗口）
+│   ├── tabs.rs             # 多页签根（docs / 重导出转发）；子模块 tabs/{state,window,ipc,tests}.rs（宿主窗口 + shell 标签栏 + tab 窗口 + IPC 命令）
 │   ├── tray.rs             # 系统托盘
 │   ├── window_state.rs     # 窗口几何：抓取 / 恢复策略（落盘在 store 的 window 段）
 │   ├── webview_hooks.rs    # WebView2 原生事件（鉴权 / 新窗口 / 右键 / 下载）
 │   ├── web_data.rs         # 清除浏览数据（缓存 / Cookie 全清，WebView2 ICoreWebView2Profile2）
 │   ├── save_dialog.rs      # 下载「另存为」原生对话框（IFileSaveDialog）
-│   ├── floatwin.rs         # 桌面悬浮球窗口（建窗 / 显示入口 show_ball / 拖动吸附 / 圆形命中）
+│   ├── floatwin.rs         # 悬浮球根（常量 / FloatState / 几何纯函数四边吸附 / persist）；子模块 floatwin/{events,native,tests}.rs（原生分层球窗 UpdateLayeredBitmap + WndProc 状态机）
 │   ├── floatprobe.rs       # 悬浮球真机合成指针 harness（--float-probe，仅 Windows）
 │   ├── splash.html         # 启动页（内联 titlebar.js，解决首文档无初始化脚本）
 │   ├── shell.html          # 多页签外壳（标签栏）
-│   ├── floaticon.html      # 悬浮球页面（双壳单一真源，透明 + 内置图标）
+│   ├── floaticon.html      # 悬浮球页面（⚠️ v1.81 起 **Electron 专属**：Tauri 球已原生化不加载页面，见 ../AGENTS.md §3.4.1）
 │   ├── titlebar.js         # 自绘标题栏注入脚本（Windows）
 │   ├── mobilebar.js        # 移动端底部导航栏注入脚本（仅移动端；mobile_bar=true 时注入）
 │   ├── loading.js          # 加载层注入脚本
@@ -50,7 +51,7 @@ webview-app/
 │   └── settings.html       # 设置界面 UI 源码（编译期被 include_str! 内嵌，经 settings:// 自定义协议加载）
 ├── tools/                  # 服务端辅助脚本（encrypt_url.py / loading_test.js）
 ├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs / probe_clear_data.rs）
-├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗；tabs-remote.json=多页签 tab-* 远程页，仅授事件发送；float-icon.json=悬浮球窗，仅授 event emit）
+├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗；tabs-remote.json=多页签 tab-* 远程页，仅授事件发送；⚠️ v1.81 起无 float-icon.json —— 悬浮球是原生窗口，不经 WebView IPC）
 ├── icons/                  # 应用图标（icon.ico / icon.png 等）
 ├── txttest_keys/           # 验签测试密钥对（⚠️ **当前工作区已不存在**：私钥被 .gitignore 忽略、目录整体已移除，见 ../docs/txttest-verify-materials.md 的换钥说明）
 └── （CI 与打包工作流已上移至仓库根 `.github/workflows/`，见 [workflows.md](workflows.md)）
@@ -100,7 +101,7 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-12 优化闭环后实测 241 通过 / 6 ignored：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 168；主 crate 合计 171 条，含 `contract_tests` 静态契约守卫）
+cargo test --all                # 全量单元测试（2026-10-25 实测 282 通过 / 6 ignored：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 209；主 crate 含 `contract_tests/` 静态契约守卫 79 条）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 
@@ -109,7 +110,8 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 
 > ⚠️ `src/proxy.rs` 同时被主 crate 与 `crates/proxy-server`（sidecar `w2a-proxy.exe`）经 `#[path]` 复用，
 > 因此**它的单元测试会在两个 crate 各跑一遍**（上表 w2a-proxy 的条数里含同一批代理用例）——新增代理
-> 测试时两个计数会同时 +N，这是预期而非重复实现。
+> 测试时两个计数会同时 +N，这是预期而非重复实现。2026-10-25 P4 拆分后 `proxy.rs` 带 `src/proxy/`
+> 子模块（声明必须带显式 `#[path = "proxy/xxx.rs"]`，否则 `#[path]` 复用的 sidecar 按 `src/` 找文件报 E0583）。
 
 ### 悬浮球真机探针（`--float-probe`，仅 Windows）
 
@@ -118,6 +120,12 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 悬停展开 / 抖动吸收 / 300ms 延迟缩回、单击 toggle 主窗、右键 = 关闭悬浮图标功能并唤回主窗口。
 退出码：`0` = 全过；`>0` = 失败断言条数；`97` = 窗口环境没起来；`98` = 看门狗总超时。
 驱动方式、受限会话 `build()` 挂死的环境抖动与外部重试器自建思路、UDF 落点与断言形态演变 —— 全文见 [float-ball.md](float-ball.md)。
+
+> **口径说明（架构审查 2026-10-25 P3）**：`floatprobe.rs` 的 1,124 行探针代码**常驻生产二进制**
+>（`lib.rs` 仅在 `--float-probe` 参数下进入 run），这是**刻意权衡**而非「测试代码混入产物」——
+> 探针必须在真实打包产物上跑才有说服力（受限会话 / 真实 DPI / 真实命中链路），与 Electron 侧
+> probe 进产物是同一口径（2026-09-29 审查 P1-2 结论）。同理 `examples/` 下的 `probe_*.rs`
+> 只是 cargo example（仅测试目标），不进任何产物。
 
 ## 常见问题
 

@@ -6,6 +6,12 @@
 >
 > 另有一个运行期对等实现：[`electron-app/src/main/config.ts`](../electron-app/src/main/config.ts)
 > （Electron 绿色版读 asar 内的 `config.json`），校验规则逐条对齐。
+>
+> **机器可读真源**：21 字段的字段表（name / kind / default / 需出现的真源）在
+> [`scripts/packaging-fields.json`](../scripts/packaging-fields.json) —— Python 解析器、
+> Node 复刻（`scripts/packlib/constants.mjs`）与契约守卫
+> （`webview-app/src/contract_tests/packaging_field_contract.rs`）共用同一份，字段的
+> **存在性**由守卫按表巡检；本文是字段的**语义 / 契约**文档（取值链、校验规则、多端行为）。
 
 ---
 
@@ -440,10 +446,11 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
 
 **② 打包期默认（脚本读取，3 处）**
 
-3. `.github/scripts/parse-packaging-config.py` 的 `DEFAULTS["proxy_bypass"]`（CI 真源；
-   同文件顶部字段表与文件尾部内置自测还各出现一次）；
-4. `scripts/packlib/constants.mjs` 的 `DEFAULTS.proxy_bypass`（Node 复刻；
-   断言在 `scripts/packlib/selftest.mjs`，`--parity` 另钉住它与第 3 项逐字等价）；
+3. `.github/scripts/parse-packaging-config.py` 的 `DEFAULTS`（CI 真源，值由字段表加载；
+   同文件顶部字段表注释与文件尾部内置自测还各出现一次字面量）；
+4. [`scripts/packaging-fields.json`](../scripts/packaging-fields.json) 的 `proxy_bypass.default`
+   （机器可读真源，两个解析器 `DEFAULTS` 的共同来源；`scripts/packlib/constants.mjs` 与第 3 项
+   都从它加载，断言在 `scripts/packlib/selftest.mjs`，`--parity` 另钉住两解析器逐字等价）；
 5. `electron-app/scripts/stage-assets.cjs` —— 没有 `config.json` 时生成的全字段兜底模板。
 
 **③ 示例 / 工作流 / 文档片段（5 处）**
@@ -452,9 +459,9 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
 7. `electron-app/config.example.json`；
 8. `.github/workflows/generate-signing-key.yml`（签名密钥向导生成给用户的配置模板）；
 9. `.github/workflows/build-custom.yml`（手工触发工作流输入框的注释说明）；
-10. `webview-app/AGENTS.md`（Rust 配置示例里的 `const PROXY_BYPASS` 片段）。
+10. `webview-app/AGENTS.md`（硬约束第 3 条的 `const PROXY_BYPASS` 注记）。
 
-⚠️ `electron-app/config.json`（**未入库**、本地调试用）由 pack-local 打包时按第 4 项规范化
+⚠️ `electron-app/config.json`（**未入库**、本地调试用）由 pack-local 按字段表（第 4 项）规范化
 生成，是产物不是真源，不在此清单内。
 
 **留空 = 不下发 bypass 参数**（即空值不覆盖 Chromium 默认）。任一真源不一致都会导致
@@ -711,8 +718,14 @@ node scripts/pack-local.mjs --parity
 
 **模板**：
 
-- [`webview-app/config.example.json`](../webview-app/config.example.json) —— Tauri / Android 侧（含全部字段）
-- [`electron-app/config.example.json`](../electron-app/config.example.json) —— Electron 绿色版侧（省略仅 Android 的 `android_*`）
+- [`webview-app/config.example.json`](../webview-app/config.example.json) —— Tauri / Android 侧（含全部 21 字段）
+- [`electron-app/config.example.json`](../electron-app/config.example.json) —— Electron 绿色版侧（17 键）
+
+> **两份样例的键集差异为有意裁剪（2026-10-25 P2-2 定性）**：Electron 侧省略的恰是 4 个 Android
+> 签名键（`android_keystore_base64` / `android_key_alias` / `android_keystore_password` / `android_key_password`）——
+> Electron 壳不出 Android 产物、本壳将它们列入 `ANDROID_ONLY_KEYS`（接受但忽略），且签名口令不宜进样例；
+> `android_permissions` 虽仅 Android 生效，但非敏感、随 config.json 正常分发，故仍收录。
+> 键集差异由 `scripts/packaging-fields.json` 的 sources 标注 + `webview-app/src/contract_tests/packaging_field_contract.rs` 钉住。
 
 ---
 

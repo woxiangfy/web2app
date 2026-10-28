@@ -10,7 +10,8 @@
  *      聚焦，deps.toggleMainWindow；此前只「显示」，主窗可见时点球没有反应）；
  *   ② 可随时显示 / 隐藏；设置页开关创建 / 销毁；
  *   ③ 按住球可拖动；
- *   ④ 拖到屏幕左 / 右缘「半隐藏」吸附（只露半球），悬停展开、移开缩回；
+ *   ④ 拖到屏幕四缘（左 / 右 / 上 / 下）就近择一「半隐藏」吸附（只露半球，peek = 28；
+ *      左 / 右沿 x 半隐藏，上 / 下沿 y 半隐藏），悬停展开、移开缩回；
  *   ⑤ 右键球 → **关闭悬浮图标功能并唤回主窗口**（v1.76）。通道本身不做事：「关功能
  *      （`float_enabled` 置 false 并落盘）+ 销毁球窗 + 显示主窗」三件事由入口经
  *      `onHideRequest` 注入 —— 与 Tauri 侧 `floatwin::disable_float_from_icon` 逐条对齐。
@@ -22,8 +23,9 @@
  *
  * 坐标系：Electron 的窗口 bounds 与 display.bounds 都是 **DIP（逻辑像素）**，floaticon.html
  * 上报的是指针【屏幕绝对坐标】screenX/screenY（CSS 像素，与 DIP 1:1；v1.70 起不再上报
- * 增量 —— 窗口每帧 setBounds 会污染下一帧增量），所以边缘决策全部走 `float-layout.ts`
- * 的逻辑常量；只有落盘 / 恢复时用 screen.dipToScreenRect / screenToDipRect 换算物理像素
+ * 增量 —— 窗口每帧 setBounds 会污染下一帧增量），所以边缘决策（松手落点 planDrop /
+ * 悬停缩回 planPeekCollapse）全部收敛在 `float-layout.ts` 的纯函数；只有落盘 / 恢复时用
+ * screen.dipToScreenRect / screenToDipRect 换算物理像素
  * （settings.json 的 `float_window` 段与 Tauri 同形，单位是物理像素）。
  *
  * 安全模型：floaticon.html 只经 float-preload 的 contextBridge 白名单调用 `float:*` IPC；
@@ -35,29 +37,30 @@ import { BrowserWindow, ipcMain, screen } from 'electron'
 import {
   FLOAT_WINDOW_KEY,
   readRawForUpdate,
-  parseSettings,
-  writeDocument,
+  updateDocument,
   type StoreLocation,
 } from './settings'
 import {
   circleShapeRects,
-  clampFreeInside,
   clampVisible,
+  clampX,
   clampY,
   COLLAPSE_DELAY_MS,
   collapsedX,
-  decideEdge,
+  collapsedY,
   DEFAULT_FLOAT_H,
   DEFAULT_FLOAT_W,
   expandedX,
+  expandedY,
   geomToSegment,
   isUsablePhysicalGeom,
   MARGIN_LOGICAL,
   MIN_VISIBLE_LOGICAL,
   parseFloatGeometry,
   PEEK_LOGICAL,
+  planDrop,
+  planPeekCollapse,
   pointInRect,
-  rectAt,
   SNAP_LOGICAL,
   type FloatEdge,
   type FloatGeom,
@@ -456,11 +459,18 @@ function applyInitialGeometry(win: BrowserWindow, saved: FloatGeom | null): void
     // 中心必须落在某个显示器上（拔过外接屏的旧坐标不该把球恢复到屏外）。
     const m = screen.getDisplayNearestPoint(center)
     if (pointInRect(center, m.bounds)) {
-      const y = clampY(Math.round(dip.y), DEFAULT_FLOAT_H, m.bounds)
+      // 恢复一律进【半隐藏】吸附态（与重启前形态一致，悬停再展开）；按轴分派：
+      // 左 / 右沿 x 半隐藏（y 纵向钳回），上 / 下沿 y 半隐藏（x 横向钳回）。
       if (saved.edge === 'left' || saved.edge === 'right') {
+        const y = clampY(Math.round(dip.y), DEFAULT_FLOAT_H, m.bounds)
         dock = { edge: saved.edge, mon: m.bounds, collapsed: true }
         placeFloat(win, collapsedX(saved.edge, m.bounds, DEFAULT_FLOAT_W), y)
+      } else if (saved.edge === 'top' || saved.edge === 'bottom') {
+        const x = clampX(Math.round(dip.x), DEFAULT_FLOAT_W, m.bounds.x, m.bounds.width)
+        dock = { edge: saved.edge, mon: m.bounds, collapsed: true }
+        placeFloat(win, x, collapsedY(saved.edge, m.bounds.y, m.bounds.height, DEFAULT_FLOAT_H))
       } else {
+        const y = clampY(Math.round(dip.y), DEFAULT_FLOAT_H, m.bounds)
         placeFloat(win, Math.round(dip.x), y)
       }
       return
@@ -531,22 +541,22 @@ function onDragEnd(): void {
     x: Math.round(b.x + b.width / 2),
     y: Math.round(b.y + b.height / 2),
   }).bounds
-  const edge = decideEdge(b, mon, SNAP_LOGICAL)
+  // 落点决策（吸附边 + 展开贴边 / 自由态钳回）是纯几何，收敛在 float-layout.planDrop；
+  // 这里只做运行期动作：摆放、登记 dock、落盘、通知前端。
+  const plan = planDrop(b, mon, SNAP_LOGICAL)
   // 松手即吸附的缩回是立即的；作废旧一代悬停定时器，避免稍后重复动作。
   cancelPendingCollapse()
-  if (edge === 'left' || edge === 'right') {
-    // 吸附：展开态贴边、纵向钳制，落盘展开态坐标，随即缩回成半球。
-    const y = clampY(Math.round(b.y), b.height, mon)
-    const x = expandedX(edge, mon, b.width)
-    placeFloat(win, x, y)
-    dock = { edge, mon, collapsed: false }
+  if (plan.edge !== 'none') {
+    // 吸附（四缘任一）：展开态贴边（planDrop 已按轴分派：左 / 右贴 x、上 / 下贴 y，
+    // 另一轴钳回），落盘展开态坐标，随即缩回成半球。
+    placeFloat(win, plan.x, plan.y)
+    dock = { edge: plan.edge, mon, collapsed: false }
     persistGeometry(win)
     collapse(dock)
   } else {
     // 自由态：完整钳回显示器内（旧实现不钳，球可停在屏外，没有标题栏就抓不回来了）。
     // placeFloat 每次都带固定宽高，顺带把已发生的尺寸漂移纠正回 56×56。
-    const p = clampFreeInside(b, mon)
-    placeFloat(win, p.x, p.y)
+    placeFloat(win, plan.x, plan.y)
     dock = null
     persistGeometry(win)
     pushState(null)
@@ -583,31 +593,51 @@ function finishPeekLeave(gen: number): void {
   if (gen !== peekGen || moving || !win || win.isDestroyed() || !win.isVisible() || !dock) return
   if (dock.collapsed) return
   const d = dock
-  const b = win.getBounds()
-  // 尺寸用固定常量（getBounds 的宽在出屏移动后会漂移，见 placeFloat）。
-  const y = clampY(Math.round(b.y), DEFAULT_FLOAT_H, d.mon)
-  const x = collapsedX(d.edge, d.mon, DEFAULT_FLOAT_W, PEEK_LOGICAL)
-  const target: Rect = { x, y, width: DEFAULT_FLOAT_W, height: DEFAULT_FLOAT_H }
-  if (pointInRect(screen.getCursorScreenPoint(), rectAt(x, y, target))) return
+  // 缩回目标与「是否真缩回」是纯几何决策（含光标点包含判定），收敛在
+  // float-layout.planPeekCollapse；尺寸一律固定常量（getBounds 的宽高在出屏移动后会漂移，
+  // 见 placeFloat）。这里只取原点 x/y 交给纯函数并读真实光标位置，再执行缩回。
+  const raw = win.getBounds()
+  const plan = planPeekCollapse(d.edge, d.mon, raw.x, raw.y, screen.getCursorScreenPoint())
+  if (!plan.collapse) return
   collapse(d)
 }
 
-/** 展开到屏内并通知前端。 */
+/** 展开到屏内并通知前端（按轴分派：左 / 右贴 x，上 / 下贴 y，另一轴钳回显示器内）。 */
 function expand(d: Dock): void {
   const win = floatWin
   if (!win || win.isDestroyed()) return
-  const y = win.getBounds().y
-  placeFloat(win, expandedX(d.edge, d.mon, DEFAULT_FLOAT_W), y)
+  const b = win.getBounds() // 只取原点 x/y（宽高恒为固定 56，见 placeFloat）
+  if (d.edge === 'left' || d.edge === 'right') {
+    placeFloat(win, expandedX(d.edge, d.mon, DEFAULT_FLOAT_W), clampY(Math.round(b.y), DEFAULT_FLOAT_H, d.mon))
+  } else {
+    placeFloat(
+      win,
+      clampX(Math.round(b.x), DEFAULT_FLOAT_W, d.mon.x, d.mon.width),
+      expandedY(d.edge, d.mon.y, d.mon.height, DEFAULT_FLOAT_H)
+    )
+  }
   dock = { ...d, collapsed: false }
   pushState(dock)
 }
 
-/** 缩回屏外只露半球并通知前端。 */
+/** 缩回屏外只露半球并通知前端（与 expand 同构按轴分派：左 / 右沿 x，上 / 下沿 y）。 */
 function collapse(d: Dock): void {
   const win = floatWin
   if (!win || win.isDestroyed()) return
-  const y = win.getBounds().y
-  placeFloat(win, collapsedX(d.edge, d.mon, DEFAULT_FLOAT_W, PEEK_LOGICAL), y)
+  const b = win.getBounds() // 只取原点 x/y（宽高恒为固定 56，见 placeFloat）
+  if (d.edge === 'left' || d.edge === 'right') {
+    placeFloat(
+      win,
+      collapsedX(d.edge, d.mon, DEFAULT_FLOAT_W, PEEK_LOGICAL),
+      clampY(Math.round(b.y), DEFAULT_FLOAT_H, d.mon)
+    )
+  } else {
+    placeFloat(
+      win,
+      clampX(Math.round(b.x), DEFAULT_FLOAT_W, d.mon.x, d.mon.width),
+      collapsedY(d.edge, d.mon.y, d.mon.height, DEFAULT_FLOAT_H, PEEK_LOGICAL)
+    )
+  }
   dock = { ...d, collapsed: true }
   pushState(dock)
 }
@@ -636,18 +666,28 @@ function pushState(d: Dock | null): void {
 // ===========================================================================
 
 /**
- * 抓取当前悬浮球几何落盘。吸附态下存【展开态】x（半隐藏偏移运行期算），
- * y / 宽高取当前窗口实际值（物理像素，与 Tauri FloatWinGeom 同形）。
+ * 抓取当前悬浮球几何落盘。吸附态下存【展开态】左上角（半隐藏偏移运行期算）：
+ * 左 / 右吸附用展开贴边 x、y 保持当前纵向钳回值；上 / 下吸附用展开贴边 y、x 保持
+ * 当前横向钳回值；自由态原样。宽高恒为固定 56（物理像素，与 Tauri FloatWinGeom 同形）。
  */
 function persistGeometry(win: BrowserWindow): void {
   if (!deps) return
   try {
-    const b = win.getBounds() // 只取位置（DIP）；尺寸恒为固定 56，不读可能漂移的 b.width
+    const b = win.getBounds() // 只取位置（DIP）；尺寸恒为固定 56，不读可能漂移的宽高
     const edge: FloatEdge = dock?.edge ?? 'none'
-    const dipX = dock ? expandedX(dock.edge, dock.mon, DEFAULT_FLOAT_W) : b.x
+    // 按轴分派展开态坐标（与 expand 同构）；吸附态两轴都取展开贴边 / 钳回后的值。
+    let dipX = b.x
+    let dipY = b.y
+    if (dock && (dock.edge === 'left' || dock.edge === 'right')) {
+      dipX = expandedX(dock.edge, dock.mon, DEFAULT_FLOAT_W)
+      dipY = clampY(Math.round(b.y), DEFAULT_FLOAT_H, dock.mon)
+    } else if (dock) {
+      dipX = clampX(Math.round(b.x), DEFAULT_FLOAT_W, dock.mon.x, dock.mon.width)
+      dipY = expandedY(dock.edge, dock.mon.y, dock.mon.height, DEFAULT_FLOAT_H)
+    }
     const phys = screen.dipToScreenRect(win, {
       x: Math.round(dipX),
-      y: Math.round(b.y),
+      y: Math.round(dipY),
       width: DEFAULT_FLOAT_W,
       height: DEFAULT_FLOAT_H,
     })
@@ -658,13 +698,9 @@ function persistGeometry(win: BrowserWindow): void {
       height: Math.round(phys.height),
       edge,
     }
-    // 读-改-写：只替换 float_window 段，设置与主窗口 window 段原样保留。
-    const cur = readRawForUpdate(deps.getStoreLoc())
-    writeDocument(deps.getStoreLoc(), {
-      settings: parseSettings(cur),
-      window: cur.window,
-      float_window: geomToSegment(geom),
-    })
+    // 读-改-写（updateDocument 统一收敛）：只替换 float_window 段，
+    // 设置与主窗口 window 段原样保留。
+    updateDocument(deps.getStoreLoc(), { float_window: geomToSegment(geom) })
   } catch (e) {
     console.warn(`[web2app] 写入悬浮球几何失败：${(e as Error).message}`)
   }

@@ -8,7 +8,7 @@ import { ConfigError, captureOutput, emit } from './diagnostic.mjs'
 import { buildMerged, toConfigJson, urlContainsUserInfo, validateForTarget } from './parser.mjs'
 import { getCloseMatches } from './pycompat.mjs'
 import { DEFAULTS } from './constants.mjs'
-import { ELECTRON_OUT_DEFAULT, TAURI_OUT_DEFAULT, isDeleteBlocked, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
+import { ELECTRON_OUT_DEFAULT, TAURI_OUT_DEFAULT, appIdFor, isDeleteBlocked, resolveElectronOut, resolvePackOut, safeName } from './util.mjs'
 import { ELECTRON, ROOT, WEBVIEW } from './paths.mjs'
 
 function assertThat(cond, msg) {
@@ -280,6 +280,12 @@ export function selftest() {
     assertThat(safeName('') === 'Web2App', '空名字回落')
     assertThat(safeName('.hidden.') === 'hidden', '去首尾句点')
 
+    // appId 必须随安装名变化（否则 NSIS 的 APP_GUID 撞车 ⇒ 安装目录套娃，见 util.mjs::appIdFor）
+    assertThat(appIdFor('osfipin.note') === 'com.web2app.osfipin.note', 'appId 带安装名')
+    assertThat(appIdFor('a/b c') === 'com.web2app.a-b-c', 'appId 非法字符压成 -')
+    assertThat(appIdFor('') === 'com.web2app.web2app', 'appId 空名回落')
+    assertThat(appIdFor('Note') !== appIdFor('Mark'), '不同应用必须得到不同 appId')
+
     // 相似度算法必须与 difflib 一致（--parity 无法覆盖「建议哪个名字」，因为那是纯函数）
     assertThat(getCloseMatches('proxy_enable', Object.keys(DEFAULTS), 1, 0.5)[0] === 'proxy_enabled', '近似名建议')
     assertThat(getCloseMatches('windo_title', Object.keys(DEFAULTS), 1, 0.5)[0] === 'title', 'windo_title → title')
@@ -350,13 +356,15 @@ export function selftest() {
     // proxy_bypass 默认串是跨壳 / 跨打包期 / 跨示例的**单一字面量契约**
     //（完整清单与原因见 docs/packaging-config.md §4.4）。改默认串时漏掉任何一处都会让
     // 「没配 bypass 时两壳直连范围不同」之类的分叉悄悄溜过去 ⇒ --selftest 在这里逐文件钉住。
+    // ⚠️ 两个解析器（parse-packaging-config.py / constants.mjs）的 DEFAULTS 已改为从
+    //    `scripts/packaging-fields.json` 加载 ⇒ 默认串的真源在那里，不再逐文件钉解析器副本。
     const BYPASS = DEFAULTS.proxy_bypass
-    // ① 运行期 / 打包期真正读取的默认值
+    // ① 运行期 / 打包期真正读取的默认值（字段表是两个解析器的默认值来源）
     for (const f of [
+      'scripts/packaging-fields.json',
       'webview-app/src/config.rs',
       'electron-app/src/main/config.ts',
       '.github/scripts/parse-packaging-config.py',
-      'scripts/packlib/constants.mjs',
       'electron-app/scripts/stage-assets.cjs',
     ]) {
       assertThat(readFileSync(join(ROOT, f), 'utf8').includes(BYPASS), `proxy_bypass 默认串必须出现在 ${f}`)

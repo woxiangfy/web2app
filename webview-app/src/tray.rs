@@ -8,11 +8,29 @@ use tauri::Manager;
 
 use crate::config::TITLE;
 
-// ⚠️ 「主窗口 label」与「tab 窗口显隐同步」两个原语已统一搬到 [`crate::bootstrap`]
-//    （`main_window_label` / `sync_tabs_visibility`）—— 它们不是桌面端专属
-//    （主窗关闭语义在 Android 上同样要走），而本模块是 `cfg(desktop)`，放在这里会让
-//    非桌面目标拿不到。这里改为直接调用，消除第 2、3 份重复实现。
-use crate::bootstrap::{main_window_label, sync_tabs_visibility};
+// ⚠️ 「主窗口 label」唯一真源在 [`crate::nav`]（`main_window_label`）—— 它不是桌面端专属
+//    （主窗关闭语义在 Android 上同样要走），不能放本模块。
+use crate::nav::main_window_label;
+
+/// 主窗口显隐后，同步多页签模式下各 tab 窗口的可见性。
+///
+/// 多页签模式里每个 tab 都是独立顶层窗口，宿主隐藏不会连带隐藏它们，桌面上会残留
+/// “没有标签栏的内容窗口”。非 Windows / 非多页签模式为空操作。
+///
+/// ⚠️ 本函数 2026-10-25（架构审查 P2-1）自 `bootstrap` 迁入本模块：bootstrap 只留编排职责，
+/// 而本模块是它在窗口显隐上的唯一消费方（`lib.rs` 的主窗关闭 / 单实例聚焦也调这里）。
+/// 平台和模式的双重开关都收在本函数内部；本模块 `cfg(desktop)`，调用方在 Android 侧
+/// 对应空操作（`lib.rs` 调用点带 `#[cfg(desktop)]`）。
+pub(crate) fn sync_tabs_visibility(app: &tauri::AppHandle, visible: bool) {
+    #[cfg(windows)]
+    {
+        if crate::tabs::tabs_enabled() {
+            crate::tabs::set_tabs_visible(app, visible);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (app, visible);
+}
 
 /// 切换主窗口：正常可见则隐藏；最小化或已隐藏则恢复并显示置顶（仅桌面端）。
 pub(crate) fn toggle_window(app: &tauri::AppHandle) {

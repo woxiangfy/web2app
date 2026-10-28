@@ -65,7 +65,12 @@ pub struct WindowGeom {
 }
 
 /// 悬浮球当前吸附的屏幕边（仅 Windows 桌面端产生该段）。序列化为小写字符串
-/// （`"none"` / `"left"` / `"right"`），与 Electron 侧 `float-window.ts` 逐字一致。
+/// （`"none"` / `"left"` / `"right"` / `"top"` / `"bottom"`），与 Electron 侧
+/// `float-window.ts` 逐字一致。
+///
+/// v1.81 起吸附从「左 / 右」扩为**四边**：左 / 右沿 x 半隐藏，上 / 下沿 y 半隐藏
+/// （半隐藏的偏移量都是「球边长 − peek」）。旧版落盘文件里没有 `top` / `bottom`，
+/// `#[serde(default)]` 缺省按 `none` 解析，向后兼容。
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DockEdge {
@@ -76,6 +81,10 @@ pub enum DockEdge {
     Left,
     /// 吸附右边。
     Right,
+    /// 吸附上边（半隐藏时只在屏幕上缘露一条）。
+    Top,
+    /// 吸附下边。
+    Bottom,
 }
 
 /// 悬浮球几何快照。语义同 [`WindowGeom`]（物理像素 outer 矩形），额外记一条吸附边：

@@ -62,12 +62,21 @@ webview2-com = "0.39"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # 悬浮球原生分层球窗（src/floatwin/native.rs）：
+    # Win32_UI_HiDpi → GetDpiForWindow（球随 DPI 缩放）；
+    # Win32_System_Registry → AppsUseLightTheme（盘面跟随系统深浅色）；
+    # Win32_System_LibraryLoader → GetModuleHandleW（注册窗口类 / 建窗的 hInstance）。
+    "Win32_UI_HiDpi",
+    # SetCapture / ReleaseCapture / TrackMouseEvent（悬浮球拖动捕获 + TME_LEAVE 悬停追踪）。
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_Com",
     "Win32_System_WinRT",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
-    # 悬浮球窗「永不抢前台」：SetWindowLongPtrW + GWL_EXSTYLE + WS_EX_NOACTIVATE
-    # （见 src/floatwin.rs::make_non_activating）。
+    # 悬浮球窗「永不抢前台」：WS_EX_NOACTIVATE / UpdateLayeredWindow / 鼠标消息
+    # （见 src/floatwin/native.rs）。
     "Win32_UI_WindowsAndMessaging",
 ] }
 # Windows 沿用系统证书库（native-tls/schannel），与你当前可用的构建保持一致。

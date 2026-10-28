@@ -1,26 +1,27 @@
 <!DOCTYPE html>
 <!--
-  web2app 桌面悬浮图标（悬浮球）页面 —— 双壳单一真源（Tauri + Electron 共用）
+  web2app 桌面悬浮图标（悬浮球）页面 —— 双壳单一真源（v1.81 起实际仅 Electron 使用）
   ---------------------------------------------------------------------------
-  这是悬浮球窗口（Tauri label "float" / Electron 独立 BrowserWindow）加载的**唯一**
-  本地内置页面：一个 56×56 透明活柱里的圆形球（Tauri 宿主窗被 WebView2 最小宽度撑宽，
-  圆外区域靠 NCHITTEST 命中穿透、视觉则是真逐像素 alpha，本页按主进程下发的 anchor 把球
-  摆到活柱内）。它本身**不加载任何网页**，职责只有四个：
+  这是悬浮球窗口加载的**唯一**本地内置页面。v1.81 起球的观感彻底脱离「浏览器 CSS 画圆」：
+  盘面（平涂底盘 + 1px 半透明描边 + 软件图标）由 canvas 超采样栅格化成**一张带 alpha 的
+  位图**，以 data URL 作 background-image 上屏 —— 浏览器只做位图贴图，不再做任何圆角
+  裁剪 / 渐变 / 合成滤镜（CSS 画圆的三源毛刺全部消除，见下方「为什么不用 CSS 画圆」）。
+  Tauri 侧已改原生分层窗口 + 位图 alpha、不再加载本页（架构例外另行登记）；本页仍由
+  floaticon://localhost/ 同一处资源分发。
 
-  ⚠️⚠️ 球的直径**必须等于活柱边长**（56 = ICON_SIZE_LOGICAL），不能留边；边缘观感完全
-  由系统合成器负责，本页**不铺任何不透明底、不靠窗口区域保边**。三轮真机教训（详见
-  `#w2f-ball` 注释与 floatwin.rs 模块文档）：
-    · v1.77b SetWindowRgn 严格裁圆 ⇒ 1bit 硬边切掉抗锯齿，白锯齿；
-    · v1.78 区域外扩 4px ⇒ 旧透明链路把半透明像素压平白底，环带漏浅色异形；
-    · v1.79 页面铺黑底绕过坏 alpha ⇒ 异形没了但轮廓仍是整像素阶梯，暗锯齿；
-  v1.80 起 Tauri 开 WS_EX_NOREDIRECTIONBITMAP（与 Electron 同一条 DirectComposition
-  路径），border-radius / box-shadow 的半透明像素逐像素合成，本页双壳统一保持真透明。
+  ⚠️⚠️ 球的直径**必须等于窗口边长**（56 = ICON_SIZE_LOGICAL = DEFAULT_FLOAT_W），不能留边：
+  球窗命中圆（Electron setShape 扫描线圆）、canvas 位图圆盘、窗口客户区三者严格等大
+  （v1.77b 真机根因：球小于命中圆 ⇒ 圆内球外一圈透明环带漏残片；守卫
+  float_page_ball_fills_the_live_pillar / Electron float-contract.test.ts 同款钉住）。
+
+  职责（交互协议不变）：
     1. 单击（没有发生拖动的 pointerup）→ 通知主进程「切换【原来的主窗口】显隐」
        （v1.71：由「只显示」改为 toggle —— 可见则隐藏、隐藏则显示并聚焦）；
     2. 按住拖动 → 上报指针的**屏幕绝对坐标**（screenX/screenY，CSS 像素），窗口位置由主进程
-       按「光标 − 抓取点偏移」计算（v1.70 修正：旧实现上报相对本窗视口的 clientX 增量，
+       按「光标 − 抓取点偏移」计算（v1.70 修正：旧实现上报相对本窗视口的坐标增量，
        而窗口每帧都在移动，下一帧增量被窗口自身位移抵消，球只有半速跟手且抖动）；
-    3. 松手报 dragend → 主进程判定左 / 右缘吸附并半隐藏（只露半球），悬停展开、移开缩回；
+    3. 松手报 dragend → 主进程判定四缘（左 / 右 / 上 / 下）吸附并半隐藏（只露半球，
+       peek = 28 逻辑像素；左 / 右沿 x 半隐藏，上 / 下沿 y 半隐藏），悬停展开、移开缩回；
     4. 右键 → **关闭悬浮图标功能**并唤回主窗口（v1.76）：页面只发 `hide` 事件，主进程
        把设置里的 `float_enabled` 置 false 并落盘、**销毁**球窗、并把主窗口显示出来
        （若此前被隐藏）。⚠️ 不能再做成「只隐藏球」——球窗一藏，若用户没启用托盘、
@@ -29,9 +30,23 @@
        Alt+F4 关球窗仍只隐藏，两者都不改设置。
 
   球内图标是**软件自己的图标**（v1.71，不再是统一的硬编码图形）：相对路径 icon.png
-  —— 两壳都经 floaticon://localhost/icon.png 分发同一份 icons/icon.png：Tauri 返回
-  编译期内嵌字节（打包时按配置替换），Electron 开发态直接读 webview-app/icons/、打包态
-  由 stage-assets.cjs 把同一份文件铺到 out/inject/ 后由协议处理器读出。
+  —— 经 floaticon://localhost/icon.png 分发同一份 icons/icon.png（开发态直接读
+  webview-app/icons/，打包态由 stage-assets.cjs 铺到 out/inject/ 后由协议处理器读出）。
+  v1.81 起它只作 canvas 的绘制源（drawImage 烘进盘面位图），不再独立叠层（img 元素本身
+  隐藏，见 `#w2f-ball img` 规则）。
+
+  为什么不用 CSS 画圆（v1.81 根治；四代失败方案存档，都不要再试）：
+    · 毛刺源① 透明窗上圆角裁剪的抗锯齿（Chromium 对白底合成再套 alpha 掩码 → 白边 / 毛刺）；
+    · 毛刺源② 合成滤镜 / 渐变 / 外阴影的强制合成层与渐变抖动；
+    · 毛刺源③ 百分比平移定位在非整数 DPI 下落到分数物理像素（阶梯毛刺）。
+    · v1.77b SetWindowRgn 严格裁圆：1bit 硬边切掉抗锯齿，白锯齿；
+    · v1.78 区域四边外扩 4px：旧透明链路把半透明像素压平白底，环带漏浅色异形；
+    · v1.79 页面铺黑底绕过坏 alpha：异形没了但轮廓仍是整像素阶梯，暗锯齿；
+    · v1.80 真逐像素 alpha 只解决了「窗口侧」，页面侧 CSS 画圆的三源毛刺仍在浏览器内。
+    v1.81 页面侧同标准收口：`#w2f-ball` 规则里不再出现任何合成滤镜 / 半透明 / 变形 /
+    圆角 / 渐变类属性，状态差异（悬停 / 拖动 / 半隐藏）全部来自 background-image 换图
+    （idle / hover / collapsed 三套预渲染位图变体），并按 devicePixelRatio 整数物理像素
+    对齐（位图圆盘绝不落在分数物理像素上）。
 
   ⚠️ 球上**不挂原生提示**（不给球写 title，v1.73）：球窗是 always-on-top，而 Chromium /
   系统的原生提示条是**独立的非置顶窗口** ⇒ 提示条只会被画在球窗**之后**，从球窗的透明环带
@@ -42,10 +57,8 @@
 
   ⚠️ 它是「切换主窗口显隐的快捷入口」，不是第二个浏览器窗：窗口透明、无导航、无远程内容。
 
-  两壳都经 floaticon://localhost/ 自定义协议提供本页（本地 origin；Tauri 只发核心事件，
-  权限见 capabilities/float-icon.json）。桥接方式：Electron 探测 window.web2app 白名单
-  方法，Tauri 走 __TAURI_INTERNALS__ 的 plugin:event|emit；事件 payload 带建窗时注入
-  主框架的一次性令牌 window.__web2appFloatToken。
+  桥接方式：Electron 探测 window.web2app 白名单方法，Tauri 走 __TAURI_INTERNALS__ 的
+  plugin:event|emit；事件 payload 带建窗时注入主框架的一次性令牌 window.__web2appFloatToken。
 -->
 <html lang="zh-CN">
 <head>
@@ -59,93 +72,55 @@
     height: 100%;
     background: transparent;
     overflow: hidden;
-    /* 球在活柱内居中；窗口本身透明，半隐藏时被平移到屏外的一半接不到指针。 */
+    /* 窗口本身透明；半隐藏时被平移到屏外的一半接不到指针。 */
   }
-  /* ⚠️ body 只有这一条规则：双壳都必须保持真透明。
-     v1.79 曾在这里加过「Tauri 壳标记 → body 黑底」规则以绕过旧透明链路上半透明像素被
-     压平白底的问题；v1.80 起 Tauri 开 WS_EX_NOREDIRECTIONBITMAP 走真逐像素 alpha
-     （与 Electron 同路径），黑底规则与壳标记注入已整版删除 —— 不要再加回来，也不要
-     在本页写死任何壳标记（守卫 float_page_and_init_script_stay_truly_transparent 钉着）。 */
+  /* ⚠️ body 只有这一条规则：必须保持真透明（守卫
+     float_page_and_init_script_stay_truly_transparent 钉着）。不要再加任何「按壳铺底 /
+     诊断色块」类规则 —— 双壳共用同一份页面，任何写死的壳标记都会误伤另一壳。 */
   #w2f-ball {
     position: absolute;
-    /* 默认活柱贴宿主窗左边：球心在左起 28px = ICON_SIZE_LOGICAL/2（活柱中心；Electron 窗恰好
-       56 宽时即视觉居中）。⚠️ 这个 28 与 PEEK_LOGICAL=28 数值相同但含义无关，两壳契约守卫
-       按 ICON/2 钉住，改 ICON_SIZE_LOGICAL 必须同步这里。 */
+    /* 契约字面量：球心在左起 28px = ICON_SIZE_LOGICAL/2。⚠️ 这个 28 与 PEEK_LOGICAL=28
+       数值相同但含义无关，两壳契约守卫按 ICON/2 钉住，改 ICON_SIZE_LOGICAL 必须同步这里。
+       v1.81 起真实几何由渲染脚本按整数物理像素重排（layoutBall），本行是脚本生效前的初值。 */
     left: 28px;
     top: 50%;
-    /* ⚠️⚠️ 几何与观感的职责划分（v1.80 定稿，改前必读 floatwin.rs 模块文档）：
-       ① 球必须**铺满整个活柱**（= ICON_SIZE_LOGICAL），不能比它小（v1.77b 真机根因：
-          球 46 / 命中圆 56，圆内球外一圈透明环带漏残片）。
-       ② 命中圆 == 活柱 == 球（Rust 侧 WM_NCHITTEST 子类化，圆心即活柱中心）。
-       ③ 视觉与命中**完全分离**：窗口不设任何 SetWindowRgn，球缘抗锯齿 / 外阴影由
-          WS_EX_NOREDIRECTIONBITMAP 的真逐像素 alpha 合成（双壳同路径）；本页不铺黑底、
-          不做任何壳判断。
-
-       三代失败方案存档（都不要再试）：
-         · v1.77b SetWindowRgn 严格裁圆：1bit 硬边切 AA ⇒ 白锯齿；
-         · v1.78 区域四边外扩 4px：旧透明链路（wry 0.55 HWND 控制器 / 无合成表面）把
-           半透明像素压平白底 ⇒ 环带漏浅色异形（2026-10-12 真机复现）；
-         · v1.79 body 自绘黑底：异形消失但窗口轮廓仍是整像素阶梯 ⇒ 暗锯齿，方向错误。
-       v1.80 升级 Tauri 2.12（tauri-runtime-wry 2.12.1 才透传 no_redirection_bitmap）后
-       根因消除。守卫：float_page_ball_fills_the_live_pillar（球 == 活柱）、
-       float_window_uses_per_pixel_alpha_and_circle_hittest（真 alpha + NCHITTEST、
-       不得有 SetWindowRgn）、float_page_and_init_script_stay_truly_transparent。
-
-       历史实测几何（2026-10-11，v1.77b 定位环带残片，脚本留档）：
-         · 真机截图：残片内边界 = 球的边缘，外边界与球同心且半径 ≈ 球半径 × 56/46 ——
-           外径 = 活柱边长的圆环；
-         · 用户现场实例的窗口区域（只读 GetWindowRgn + PtInRegion 网格）：
-           `GetRgnBox=(0,0)..(55,56)`，每行宽度两端递减、y=28 处最宽 55 ⇒ 内接于 56×56
-           活柱的圆，区域圆 Ø56 而球只有 46 ⇒ 环带宽度 5 逻辑像素。
-       取证脚本（`region-probe.py` 量窗口区域、`analyze-frag.py` 量截图）都是**一次性产物**，
-       所在 `tests/` 工作目录已于 2026-10-12 清空 ⇒ 本文不再给出具体路径，需要时按上述
-       「量区域 / 量截图」两条思路重建即可。 */
+    /* ⚠️⚠️ 球必须**铺满整个窗口**（= ICON_SIZE_LOGICAL = 命中圆直径），不能留边、不能比它小。
+       ⚠️⚠️ 本规则与所有 #w2f-ball 规则里**不得**再出现任何合成滤镜 / 半透明 / 变形 /
+       圆角 / 渐变类属性 —— 状态差异全部来自 background-image 换图（三套超采样位图变体），
+       见文件头「为什么不用 CSS 画圆」。守卫：Electron test/float-contract.test.ts
+       的「#w2f-ball 规则禁止画圆 / 合成」两条。 */
     width: 56px;
     height: 56px;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: block;
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
-    background: radial-gradient(circle at 34% 30%, #6a9bff 0%, #3a6dea 62%, #274db8 100%);
-    box-shadow: 0 2px 9px rgba(20, 40, 100, .45), inset 0 1px 2px rgba(255, 255, 255, .45);
-    /* ⚠️ 过渡里**不含 transform**：悬停/拖动反馈不能再靠放大（见下）。 */
-    transition: filter .12s ease, box-shadow .12s ease;
+    /* 盘面位图：canvas 超采样栅格化的 data URL（JS 预渲染三套变体写进自定义属性，
+       这里默认 idle 变体）。位图 = 底盘 + 1px 描边 + 图标，一整张带 alpha 的图。 */
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    background-image: var(--w2f-disc);
   }
-  /* Tauri 右吸附：活柱贴宿主窗右边（宿主窗被 WebView2 撑宽，见文件头说明）。
-     Electron 窗宽正好 56，两种 anchor 计算结果相同，不会有视觉差异。 */
+  /* Tauri 活柱遗留锚语义：anchor='r' 时球心在视口右起 28px（Electron 窗恰好 56 宽，
+     两种 anchor 计算结果相同，不会有视觉差异）。 */
   html[data-anchor="r"] #w2f-ball {
     left: calc(100% - 28px);
   }
-  /* 半隐藏态：球稍微压暗一点点，提示「这是吸附在边上的球，鼠标移来会展开」。
-     ⚠️ 用 `filter: brightness()` 而**不是** `opacity`：opacity 会让整颗球变成半透明，
-     连窗口底色都透出来（v1.77b：球已铺满活柱，再叠一层全局半透明等于自毁这层保护）。 */
-  html.w2f-collapsed #w2f-ball {
-    filter: brightness(.92);
-  }
-  /* 悬停 / 拖动反馈：⚠️ **不能靠 scale 放大** —— 球与命中圆等大，scale>1 放大出的部分
-     会超出圆形命中区（放大边缘看着在球上却点不着、抓不住），双壳同理；且放大期间球心不
-     变会在吸附边缘抖。改为提亮 + 加强外发光：视觉上依旧是「鼠标压上去亮了一下」。 */
+  /* 三态盘面（全部只换位图）：hover / 拖动 = 图标 37px 变体，半隐藏 = 盘面压暗变体。 */
   html #w2f-ball:hover {
-    filter: brightness(1.12);
-    box-shadow: 0 3px 12px rgba(20, 40, 100, .6), inset 0 1px 2px rgba(255, 255, 255, .55);
+    background-image: var(--w2f-disc-hover);
   }
   html #w2f-ball.w2f-grabbing {
     cursor: grabbing;
-    filter: brightness(1.06);
+    background-image: var(--w2f-disc-hover);
   }
-  /* 软件自己的图标（同目录 icon.png，双壳各自分发同一份文件）。
-     尺寸随球一起放大（球 46→56 是 ×1.217）：30px 时代图标占球径 65%，36px 维持同一比例。 */
+  html.w2f-collapsed #w2f-ball {
+    background-image: var(--w2f-disc-collapsed);
+  }
+  /* 图标只作 canvas 绘制源（drawImage 烘进盘面位图），页面上不再叠第二层。 */
   #w2f-ball img {
-    width: 36px;
-    height: 36px;
-    object-fit: contain;
-    pointer-events: none; /* 让指针事件始终落在球本体，拖拽 / 点击判定不被图片打断 */
-    -webkit-user-drag: none;
+    display: none;
   }
 </style>
 </head>
@@ -154,8 +129,8 @@
      非置顶窗口** ⇒ 提示条只会被画在球窗**之后**，从球窗的透明环带（圆内、球本体之外）漏出一
      块浅色残片，看起来就像「图标背景上有异样图形」（2026-10-11 真机 + Electron 复刻本页双重
      取证）。作用说明改由 aria-label 承载（读屏可见，且不会产生原生提示）。 -->
-<div id="w2f-ball" role="button" aria-label="单击显示 / 隐藏主窗口（拖动可移动，拖到屏幕边缘可吸附，右键关闭悬浮图标并显示主窗口）">
-  <!-- 软件自己的图标：两壳统一走 floaticon://localhost/icon.png（见文件头说明）。 -->
+<div id="w2f-ball" role="button" aria-label="单击显示 / 隐藏主窗口（拖动可移动，拖到屏幕四缘可吸附，右键关闭悬浮图标并显示主窗口）">
+  <!-- 软件自己的图标：floaticon://localhost/icon.png（只作 canvas 绘制源，见文件头说明）。 -->
   <img src="icon.png" alt="" draggable="false"/>
 </div>
 <script>
@@ -177,26 +152,126 @@
     var EV_HIDE = 'web2app:float-hide';
     var EV_CLICK = 'web2app:float-click';
 
-    // Rust 在主框架 eval window.__web2appFloat.setState({edge,collapsed,anchor}) 驱动
-    // 吸附样式；anchor='r'（右吸附活柱贴宿主右边）时球在视口右侧 28px，其余在左侧 28px。
+    // 主进程 eval window.__web2appFloat.setState({edge,collapsed,anchor}) 驱动吸附状态。
+    // edge 扩为四缘（left / right / top / bottom，v1.81）；anchor 只有 'l'/'r'（Tauri 活柱
+    // 遗留语义，保留不动）：'r' 时球心在视口右侧 28px，其余在左侧 28px。
     var current = { edge: 'none', collapsed: false, anchor: 'l' };
-    window.__web2appFloat = {
-      setState: function (s) {
-        try {
-          if (!s) return;
-          current.edge = s.edge === 'left' || s.edge === 'right' ? s.edge : 'none';
-          current.collapsed = !!s.collapsed;
-          current.anchor = s.anchor === 'r' ? 'r' : 'l';
-          var root = document.documentElement;
-          if (root) {
-            root.setAttribute('data-anchor', current.anchor);
-            root.classList.toggle('w2f-dock-left', current.edge === 'left');
-            root.classList.toggle('w2f-dock-right', current.edge === 'right');
-            root.classList.toggle('w2f-collapsed', current.collapsed && current.edge !== 'none');
-          }
-        } catch (e) { /* 忽略 */ }
+
+    var ball = document.getElementById('w2f-ball');
+    if (!ball) return;
+    var iconImg = ball.querySelector('img');
+
+    // =========================================================================
+    // 盘面渲染（v1.81 根治毛刺）：canvas 超采样栅格化 → data URL 位图
+    // =========================================================================
+    // 为什么不用 CSS 画圆：见文件头「为什么不用 CSS 画圆」。这里一次把「平涂底盘 +
+    // 1px 半透明描边 + 图标」烘进**同一张**带 alpha 的位图；三套变体（idle / hover /
+    // collapsed）预渲染，状态切换只换 background-image，浏览器不做任何裁剪 / 合成。
+    var BALL_SIZE = 56;   // 球边长（逻辑像素）= DEFAULT_FLOAT_W = ICON_SIZE_LOGICAL
+    var ICON_IDLE = 36;   // 图标边长（逻辑像素）
+    var ICON_HOVER = 37;  // 悬停变体：图标微放大 1px（替代旧的合成提亮）
+    var SUPERSAMPLE = 8;  // 超采样倍率：圆缘 1 物理像素内的覆盖率抗锯齿由它提供
+
+    // 跟随系统深浅色：平涂白 / 黑底盘 + 1px 半透明描边；切换时三套变体整组重渲染。
+    var mqDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+    // 底盘颜色（平涂，无渐变）：collapsed 压暗约 8%，提示「这是吸附在边上的球」。
+    function discFill(dark, variant) {
+      if (dark) return variant === 'collapsed' ? '#1c1c1c' : '#1e1e1e';
+      return variant === 'collapsed' ? '#ebebeb' : '#ffffff';
+    }
+
+    function renderDisc(variant) {
+      try {
+        var dpr = window.devicePixelRatio || 1;
+        var sizeDev = Math.round(BALL_SIZE * dpr); // 位图边长 = 整数物理像素
+        var big = sizeDev * SUPERSAMPLE;           // 超采样画布
+        var c1 = document.createElement('canvas');
+        c1.width = big;
+        c1.height = big;
+        var g = c1.getContext('2d');
+        if (!g) return '';
+        var dark = !!(mqDark && mqDark.matches);
+        var r = big / 2;
+        // 平涂圆盘：边缘覆盖率抗锯齿交给「超采样 → 下采样」，不用任何渐变描边。
+        g.beginPath();
+        g.arc(r, r, r, 0, Math.PI * 2);
+        g.fillStyle = discFill(dark, variant);
+        g.fill();
+        // 1 物理像素描边（超采样宽度 = SUPERSAMPLE），描边带整体落在盘内、不外溢。
+        g.beginPath();
+        g.arc(r, r, r - SUPERSAMPLE / 2, 0, Math.PI * 2);
+        g.lineWidth = SUPERSAMPLE;
+        g.strokeStyle = dark ? 'rgba(255, 255, 255, .16)' : 'rgba(0, 0, 0, .10)';
+        g.stroke();
+        // 下采样到 sizeDev 物理像素：一次缩放把超采样覆盖率折算成边缘单级覆盖率渐变。
+        var c2 = document.createElement('canvas');
+        c2.width = sizeDev;
+        c2.height = sizeDev;
+        var g2 = c2.getContext('2d');
+        if (!g2) return '';
+        g2.imageSmoothingEnabled = true;
+        if ('imageSmoothingQuality' in g2) g2.imageSmoothingQuality = 'high';
+        g2.drawImage(c1, 0, 0, sizeDev, sizeDev);
+        // 图标叠进同一张离屏画布：最终 background-image 是一张完整位图（不是 CSS 拼层）。
+        // 偏移取整到物理像素：图标绝不落在分数物理像素上（分数对齐 = 阶梯毛刺）。
+        if (iconImg && iconImg.complete && iconImg.naturalWidth > 0) {
+          var iconDev = Math.round((variant === 'hover' ? ICON_HOVER : ICON_IDLE) * dpr);
+          var off = Math.round((sizeDev - iconDev) / 2);
+          g2.drawImage(iconImg, off, off, iconDev, iconDev);
+        }
+        return c2.toDataURL('image/png');
+      } catch (e) {
+        return '';
       }
-    };
+    }
+
+    // 三套盘面变体一次渲染，写进自定义属性；状态切换只换 background-image（CSS 规则）。
+    function applyVariants() {
+      try {
+        var root = document.documentElement;
+        if (root) {
+          root.style.setProperty('--w2f-disc', 'url("' + renderDisc('idle') + '")');
+          root.style.setProperty('--w2f-disc-hover', 'url("' + renderDisc('hover') + '")');
+          root.style.setProperty('--w2f-disc-collapsed', 'url("' + renderDisc('collapsed') + '")');
+        }
+      } catch (e) { /* 忽略 */ }
+      layoutBall();
+    }
+
+    // 物理像素对齐摆放：左 / 上 / 宽 / 高都按整数物理像素计算后 /dpr 回写 CSS 像素，
+    // 位图圆盘绝不落在分数物理像素上（分数对齐会重新引入阶梯毛刺，见文件头毛刺源③）。
+    function layoutBall() {
+      try {
+        var dpr = window.devicePixelRatio || 1;
+        var sizeDev = Math.round(BALL_SIZE * dpr);
+        var viewportDevW = Math.round((window.innerWidth || BALL_SIZE) * dpr);
+        var viewportDevH = Math.round((window.innerHeight || BALL_SIZE) * dpr);
+        var xDev = current.anchor === 'r'
+          ? Math.round(viewportDevW - sizeDev)
+          : Math.round(BALL_SIZE / 2 * dpr - sizeDev / 2);
+        var yDev = Math.round(viewportDevH / 2 - sizeDev / 2);
+        ball.style.left = (xDev / dpr) + 'px';
+        ball.style.top = (yDev / dpr) + 'px';
+        ball.style.width = (sizeDev / dpr) + 'px';
+        ball.style.height = (sizeDev / dpr) + 'px';
+      } catch (e) { /* 忽略 */ }
+    }
+
+    // devicePixelRatio 变化（跨屏拖动到不同缩放的显示器）→ 重渲染盘面 + 重排位置。
+    // 没有直接的 dpr 变更事件，用「resolution 媒体查询 + 变更后重挂」的标准做法。
+    function watchDpr() {
+      try {
+        if (!window.matchMedia) return;
+        var mq = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+        var onChange = function () {
+          try { mq.removeEventListener('change', onChange); } catch (e) { /* 忽略 */ }
+          applyVariants();
+          watchDpr();
+        };
+        mq.addEventListener('change', onChange);
+      } catch (e) { /* 忽略 */ }
+    }
 
     // ---- 桥接：Electron 走 window.web2app 白名单；Tauri 走核心事件 ----
     function electronApi() {
@@ -224,7 +299,7 @@
     }
     // kind: down | move | cancel | dragend | click | peekenter | peekleave | hide
     // down / move 携带指针的【屏幕绝对坐标】(sx, sy)（CSS 像素），不是相对球窗的增量 ——
-    // 主进程每帧都在 set_position，窗口自身位移会污染 clientX 增量（见文件头说明）。
+    // 主进程每帧都在 set_position，窗口自身位移会污染增量（见文件头说明）。
     // down 在 pointerdown 立即发：主进程只暂存「按下点」，第一帧 move 时才据此算抓取偏移
     // （不能在第一帧 move 才算 —— 那时光标已经离开按下点，首帧窗口会纹丝不动）。
     function send(kind, sx, sy) {
@@ -252,12 +327,30 @@
       } catch (e) { /* 忽略 */ }
     }
 
-    var ball = document.getElementById('w2f-ball');
-    if (!ball) return;
+    window.__web2appFloat = {
+      setState: function (s) {
+        try {
+          if (!s) return;
+          current.edge = s.edge === 'left' || s.edge === 'right' || s.edge === 'top' || s.edge === 'bottom' ? s.edge : 'none';
+          current.collapsed = !!s.collapsed;
+          current.anchor = s.anchor === 'r' ? 'r' : 'l';
+          var root = document.documentElement;
+          if (root) {
+            root.setAttribute('data-anchor', current.anchor);
+            root.classList.toggle('w2f-dock-left', current.edge === 'left');
+            root.classList.toggle('w2f-dock-right', current.edge === 'right');
+            root.classList.toggle('w2f-dock-top', current.edge === 'top');
+            root.classList.toggle('w2f-dock-bottom', current.edge === 'bottom');
+            root.classList.toggle('w2f-collapsed', current.collapsed && current.edge !== 'none');
+          }
+          layoutBall();
+        } catch (e) { /* 忽略 */ }
+      }
+    };
 
-    // ---- 点击 vs 拖动：屏幕位移超过阈值才算拖动；否则松手即「点击 → 显示主窗」----
+    // ---- 点击 vs 拖动：屏幕位移超过阈值才算拖动；否则松手即「点击 → 切换主窗」----
     // 全程用 screenX/screenY（屏幕绝对坐标，CSS 像素）：主进程移动窗口不会改变它，
-    // 因此既不会被窗口自身位移抵消（v1.69 旧实现用 clientX 增量导致半速跟手 / 抖动），
+    // 因此既不会被窗口自身位移抵消（v1.69 旧实现用增量导致半速跟手 / 抖动），
     // 吸附态起拖时窗口的 28px 展开平移也不会被误算成一次跳动。
     var DRAG_THRESHOLD = 5;
     // 双击去抖窗口（毫秒）：双击会送来两次 pointerup（两次 click），两次 toggle 相互抵消，
@@ -343,6 +436,13 @@
     document.addEventListener('mouseover', function (e) {
       if (!e.relatedTarget) send('peekenter');
     }, true);
+
+    // 图标就绪后重渲染一次（把图标烘进盘面位图）；视口 / 锚变化重排到整数物理像素。
+    if (iconImg) iconImg.addEventListener('load', applyVariants);
+    window.addEventListener('resize', layoutBall);
+    if (mqDark && mqDark.addEventListener) mqDark.addEventListener('change', applyVariants);
+    applyVariants();
+    watchDpr();
 
     window.__web2appFloat.setState(current);
   } catch (e) { /* 内置页面任何异常都静默，不影响主进程 */ }

@@ -1,45 +1,23 @@
+import { readFileSync } from 'node:fs'
+
 /**
- * 契约常量 —— 与 .github/scripts/parse-packaging-config.py **逐字对应**
- * 顺序即打印顺序，也是写进 config.json 的键顺序。改这里必须同步改那边 + docs/packaging-config.md
+ * 契约常量 —— 字段表的**机器可读唯一真源**是 `../packaging-fields.json`（name / kind /
+ * default / 需出现的真源），与 .github/scripts/parse-packaging-config.py 共用同一份；
+ * 顺序即打印顺序，也是写进 config.json 的键顺序（= 字段表里的排列顺序）。
+ * 改字段 = 改那一份 JSON + 各真源实现；解析语义与 Python 侧逐字对应，改任何语义必须
+ * 同步改那边 + docs/packaging-config.md，并跑 `node scripts/pack-local.mjs --parity`。
  */
-export const DEFAULTS = {
-  app_url: '',
-  app_name: 'Web2App',
-  title: '',
-  // 打包产物版本（Tauri 写 tauri.conf.json.version；Electron 走 extraMetadata.version）。
-  // 只接受三段纯数字 x.y.z（主/次 ≤ 255、补丁 ≤ 65535），见 parser.mjs::normalizeVersion。
-  version: '0.0.1',
-  extra: {},
-  icon_url: '',
-  proxy_enabled: false,
-  proxy_http: '',
-  proxy_https: '',
-  // ⚠️ 两壳必须一致：webview-app 的 config.rs 编译期默认值、electron 的 DEFAULTS
-  //    都用这同一个串。留空 = 不下发 bypass 参数（即空值不覆盖 Chromium 默认）。
-  proxy_bypass: 'localhost;127.0.0.1;<-loopback>',
-  // 空串在本字段里**是有含义的取值**（= 系统默认程序目录），不是「未设置」。
-  data_dir: 'data',
-  tabs_enabled: false,
-  // 移动端底栏：仅移动端（Android/iOS）生效的底部导航栏（首页 / 后退 / 前进 / 列表）。
-  // 桌面壳（Windows Tauri / Electron）注入了也一律忽略 —— Rust 侧常量按 #[cfg(mobile)] 编译。
-  mobile_bar: false,
-  public_key: '',
-  resolve_secret: '',
-  debug: false,
-  android_keystore_base64: '',
-  android_key_alias: '',
-  android_keystore_password: '',
-  android_key_password: '',
-  // 仅 Android：按需向 AndroidManifest.xml 注入运行时权限声明。
-  // 白名单三值 camera / microphone / location（见 parser.mjs::normalizeAndroidPermissions），
-  // 默认 [] = 不声明任何可选权限。由 patch-android-permissions.py 消费 ANDROID_PERMISSIONS。
-  android_permissions: [],
-}
+const FIELDS = JSON.parse(readFileSync(new URL('../packaging-fields.json', import.meta.url), 'utf8'))
+  .fields
+
+/** 字段名 → 默认值（顺序 = 字段表顺序）。 */
+export const DEFAULTS = Object.fromEntries(FIELDS.map((f) => [f.name, f.default]))
 
 /** android_permissions 白名单（顺序即 Manifest 注入顺序；与 Python 侧元组逐字对齐）。 */
 export const ANDROID_PERMISSION_CHOICES = ['camera', 'microphone', 'location']
 
-export const BOOL_KEYS = new Set(['proxy_enabled', 'tabs_enabled', 'mobile_bar', 'debug'])
+/** 布尔字段（kind=「bool」）：只接受真 bool，字符串一律拒绝。 */
+export const BOOL_KEYS = new Set(FIELDS.filter((f) => f.kind === 'bool').map((f) => f.name))
 // 需要保持 JSON 结构（对象/数组/标量）的字段：序列化成单行 JSON 文本进 env。
 export const JSON_KEYS = new Set(['extra'])
 // 签名相关字段不进环境变量：keystore 体积大 / 密码敏感。

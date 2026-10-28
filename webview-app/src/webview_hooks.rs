@@ -657,10 +657,7 @@ fn register_webview_hooks(
                                 .ok()
                                 .and_then(|_| uri_pw.to_string().ok())
                                 .map(|uri| {
-                                    crate::bootstrap::is_upstream_request(
-                                        wr_upstream.as_deref(),
-                                        &uri,
-                                    )
+                                    crate::nav::is_upstream_request(wr_upstream.as_deref(), &uri)
                                 })
                                 .unwrap_or(false);
                             if !uri_pw.is_null() {
@@ -705,10 +702,7 @@ fn register_webview_hooks(
                                 .ok()
                                 .and_then(|_| uri_pw.to_string().ok())
                                 .map(|uri| {
-                                    crate::bootstrap::is_upstream_request(
-                                        basic_upstream.as_deref(),
-                                        &uri,
-                                    )
+                                    crate::nav::is_upstream_request(basic_upstream.as_deref(), &uri)
                                 })
                                 .unwrap_or(false);
                             if !uri_pw.is_null() {
@@ -739,7 +733,7 @@ fn register_webview_hooks(
     }
 
     // --- 3) 注册完毕。本函数不负责导航：首次导航由调用方用
-    // `WebviewWindow::navigate` 触发（见 [`crate::bootstrap::navigate_window`]）。
+    // `WebviewWindow::navigate` 触发（见 [`crate::nav::navigate_window`]）。
 }
 
 #[cfg(test)]
