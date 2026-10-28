@@ -520,12 +520,75 @@ jobs:
           grep -q "org.gradle.stacktrace" "$gp" || echo "org.gradle.stacktrace=all" >> "$gp"
           echo "--- gradle.properties ---"; cat "$gp"
 
+      - name: Android 环境指纹（诊断用，失败时靠它定位）
+        # ⚠️ 2026-10-28 新增。动机：`cargo tauri android build` 是一个**黑盒总流程**
+        #   （tauri 前置校验 → 首次 Rust 交叉编译 → gradle 配置 → gradle 执行），
+        #   任何一段失败都只体现成"没有 APK"。而失败原因往往只是**某一层版本对不上**，
+        #   这些信息散落在 6 个安装动作里（tauri-cli / rustc / JDK / SDK 平台 / NDK /
+        #   模板里钉的 AGP & Gradle & Kotlin）。缺了它们，"构建失败"只能靠猜。
+        #   ⇒ 一次性拍全现场，让它落到主线日志与 android-build-log 旁边。
+        # 只读，不改任何东西；所有命令 `|| true`，本步永不失败。
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "── tauri-cli ──"; cargo tauri --version 2>&1 | head -2 || true
+          echo "── rustc ──";      rustc -Vv 2>&1 | head -3 || true
+          echo "── cargo/rustup targets ──"; rustup target list --installed 2>/dev/null | grep android || true
+          echo "── java（AGP 9 要求 JDK 17+）──"; java -version 2>&1 | head -3 || true
+          echo "── 模板钉住的构建链版本（AGP / Gradle / Kotlin / SDK）──"
+          grep -nE 'com\.android\.tools\.build:gradle|kotlin-gradle-plugin' \
+            gen/android/build.gradle.kts 2>/dev/null || true
+          grep -nE 'distributionUrl' \
+            gen/android/gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
+          grep -nE 'compileSdk|targetSdk|minSdk|ndkVersion' \
+            gen/android/app/build.gradle.kts 2>/dev/null || true
+          echo "── gradle.properties（configuration-cache 决定我们注入的任务链会不会被跳过）──"
+          cat gen/android/gradle.properties 2>/dev/null | grep -vE '^\s*#' || true
+          echo "── SDK 平台 / build-tools / NDK ──"
+          ls -d "${ANDROID_HOME:-/nonexistent}"/platforms/* 2>/dev/null || true
+          ls -d "${ANDROID_HOME:-/nonexistent}"/build-tools/* 2>/dev/null || true
+          echo "NDK: ${ANDROID_NDK_HOME:-<未设置>}"
+          echo "── 注入的补丁任务链（末 6 行，确认真的落到 CI 的文件里）──"
+          tail -n 6 gen/android/app/build.gradle.kts 2>/dev/null || true
+          echo "── gen/android 概况 ──"
+          ls gen/android 2>/dev/null || echo "!! gen/android 不存在（init 失败？）"
+
       - name: Build Android APK
         # --apk 仅产出 APK（便于直接安装测试）；上架 Play Store 的 AAB 去掉 --apk 即可。
         # tauri-cli 的 --target 只接受架构名（aarch64/armv7/i686/x86_64），不是 rustup 的
         # 完整三元组 aarch64-linux-android。release APK 默认【未签名】，下一步签名后才能安装。
         # tee 到日志：失败时随 "Upload Android build log" 上传，便于定位 gradle 根因。
-        run: cargo tauri android build --target aarch64 --apk 2>&1 | tee "$RUNNER_TEMP/android-build.log"
+        #
+        # ⚠️⚠️ 2026-10-28 修的 P0：**必须 pipefail**。Linux 上不写 `shell:` 时的默认模板是
+        #   `bash -e {0}`（**不含** pipefail）⇒ 管道退出码取最后一个命令（tee 恒为 0）⇒
+        #   gradle / cargo 的失败被**吞掉**、本步骤显示绿色，下一步签名却报
+        #   「未找到 *-unsigned.apk，构建产物异常」+ `find: gen/android/app/build/outputs:
+        #   No such file or directory`。真实错误只在 android-build-log 里，主线日志连一行
+        #   error 都没有 —— 排查方向被彻底带偏（线上实际就踩了这个）。
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo tauri android build --target aarch64 --apk 2>&1 \
+              | tee "$RUNNER_TEMP/android-build.log"; then
+            echo "::error::Android 构建失败 —— 真实原因见下方摘录与 artifact android-build-log"
+            # 只摘「哪一行是根因」：Rust 编译错误 / gradle 的 What went wrong 段落。
+            grep -nE '^(error(\[E[0-9]+\])?:|e: |FAILURE: Build|What went wrong:|\* What went wrong:)' \
+              "$RUNNER_TEMP/android-build.log" | head -40 || true
+            echo '--- 日志末尾 120 行 ---'
+            tail -120 "$RUNNER_TEMP/android-build.log"
+            echo '--- gradle 到底有没有创建构建目录 ---'
+            ls -a gen/android/app/build 2>/dev/null | head -20 || echo "app/build 不存在 ⇒ gradle 配置期之前就挂了"
+            exit 1
+          fi
+          # 构建命令成功 ≠ 有产物：产物缺失时在本步就说清楚，别让下一步报一句看不懂的错。
+          shopt -s nullglob globstar
+          apks=(gen/android/app/build/outputs/apk/**/*-unsigned.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "::error::构建命令成功但没产出 *-unsigned.apk"
+            ls -R gen/android/app/build/outputs 2>/dev/null | head -40 || true
+            exit 1
+          fi
+          printf '产物：%s\n' "${apks[@]}"
 
       - name: 签名 APK（release 包默认未签名，不签名无法安装）
         # 签名密钥三级策略：
@@ -709,7 +772,9 @@ jobs:
             echo "已签名: $signed"
           done
           if [ "$found" = "0" ]; then
-            echo "::error::未找到 *-unsigned.apk，构建产物异常"
+            # 本行几乎**从不**是根因：APK 没有 = 上一步 Build 就没成功（2026-10-28 前它还会
+            # 被 tee 吞成绿色）。先看 Build Android APK 步骤与 android-build-log artifact。
+            echo "::error::未找到 *-unsigned.apk —— 请先看「Build Android APK」步骤与 android-build-log，本行只是结果不是原因"
             find gen/android/app/build/outputs -type f || true
             exit 1
           fi

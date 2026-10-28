@@ -17,7 +17,10 @@ fn decide_edge_detects_all_four_edges() {
     // 贴上缘：y = 0
     assert_eq!(decide_edge((500, 0, 56, 56), mon, snap), DockEdge::Top);
     // 贴下缘：y = 1080-56 = 1024
-    assert_eq!(decide_edge((500, 1024, 56, 56), mon, snap), DockEdge::Bottom);
+    assert_eq!(
+        decide_edge((500, 1024, 56, 56), mon, snap),
+        DockEdge::Bottom
+    );
     // 离四边都远 → None
     assert_eq!(decide_edge((500, 500, 56, 56), mon, snap), DockEdge::None);
     // 超出容差 → None
@@ -163,10 +166,7 @@ fn dock_target_pos_moves_only_the_docked_axis() {
         edge: DockEdge::Bottom,
         ..d
     };
-    assert_eq!(
-        dock_target_pos(db, (3000, 500, 56, 56), 1.0),
-        (1864, 1024)
-    );
+    assert_eq!(dock_target_pos(db, (3000, 500, 56, 56), 1.0), (1864, 1024));
 }
 
 #[test]

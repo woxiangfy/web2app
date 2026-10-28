@@ -168,7 +168,13 @@ fn float_ball_renders_supersampled_premultiplied_bitmap() {
         );
     }
     // 状态差异（hover 提亮 / 半隐藏压暗）只许改平涂色，不得引入任何合成层副作用。
-    for banned in ["filter:", "opacity", "radial-gradient", "linear-gradient", "border-radius"] {
+    for banned in [
+        "filter:",
+        "opacity",
+        "radial-gradient",
+        "linear-gradient",
+        "border-radius",
+    ] {
         assert!(
             !code_has_occurrence(FLOAT_RS, banned),
             "球面渲染不得再出现 {banned}：那正是 v1.77b–v1.80 毛刺的来源（状态只改平涂色）"
@@ -347,7 +353,11 @@ fn float_click_toggles_the_original_main_window() {
         TRAY_RS.contains("pub(crate) fn toggle_window"),
         "tray.rs 必须提供 toggle_window（托盘左键 / 唤醒快捷键 / 单击球共用）"
     );
-    for needle in ["window.hide()", "sync_tabs_visibility(app, false)", ".show()"] {
+    for needle in [
+        "window.hide()",
+        "sync_tabs_visibility(app, false)",
+        ".show()",
+    ] {
         assert!(
             TRAY_RS.contains(needle),
             "tray::toggle_window 必须真正切换主窗口（找不到 {needle}）"
@@ -371,7 +381,10 @@ fn float_right_click_disables_feature_and_restores_main_window() {
         wndproc.contains("events::on_right_click(&app)"),
         "WM_RBUTTONDOWN 分支必须派给 events::on_right_click"
     );
-    let right = fn_body(FLOAT_RS, "pub(super) fn on_right_click(app: &tauri::AppHandle)");
+    let right = fn_body(
+        FLOAT_RS,
+        "pub(super) fn on_right_click(app: &tauri::AppHandle)",
+    );
     assert!(
         right.contains("disable_float_from_icon(app)"),
         "on_right_click 必须走 disable_float_from_icon"
@@ -383,7 +396,10 @@ fn float_right_click_disables_feature_and_restores_main_window() {
 
     // ② 三件事必须真的在函数体里（各自单独限定，缺哪件就红哪条）。
     let body = fn_body(FLOAT_RS, "pub(crate) fn disable_float_from_icon");
-    assert!(!body.is_empty(), "floatwin.rs 必须有 disable_float_from_icon 函数");
+    assert!(
+        !body.is_empty(),
+        "floatwin.rs 必须有 disable_float_from_icon 函数"
+    );
     assert!(
         body.contains("crate::settings::set_float_enabled(app, false)"),
         "右键必须把 float_enabled 置 false 并落盘（否则进程继续驻留、重启后球又回来）"
@@ -399,7 +415,10 @@ fn float_right_click_disables_feature_and_restores_main_window() {
 
     // ③ 设置写入纪律：只翻转这一位 + 落盘成功才写内存态（与 save_settings 同）。
     let setter = fn_body(SETTINGS_RS, "pub(crate) fn set_float_enabled");
-    assert!(!setter.is_empty(), "settings.rs 必须有进程内 set_float_enabled（右键路径没有前端载荷）");
+    assert!(
+        !setter.is_empty(),
+        "settings.rs 必须有进程内 set_float_enabled（右键路径没有前端载荷）"
+    );
     assert!(
         setter.contains("persist_settings(app, &next)?") && setter.contains("*guard = next;"),
         "set_float_enabled 必须先落盘、成功后才写内存态（失败不写内存态）"
@@ -496,18 +515,29 @@ fn float_docks_to_all_four_edges() {
         "fn clamp_y(",
         "fn dock_target_pos(",
     ] {
-        assert!(has_code_line(FLOAT_RS, sig), "四边吸附几何缺少纯函数：{sig}");
+        assert!(
+            has_code_line(FLOAT_RS, sig),
+            "四边吸附几何缺少纯函数：{sig}"
+        );
     }
     // decide_edge 必须真的考虑四条边（不是只判左右）。
     let decide = fn_body(FLOAT_RS, "fn decide_edge(");
-    for edge in ["DockEdge::Left", "DockEdge::Right", "DockEdge::Top", "DockEdge::Bottom"] {
+    for edge in [
+        "DockEdge::Left",
+        "DockEdge::Right",
+        "DockEdge::Top",
+        "DockEdge::Bottom",
+    ] {
         assert!(
             decide.contains(edge),
             "decide_edge 必须考虑 {edge}：吸附已扩为四边就近择一"
         );
     }
     // 松手决策必须走 decide_edge（不是别处另写一份判定）。
-    let drag_end = fn_body(FLOAT_RS, "pub(super) fn on_drag_end(app: &tauri::AppHandle)");
+    let drag_end = fn_body(
+        FLOAT_RS,
+        "pub(super) fn on_drag_end(app: &tauri::AppHandle)",
+    );
     assert!(
         drag_end.contains("decide_edge("),
         "on_drag_end 必须经 decide_edge 判吸附边"
@@ -520,7 +550,10 @@ fn float_docks_to_all_four_edges() {
     let en = fn_body(STORE_RS, "pub enum DockEdge {");
     assert!(!en.is_empty(), "store.rs 必须有 DockEdge 枚举");
     for variant in ["None,", "Left,", "Right,", "Top,", "Bottom,"] {
-        assert!(en.contains(variant), "DockEdge 必须含变体 {variant}（四边 + 自由态）");
+        assert!(
+            en.contains(variant),
+            "DockEdge 必须含变体 {variant}（四边 + 自由态）"
+        );
     }
     assert!(
         has_code_line(STORE_RS, "#[serde(rename_all = \"lowercase\")]"),
@@ -586,10 +619,16 @@ fn float_peek_delay_cursor_check_and_soft_clamp() {
         "缩回必须延迟 300ms（边缘进出事件连环触发时防抖）"
     );
     assert!(
-        has_code_line(FLOAT_RS, "fn finish_peek_leave(app: &tauri::AppHandle, gen: u64)"),
+        has_code_line(
+            FLOAT_RS,
+            "fn finish_peek_leave(app: &tauri::AppHandle, gen: u64)"
+        ),
         "必须有延迟到期的统一收口 finish_peek_leave"
     );
-    let finish = fn_body(FLOAT_RS, "fn finish_peek_leave(app: &tauri::AppHandle, gen: u64)");
+    let finish = fn_body(
+        FLOAT_RS,
+        "fn finish_peek_leave(app: &tauri::AppHandle, gen: u64)",
+    );
     assert!(
         finish.contains("cursor_screen_pos()") && finish.contains("point_in_rect("),
         "finish_peek_leave 到期必须校验真实光标位置：光标已在缩回后矩形内则保持展开"
@@ -599,7 +638,8 @@ fn float_peek_delay_cursor_check_and_soft_clamp() {
         "必须有悬停代际计数器，使排队中的旧缩回任务作废"
     );
     assert!(
-        has_code_line(FLOAT_RS, "fn point_in_rect(") && has_code_line(FLOAT_RS, "fn clamp_visible("),
+        has_code_line(FLOAT_RS, "fn point_in_rect(")
+            && has_code_line(FLOAT_RS, "fn clamp_visible("),
         "点包含 / 拖动软钳制必须是纯函数（有单测）"
     );
 }
@@ -611,11 +651,17 @@ fn float_peek_delay_cursor_check_and_soft_clamp() {
 #[test]
 fn float_drag_tracks_by_absolute_screen_coords() {
     assert!(
-        has_code_line(FLOAT_RS, "fn on_down(app: &tauri::AppHandle, sx: i32, sy: i32)"),
+        has_code_line(
+            FLOAT_RS,
+            "fn on_down(app: &tauri::AppHandle, sx: i32, sy: i32)"
+        ),
         "必须有 on_down：只暂存按下点，不展开、不置 moving"
     );
     assert!(
-        has_code_line(FLOAT_RS, "fn on_move(app: &tauri::AppHandle, cx: i32, cy: i32)"),
+        has_code_line(
+            FLOAT_RS,
+            "fn on_move(app: &tauri::AppHandle, cx: i32, cy: i32)"
+        ),
         "on_move 必须接收屏幕绝对坐标（物理像素），而不是增量"
     );
     assert!(
@@ -630,8 +676,10 @@ fn float_drag_tracks_by_absolute_screen_coords() {
     // lparam（客户区）→ 物理屏幕坐标换算 + 阈值判定。
     let wndproc_helpers = FLOAT_RS;
     assert!(
-        has_code_line(wndproc_helpers, "fn screen_point(hwnd: HWND, lparam: LPARAM)")
-            && has_code_line(wndproc_helpers, "ClientToScreen(hwnd, &mut p)"),
+        has_code_line(
+            wndproc_helpers,
+            "fn screen_point(hwnd: HWND, lparam: LPARAM)"
+        ) && has_code_line(wndproc_helpers, "ClientToScreen(hwnd, &mut p)"),
         "WndProc 坐标必须经 ClientToScreen 换算成物理屏幕坐标（拖动 / 吸附同一坐标系）"
     );
     assert!(
@@ -656,8 +704,14 @@ fn float_probe_entry_drives_the_real_state_machine() {
     );
     let inject = fn_body(FLOAT_RS, "pub(crate) fn inject_page_event(");
     for ev in [
-        "\"down\" =>", "\"move\" =>", "\"cancel\" =>", "\"dragend\" =>",
-        "\"peekenter\" =>", "\"peekleave\" =>", "\"hide\" =>", "\"click\" =>",
+        "\"down\" =>",
+        "\"move\" =>",
+        "\"cancel\" =>",
+        "\"dragend\" =>",
+        "\"peekenter\" =>",
+        "\"peekleave\" =>",
+        "\"hide\" =>",
+        "\"click\" =>",
     ] {
         assert!(inject.contains(ev), "inject_page_event 必须分派事件 {ev}");
     }
@@ -681,7 +735,10 @@ fn float_probe_fake_main_window_sets_data_directory() {
     );
     // 反向对照：把调用挖掉后同一判据必须不再成立，否则这条守卫咬不住人。
     let broken = FLOATPROBE_RS.replace(NEEDLE, "Some(dir) => b,");
-    assert_ne!(broken, FLOATPROBE_RS, "反向对照：被测 needle 必须真的存在于源码里");
+    assert_ne!(
+        broken, FLOATPROBE_RS,
+        "反向对照：被测 needle 必须真的存在于源码里"
+    );
     assert!(
         !has_code_line(&broken, NEEDLE),
         "反向对照失败：挖掉 data_directory 后判据仍成立 ⇒ 守卫是自欺的"
@@ -770,12 +827,18 @@ fn tabs_host_window_sets_data_directory() {
     const NEEDLE: &str = concat!("Some(dir) => build", "er.data_directory(dir),");
     assert!(
         has_code_line(TABS_RS, NEEDLE)
-            && has_code_line(TABS_RS, "let builder = match crate::config::data_dir(app) {"),
+            && has_code_line(
+                TABS_RS,
+                "let builder = match crate::config::data_dir(app) {"
+            ),
         "create_host_window 必须与主窗 / tab 窗同构显式设置 WebView2 数据目录"
     );
     // 反向对照：挖掉后同判据必须不再成立。
     let broken = TABS_RS.replace(NEEDLE, "Some(dir) => builder,");
-    assert_ne!(broken, TABS_RS, "反向对照：被测 needle 必须真的存在于 tabs.rs");
+    assert_ne!(
+        broken, TABS_RS,
+        "反向对照：被测 needle 必须真的存在于 tabs.rs"
+    );
     assert!(
         !has_code_line(&broken, NEEDLE),
         "反向对照失败：挖掉 data_directory 后判据仍成立 ⇒ 守卫是自欺的"

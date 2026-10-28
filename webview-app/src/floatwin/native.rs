@@ -26,12 +26,14 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::OnceLock;
 
 use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, ERROR_SUCCESS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-    MonitorFromPoint, ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, BI_RGB,
-    BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTOPRIMARY,
+    ClientToScreen, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
+    GetMonitorInfoW, MonitorFromPoint, ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HGDIOBJ, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
@@ -41,13 +43,13 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 // SetCapture / ReleaseCapture / TrackMouseEvent 归属 Win32::UI::Input::KeyboardAndMouse
 // （windows 0.62 的模块划分如此，不在 WindowsAndMessaging 里）。
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect, IsWindow,
     IsWindowVisible, LoadCursorW, RegisterClassW, SetWindowPos, ShowWindow, UpdateLayeredWindow,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HWND_TOPMOST, IDC_HAND, MA_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_CANCELMODE, WM_CLOSE,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HWND_TOPMOST, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_CANCELMODE, WM_CLOSE,
     WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
     WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -124,16 +126,12 @@ pub(crate) fn cursor_screen_pos() -> Option<(i32, i32)> {
 
 /// 取物理点所在显示器的物理边界 `(x, y, w, h)`；不在任何显示器上返回 None。
 pub(crate) fn monitor_bounds_at(px: i32, py: i32) -> Option<(i32, i32, i32, i32)> {
-    bounds_of(unsafe {
-        MonitorFromPoint(POINT { x: px, y: py }, MONITOR_DEFAULTTONEAREST)
-    })
+    bounds_of(unsafe { MonitorFromPoint(POINT { x: px, y: py }, MONITOR_DEFAULTTONEAREST) })
 }
 
 /// 主显示器的物理边界。
 pub(crate) fn primary_monitor_bounds() -> Option<(i32, i32, i32, i32)> {
-    bounds_of(unsafe {
-        MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY)
-    })
+    bounds_of(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) })
 }
 
 fn bounds_of(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<(i32, i32, i32, i32)> {
@@ -272,9 +270,10 @@ fn apply_initial_geometry(app: &tauri::AppHandle, hwnd: HWND, saved: Option<Floa
                 if let Some((mx, my, mw, mh)) = monitor_bounds_at(g.x, g.y) {
                     let peek = peek_px(scale);
                     let (x, y) = match g.edge {
-                        DockEdge::Left | DockEdge::Right => {
-                            (collapsed_x(g.edge, mx, mw, lw, peek), clamp_y(g.y, lh, my, mh))
-                        }
+                        DockEdge::Left | DockEdge::Right => (
+                            collapsed_x(g.edge, mx, mw, lw, peek),
+                            clamp_y(g.y, lh, my, mh),
+                        ),
                         _ => (
                             clamp_x(g.x, lw, mx, mw),
                             collapsed_y(g.edge, my, mh, lh, peek),
@@ -356,14 +355,30 @@ pub(super) fn destroy_ball() {
 pub(super) fn set_pos(x: i32, y: i32) {
     if let Some(h) = hwnd() {
         unsafe {
-            let _ = SetWindowPos(h, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                h,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE,
+            );
         }
     }
 }
 
 fn set_size(hwnd: HWND, w: i32, h: i32) {
     unsafe {
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, w, h, SWP_NOMOVE | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            w,
+            h,
+            SWP_NOMOVE | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -431,7 +446,11 @@ fn render_ball(w: i32, h: i32, scale: f64, dark: bool, hover: bool, collapsed: b
     } else {
         1.0
     };
-    let (br, bg, bb) = ((br * k).min(255.0), (bg * k).min(255.0), (bb * k).min(255.0));
+    let (br, bg, bb) = (
+        (br * k).min(255.0),
+        (bg * k).min(255.0),
+        (bb * k).min(255.0),
+    );
     // 1 物理像素半透明描边：浅色压深、深色提亮；同样走超采样 ⇒ 描边内外都是软边。
     let (sr, sg, sb, sa): (f64, f64, f64, f64) = if dark {
         (255.0, 255.0, 255.0, 0.16)

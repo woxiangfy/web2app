@@ -154,3 +154,71 @@ fn release_supports_version_like_manual_packaging() {
         );
     }
 }
+
+/// 剥掉整行注释后再做文本匹配。
+///
+/// ⚠️ 本仓库的教训：**针会被注释满足**。此次修的 bug 的注释里就写着 `pipefail` / `tee`，
+/// 直接 `contains` 会让「把 `set -o pipefail` 删掉、只在注释里留一句」这种退化照样通过。
+fn code_only(yml: &str) -> String {
+    yml.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// ⑥ **构建失败不许被 tee 吞掉**（2026-10-28 线上 P0）。
+///
+/// 事故链：Linux 上 `run:` 不写 `shell:` 时的默认模板是 `bash -e {0}`（**不含** pipefail）
+/// ⇒ `cargo tauri android build 2>&1 | tee log` 的退出码取 tee（恒 0）⇒ gradle / rustc 的
+/// 失败被吞、步骤显示绿色 ⇒ 下一步签名报「未找到 *-unsigned.apk，构建产物异常」+
+/// `find: gen/android/app/build/outputs: No such file or directory`。
+/// 真实错误只在 artifact `android-build-log` 里，主线日志一行 error 都没有 —— 排查方向全偏。
+///
+/// 所以这里钉三件事：① 显式 `shell: bash`；② 显式 `set -o pipefail`；③ 失败分支必须打
+/// `::error::`（否则失败只是「红了一行」，看不出根因在哪）。
+#[test]
+fn android_build_step_must_not_swallow_failures() {
+    for (name, yml) in [
+        ("build-custom.yml", BUILD_CUSTOM_YML),
+        ("release.yml", RELEASE_YML),
+    ] {
+        let code = code_only(yml);
+        let lines: Vec<&str> = code.lines().collect();
+        let idx = lines
+            .iter()
+            .position(|l| l.contains("cargo tauri android build"))
+            .unwrap_or_else(|| panic!("{name} 必须调用 cargo tauri android build"));
+        // 取该行前后各若干行：`shell:` / `run: |` / `set -o pipefail` 都在它之前，
+        // 失败分支与产物检查在它之后。
+        let from = idx.saturating_sub(30);
+        let to = (idx + 40).min(lines.len());
+        let block = lines[from..to].join("\n");
+
+        assert!(
+            block.contains("shell: bash"),
+            "{name} 的 Build Android APK 步骤必须显式 `shell: bash` —— \
+             Linux 上不写 shell 的默认模板 `bash -e {{0}}` 不含 pipefail"
+        );
+        assert!(
+            block.contains("set -o pipefail"),
+            "{name} 的 Build Android APK 步骤必须 `set -o pipefail`，否则 `| tee` 会把 \
+             gradle/rustc 的失败吞成退出码 0（2026-10-28 P0：构建失败却显示绿色，\
+             报错落到下一步「未找到 *-unsigned.apk」）"
+        );
+        assert!(
+            block.contains("::error::"),
+            "{name} 的构建失败分支必须打 `::error::` 注解（否则 CI 页只红一行、看不出根因）"
+        );
+
+        // ⑦ 下游那句「未找到 APK」必须指向真正的排查方向，不能只说「构建产物异常」。
+        let msg = code
+            .lines()
+            .find(|l| l.contains("未找到 *-unsigned.apk"))
+            .unwrap_or_else(|| panic!("{name} 应有「未找到 *-unsigned.apk」的兜底报错"));
+        assert!(
+            msg.contains("android-build-log") && msg.contains("Build Android APK"),
+            "{name} 的「未找到 *-unsigned.apk」文案必须指向 Build 步骤与 android-build-log \
+             —— 这行只是结果不是原因，历史上正是它把排查方向带偏"
+        );
+    }
+}

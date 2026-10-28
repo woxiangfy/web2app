@@ -300,9 +300,18 @@ fn phase_ball_frame(app: &tauri::AppHandle, env: &Env, r: &mut Report) {
     // 扩展样式：建窗时一次定死（见 `floatwin/native.rs`），没有框架会再改它。
     let ex = exstyle_of(hwnd);
     let styles: [(&str, u32); 4] = [
-        ("WS_EX_LAYERED（逐像素 alpha；命中穿透的前提）", WS_EX_LAYERED.0),
-        ("WS_EX_TOOLWINDOW（不进任务栏 / Alt+Tab）", WS_EX_TOOLWINDOW.0),
-        ("WS_EX_NOACTIVATE（显示 / 点击都不抢前台）", WS_EX_NOACTIVATE.0),
+        (
+            "WS_EX_LAYERED（逐像素 alpha；命中穿透的前提）",
+            WS_EX_LAYERED.0,
+        ),
+        (
+            "WS_EX_TOOLWINDOW（不进任务栏 / Alt+Tab）",
+            WS_EX_TOOLWINDOW.0,
+        ),
+        (
+            "WS_EX_NOACTIVATE（显示 / 点击都不抢前台）",
+            WS_EX_NOACTIVATE.0,
+        ),
         ("WS_EX_TOPMOST（独立置顶）", WS_EX_TOPMOST.0),
     ];
     for (name, bit) in styles {

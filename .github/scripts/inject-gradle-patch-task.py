@@ -48,6 +48,7 @@ gen/android/gradle.properties 默认 org.gradle.configuration-cache=true，
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 
@@ -253,6 +254,25 @@ def selftest() -> int:
         )
         assert result4.returncode != 0, "缺失 build.gradle.kts 应返回非零"
 
+        # 应急开关 W2A_SKIP_GRADLE_PATCH=1：正常退出但**不注入**（排障用的二分手段）。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp2:
+            gen2 = pathlib.Path(tmp2) / "gen" / "android"
+            bg2 = gen2 / "app" / "build.gradle.kts"
+            bg2.parent.mkdir(parents=True)
+            bg2.write_text('android { namespace = "x.y" }\n', encoding="utf-8")
+            env2 = dict(os.environ, W2A_SKIP_GRADLE_PATCH="1")
+            result5 = _sp.run(
+                [sys.executable, str(pathlib.Path(__file__)), "--gen-root", str(gen2)],
+                capture_output=True,
+                text=True,
+                env=env2,
+            )
+            assert result5.returncode == 0, f"应急开关下不应失败：{result5.stderr}"
+            assert IDEMPOTENT_MARKER not in bg2.read_text(encoding="utf-8"), \
+                "设置 W2A_SKIP_GRADLE_PATCH 后不得再注入任务链"
+            assert "W2A_SKIP_GRADLE_PATCH" in (result5.stdout + result5.stderr), \
+                "应急开关生效时必须留一行警告（静默跳过 = 无人知道补丁没打）"
+
     print("inject-gradle-patch-task.py 自测通过 ✓")
     return 0
 
@@ -266,6 +286,16 @@ def main() -> int:
 
     if args.selftest:
         return selftest()
+
+    # 应急开关（默认关闭）：只跳过「gradle 里重放补丁」这一层。
+    # 用途 = **一次运行就能二分**出问题是否出在注入的 Kotlin DSL 上：如果设了它 APK 就出来了，
+    # 说明坏在注入块（gradle 配置期解析失败 ⇒ 连 app/build 都不会被创建）；否则坏在别处。
+    # 代价：这三处补丁只在 init 之后被应用过一次，wry build.rs 在编译期重新生成 Kotlin 时会覆盖
+    # 它们 ⇒ 外部 scheme 外跳 / 下载接管 / H5 全屏会在成包里**静默失效**。仅作排障，勿长期开。
+    if os.environ.get("W2A_SKIP_GRADLE_PATCH"):
+        print("::warning::W2A_SKIP_GRADLE_PATCH 已设置 —— 跳过 gradle 补丁任务链注入"
+              "（extras/schemes/fullscreen 将不再在 Kotlin 编译前重放，成包里这三项会失效）")
+        return 0
 
     gen_root = resolve_gen_root(args.gen_root)
     build_gradle = gen_root / "app" / "build.gradle.kts"

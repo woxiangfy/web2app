@@ -16,7 +16,7 @@
 | `docs/` | 全仓库级专项文档（`archive/` 归档稿、`changes/` 按日变更记录） | 见「四」 |
 | `.github/` | 统一 CI / 打包 workflow（工作目录落 `webview-app`，产物带 `webview-app/` 前缀） | — |
 | `scripts/` | 零依赖 Node 本地脚本：`init-env.mjs` 环境初始化、`pack-local.mjs` 本地出包 | [local-scripts.md](docs/local-scripts.md) |
-| `tests/` | 一次性产物落点（**非整目录忽略**；`ci-sdk-step/`、`build-*.bat` 有意入库） | §3.2 |
+| `tests/` | 一次性产物落点（**非整目录忽略**；`ci-sdk-step/`、`android-build-step/`、`android-template-rehearsal/`、`build-*.bat` 有意入库） | §3.2 |
 | `.workbuddy/`、`.trae/`、`signing/` | AI 记忆目录 / 历史 spec（均已入库）/ 签名凭据（**未入库**，本地按需创建） | — |
 
 > 顶层目录变动时须同步更新本表及对应项目 `AGENTS.md`。
@@ -69,7 +69,7 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 
 | 日期 | 摘要 |
 | --- | --- |
-| 2026-10-28 | 修 Android 打包 `config_url` 误填 JSON 导致的 `URLError: unknown url type`：解析器改「先判形态再取内容」（JSON⇒按 config_json / 带 scheme⇒下载 / 无 scheme⇒仓库内路径），网络与路径失败一律 `::error::` 可操作文案；`--selftest` +4 组、两份 workflow 输入框描述与 §7.1 同步 → `docs/changes/2026-10-28.md` |
+| 2026-10-28 | Android 打包三连：① `config_url` 误填 JSON 的 `URLError`（解析器改「先判形态再取内容」）；② `cargo tauri android build \| tee` 失败被**吞成绿色**（缺 pipefail）⇒ 下游假报「未找到 *-unsigned.apk」，现补 `shell: bash` + `set -o pipefail` + 根因摘录 + 产物校验；③ 定性「零产物 = gradle 未启动」，加**环境指纹**步骤（tauri-cli/rustc/JDK/模板 AGP·Gradle·Kotlin/SDK/NDK）+ `W2A_SKIP_GRADLE_PATCH` 二分开关，并用**真模板**离线重放补丁链 11/11；连带 `cargo fmt --all`（v1.81 遗留）→ `docs/changes/2026-10-28.md` |
 | 2026-10-27 | 悬浮球 v1.81 根治边缘毛刺：Tauri 球弃 WebView2 改 **Win32 分层窗口**（`UpdateLayeredWindow` 预乘 ARGB + 4×4 超采样圆盘，像素 alpha 穿透），Electron 球改 canvas 超采样 alpha 位图；盘面弃蓝色渐变改跟随系统深浅色白/黑；吸附扩为**四边**就近择一（`DockEdge` 增 top/bottom），`floaticon.html` 转 Electron 专属、`capabilities/float-icon.json` 退役 → `docs/changes/2026-10-27.md` |
 | 2026-10-25 | webview-app 架构审查落盘 + 优化批次①②③④（P1–P4 全落地）：contract_tests.rs 拆 13 个领域子模块、打包配置字段表单源化（`scripts/packaging-fields.json`）、新建 `nav.rs` 切断 bootstrap 双向耦合（六模块归零）、electron 样例 17 键差异定性、debug_log/floatprobe 口径钉死、floatwin/tabs/proxy 三大文件垂直拆分（子模块化，proxy `#[path]` 双壳同源不破），Rust 282 全绿 / parity 55/55 → `docs/changes/2026-10-25.md` |
 | 2026-10-24 | electron-app 架构审查优化批次①–⑤ 落地（updateDocument 统一读-改-写 / index.ts 装配化 / probe-single 19 段函数化 / 设置页命令名三方守卫 / util.ts 与 protocols.ts 依赖收口 / 悬浮球决策纯函数化），unit 115/115、probe 149/150（预存环境项）、tabs 47/47 → `docs/changes/2026-10-24.md` |
