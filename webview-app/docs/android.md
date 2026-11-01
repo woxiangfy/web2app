@@ -82,6 +82,15 @@ fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6。
 再用「注入时固化的绝对路径」兜底 → 两者皆无则在**配置期**抛 `GradleException`。
 CI 侧另有「校验注入结果」步骤用同款规则**独立复算**一遍（两 workflow 逐字相同）。
 
+⚠️ **注入的 Kotlin 片段还要做「形参 ↔ 实参」类型核对**（同日第五轮）：wry 0.57 的
+`shouldOverrideUrlLoading(view, request: WebResourceRequest)` 第二参**不是** `Uri`，
+而 `patch-android-schemes.py` 的辅助方法形参是 `uri: Uri` ⇒ 守卫必须传 `request.url`，
+直接传 `request` 会得到 `e: RustWebViewClient.kt:115:47 Argument type mismatch`。
+字符串拼接式注入不经过类型检查，**selftest 断言若照抄实现就永远绿** ⇒
+每个带辅助方法的补丁都要有一条「形参类型 ↔ 实参文本」核对（见
+`patch-android-schemes.py::_assert_helper_call_types`）。离线复现：`rehearse.py` 产物的行号与
+CI 报错行号一致。
+
 ## 移动端底栏（`mobile_bar`，仅移动端）
 
 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**（仅多页签）/ **更多**（恒在最后，无条件渲染）。

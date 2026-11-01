@@ -57,17 +57,23 @@ IMPORT_LINE = re.compile(r"^import\s+.*$", re.M)
 PACKAGE_LINE = re.compile(r"^package\s+.*$", re.M)
 
 # wry 0.57 模板里该方法签名折成 4 行；分别捕获 view / request 的参数名，避免硬编码。
+# ⚠️ 第二参数类型必须同时接受 `WebResourceRequest` 与 `WebResourceRequest?`（后者极少见，
+#    但模板升级时若加了可空标记，守卫要跟着加 `?: return false`）。
 OVERRIDE_FUN = re.compile(
     r"^([ \t]*)override\s+fun\s+shouldOverrideUrlLoading\s*\(\s*"
     r"(\w+)\s*:\s*WebView\s*,\s*"
-    r"(\w+)\s*:\s*WebResourceRequest\s*"
+    r"(\w+)\s*:\s*WebResourceRequest(\?)?\s*"
     r"\)\s*:\s*Boolean\s*\{",
     re.M | re.S,
 )
 
+# ⚠️ 守卫传的是 **Uri**（辅助方法签名收 `uri: Uri`），不是 `WebResourceRequest`。
+#   2026-11-01 CI 实测：直接传 `request` ⇒ `e: ...RustWebViewClient.kt:115:47
+#   Argument type mismatch: actual type is 'WebResourceRequest', but 'Uri' was expected.`
+#   —— 配置期、注入期、selftest 全都发现不了，只有真跑 kotlinc 才炸。
 GUARD_TEMPLATE = (
     "{indent}// {marker}：非网页 scheme 先交系统应用处理（tel/mailto/weixin/intent/…）。\n"
-    "{indent}if (web2appHandleExternalScheme({view_param}, {req_param})) return true\n"
+    "{indent}if (web2appHandleExternalScheme({view_param}, {uri_arg})) return true\n"
 )
 
 # 4 空格缩进对齐 wry kotlin 模板（类成员 4 空格）。
@@ -149,12 +155,15 @@ def patch_src(src: str) -> str:
 
     src = _add_imports(src, NEEDED_IMPORTS)
     m = OVERRIDE_FUN.search(src)
-    indent, view_param, req_param = m.group(1), m.group(2), m.group(3)
+    indent, view_param, req_param, nullable = m.groups()
+    # 实参类型必须与辅助方法的形参（`uri: Uri`）一致 ⇒ 传 `request.url`，
+    # 绝不能直接传 `request`（WebResourceRequest）。
+    uri_arg = f"{req_param}?.url ?: return false" if nullable else f"{req_param}.url"
     guard = GUARD_TEMPLATE.format(
         indent=indent + "    ",
         marker=MARKER,
         view_param=view_param,
-        req_param=req_param,
+        uri_arg=uri_arg,
     )
 
     # 1) 守卫插到方法体开头（签名 '{' 之后）。
@@ -200,12 +209,38 @@ PRISTINE = (
 )
 
 
+def _assert_helper_call_types(src: str) -> None:
+    """守卫实参类型必须与辅助方法形参类型一致（2026-11-01 CI 实测的缺陷形态）。
+
+    kotlinc 要等**编译期**才知道 `request` 是 `WebResourceRequest`、而形参是 `uri: Uri`；
+    配置期、注入期、本脚本 selftest 全都是绿的 ⇒ 必须在这里做一次「形参类型 ↔ 实参文本」核对：
+    形参是 `Uri` ⇒ 实参只能是 `uri` 或 `<x>.url`。
+    """
+    sig = re.search(r"private fun web2appHandleExternalScheme\(([^)]*)\)", src)
+    assert sig, "缺少 web2appHandleExternalScheme 定义"
+    params = [p.split(":")[1].strip() for p in sig.group(1).split(",") if ":" in p]
+    call = re.search(r"web2appHandleExternalScheme\(([^)]*)\)\)\s*return true", src)
+    assert call, "缺少守卫调用（if (web2appHandleExternalScheme(...)) return true）"
+    args = [a.strip() for a in call.group(1).split(",")]
+    assert len(args) == len(params), (
+        f"守卫实参数（{len(args)}）与形参（{len(params)}）不一致"
+    )
+    for typ, arg in zip(params, args):
+        if typ.rstrip("?") != "Uri":
+            continue
+        head = arg.split("?:")[0].strip()
+        assert head == "uri" or head.endswith(".url"), (
+            f"形参类型是 Uri，实参却是 `{arg}` —— 直接传 WebResourceRequest 会报 "
+            f"Argument type mismatch（只有 kotlinc 才暴露，见 2026-11-01 CI）"
+        )
+
+
 def selftest() -> int:
     # 1) 原始模板 → 要素齐全
     patched = patch_src(PRISTINE)
     for needle in (
         MARKER,
-        "if (web2appHandleExternalScheme(view, request)) return true",
+        "if (web2appHandleExternalScheme(view, request.url)) return true",
         "private fun web2appHandleExternalScheme(view: WebView, uri: Uri): Boolean",
         "Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME)",
         "Intent(Intent.ACTION_VIEW, uri)",
@@ -224,9 +259,11 @@ def selftest() -> int:
 
     # 2) 守卫必须在原 return 之前（先拦截、后回落）。
     #    注意用完整语句定位：辅助方法的 KDoc 注释里也出现过 Rust.shouldOverride 字样。
-    assert patched.index("web2appHandleExternalScheme(view, request)") < patched.index(
+    assert patched.index("web2appHandleExternalScheme(view, request.url)") < patched.index(
         "return Rust.shouldOverride"
     ), "守卫必须在 wry 原决策之前"
+    # 实参类型核对（Uri ↔ WebResourceRequest 混用只有 kotlinc 才报）
+    _assert_helper_call_types(patched)
     # 辅助方法在 override 函数之前
     assert patched.index("private fun web2appHandleExternalScheme") < patched.index(
         "override fun shouldOverrideUrlLoading"
@@ -251,7 +288,16 @@ def selftest() -> int:
         "    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {\n",
     )
     p2 = patch_src(single_line)
-    assert "web2appHandleExternalScheme(view, request)" in p2
+    assert "web2appHandleExternalScheme(view, request.url)" in p2
+    _assert_helper_call_types(p2)
+
+    # 5b) 可空签名变体（`request: WebResourceRequest?`）也要类型对齐：补 elvis，仍传 Uri
+    nullable_src = PRISTINE.replace(
+        "request: WebResourceRequest\n", "request: WebResourceRequest?\n"
+    )
+    p3 = patch_src(nullable_src)
+    assert "web2appHandleExternalScheme(view, request?.url ?: return false)" in p3
+    _assert_helper_call_types(p3)
 
     # 6) 文件级集成：find_kotlin_file 定位 + 落盘 + 缺失报错
     import tempfile
