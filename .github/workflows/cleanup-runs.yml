@@ -1,0 +1,73 @@
+name: 清理旧运行记录（保留 3 天）
+
+# 【这个 workflow 是干什么的】
+#   仓库约定：workflow 运行记录不长期保存 ——
+#     · 构建物（artifact）保留 1 天：所有 upload-artifact 一律 `retention-days: 1`，到期自动消失；
+#     · 运行记录（Actions 页的 run 条目 + 其日志）保留 3 天：GitHub 不会自动删 run 记录
+#       （日志过期后条目仍留在列表里），所以由本 workflow 每天定时删除 3 天前的 run。
+#   删除 run 会连带删掉它的日志与残余 artifact，一次清理到位。
+#
+# 【删除范围】全仓所有 workflow 的 run；只删 created_at 早于 3 天前、且已结束
+#   （status == completed）的记录，正在排队 / 运行中的一律不动。本 workflow 自己的
+#   run 同样只活 3 天（下次清理时被删），不留永久垃圾。
+#
+# 【失败策略】单条删除失败只告警不中断，避免一条卡死记录堵住整轮清理；
+#   但只要有失败就把 job 标红，好在 Actions 页看见。
+#
+# 【权限】DELETE /repos/{repo}/actions/runs/{id} 需要 `actions: write`，
+#   故显式声明下面的 permissions（GITHUB_TOKEN 默认权限最小化）。
+
+on:
+  schedule:
+    # 每天 18:23 UTC（≈ 北京时间次日 02:23）跑一次；错开整点，避开 GitHub 高峰排队。
+    - cron: '23 18 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    name: 删除 3 天前的运行记录
+    runs-on: ubuntu-latest
+    steps:
+      - name: 删除过期运行记录
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RETAIN_DAYS: '3'
+        run: |
+          set -uo pipefail
+          cutoff="$(date -u -d "$RETAIN_DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)"
+          echo "保留 $RETAIN_DAYS 天：删除 created_at 早于 $cutoff 的已结束运行记录"
+
+          if ! runs="$(gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
+                --jq '.workflow_runs[] | select(.status == "completed") | "\(.id)\t\(.created_at)\t\(.name)"')"; then
+            echo "::error::拉取运行记录列表失败（gh api .../actions/runs）"
+            exit 1
+          fi
+
+          total=0; deleted=0; failed=0
+          # ⚠️ 用 here-string 而非管道喂循环：管道会把 while 丢进子 shell，计数器全丢。
+          while IFS=$'\t' read -r id created name; do
+            [[ -z "$id" ]] && continue
+            total=$((total + 1))
+            # created_at 是定长 UTC ISO8601（2026-11-01T10:20:30Z），字典序即时间序。
+            if [[ "$created" < "$cutoff" ]]; then
+              if gh api --method DELETE "repos/$REPO/actions/runs/$id" >/dev/null 2>&1; then
+                deleted=$((deleted + 1))
+                echo "已删除 run $id（$created｜$name）"
+              else
+                failed=$((failed + 1))
+                echo "::warning::删除 run $id（$created｜$name）失败"
+              fi
+            fi
+          done <<< "$runs"
+
+          echo "扫描 $total 条已结束运行记录：删除 $deleted 条，失败 $failed 条"
+          if [[ "$failed" -gt 0 ]]; then
+            echo "::error::有 $failed 条删除失败 —— 若返回 403，请确认本 workflow 的 permissions.actions: write 生效"
+            exit 1
+          fi

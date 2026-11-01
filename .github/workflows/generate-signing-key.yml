@@ -228,3 +228,4 @@ jobs:
           name: android-signing-key
           path: ${{ runner.temp }}/android-signing-key/
           if-no-files-found: error
+          retention-days: 1

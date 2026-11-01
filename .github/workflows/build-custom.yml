@@ -283,6 +283,7 @@ jobs:
           # ⚠️ 以仓库根为基准（upload-artifact 不受 defaults.run.working-directory 影响）。
           path: webview-app/target/release/bundle/msi/*.msi
           if-no-files-found: warn
+          retention-days: 1
 
       - name: Upload Windows 单文件版（zip，文件名含 app_name）
         if: ${{ github.event.inputs.windows_portable != 'false' }}
@@ -294,6 +295,7 @@ jobs:
           # ⚠️ 同上前缀说明：以仓库根为基准。
           path: webview-app/target/release/${{ env.PORTABLE_NAME }}.exe
           if-no-files-found: warn
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # Android APK（aarch64）。本作业会在 CI 上【自动生成 gen/android 并交叉编译出 APK】，
@@ -451,6 +453,11 @@ jobs:
         #      ③ 若注入块仍是旧写法，立刻红在这里（早 5 分钟，且原因写在脸上）。
         # 注意：不要用 `grep java.io.` 做判据 —— 注入块的**注释里**就带着这个反例字符串，
         #   只能匹配真正的缺陷形态 `= java.io.File(w2aRepoRoot`。
+        # ⚠️ 同日第二轮：修完 java.io 又炸在「Working directory ... does not exist」——
+        #   注入块把仓库根算少了一级（gen/android 到仓库根是三级，不是两级）。这类错误同样
+        #   只在**执行期**暴露 ⇒ 再加两条判据：
+        #   ④ 注入块必须是「逐级向上查找」写法（正向判据，注释里的反例文字不参与匹配）；
+        #   ⑤ 用 gradle 同款规则**独立复算**那个目录，不存在就立刻红（而不是等 5 分钟）。
         shell: bash
         run: |
           set -euo pipefail
@@ -465,6 +472,28 @@ jobs:
             echo "::error::本提交（${{ github.sha }}）里 .github/scripts/inject-gradle-patch-task.py 应为 File#resolve 写法；请确认这次运行 checkout 的提交是否含该修复。"
             exit 1
           fi
+          # ② 旧提交还有第二种形态：靠 parentFile 数层数（只上两级 ⇒ webview-app/.github/scripts）。
+          #    Exec 的 workingDir 只在**执行期**校验 ⇒ 配置期全绿、白等 5 分钟 Rust 编译才炸，
+          #    日志还只会说「目录不存在」。这里用**正向判据**要求注入块是「逐级向上查找」写法
+          #    （不匹配注释里的反例文字，注释行以 `//` 开头）。
+          if ! grep -q 'val w2aScriptsDir: File = generateSequence' "$f"; then
+            echo "::error::注入块不是「逐级向上查找」版本（缺 generateSequence）⇒ 脚本目录可能少上一级，"
+            echo "::error::gradle 会在 patchWry* 任务执行期报 Working directory ... does not exist。"
+            echo "::error::请确认本提交（${{ github.sha }}）含 inject-gradle-patch-task.py 的路径推导修复。"
+            exit 1
+          fi
+          # ③ 用 gradle 同款规则**独立复算**一遍，确认那个目录真的存在（上一轮失败的直接原因）
+          d="$PWD/gen/android"
+          while [ -n "$d" ] && [ ! -f "$d/.github/scripts/patch-android-extras.py" ]; do
+            nd=$(dirname "$d")
+            if [ "$nd" = "$d" ]; then d=""; break; fi
+            d="$nd"
+          done
+          if [ -z "$d" ]; then
+            echo "::error::从 $PWD/gen/android 逐级向上找不到 .github/scripts/patch-android-extras.py ⇒ patchWry* 的 workingDir 必错"
+            exit 1
+          fi
+          echo "gradle 将使用的脚本目录（复算）= $d/.github/scripts"
           echo "注入校验通过"
 
       - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
@@ -812,7 +841,7 @@ jobs:
           name: android-signing-key
           path: ${{ runner.temp }}/android-signing-key/
           if-no-files-found: ignore
-          retention-days: 3
+          retention-days: 1
 
       - name: Upload Android build log (诊断用)
         # 与 release.yml 对齐：完整构建日志（含 gradle 错误栈）落盘为 artifact。
@@ -822,6 +851,7 @@ jobs:
           name: android-build-log
           path: ${{ runner.temp }}/android-build.log
           if-no-files-found: ignore
+          retention-days: 1
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
@@ -830,4 +860,4 @@ jobs:
           name: android-apk
           path: ${{ runner.temp }}/signed/*.apk
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1

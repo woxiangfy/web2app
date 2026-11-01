@@ -112,6 +112,7 @@ jobs:
           name: resolve-keys
           path: ${{ runner.temp }}/resolve-keys/
           if-no-files-found: error
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # ② 生成 TXT 密文
@@ -225,6 +226,7 @@ jobs:
           name: resolve-cipher
           path: ${{ runner.temp }}/cipher-info.txt
           if-no-files-found: error
+          retention-days: 1
 
   # ---------------------------------------------------------------------------
   # ③ 一键生成密钥对 + 密文
@@ -332,3 +334,4 @@ jobs:
           name: resolve-all
           path: ${{ runner.temp }}/resolve-all/
           if-no-files-found: error
+          retention-days: 1

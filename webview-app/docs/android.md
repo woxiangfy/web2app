@@ -73,6 +73,15 @@ fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6。
 ⇒ 禁写 `java.io.File(...)` / `java.nio.*` / `java.util.*`（会得到 `Unresolved reference 'io'`），
 派生路径一律用 `File#resolve`（`org.gradle.*` 不受影响，`kotlin.io` 等走隐式导入的也没事）。
 
+⚠️ **注入块里的仓库路径不许「数层数」**（同日第二轮，同一条根因的第二种形态）：
+`rootProject.projectDir` 是 `<repo>/webview-app/gen/android`，到仓库根是**三级**；早期写
+`parentFile.parentFile`（只上两级）⇒ 得到 `webview-app/.github/scripts`。而 Exec 的 `workingDir`
+只在**执行期**校验 ⇒ 配置期照样"成功"、白等 5 分钟 Rust 编译才报
+`Working directory ... does not exist`（且日志里看不出是路径算错）。
+⇒ 规则：从 `projectDir` 逐级向上找第一个含 `patch-android-extras.py` 的 `.github/scripts` →
+再用「注入时固化的绝对路径」兜底 → 两者皆无则在**配置期**抛 `GradleException`。
+CI 侧另有「校验注入结果」步骤用同款规则**独立复算**一遍（两 workflow 逐字相同）。
+
 ## 移动端底栏（`mobile_bar`，仅移动端）
 
 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**（仅多页签）/ **更多**（恒在最后，无条件渲染）。

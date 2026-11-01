@@ -82,16 +82,29 @@ GRADLE_TASK_BLOCK = """
 //   rustBuild<Variant> 任务由 buildSrc 的 RustPlugin 在它自己的 afterEvaluate
 //   回调里创建（插件先于本脚本注册回调，故执行到这里时任务已就绪）。
 //
-// 路径推导（配置期计算，不硬编码相对层数）：
-//   rootProject.projectDir = gen/android/（settings.gradle 所在目录）
-//   .parentFile = webview-app/；.parentFile.parentFile = 仓库根 → .github/scripts/
-
-val w2aRepoRoot = rootProject.projectDir.parentFile.parentFile
-// ⚠️ 必须用 File#resolve，禁止写 java.io.File(...)：在 build.gradle.kts 里 `java` 是
-//   Gradle 生成的类型安全访问器（JavaPluginExtension），不是包名 ⇒ `java.io.File` 会
-//   编译成 `(java).io` 并报 "Unresolved reference 'io'"，整个脚本编译失败、APK 零产物。
-//   （2026-11-01 CI 实测：app/build.gradle.kts:108:26 Unresolved reference 'io'）
-val w2aScriptsDir = w2aRepoRoot.resolve(".github/scripts")
+// 路径推导（配置期计算）：
+//   rootProject.projectDir = <repo>/webview-app/gen/android/（settings.gradle 所在目录）
+//   ⇒ 仓库根在**上三级**（gen/android → gen → webview-app → <repo>）。
+// ⚠️ 但**不要数层数**：早期版本写 parentFile.parentFile（只上两级），得到
+//   webview-app/.github/scripts，CI 实测 2026-11-01 报
+//   "Working directory '.../webview-app/.github/scripts' does not exist"。
+//   之所以能潜伏：Exec 的 workingDir 只在**执行期**校验 ⇒ 配置期照样"成功"，
+//   白等 5 分钟 Rust 编译才炸，且日志里看不出是路径算错。
+// ⚠️ 也不要在本文件里写 java 包前缀（如 java 点 io 点 File）：build.gradle.kts 里 `java`
+//   是 Gradle 生成的类型安全访问器（JavaPluginExtension），不是包名 ⇒ 会报
+//   "Unresolved reference 'io'"（2026-11-01 CI 实测 108:26），整个脚本编译失败、零产物。
+//   Kotlin 默认已导入 File，直接用即可。
+// ⇒ 规则：从 projectDir 逐级向上找第一个含补丁脚本的 .github/scripts；
+//   找不到再用「注入时固化下来的绝对路径」兜底；两者都没有则在**配置期**直接失败。
+val w2aScriptsDir: File = generateSequence(rootProject.projectDir.absoluteFile) { it.parentFile }
+    .map { File(it, ".github/scripts") }
+    .firstOrNull { File(it, "patch-android-extras.py").isFile }
+    ?: File("{scripts_dir_literal}").takeIf { it.isDirectory }
+    ?: throw org.gradle.api.GradleException(
+        "web2app: 找不到 .github/scripts —— 已从 ${rootProject.projectDir} 逐级向上查找，" +
+            "注入时固化的路径 {scripts_dir_literal} 也不存在；" +
+            "请确认 gen/android 位于 <repo>/webview-app/gen/android"
+    )
 val w2aGenRoot = rootProject.projectDir.absolutePath
 val w2aPython = "{python_exe}"
 val w2aPatchScripts = listOf(
@@ -151,6 +164,21 @@ afterEvaluate {
 """.strip("\n")
 
 
+def _mirror_scripts_dir(start: pathlib.Path) -> pathlib.Path | None:
+    """Kotlin 段 `generateSequence(...).firstOrNull { ... }` 的 Python 镜像 —— 同一判据。
+
+    存在的意义：那段 Kotlin 本机跑不了（没有 JVM / gradle / SDK），只能把**判据**搬到
+    Python 里对着一个真实目录树跑一遍，证明「从 gen/android 逐级向上能找到
+    `<repo>/.github/scripts`」这条规则成立。Kotlin 侧一旦改判据，这里同步改（下面有
+    字符串守卫钉住 generateSequence 的写法）。
+    """
+    for cur in (start, *start.parents):
+        cand = cur / ".github" / "scripts"
+        if (cand / "patch-android-extras.py").is_file():
+            return cand
+    return None
+
+
 def selftest() -> int:
     """用临时目录模拟完整流程。"""
     import tempfile
@@ -158,7 +186,13 @@ def selftest() -> int:
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp_path = pathlib.Path(tmp)
-        gen_root = tmp_path / "gen" / "android"
+        # 模拟**真实仓布局**：<repo>/webview-app/gen/android —— 仓库根在 gen/android 上三级。
+        # 早期 selftest 用的是 <tmp>/gen/android（只上两级就到顶），正好把这个缺陷放过去了。
+        repo_root = tmp_path / "repo"
+        scripts_dir = repo_root / ".github" / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "patch-android-extras.py").write_text("", encoding="utf-8")
+        gen_root = repo_root / "webview-app" / "gen" / "android"
 
         # 模拟 gen/android/app/build.gradle.kts
         build_gradle = gen_root / "app" / "build.gradle.kts"
@@ -203,15 +237,35 @@ def selftest() -> int:
         # Kotlin DSL 命名空间陷阱：`java` 在这个作用域里是 Gradle 生成的类型安全访问器
         # （JavaPluginExtension），不是包名 ⇒ 写 java.io.File 会让整个脚本编译失败
         # （CI 实测 2026-11-01：app/build.gradle.kts:108:26 Unresolved reference 'io'）。
-        # 派生路径一律用 File#resolve。
         # ⚠️ 注入块自己的注释里就带着这个反例字符串（讲解用），直接对 content 匹配会被
         #    注释满足 ⇒ 先剥掉 // 行注释再断言。
         code_only = "\n".join(
             ln for ln in content.splitlines() if not ln.lstrip().startswith("//")
         )
         assert "java.io." not in code_only, "Kotlin DSL 里 java 是扩展访问器，禁止写 java.io.*"
-        assert 'w2aRepoRoot.resolve(".github/scripts")' in code_only, (
-            "脚本目录必须由 w2aRepoRoot.resolve 派生（File#resolve）"
+        # 路径推导守卫（2026-11-01 第二轮 CI：workingDir 少上一级 ⇒ 只在 Exec 执行期炸，
+        # 白等 5 分钟 Rust 编译，日志还把根因说成「目录不存在」）
+        assert "parentFile.parentFile" not in code_only, (
+            "禁止用 parentFile 数层数推导仓库根：gen/android 到仓库根是三级，"
+            "少一级 = workingDir 不存在，且只在执行期才报错"
+        )
+        assert "generateSequence(rootProject.projectDir.absoluteFile)" in code_only, (
+            "仓库根必须从 projectDir 逐级向上查找 .github/scripts"
+        )
+        assert "GradleException" in code_only, (
+            "找不到 .github/scripts 必须在配置期直接失败（别拖到执行期才报目录不存在）"
+        )
+        injector_scripts_dir = pathlib.Path(__file__).resolve().parent
+        assert injector_scripts_dir.as_posix() in content, (
+            "注入块必须固化注入时的绝对脚本目录作兜底（本脚本自己就在该目录里，无需猜层数）"
+        )
+        # 同一判据的 Python 镜像：在模拟的真实布局 <repo>/webview-app/gen/android 上跑一遍，
+        # 证明「逐级向上找」确实命中仓库根的 .github/scripts（Kotlin 段本机执行不了）。
+        assert _mirror_scripts_dir(gen_root) == scripts_dir, (
+            f"从 {gen_root} 向上未找到 {scripts_dir}"
+        )
+        assert _mirror_scripts_dir(tmp_path / "elsewhere") is None, (
+            "不在仓库内的目录不应误判出 .github/scripts"
         )
         # 语法跳闸（只查配平，不是解析器）：注入块的 `{}` / `()` 必须成对 —— 手工改这段
         # 模板时最容易掉一行 `}`，而这类错误同样只会在 gradle 配置期才暴露。
@@ -223,7 +277,8 @@ def selftest() -> int:
         assert ".configureEach" not in content, "不应使用 configureEach（注册时机不确定）"
         assert "findByName" not in content, "不应使用 findByName（会提前 realize 任务）"
         # 占位符必须全部替换，不得残留
-        for leftover in ("{marker}", "{script_lines_block}", "{python_exe}", "{{", "}}"):
+        for leftover in ("{marker}", "{script_lines_block}", "{python_exe}",
+                         "{scripts_dir_literal}", "{{", "}}"):
             assert leftover not in content, f"模板占位符/转义残留：{leftover}"
         # python 可执行名按宿主平台写死
         expected_exe = "python" if sys.platform.startswith("win") else "python3"
@@ -343,12 +398,16 @@ def main() -> int:
     # python 可执行名按注入脚本运行的宿主平台决定（CI Android job 是 Linux → python3；
     # Windows 本地跑 tauri android build 时通常只有 python.exe）。
     python_exe = "python" if sys.platform.startswith("win") else "python3"
+    # 兜底路径：本脚本自己就住在 .github/scripts 里 ⇒ 绝对路径是**可知的**，不靠猜层数。
+    # 用 as_posix() 规避 Windows 反斜杠在 Kotlin 字符串里的转义问题（Java File 认 `/`）。
+    scripts_dir_literal = pathlib.Path(__file__).resolve().parent.as_posix()
 
     block = (
         GRADLE_TASK_BLOCK
         .replace("{marker}", IDEMPOTENT_MARKER)
         .replace("{script_lines_block}", script_lines_block)
         .replace("{python_exe}", python_exe)
+        .replace("{scripts_dir_literal}", scripts_dir_literal)
     )
 
     # 追加到文件末尾（确保末尾有换行）

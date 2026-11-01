@@ -195,6 +195,7 @@ jobs:
           # ⚠️ 以仓库根为基准（upload-artifact 不受 defaults.run.working-directory 影响）
           path: electron-app/release/*.zip
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload 单文件版（portable exe）
         uses: actions/upload-artifact@v7
@@ -202,6 +203,7 @@ jobs:
           name: web2app-electron-win-x64-portable
           path: electron-app/release/*-portable.exe
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload 安装版（NSIS setup exe）
         uses: actions/upload-artifact@v7
@@ -209,3 +211,4 @@ jobs:
           name: web2app-electron-win-x64-setup
           path: electron-app/release/*-setup.exe
           if-no-files-found: error
+          retention-days: 1
