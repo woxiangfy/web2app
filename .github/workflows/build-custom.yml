@@ -442,6 +442,31 @@ jobs:
         # task 里重新运行 extras / schemes / fullscreen 三个补丁脚本。
         run: python3 ../.github/scripts/inject-gradle-patch-task.py
 
+      - name: 校验注入结果（旧版注入块 / 旧提交会在这里 1 分钟内失败，而不是 6 分钟后）
+        # ⚠️ 2026-11-01 新增。动机：同一次「还是失败」的日志与修复前**逐字相同**（都卡在
+        #   build.gradle.kts:108 的 java.io.File），但仓库里那行早已改成 File#resolve ——
+        #   说明那份日志来自**没有该提交的运行**（旧 artifact / 旧 ref），而日志本身不含任何
+        #   能自证「我是哪个提交」的信息 ⇒ 只能靠猜。
+        #   ⇒ ① 把 commit/ref/run 打进主线日志；② 把真正注入的那行打印出来；
+        #      ③ 若注入块仍是旧写法，立刻红在这里（早 5 分钟，且原因写在脸上）。
+        # 注意：不要用 `grep java.io.` 做判据 —— 注入块的**注释里**就带着这个反例字符串，
+        #   只能匹配真正的缺陷形态 `= java.io.File(w2aRepoRoot`。
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "commit=${{ github.sha }}"
+          echo "ref=${{ github.ref }}  event=${{ github.event_name }}  run=${{ github.run_id }}"
+          f=gen/android/app/build.gradle.kts
+          if [ ! -f "$f" ]; then echo "::error::$f 不存在（init 阶段就没生成？）"; exit 1; fi
+          echo "── 注入块里的路径派生行 ──"
+          grep -n 'val w2aScriptsDir' "$f"
+          if grep -q '= java\.io\.File(w2aRepoRoot' "$f"; then
+            echo "::error::注入块仍是旧版（= java.io.File(w2aRepoRoot...)），gradle 配置期必然报 Unresolved reference 'io'。"
+            echo "::error::本提交（${{ github.sha }}）里 .github/scripts/inject-gradle-patch-task.py 应为 File#resolve 写法；请确认这次运行 checkout 的提交是否含该修复。"
+            exit 1
+          fi
+          echo "注入校验通过"
+
       - name: 适配系统状态栏/导航栏（避免页面被顶部通栏遮挡）
         # 逻辑在 .github/scripts/patch-android-insets.py —— 两壳共用（两份内联逻辑实测逐字节相同）。
         # 模板 MainActivity 调用了 enableEdgeToEdge()，WebView 会绘制到系统栏下方；脚本按
