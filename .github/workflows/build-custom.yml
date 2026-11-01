@@ -787,6 +787,7 @@ jobs:
           name: android-signing-key
           path: ${{ runner.temp }}/android-signing-key/
           if-no-files-found: ignore
+          retention-days: 3
 
       - name: Upload Android build log (诊断用)
         # 与 release.yml 对齐：完整构建日志（含 gradle 错误栈）落盘为 artifact。
@@ -804,3 +805,4 @@ jobs:
           name: android-apk
           path: ${{ runner.temp }}/signed/*.apk
           if-no-files-found: error
+          retention-days: 3

@@ -228,6 +228,7 @@ jobs:
           name: ${{ env.PKG_NAME }}-win-x64-portable
           path: electron-app/release/*-portable.exe
           if-no-files-found: error
+          retention-days: 3
 
       - name: Upload 安装版（NSIS setup exe）
         if: ${{ github.event.inputs.electron_nsis != 'false' }}
@@ -236,3 +237,4 @@ jobs:
           name: ${{ env.PKG_NAME }}-win-x64-setup
           path: electron-app/release/*-setup.exe
           if-no-files-found: error
+          retention-days: 3

@@ -87,7 +87,11 @@ GRADLE_TASK_BLOCK = """
 //   .parentFile = webview-app/；.parentFile.parentFile = 仓库根 → .github/scripts/
 
 val w2aRepoRoot = rootProject.projectDir.parentFile.parentFile
-val w2aScriptsDir = java.io.File(w2aRepoRoot, ".github/scripts")
+// ⚠️ 必须用 File#resolve，禁止写 java.io.File(...)：在 build.gradle.kts 里 `java` 是
+//   Gradle 生成的类型安全访问器（JavaPluginExtension），不是包名 ⇒ `java.io.File` 会
+//   编译成 `(java).io` 并报 "Unresolved reference 'io'"，整个脚本编译失败、APK 零产物。
+//   （2026-11-01 CI 实测：app/build.gradle.kts:108:26 Unresolved reference 'io'）
+val w2aScriptsDir = w2aRepoRoot.resolve(".github/scripts")
 val w2aGenRoot = rootProject.projectDir.absolutePath
 val w2aPython = "{python_exe}"
 val w2aPatchScripts = listOf(
@@ -196,6 +200,25 @@ def selftest() -> int:
         # Gradle 9 + configuration cache 兼容性守卫：
         # 必须用内置 Exec task，不得回退到任务动作里调 Project#exec（Gradle 9 已移除）
         assert "org.gradle.api.tasks.Exec" in content, "应使用内置 Exec task"
+        # Kotlin DSL 命名空间陷阱：`java` 在这个作用域里是 Gradle 生成的类型安全访问器
+        # （JavaPluginExtension），不是包名 ⇒ 写 java.io.File 会让整个脚本编译失败
+        # （CI 实测 2026-11-01：app/build.gradle.kts:108:26 Unresolved reference 'io'）。
+        # 派生路径一律用 File#resolve。
+        # ⚠️ 注入块自己的注释里就带着这个反例字符串（讲解用），直接对 content 匹配会被
+        #    注释满足 ⇒ 先剥掉 // 行注释再断言。
+        code_only = "\n".join(
+            ln for ln in content.splitlines() if not ln.lstrip().startswith("//")
+        )
+        assert "java.io." not in code_only, "Kotlin DSL 里 java 是扩展访问器，禁止写 java.io.*"
+        assert 'w2aRepoRoot.resolve(".github/scripts")' in code_only, (
+            "脚本目录必须由 w2aRepoRoot.resolve 派生（File#resolve）"
+        )
+        # 语法跳闸（只查配平，不是解析器）：注入块的 `{}` / `()` 必须成对 —— 手工改这段
+        # 模板时最容易掉一行 `}`，而这类错误同样只会在 gradle 配置期才暴露。
+        for opener, closer in (("{", "}"), ("(", ")")):
+            assert code_only.count(opener) == code_only.count(closer), (
+                f"注入块括号不配平：{opener}={code_only.count(opener)} {closer}={code_only.count(closer)}"
+            )
         assert "doLast" not in content, "不得在任务动作里调 Project#exec（Gradle 9 已移除）"
         assert ".configureEach" not in content, "不应使用 configureEach（注册时机不确定）"
         assert "findByName" not in content, "不应使用 findByName（会提前 realize 任务）"

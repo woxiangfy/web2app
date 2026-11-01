@@ -67,6 +67,12 @@ download 复用 back 新建的 `onWebViewCreate` override 只插一行；extras 
 fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6。
 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
 
+⚠️ **注入进 `build.gradle.kts` 的 Kotlin 片段必须能通过脚本编译**（它只在 gradle **配置期**才被编译，
+本地 `--selftest` 跑不出来——2026-11-01 就是这个盲区炸的，见 `docs/changes/2026-11-01.md`）：
+在脚本作用域里 `java` 是 Gradle 生成的**类型安全访问器**（`JavaPluginExtension`）而**不是包名**
+⇒ 禁写 `java.io.File(...)` / `java.nio.*` / `java.util.*`（会得到 `Unresolved reference 'io'`），
+派生路径一律用 `File#resolve`（`org.gradle.*` 不受影响，`kotlin.io` 等走隐式导入的也没事）。
+
 ## 移动端底栏（`mobile_bar`，仅移动端）
 
 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**（仅多页签）/ **更多**（恒在最后，无条件渲染）。

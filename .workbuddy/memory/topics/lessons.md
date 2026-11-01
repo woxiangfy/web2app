@@ -312,3 +312,19 @@
 - ⚠️ **写记忆/文档时先分清「活文件」与「历史快照」**：`MEMORY.md`、`topics/*.md` 是活的（要改成现状）；
   `docs/changes/YYYY-MM-DD.md`、`.workbuddy/memory/YYYY-MM-DD.md`、`*-review-20xx-xx-xx.md` 是快照
   （**保留原文**，只加「时点快照」横幅）。改错这一层比不改更糟。
+
+## 2026-11-01：**注入到 `build.gradle.kts` 的 Kotlin 片段，本地测试是盲区**
+
+- ⚠️⚠️ **`--selftest` 只能验「字符串拼对了」，验不了「Kotlin 能编译」**：注入块的编译发生在 gradle
+  **配置期**，本机没有 SDK/NDK 就永远跑不到。⇒ 这类模板的守卫只能覆盖**已知的具体坑**，
+  每踩一个新坑就往 selftest 里加一条（本次加了「禁 `java.io.*`」）。
+- ⚠️⚠️ **`build.gradle.kts` 里 `java` 不是包名**：Gradle 为已应用插件的扩展生成类型安全访问器
+  （`val Project.java: JavaPluginExtension`，AGP 会应用 java-base）⇒ `java.io.File(...)` 被解析成
+  「访问器 `java` 的成员 `io`」，报 **`Unresolved reference 'io'`**，整个脚本编译失败、**零产物**。
+  ⇒ 派生路径用 `File#resolve`；`java.nio.*` / `java.util.*` 同理禁写（`org.gradle.*` 不受影响）。
+  ⚠️ 判据技巧：**报错列号能定性** —— `108:26` 的 26 正好是 `io` 首列，说明编译器把 `java` 当成了表达式。
+- ⚠️⚠️ **`continue-on-error: true` = 静默失败制造机**：android job 从 2026-10-16 红到 11-01 无人察觉，
+  因为整轮 workflow 一直是绿的。⇒ 尽力而为的作业至少要有「产物不存在就 exit 1」的自检，
+  或把失败升级成 workflow 级可见信号。
+- ⚠️ **给「注释里带反例字符串」的模板加禁词守卫，必须先剥注释**：本次模板注释里就写着
+  `java.io.File` 当反面教材，不剥 `//` 行注释 ⇒ 守卫永远假失败（或反过来，禁词只出现在注释里就永远假通过）。
