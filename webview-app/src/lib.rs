@@ -513,9 +513,14 @@ pub fn run() {
                 //（标题由 mobilebar.js 的 web2app:mobile-doc 事件另补；启动页 url 在其内部被忽略）。
                 // ⚠️ 顺序与旧实现（原 bootstrap::on_page_load 内联）一致：先经 nav::on_page_load
                 //    置位 BootReady，再记页签；这里不放回 nav 是为避免 nav → mobilebar 的层级环。
+                // ⚠️⚠️ url **必须从这里传进去**，不能让 mobilebar 回头调 `window.url()`：
+                //    本闭包由 wry 的 `Rust.onPageLoaded`（JNI，同步）驱动，**跑在 Android UI 线程**，
+                //    而 `url()` 走 MainPipe + `recv_timeout(10s)`、管道消费方正是这条线程 ⇒
+                //    必然僵 10 秒超时，随后 wry 的 GetUrl 分支 `tx.send(url).unwrap()` 撞上已丢弃的
+                //    接收端 ⇒ panic ⇒ abort（真机表象：白屏约 10 秒后应用自动退出，2026-11-01）。
                 #[cfg(mobile)]
                 if finished {
-                    crate::mobilebar::on_page_finished(window.app_handle());
+                    crate::mobilebar::on_page_finished(window.app_handle(), payload.url().as_str());
                 }
             });
 

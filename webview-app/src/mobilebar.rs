@@ -37,6 +37,28 @@
 //!     与 `bootstrap.rs` 里那组 `#[cfg(any(not(windows), test))]` 同一条写法。
 //! ⚠️ 因此本模块里**只能**用跨平台 API，不得引用任何 `#[cfg(mobile)]` / `#[cfg(windows)]`
 //!    的项（那样会让桌面端的测试构建编译不过）。
+//!
+//! # ⚠️⚠️ 本模块的所有入口都跑在 Android **UI 线程**上 ⇒ 禁调阻塞型 webview getter
+//!
+//! 调用链：`RustWebViewClient.onPageFinished`（UI 线程）→ JNI `Rust.onPageLoaded`
+//! （`wry/src/android/binding.rs`，**同步**在该线程执行）→ tauri `on_page_load` 闭包
+//! （`lib.rs` 里接线）→ 本模块的 [`on_page_finished`]。事件入口同理，都是 UI 线程。
+//!
+//! 而 `WebviewWindow::url()` 在 Android 上是
+//! `MainPipe::send(GetUrl)` + `rx.recv_timeout(MAIN_PIPE_TIMEOUT = 10s)`
+//! （`wry/src/android/mod.rs`），管道的**消费方就是这条 UI 线程**（`onFirstActivityCreateWry`
+//! 把 `MAIN_PIPE[0]` 注册成 `ThreadLooper::for_thread()` 的 fd 回调）⇒ 在 UI 线程上问地址
+//! **必然**僵住 10 秒，然后超时返回 `Err`。
+//!
+//! 更糟的是超时**不是终点**：那条 `GetUrl` 仍留在管道里，等 UI 线程腾出来被处理时，
+//! `main_pipe.rs` 的 `WebViewMessage::GetUrl` 分支结尾是 `tx.send(url).unwrap()` ——
+//! 而接收端已经随超时被丢弃 ⇒ `unwrap()` panic ⇒ 跨 FFI 的 panic 直接 abort 进程。
+//!
+//! 真机表象（2026-11-01，`tabs_enabled=true` + `mobile_bar=true` 的包）：
+//! **打开白屏约 10 秒 → 应用自动退出**。所以本模块里当前地址一律走
+//! [`CurrentUrl`] 这份**缓存**（页面加载完成事件与 `web2app:mobile-doc` 事件负责写入），
+//! 绝不再向 webview 现问。静态守卫：`contract_tests::mobile_bar_contract` 的
+//! `mobile_bar_never_queries_webview_on_ui_thread`。
 
 use std::sync::Mutex;
 
@@ -287,6 +309,40 @@ fn is_builtin_url(u: &str) -> bool {
 #[derive(Default)]
 pub(crate) struct MobileTabsState(Mutex<MobileTabs>);
 
+/// 主 webview 的**当前地址缓存**（模块头「禁调阻塞型 getter」一节的唯一替代品）。
+///
+/// 写入方（都发生在 UI 线程，但都只是本地字符串赋值，不碰 webview）：
+///   · `on_page_finished`（每次文档加载完成，url 由 wry 经 `on_page_load` payload 给出）；
+///   · `doc_reported`（页面 `web2app:mobile-doc` 事件的 `{url}`，覆盖 SPA 内部跳转）。
+/// 读取方：首页按钮 / 标签切换 / 标签关闭后的「是否已在同一落点」判定。
+///
+/// ⚠️ 空串 = 「还没观测到任何真实网页地址」（此时一律按「不在目标页」处理，
+///    退化成直接导航 —— 与旧实现读地址失败时的分支一致）。
+/// ⚠️ 内置启动页地址不入缓存（`is_builtin_url`）：启动页不是任何标签/首页的落点。
+#[derive(Default)]
+pub(crate) struct CurrentUrl(Mutex<String>);
+
+/// 读取当前地址缓存（空串 = 未知）。
+fn current_url(app: &AppHandle) -> String {
+    app.state::<CurrentUrl>()
+        .0
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// 写入当前地址缓存；空串与内置启动页地址一律忽略。
+fn remember_url(app: &AppHandle, url: &str) {
+    if url.is_empty() || is_builtin_url(url) {
+        return;
+    }
+    if let Ok(mut g) = app.state::<CurrentUrl>().0.lock() {
+        if g.as_str() != url {
+            *g = url.to_string();
+        }
+    }
+}
+
 /// 记下本次解析出的首页导航信息（由 `bootstrap` 在解析成功后调用）。
 pub(crate) fn set_home_nav(app: &AppHandle, nav: &Navigation) {
     if let Ok(mut g) = app.state::<HomeNav>().0.lock() {
@@ -303,22 +359,24 @@ pub(crate) fn set_home_nav(app: &AppHandle, nav: &Navigation) {
 
 /// 主 webview 每次文档加载完成时调用（由 `lib.rs` 的 on_page_load 闭包接线，仅移动端）：
 /// 把最终落点 url 记进活动标签（标题由页面事件另补），变了就推回列表面板。
-pub(crate) fn on_page_finished(app: &AppHandle) {
+///
+/// ⚠️⚠️ `url` **必须由调用方传进来**（wry 的 `on_page_load` payload 就带着它）。
+///    绝不许在这里 `window.url()` 现问 —— 本函数跑在 Android UI 线程，而那个 getter 走
+///    MainPipe 且消费方就是这条线程：必然僵 10 秒，随后触发 wry 侧
+///    `tx.send(url).unwrap()` 的 panic ⇒ abort（真机表象「白屏约 10 秒后自动退出」）。
+///    完整机制见模块头「禁调阻塞型 getter」一节；守卫
+///    `contract_tests::mobile_bar_contract::mobile_bar_never_queries_webview_on_ui_thread`。
+pub(crate) fn on_page_finished(app: &AppHandle, url: &str) {
+    // 地址缓存与页签无关（首页按钮 / 切标签都要用它），故这一行在 tabs 判定**之前**。
+    remember_url(app, url);
     if !tabs_available() {
         return;
     }
-    let Some(window) = main_window(app) else {
-        return;
-    };
-    let Ok(cur) = window.url() else {
-        return;
-    };
-    let cur = cur.to_string();
     let changed = app
         .state::<MobileTabsState>()
         .0
         .lock()
-        .map(|mut t| t.observe(&cur, None))
+        .map(|mut t| t.observe(url, None))
         .unwrap_or(false);
     if changed {
         push_rows(app);
@@ -332,6 +390,7 @@ pub(crate) fn on_page_finished(app: &AppHandle) {
 pub(crate) fn setup(app: &AppHandle) {
     app.manage(HomeNav::default());
     app.manage(MobileTabsState::default());
+    app.manage(CurrentUrl::default());
 
     let home = app.clone();
     app.listen(NAV_HOME_EVENT, move |_event| {
@@ -393,11 +452,14 @@ fn home_url(app: &AppHandle) -> Option<String> {
 }
 
 /// 把 webview 当前所在 url 记进活动标签（切换 / 新建之前先保住旧标签的落点）。
-fn bind_current_url(app: &AppHandle, window: &tauri::WebviewWindow) {
-    let Ok(cur) = window.url() else {
+///
+/// ⚠️ 用 [`CurrentUrl`] 缓存而不是 `window.url()`：调用点（事件回调）在 Android 上同样是
+///    UI 线程，现问地址会把 UI 线程钉住 10 秒并最终 abort 进程（见模块头）。
+fn bind_current_url(app: &AppHandle) {
+    let cur = current_url(app);
+    if cur.is_empty() {
         return;
-    };
-    let cur = cur.to_string();
+    }
     if let Ok(mut t) = app.state::<MobileTabsState>().0.lock() {
         t.observe(&cur, None);
     }
@@ -418,7 +480,7 @@ fn create_tab(app: &AppHandle) {
         crate::nav::bootstrap(app.clone());
         return;
     };
-    bind_current_url(app, &window);
+    bind_current_url(app);
     let target = {
         let state = app.state::<MobileTabsState>();
         let Ok(mut t) = state.0.lock() else {
@@ -427,7 +489,7 @@ fn create_tab(app: &AppHandle) {
         let i = t.new_tab(&home);
         t.tabs[i].url.clone()
     };
-    navigate_to(&window, &target);
+    navigate_to(app, &window, &target);
     push_rows(app);
 }
 
@@ -460,7 +522,7 @@ fn create_tab_with_url(app: &AppHandle, raw_url: &str) {
     let Some(window) = main_window(app) else {
         return;
     };
-    bind_current_url(app, &window);
+    bind_current_url(app);
     let target = {
         let state = app.state::<MobileTabsState>();
         let Ok(mut t) = state.0.lock() else {
@@ -470,7 +532,7 @@ fn create_tab_with_url(app: &AppHandle, raw_url: &str) {
         let i = t.new_tab(raw_url);
         t.tabs[i].url.clone()
     };
-    navigate_to(&window, &target);
+    navigate_to(app, &window, &target);
     push_rows(app);
 }
 
@@ -483,7 +545,7 @@ fn switch_tab(app: &AppHandle, label: &str) {
     let Some(window) = main_window(app) else {
         return;
     };
-    bind_current_url(app, &window);
+    bind_current_url(app);
     let target = {
         let state = app.state::<MobileTabsState>();
         let Ok(mut t) = state.0.lock() else {
@@ -494,7 +556,7 @@ fn switch_tab(app: &AppHandle, label: &str) {
             None => return, // 点的就是当前标签
         }
     };
-    navigate_to(&window, &target);
+    navigate_to(app, &window, &target);
     push_rows(app);
 }
 
@@ -526,7 +588,7 @@ fn close_tab(app: &AppHandle, label: &str) {
                         .ok()
                         .and_then(|t| t.tabs.get(i).map(|t| t.url.clone()));
                     if let Some(url) = target {
-                        navigate_to(&window, &url);
+                        navigate_to(app, &window, &url);
                     }
                 }
             }
@@ -536,10 +598,11 @@ fn close_tab(app: &AppHandle, label: &str) {
 }
 
 /// 页面上报 `{url,title}`：刷新活动标签记录并推回面板（仅在记录变化时）。
+///
+/// 它同时是 [`CurrentUrl`] 的**第二个写入方**：SPA 的 `pushState` / `replaceState` 跳转
+/// 不会再触发文档加载完成事件，只靠 `on_page_finished` 会把缓存留在旧页面上
+/// （后果：首页按钮判定「已在首页」误判 → 点首页变 reload 而不是回入口）。
 fn doc_reported(app: &AppHandle, payload: &str) {
-    if !tabs_available() {
-        return;
-    }
     #[derive(serde::Deserialize, Default)]
     struct P {
         #[serde(default)]
@@ -549,6 +612,11 @@ fn doc_reported(app: &AppHandle, payload: &str) {
     }
     let p = serde_json::from_str::<P>(payload).unwrap_or_default();
     if p.url.is_empty() {
+        return;
+    }
+    // 与页签无关（首页按钮 / 切标签都要用），故在 tabs 判定之前。
+    remember_url(app, &p.url);
+    if !tabs_available() {
         return;
     }
     let changed = app
@@ -587,17 +655,28 @@ fn push_rows(app: &AppHandle) {
 
 /// 导航到指定地址：已在同一落点时退化为 reload（与 [`navigate_home`] 同一理由 ——
 /// 同地址 navigate 在部分内核上是 no-op，用户会觉得「点了没反应」）。
-fn navigate_to(window: &tauri::WebviewWindow, target: &str) {
+///
+/// ⚠️ 「当前在哪」取 [`CurrentUrl`] 缓存，不用 `window.url()`（UI 线程 + MainPipe 的
+///    组合会僵 10 秒后 abort，见模块头）。
+fn navigate_to(app: &AppHandle, window: &tauri::WebviewWindow, target: &str) {
     let Ok(url) = url::Url::parse(target) else {
         dlog!("[mobilebar] 标签地址不合法：{target}");
         return;
     };
-    if matches!(window.url(), Ok(cur) if same_target(&cur, &url)) {
+    if at_same_target(app, &url) {
         let _ = window.eval("try{location.reload();}catch(e){}");
         return;
     }
     if let Err(e) = window.navigate(url) {
         dlog!("[mobilebar] 标签导航失败：{e}");
+    }
+}
+
+/// 缓存的当前地址是否就是这个落点（缓存缺失 / 解析不了 ⇒ `false` = 直接导航）。
+fn at_same_target(app: &AppHandle, target: &url::Url) -> bool {
+    match url::Url::parse(&current_url(app)) {
+        Ok(cur) => same_target(&cur, target),
+        Err(_) => false,
     }
 }
 
@@ -661,7 +740,9 @@ fn navigate_home(app: &AppHandle) {
     };
 
     // ① 已在首页 → 重新加载
-    if matches!(window.url(), Ok(cur) if same_target(&cur, &target)) {
+    // ⚠️ 「当前在哪」取 [`CurrentUrl`] 缓存，不许 `window.url()`：本函数由 `web2app:nav-home`
+    //    事件驱动，而事件回调在 Android 上同样是 UI 线程（详见模块头）。
+    if at_same_target(app, &target) {
         let _ = window.eval("try{location.reload();}catch(e){}");
         return;
     }

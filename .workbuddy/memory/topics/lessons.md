@@ -358,3 +358,17 @@
 - ⚠️ **上游模板升级会悄悄改签名**（wry 0.57 把 `shouldOverrideUrlLoading(view, uri: Uri)` 改成
   `(view, request: WebResourceRequest)`）⇒ 补丁里凡是「取用 override 形参」的地方，
   都要从**签名正则捕获**参数名与类型，而不是硬编码参数名/类型假设。
+
+## 守卫的「针」形态：钉得太窄 = 自我满足（第五种形态）
+
+前四种：注释里写裸 hostname / 说明文字含同一字面量 / 反向断言被自身注释干扰 / 针被注释满足。
+**第五种（2026-11-01）**：针只覆盖**一种写法**，缺陷换个写法就绕过。
+
+- 缺陷：`mobilebar.rs` 在 Android UI 线程调 `window.url()`（→ 僵 10 秒 → `tx.send().unwrap()` abort）。
+- 守卫初版：`!has_code_line(BAR_RS, "window.url()")`。
+- 反向对照注入 `main_window(app).map(|w| w.url())` ⇒ **测试仍然绿**（针被绕过），
+  即「守卫自己也是假绿」。改成禁**整个调用形态** `.url()` 后，同一注入如期 FAILED。
+- 判据：钉「形态」（`.url()` / 某个 trait 方法 / 某个 API 家族），不要钉「某一次写法」；
+  反向对照必须**换一种等价写法**再试一次，只用同一种写法还原算没验证。
+- 连带的更深一层：`#[cfg]` 分支上的守卫要同时确认**被守护的代码在真机目标上真的会编译**
+  （本机盲区用 cfg 互换 `cargo check --all-targets` + 逐字节还原，sha256 比对）。

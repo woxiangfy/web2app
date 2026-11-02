@@ -149,6 +149,30 @@ v1.63 把现场**拼进**了卡片，但「拼进去」≠「看得见」——�
 4. **下一版真机怎么读这张卡**：出现「重发导航已生效（第 N 次）」⇒ 根因确实是导航被挤掉、重发救回来了；出现「重发导航 2 次后仍未离开启动页（导航未提交，与网络无关）」⇒ 与网络无关，要往 wry 上游走；两条都没有且页面正常 ⇒ 走的正常启动路径。
 5. 静态守卫 `android_navigation_is_verified_and_retried`（4 条断言：判据双形态 / 调用点 / 重发上限 / 独立线程）。⚠️ **反向对照抓出守卫自身的盲区**：第一版用裸 `contains("ensure_navigation_committed(app, label, &url);")`，把调用点改成**注释**（`// …`）后守卫**仍然通过** —— 注释里含同样文字，`contains` 被满足；改为 `has_code_line()`（排除 `//`、`*` 开头的行）后，同样的改坏方式**如期 FAILED**。这是本项目「守卫的针被注释满足」的**第四种形态**（前三：注释里写裸 hostname、说明文字含同一字面量、反向断言被自身注释干扰）。
 
+### 2026-11-01 打开白屏 → 约 10 秒后自动退出（**UI 线程调阻塞型 getter**，改动 mobilebar 前必读）
+
+1. **现象**：APK 安装正常、打开白屏、约 10 秒后进程自己消失（`tabs_enabled=true` + `mobile_bar=true` 的包首次暴露）。
+2. **机制**（三段，全部可在依赖源码里核对）：
+   - `window.url()` 在 Android = `MainPipe::send(GetUrl)` + `rx.recv_timeout(10s)`（`wry/src/android/mod.rs`）；
+   - 管道的消费方就是**建 Activity 的那条 UI 线程**（`binding.rs::onFirstActivityCreateWry` 把它注册成
+     `ThreadLooper::for_thread()` 的 fd 回调）⇒ 在 UI 线程上问地址，回执永远没人处理 ⇒ 必然僵 10 秒超时；
+   - 超时后那条 `GetUrl` 仍在管道里，等 UI 线程腾出来处理时，`main_pipe.rs` 的收尾
+     **`tx.send(url).unwrap()`** 撞上已丢弃的接收端 ⇒ panic ⇒ 跨 FFI ⇒ abort。
+3. **触发点**：`mobilebar::on_page_finished` 在 UI 线程（wry `onPageFinished` → JNI → tauri `on_page_load`，
+   同一条调用栈，**同步**）里调了 `window.url()`；而它只在 `tabs_available()`（打包字段 `tabs_enabled`）
+   为真时才走到 ⇒ 2026-10-13 页签落地起就存在，直到第一份开了页签的移动包才上真机显形。
+4. **修法（已落地）**：移动端当前地址一律走缓存 `mobilebar::CurrentUrl`，写入方是
+   `on_page_finished`（url 由 `on_page_load` payload 给出）与 `web2app:mobile-doc`（覆盖 SPA `pushState`）；
+   判定「是否已在同一落点」用 `at_same_target()`。守卫
+   `contract_tests::mobile_bar_contract::mobile_bar_never_queries_webview_on_ui_thread`。
+5. **通用纪律**：**任何在 `on_page_load` / 前端事件回调里执行的代码，都不得调 webview 的 getter**
+   （`url()` / `cookies_for_url()` / `can_go_back()` / `position()` …）—— 它们全走 main-pipe，
+   在 UI 线程上等于「僵 10 秒 + 之后的 `unwrap()` abort」。取值请从事件 payload 或缓存拿。
+   ⚠️ 反面先例：`bootstrap::ensure_navigation_committed` 早就因此**单开独立线程**读地址（v1.65）。
+6. **仍复现时怎么取证**：`adb logcat -b crash -d`（进程死亡原因）+ 
+   `adb logcat -d | grep -iE "panic|AndroidRuntime|libweb2app"`；「白屏但不退出」= 只剩 UI 冻结，
+   继续找别处同一形态。
+
 ## 数据存在哪 / 包名 / tauri.conf 字段
 
 **Android 端应用的数据存在哪？**（下文中 `<pkg>` = 构建时的应用包名，即打包工作流在 `android init` 前

@@ -388,6 +388,77 @@ fn mobile_tab_skeleton_is_wired_end_to_end() {
     );
 }
 
+/// ⑤d **Android UI 线程禁调阻塞型 webview getter**（2026-11-01 真机缺陷的守卫）。
+///
+/// 缺陷形态（`tabs_enabled=true` + `mobile_bar=true` 的包：安装正常、打开白屏、
+/// 约 10 秒后应用自动退出）：
+/// ```text
+/// RustWebViewClient.onPageFinished（Android UI 线程）
+///   → JNI Rust.onPageLoaded（wry binding.rs，同步在该线程执行）
+///   → tauri on_page_load 闭包（lib.rs）
+///   → mobilebar::on_page_finished → window.url()
+///        = MainPipe::send(GetUrl) + recv_timeout(10s)
+///        而 MAIN_PIPE 的消费方就是这条 UI 线程（onFirstActivityCreateWry 注册的 looper fd 回调）
+///        ⇒ 必然僵 10 秒后超时
+///   → 那条 GetUrl 仍留在管道里；UI 线程腾出来后处理它，
+///     main_pipe.rs 结尾 `tx.send(url).unwrap()` 撞上已丢弃的接收端 ⇒ panic ⇒ abort ⇒ 进程退出
+/// ```
+/// 判据成对：① `mobilebar.rs` 的**代码行**里不得出现任何 `.url()` 取地址调用
+/// （`window.url()` / `w.url()` / `main_window(app).map(|w| w.url())` 都是同一个缺陷形态，
+/// 故针取 `.url()` 而不是特定接收者的写法 —— 第一版只钉 `window.url()`，
+/// 换成 `w.url()` 的注入就**假绿**了，见 2026-11-01 反向对照记录）；
+/// ② 当前地址必须由 `CurrentUrl` 缓存供给；③ `on_page_finished` 必须收 `url` 参数，
+/// 且 `lib.rs` 必须把 `on_page_load` payload 的地址传进去（改回无参 = 缺陷原样复发）。
+#[test]
+fn mobile_bar_never_queries_webview_on_ui_thread() {
+    // ① 禁现问地址（`has_code_line` 先剥注释，避免针被注释满足）。
+    assert!(
+        !has_code_line(BAR_RS, ".url()"),
+        "mobilebar.rs 不得调 `.url()` 取 webview 地址：Android 上它走 MainPipe + \
+         recv_timeout(10s)，而调用点就在消费该管道的 UI 线程上 ⇒ 僵 10 秒后触发 wry \
+         的 tx.send().unwrap() panic ⇒ 进程 abort（用 CurrentUrl 缓存代替）"
+    );
+    // ② 替代品必须是缓存（状态 + 两个写入方 + 一个读取方判据）。
+    assert!(
+        has_code_line(BAR_RS, "pub(crate) struct CurrentUrl(Mutex<String>)"),
+        "必须用 CurrentUrl 缓存当前地址（否则只能回头问 webview）"
+    );
+    assert!(
+        has_code_line(BAR_RS, "fn remember_url(app: &AppHandle, url: &str)"),
+        "缓存必须有写入函数 remember_url"
+    );
+    assert!(
+        has_code_line(BAR_RS, "remember_url(app, url);"),
+        "on_page_finished 必须把调用方传来的 url 写进缓存"
+    );
+    assert!(
+        has_code_line(BAR_RS, "remember_url(app, &p.url);"),
+        "doc_reported 也必须写缓存（SPA pushState 不触发文档加载完成事件）"
+    );
+    assert!(
+        has_code_line(
+            BAR_RS,
+            "fn at_same_target(app: &AppHandle, target: &url::Url) -> bool"
+        ),
+        "「是否已在同一落点」必须走 at_same_target（读缓存），不得读 webview"
+    );
+    // ③ 接线：签名收 url + lib.rs 把 payload 地址传进来。
+    assert!(
+        has_code_line(
+            BAR_RS,
+            "pub(crate) fn on_page_finished(app: &AppHandle, url: &str)"
+        ),
+        "on_page_finished 必须收 url 参数（无参就只能回头问 webview）"
+    );
+    assert!(
+        has_code_line(
+            LIB_RS,
+            "crate::mobilebar::on_page_finished(window.app_handle(), payload.url().as_str());"
+        ),
+        "lib.rs 的 on_page_load 闭包必须把 payload.url() 传给 on_page_finished"
+    );
+}
+
 /// ⑤c 窄贴底件（FAB）不得再被「半屏宽」门槛漏掉 —— 真机上被底栏切掉半截的就是它。
 ///    同时上移后必须保留元素原本的 px 底边距，不能把悬浮按钮顶死在栏边上。
 #[test]
