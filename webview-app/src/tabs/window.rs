@@ -340,7 +340,11 @@ pub(crate) fn spawn_tab_with_target(
             "if (window.self === window.top) {{ window.__web2appTabToken = {}; }}",
             crate::loading::js_str(&token)
         ))
-        .initialization_script(include_str!("../tab_title.js"));
+        .initialization_script(include_str!("../tab_title.js"))
+        // Ctrl+W 关闭当前页签：键位 → 核心事件 web2app:close-tab（含 label/token）→
+        // Rust `request_close_tab` 校验后走 close_tab_inner（首页那一签在那里被拒绝）。
+        // 与 tab_title.js 同一套「远程页面只能用核心事件」的通路，理由见该文件头注释。
+        .initialization_script(include_str!("../tab_keys.js"));
 
     // 建窗即给出与宿主内容区一致的初始**客户区**尺寸（逻辑像素；外框偏移由 tao 的
     // set_inner_size 自行补偿，位置由 relayout 负责），避免首帧尺寸错误。

@@ -968,6 +968,165 @@ async function probeSec13SettingsWindow(ctx: ProbeContext, p: Probe, HK: HotkeyC
     )) as string
     p.check('设置页能读到设置（get_settings 打通）', got.includes('tray_enabled'), got)
 
+    // ---------- 13b. 唤醒快捷键 UI：手动组合（修饰键 + 主键），单键必须被拦 ----------
+    // 起因（2026-11-03 使用者）：「手动选择」只有一个主键下拉，看不出是组合键还是单键 ——
+    // 实际实现隐式补了 Alt（选 F9 实存 Alt+F9），而「点击捕获」又能产出裸单键 F9。
+    // 现在只有一种词表：组合键 = 修饰键（至少一个）+ 主键；这三条断言钉住它。
+    const hkBefore = ctx.m3.getSettings().wake_hotkey
+    const uiJs = async (code: string): Promise<string> =>
+      (await swin.webContents.executeJavaScript(code, true)) as string
+    // 辅助：把「勾选某修饰键 / 选某主键」变成真实 change 事件（走用户同一路径）
+    const pickMod = (id: string, on: boolean) =>
+      `(() => { const e = document.getElementById('${id}'); e.checked = ${on};
+        e.dispatchEvent(new Event('change', { bubbles: true })); return true })()`
+    const pickKey = (key: string) =>
+      `(() => { const s = document.getElementById('keySelect'); s.value = '${key}';
+        s.dispatchEvent(new Event('change', { bubbles: true })); return true })()`
+    const hkUiState = () =>
+      `JSON.stringify({
+        preview: document.getElementById('hkPreview').textContent,
+        current: document.getElementById('hkCurrent').textContent,
+        bad: document.getElementById('hkPreview').classList.contains('bad'),
+        statusErr: document.getElementById('hkStatus').className.indexOf('err') >= 0,
+        on: document.querySelectorAll('.hkbuild .mod.on').length
+      })`
+
+    // ① 组合键：勾 Alt + 选 F9 → 预览 Alt+F9；「当前生效」不跟着跳（那是保存后的值）
+    await uiJs(pickKey(''))
+    await uiJs(pickMod('hkAlt', true))
+    await uiJs(pickKey('F9'))
+    const combo = JSON.parse(await uiJs(hkUiState())) as {
+      preview: string
+      current: string
+      bad: boolean
+      on: number
+    }
+    p.check(
+      '唤醒键 UI：勾 Alt + 选 F9 = 组合键 Alt+F9（预览与「当前生效」分离）',
+      // 页面里「未设置」显示为「—」（与 hotkey.ts::hotkeyLabel 的「(未设置)」是两套文案：
+      // 前者给人看，后者进日志），所以这里按空值口径比。
+      combo.preview === 'Alt+F9' && combo.current === (hkBefore.key ? hotkeyLabel(hkBefore) : '—') &&
+        combo.bad === false && combo.on === 1,
+      JSON.stringify(combo)
+    )
+
+    // ② 取消 Alt → 只剩单键：预览标红 + 状态为错误（不等到点保存才发现）
+    await uiJs(pickMod('hkAlt', false))
+    const single = JSON.parse(await uiJs(hkUiState())) as {
+      preview: string
+      bad: boolean
+      statusErr: boolean
+    }
+    p.check(
+      '唤醒键 UI：单键被标红并给出原因（不会静默收下）',
+      single.preview === 'F9' && single.bad === true && single.statusErr === true,
+      JSON.stringify(single)
+    )
+
+    // ②b 系统/输入法占用的组合也拦（`Ctrl+Space` 在中文 Windows 上是中英切换：注册成功
+    //     反而会把用户打字打残，比「不生效」更糟）。这一条同时钉住 HK_RESERVED 这张表还在。
+    await uiJs(pickKey('Space'))
+    await uiJs(pickMod('hkCtrl', true))
+    const reserved = JSON.parse(await uiJs(hkUiState())) as { preview: string; bad: boolean }
+    p.check(
+      '唤醒键 UI：Ctrl+Space（输入法中英切换）也被拦下',
+      reserved.preview === 'Ctrl+Space' && reserved.bad === true,
+      JSON.stringify(reserved)
+    )
+    // 回到「单键 F9」这个状态，供下一条断言用
+    await uiJs(pickMod('hkCtrl', false))
+    await uiJs(pickKey('F9'))
+
+    // ③ 此时点「保存」必须**一个字节都不写**：主进程设置保持原值（正则 / 托盘都别被动到）
+    await uiJs(`document.getElementById('saveBtn').click(); true`)
+    await sleep(300)
+    const hkAfterBlocked = ctx.m3.getSettings().wake_hotkey
+    const blockedMsg = await uiJs(`document.getElementById('status').textContent`)
+    p.check(
+      '唤醒键 UI：单键点保存被拦下（设置未变，状态栏说明原因）',
+      hkAfterBlocked.key === hkBefore.key &&
+        hkAfterBlocked.alt === hkBefore.alt &&
+        blockedMsg.indexOf('未保存') === 0,
+      `key=${hkAfterBlocked.key}/${hkBefore.key} alt=${hkAfterBlocked.alt}/${hkBefore.alt} msg=${blockedMsg}`
+    )
+
+    // ④ 补回修饰键再保存 → 真正生效（页面 → 垫片 → 注册 → 内存态）
+    await uiJs(pickMod('hkAlt', true))
+    await uiJs(`document.getElementById('saveBtn').click(); true`)
+    const savedCombo = await waitUntil(
+      async () => ctx.m3.getSettings().wake_hotkey.key === 'F9',
+      3000
+    )
+    const applied = ctx.m3.getSettings().wake_hotkey
+    p.check(
+      '唤醒键 UI：组合键保存后生效（Alt+F9）',
+      savedCombo && applied.alt === true && applied.shift === false && applied.ctrl === false,
+      JSON.stringify(applied)
+    )
+
+    // ⑤ 捕获路径同一条规则：按下**裸键**不接收（继续等），按 Esc 才退出捕获
+    await uiJs(`document.getElementById('captureBtn').click(); true`)
+    await uiJs(
+      `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ', bubbles: true })); true`
+    )
+    const captured = JSON.parse(
+      await uiJs(
+        `JSON.stringify({
+          stillCapturing: document.getElementById('captureBtn').textContent.indexOf('捕获中') >= 0,
+          statusErr: document.getElementById('hkStatus').className.indexOf('err') >= 0,
+          preview: document.getElementById('hkPreview').textContent
+        })`
+      )
+    ) as { stillCapturing: boolean; statusErr: boolean; preview: string }
+    p.check(
+      '唤醒键 UI：捕获到裸键时不接收（继续捕获并说明原因，预览不变）',
+      captured.stillCapturing && captured.statusErr && captured.preview === 'Alt+F9',
+      JSON.stringify(captured)
+    )
+    await uiJs(
+      `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`
+    )
+    const escOk = await uiJs(
+      `document.getElementById('captureBtn').textContent.indexOf('捕获') >= 0 ? 'ok' : 'still'`
+    )
+    p.check('唤醒键 UI：Esc 退出捕获并回到当前组合', escOk === 'ok', escOk)
+
+    // ⑤b 捕获到**列表之外**的键（ArrowUp / Numpad3 / BracketLeft 这类只在捕获里出现）：
+    //     下拉必须把它选上。只在初始化补一次 option 的话，`sel.value = 'ArrowUp'` 会落空
+    //     ⇒ 下拉 `selectedIndex = -1`（看上去「什么都没选」），而右边预览写着 Ctrl+↑ ——
+    //     又是两处说法不一致；用户随后碰一下下拉，`readManual` 就把捕获结果整条丢掉，
+    //     看起来还像是自己选了「无」。
+    await uiJs(`document.getElementById('captureBtn').click(); true`)
+    await uiJs(
+      `document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'ArrowUp', code: 'ArrowUp', ctrlKey: true, bubbles: true })); true`
+    )
+    const outside = JSON.parse(
+      await uiJs(
+        `JSON.stringify({
+          preview: document.getElementById('hkPreview').textContent,
+          sel: document.getElementById('keySelect').value,
+          idx: document.getElementById('keySelect').selectedIndex,
+          text: document.getElementById('keySelect').selectedOptions[0]
+            ? document.getElementById('keySelect').selectedOptions[0].textContent : null
+        })`
+      )
+    ) as { preview: string; sel: string; idx: number; text: string | null }
+    p.check(
+      '唤醒键 UI：捕获列表之外的键（Ctrl+↑）后下拉仍选中它（预览与下拉不打架）',
+      outside.preview === 'Ctrl+↑' &&
+        outside.sel === 'ArrowUp' &&
+        outside.idx >= 0 &&
+        outside.text === '↑（其它键）',
+      JSON.stringify(outside)
+    )
+
+    // 复原：把快捷键清空，让后面 13 段「设置页点保存」从干净状态开始
+    await uiJs(pickKey(''))
+    await uiJs(`document.getElementById('saveBtn').click(); true`)
+    await waitUntil(async () => ctx.m3.getSettings().wake_hotkey.key === '', 3000)
+
+
     // 完整走一遍「设置页点保存」的真实链路：页面 → 垫片 → IPC → 校验 → 应用副作用 → 落盘。
     // ⚠️ 只断言读是不够的：保存路径里有快捷键注册、托盘创建、持久化三件副作用，
     //    任何一件坏掉都只在「用户改了设置」时才暴露，而这恰好是探针最容易漏测的动作。

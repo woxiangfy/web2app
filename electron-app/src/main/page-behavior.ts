@@ -1,13 +1,16 @@
 /**
- * M4 页面行为：**开发者工具（F12）/ 右键菜单 / 下载接管**。
+ * M4 页面行为：**开发者工具（F12）/ 右键菜单 / 下载接管**；外加多页签的
+ * **Ctrl+W 关闭当前页签**（M5 快捷键，见文件末尾）。
  *
- * 三项都对齐 Tauri 版（后者在 `webview_hooks.rs` 里用 WebView2 原生 API 实现）：
+ * 前四项都对齐 Tauri 版（后者在 `webview_hooks.rs` / `tabs::window` 里用 WebView2 原生 API
+ * 与注入脚本实现）：
  *
  * | 能力 | Tauri 侧 | 本壳 |
  * |---|---|---|
  * | F12 | `DEVTOOLS_ENABLED`（debug 构建开 / release 关） | `devtoolsEnabled()`：`!isPackaged \|\| debug` |
  * | 右键菜单 | 原生菜单上**移除** print / save* / moreTools，**追加**「设置」 | 自建菜单，同样不给打印/另存为，同样带「设置」 |
  * | 下载 | 系统「另存为」（`save_dialog.rs`）→ 用户定落盘位置 | `dialog.showSaveDialog` → `item.setSavePath()` |
+ * | Ctrl+W 关页签 | tab 页面注入 `tab_keys.js` → 核心事件 `web2app:close-tab` | 本文件的 `attachCloseTabShortcut()`（`before-input-event`） |
  *
  * ⚠️ 本文件的分层是**刻意**的，别顺手糊在一起：
  *   - **纯函数区**（`isDevtoolsKey` / `devtoolsEnabled` / `contextMenuTemplate` /
@@ -54,10 +57,17 @@ export function devtoolsEnabled(isPackaged: boolean, debug: boolean): boolean {
   return !isPackaged || debug
 }
 
-/** `before-input-event` 给的按键信息里，本文件只关心这两项。 */
+/** `before-input-event` 给的按键信息里，本文件关心的字段。 */
 export interface KeyInputLike {
   type?: string
   key?: string
+  /** 以下四项由 `before-input-event` 一并给出（`WebContents` 的 Input 对象） */
+  control?: boolean
+  shift?: boolean
+  alt?: boolean
+  meta?: boolean
+  /** 长按产生的重复按键 */
+  isAutoRepeat?: boolean
 }
 
 /**
@@ -67,6 +77,30 @@ export interface KeyInputLike {
  */
 export function isDevtoolsKey(input: KeyInputLike | null | undefined): boolean {
   return !!input && input.type === 'keyDown' && input.key === 'F12'
+}
+
+/**
+ * 是否是「关闭当前页签」的那次按键：**Ctrl+W**，且不带 Shift / Alt / Meta。
+ *
+ * 为什么自己做判断而不是给窗口挂菜单 accelerator：本壳是**无边框自绘标题栏**（没有系统菜单
+ * 栏），而 Ctrl+W 必须由主进程在 `before-input-event` 里先接住 —— 否则远程页面自己的
+ * Ctrl+W（编辑器类站点常见）会先吃掉这次按键，用户侧表现为「有时能关、有时关不掉」。
+ *
+ * ⚠️ 三条刻意排除，改前先读：
+ *   · `shiftKey`：Ctrl+Shift+W 在浏览器里是「关闭窗口」，本壳**不提供**这条（关窗会触发
+ *     托盘驻留语义，和「关页签」完全不是一回事），混进来等于给用户一个意外出口；
+ *   · `altKey` / `metaKey`：只认最窄的那个组合，避免与输入法 / 系统组合键撞车；
+ *   · `isAutoRepeat`：长按不连关。浏览器会连关，但桌面壳里一按到底烧掉整叠页签是不可逆的
+ *     体验事故（页签状态不再有历史栈），宁可要求「按一次关一个」。
+ */
+export function isCloseTabKey(input: KeyInputLike | null | undefined): boolean {
+  if (!input || input.type !== 'keyDown') return false
+  if (input.control !== true || input.shift || input.alt || input.meta) return false
+  if (input.isAutoRepeat) return false
+  // `key` 在按住 Ctrl 时仍是 'w'；同时接受 'W'（大写锁定开着时个别布局会给大写）
+  // ⚠️ 不要改成按 `input.code` 兜底：`code` 按 US 布局命名，AZERTY 上「生出 w 的物理键」
+  //   是 KeyZ ⇒ 用户按 Ctrl+Z（撤销）会被当成 Ctrl+W 关掉页签。双壳契约测试正反两项钉住。
+  return input.key === 'w' || input.key === 'W'
 }
 
 /** 右键菜单项规格（纯数据：`label` 为 null 表示分隔线）。 */
@@ -209,6 +243,29 @@ export function attachDevtools(wc: WebContents, enabled: boolean): void {
     if (!isDevtoolsKey(input)) return
     if (wc.isDevToolsOpened()) wc.closeDevTools()
     else wc.openDevTools({ mode: 'detach' })
+  })
+}
+
+/**
+ * Ctrl+W → 关闭**当前页签**（多页签模式；单窗口模式不挂，见调用点）。
+ *
+ * 挂两个地方，两处合起来才是「无论焦点在哪都生效」：
+ *   ① 每个内容视图（`tab-spawn.ts`）—— 用户在网页里打字 / 点链接时焦点在这里；
+ *   ② 壳页面（`index.ts`）—— 用户点过标签栏（或刚关掉一个页签）时焦点在壳上。
+ *
+ * ⚠️⚠️ `event.preventDefault()` 不可省：不拦的话这次按键会继续派发给页面与菜单快捷键 ——
+ *   页面若自己也处理 Ctrl+W 就会「关页签 + 页面动作」双触发；而菜单若带 close 角色的
+ *   accelerator，还会顺带把窗口一起关掉。
+ *
+ * ⚠️ 回调里**不要**同步关闭 `wc` 所属的视图：本处理器正跑在 `wc` 的事件派发栈里，就地
+ * `webContents.close()` 属于「在自己的回调里销毁自己」。调用方（tab-spawn / index）用
+ * `setImmediate` 推到下一轮再关。
+ */
+export function attachCloseTabShortcut(wc: WebContents, onClose: () => void): void {
+  wc.on('before-input-event', (event, input) => {
+    if (!isCloseTabKey(input)) return
+    event.preventDefault()
+    onClose()
   })
 }
 

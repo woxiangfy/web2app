@@ -5,6 +5,8 @@
   · 标签栏高度必须与 src/tabs.rs 的 TAB_BAR_HEIGHT（38px）一致，否则 tab 内容会与标签栏重叠/留缝。
   · 通过 Tauri IPC 与 Rust 交互：switch_tab / close_tab / get_tabs /
     minimize_host / close_host / open_settings（设置按钮；新建 tab 改由页面内 target="_blank" 触发）。
+  · 快捷键 **Ctrl+W** = 关闭当前激活页签（本页的 keydown 只管「焦点在标签栏」这一半；
+    焦点在网页里那一半由 Tauri 的 src/tab_keys.js / Electron 的 before-input-event 接住）。
     注意：tab 的真实标题不是本页调命令回传的——远程 tab 页面只能发核心事件
     web2app:tab-title（应用命令对远程 origin 必被 ACL 拒），见 src/tab_title.js。
   · 宿主窗口是 decorations(false)，系统标题栏不存在 → 设置 / 最小化 / 关闭按钮由本页右侧自绘。
@@ -362,6 +364,27 @@
         } else {
           invoke("switch_tab", { label });
         }
+      });
+
+      // Ctrl+W：关闭**当前激活**页签（与网页里那条通路同一个 close_tab 命令）。
+      // ⚠️ 只在焦点落在标签栏（本页）时才有意义；焦点在网页里那条路由注入脚本（Tauri
+      //    tab_keys.js）/ 主进程 before-input-event（Electron）接住。
+      document.addEventListener("keydown", (e) => {
+        // 与 Electron 侧 isCloseTabKey / Tauri 侧 tab_keys.js 逐条对齐：
+        // 只认 Ctrl+W（不带 Shift / Alt / Meta），长按（repeat）不连关。
+        if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+        // 只认逻辑键位（不用 e.code：AZERTY 上物理 KeyZ 生出的是 'w'、物理 KeyW 生出的
+        // 是 'z'，按物理码判会把 Ctrl+Z 撤销变成关页签）。
+        const isW = e.key === "w" || e.key === "W";
+        if (!isW || e.repeat) return;
+        e.preventDefault();
+        const active = items.find((t) => t.active);
+        // 首页不可关：home 标记由宿主下发（规则本体仍只有 tabs.rs::is_home_index /
+        // tab-order.ts::isPinnedHome 一份，本页只是读标记）。这里直接不发请求 —— 既省掉
+        // 一次注定被拒的 IPC 往返，也和「首页不渲染 ×」保持同一个可见语义；
+        // 后端 close_tab 仍有拒绝作为兜底（两道成对）。
+        if (!active || active.home) return;
+        invoke("close_tab", { label: active.label }).catch(() => {});
       });
 
       // 窗口控制：最小化 / 设置 / 关闭（关闭走 Rust 侧「托盘隐藏 or 退出」的统一语义）。

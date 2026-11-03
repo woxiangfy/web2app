@@ -284,3 +284,154 @@ fn tab_retry_event_contract_between_lib_tabs_and_loading() {
         "loading.js 重试必须走核心事件通路"
     );
 }
+
+// ===========================================================================
+// Ctrl+W 关闭当前页签（多页签，双壳）
+// ===========================================================================
+
+/// 注入到每个 tab 远程页面的快捷键脚本（Ctrl+W → 核心事件）。
+#[cfg(windows)]
+const TAB_KEYS_JS: &str = include_str!("../tab_keys.js");
+/// 双壳共用的标签栏页面 —— Ctrl+W 的「焦点在标签栏」那一半在这里。
+#[cfg(windows)]
+const SHELL_HTML: &str = include_str!("../shell.html");
+/// Electron 侧同一判据（纯函数 `isCloseTabKey` + 挂载 `attachCloseTabShortcut`）。
+#[cfg(windows)]
+const ELECTRON_PAGE_BEHAVIOR: &str =
+    include_str!("../../../electron-app/src/main/page-behavior.ts");
+/// Electron 壳页面（标签栏）焦点路径的挂载点。
+#[cfg(windows)]
+const ELECTRON_INDEX: &str = include_str!("../../../electron-app/src/main/index.ts");
+/// Electron 内容视图（远程页面）焦点路径的挂载点。
+#[cfg(windows)]
+const ELECTRON_TAB_SPAWN: &str = include_str!("../../../electron-app/src/main/tab-spawn.ts");
+
+/// ⑦ tab 页面 Ctrl+W 事件：tabs.rs 常量 ↔ lib.rs 监听 ↔ tab_keys.js 字面量逐字一致；
+///    脚本必须「带令牌 + 只在主框架 + capture + preventDefault」。
+///
+/// 为什么钉死：整条链路每一环漏掉都是**静默失效** —— 事件名差一个字符 ⇒ 永远不触发；
+/// 少了 preventDefault ⇒ 页面自己的 Ctrl+W 同时生效（关页签 + 页面动作）；
+/// 少了 token ⇒ 任何页面都能伪造关闭别的页签；少了主框架守卫 ⇒ 广告 iframe 里的按键
+/// 也能关掉整个页签。
+#[cfg(windows)]
+#[test]
+fn tab_close_event_contract_between_lib_tabs_and_script() {
+    const CLOSE_IN_RUST: &str = concat!("\"", "web2app:close-tab", "\"");
+    assert!(
+        TABS_RS.contains(CLOSE_IN_RUST),
+        "tabs.rs 必须定义 TAB_CLOSE_EVENT 字面量 {CLOSE_IN_RUST}"
+    );
+    assert!(
+        LIB_RS.contains("app.listen(tabs::TAB_CLOSE_EVENT"),
+        "lib.rs 必须监听 tabs::TAB_CLOSE_EVENT（否则 Ctrl+W 静默无效）"
+    );
+    const CLOSE_IN_JS: &str = concat!("'", "web2app:close-tab", "'");
+    assert!(
+        TAB_KEYS_JS.contains(CLOSE_IN_JS),
+        "tab_keys.js 必须包含事件名 {CLOSE_IN_JS}"
+    );
+    assert!(
+        TAB_KEYS_JS.contains("__web2appTabToken") && TAB_KEYS_JS.contains("__web2appTabLabel"),
+        "tab_keys.js 必须携带建窗时注入的 label + 一次性令牌（伪造防护靠它）"
+    );
+    assert!(
+        TAB_KEYS_JS.contains("plugin:event|emit"),
+        "tab_keys.js 必须走核心事件通路（远程 origin 的应用命令必被 ACL 拒）"
+    );
+    assert!(
+        TAB_KEYS_JS.contains("window.self !== window.top"),
+        "tab_keys.js 必须在子框架早退：初始化脚本无 frame 过滤，广告 iframe 里按 Ctrl+W \
+         不该关掉宿主页签"
+    );
+    assert!(
+        TAB_KEYS_JS.contains("preventDefault()") && TAB_KEYS_JS.contains("stopPropagation()"),
+        "tab_keys.js 必须吃掉这次按键：否则页面自己的 Ctrl+W 会与关页签同时生效"
+    );
+    // capture 阶段：站点自己的 keydown（编辑器类页面常见）不能抢在前面。
+    assert!(
+        TAB_KEYS_JS.contains("}, true);"),
+        "tab_keys.js 的 keydown 必须用 capture 阶段监听（第三个参数 true）"
+    );
+    assert!(
+        TAB_KEYS_JS.contains("e.repeat"),
+        "tab_keys.js 必须排除长按重复（与 Electron 侧 isAutoRepeat 同一条取舍）"
+    );
+}
+
+/// ⑧ Ctrl+W 的两条焦点路径都要接住，且双壳判据一致。
+///
+/// 漏任一环的后果都是「有时能关、有时关不掉」：
+///   · Tauri：`tabs/window.rs` 未注入 tab_keys.js ⇒ 焦点在网页里时按键被页面吃掉；
+///   · Tauri：`shell.html` 没有 keydown ⇒ 焦点在标签栏时按键没有任何效果；
+///   · Electron：`tab-spawn.ts` / `index.ts` 少挂一处 ⇒ 同上的那一半失效。
+///
+/// ⚠️ `#[cfg(windows)]`：本函数要读 `TABS_RS` / `TAB_KEYS_JS`，而多页签模块整体
+///    Windows-only —— 不加就会在 Linux / Android 目标上因「常量不存在」编译失败。
+#[cfg(windows)]
+#[test]
+fn tab_close_shortcut_wired_on_both_focus_paths() {
+    // Tauri：注入（焦点在网页里）
+    assert!(
+        TABS_RS.contains(r#"include_str!("../tab_keys.js")"#),
+        "tabs/window.rs 的建窗 builder 必须注入 tab_keys.js（焦点在网页内时的唯一通路）"
+    );
+    // 双壳：壳页面 keydown（焦点在标签栏）
+    assert!(
+        SHELL_HTML.contains("document.addEventListener(\"keydown\"")
+            && SHELL_HTML.contains(r#"invoke("close_tab", { label: active.label })"#),
+        "shell.html 必须有 Ctrl+W → close_tab 的 keydown 处理（焦点在标签栏时的通路）"
+    );
+    // Electron：纯函数 + 两个挂载点
+    assert!(
+        ELECTRON_PAGE_BEHAVIOR.contains("export function isCloseTabKey")
+            && ELECTRON_PAGE_BEHAVIOR.contains("export function attachCloseTabShortcut"),
+        "page-behavior.ts 必须提供 isCloseTabKey / attachCloseTabShortcut（与 JS 侧同一判据）"
+    );
+    assert!(
+        ELECTRON_INDEX.contains("attachCloseTabShortcut(win.webContents"),
+        "index.ts 必须在壳页面上挂 Ctrl+W（焦点在标签栏时的通路）"
+    );
+    assert!(
+        ELECTRON_TAB_SPAWN.contains("attachCloseTabShortcut(view.webContents"),
+        "tab-spawn.ts 必须在每个内容视图上挂 Ctrl+W（焦点在网页内时的通路）"
+    );
+    // 双壳判据必须一致：都排除 Shift / Alt / Meta 与长按。
+    for (file, needle) in [
+        (TAB_KEYS_JS, "e.shiftKey || e.altKey || e.metaKey"),
+        (SHELL_HTML, "e.shiftKey || e.altKey || e.metaKey"),
+        (
+            ELECTRON_PAGE_BEHAVIOR,
+            "input.shift || input.alt || input.meta",
+        ),
+    ] {
+        assert!(
+            file.contains(needle),
+            "Ctrl+W 的修饰键白名单必须双壳一致（缺 `{needle}`）：Ctrl+Shift+W 在浏览器里是\
+             关窗，本壳不提供那条出口"
+        );
+    }
+    // 双壳判据必须一致（之二）：都按**逻辑键位**（'w' / 'W'）认键，不用物理码。
+    for (file, needle) in [
+        (TAB_KEYS_JS, "e.key === 'w'"),
+        (SHELL_HTML, "e.key === \"w\""),
+        (ELECTRON_PAGE_BEHAVIOR, "input.key === 'w'"),
+    ] {
+        assert!(
+            file.contains(needle),
+            "Ctrl+W 必须按逻辑键位判（缺 `{needle}`）"
+        );
+    }
+    // 反向：禁物理键位兜底。`e.code` 按 US 布局命名 —— AZERTY 上「生出 'w' 的那个物理键」
+    // 的 code 是 KeyZ，用 code 匹配等于把 Ctrl+Z（撤销）变成关页签。
+    // ⚠️ 字面量拆成两段写：整串出现在注释里也会让断言自我满足。
+    for bad in [
+        concat!("e.code ===", " 'KeyW'"),
+        concat!("e.code ===", " \"KeyW\""),
+    ] {
+        assert!(
+            !TAB_KEYS_JS.contains(bad) && !SHELL_HTML.contains(bad),
+            "Ctrl+W 不得按物理键位匹配（{bad}）：AZERTY 上物理 KeyW 敲出的是 'z'，\
+             会把 Ctrl+Z 撤销变成关页签；Electron 侧同样只看 key，双壳必须一致"
+        );
+    }
+}

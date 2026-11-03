@@ -7,7 +7,7 @@
  * `resolveInitialTarget`，只解析、不导航壳页面；导航目标是本内容视图。
  */
 import type { ResolvedTarget } from './navigate'
-import { attachContextMenu, attachDevtools } from './page-behavior'
+import { attachCloseTabShortcut, attachContextMenu, attachDevtools } from './page-behavior'
 import type { TabManager, TabsOptions } from './tabs'
 
 export interface TabSpawnDeps {
@@ -63,6 +63,18 @@ export function makeTabSpawn(deps: TabSpawnDeps): TabsOptions['onSpawn'] {
     // M4 页面行为：F12 / 右键菜单（与单窗口模式同一套实现，逐视图挂）
     attachDevtools(view.webContents, devtools)
     attachContextMenu(view.webContents, openSettings)
+    // M5 快捷键：Ctrl+W 关闭当前页签（焦点在网页里时走这条；焦点在壳上时走 index.ts 那条）。
+    // ⚠️ 关闭动作必须 `setImmediate`：本回调运行在该视图自己的 before-input-event 派发栈里，
+    //    就地 close 属于「在自己的回调里销毁自己」（Electron 未定义安全边界），推到下一轮再关。
+    attachCloseTabShortcut(view.webContents, () => {
+      setImmediate(() => {
+        const mgr = getTabManager()
+        const active = mgr?.active
+        // 首页那一签不可关 ⇒ 交给 closeTab 的 isPinnedHome 拦截（**不在这里重复判断**：
+        // 「首页判定」全项目只有 tab-order.ts::isPinnedHome 一份实现）。
+        if (mgr && active) mgr.closeTab(active.label)
+      })
+    })
     await view.webContents.loadURL(t.url).catch((e) => {
       console.warn(`[web2app] 内容页 loadURL 被拒绝：${(e as Error).message}`)
     })

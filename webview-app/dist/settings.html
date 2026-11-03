@@ -20,9 +20,16 @@
       `data-tauri-drag-region` 给 Tauri —— 后者要 capability 里的 `core:window:allow-start-dragging`，
       见 webview-app/capabilities/settings-window.json）。
     · 底部操作区固定：内容再多，保存按钮也不会被滚出视野。
-  ⚠️ 元素 id（hkCurrent / captureBtn / keySelect / trayEnabled / minimizeOnClose /
-     floatEnabled / showFloatBtn / quitBtn / clearDataBtn / saveBtn / closeBtn / status）
-     是与脚本、探针的接口，改名要同步改。
+  ⚠️ 元素 id（hkCurrent / captureBtn / hkCtrl / hkAlt / hkShift / keySelect / hkPreview /
+     hkStatus / trayEnabled / minimizeOnClose / floatEnabled / showFloatBtn / quitBtn /
+     clearDataBtn / saveBtn / closeBtn / status）是与脚本、探针的接口，改名要同步改。
+
+  唤醒快捷键的交互（2026-11-03 重做，起因：使用者指「手动选择」分不清组合键还是单键）：
+    · 词表只有一种：**组合键 = 修饰键（Ctrl / Alt / Shift 至少一个）+ 主键**；空主键 = 不设置。
+    · `captured` 是唯一状态，「手动组合」与「点击捕获」都是它的编辑器 —— 改任一处都重画另一处，
+      不允许多选题看起来像填空。
+    · 「手动选择」过去其实**隐式**补 `alt:true`（选了 F9 实存 Alt+F9，界面不显示），而捕获路径
+      又能产出**裸单键**（按 F9 得到 F9）—— 两条入口语义相反，这就是歧义的来源，已删除。
 -->
 <style>
   :root {
@@ -222,6 +229,27 @@
   .err { color: var(--danger); }
   .muted { color: var(--text-secondary); }
 
+  /* 手动组合快捷键：**修饰键 + 主键 = 组合键**（与「点击捕获」共用同一个状态）。
+     尺寸刻意做成可换行：设置窗最小宽度 460px，窄窗时这一行折成两行而不是横向溢出。 */
+  .hkbuild { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .hkbuild .mod {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; cursor: pointer; user-select: none;
+  }
+  .hkbuild .mod:hover { border-color: var(--text-secondary); }
+  /* 勾选态只换描边与底色（用 JS 加 .on，不依赖 :has()）：不改变尺寸，勾选时整行不跳动 */
+  .hkbuild .mod.on { border-color: var(--primary); background: var(--surface-hover); font-weight: 600; }
+  .hkbuild .op { color: var(--text-secondary); font-size: 13px; }
+  /* 「+ 主键」不拆行；「= 预览」不拆行 */
+  .hk-key, .hk-eq { display: inline-flex; align-items: center; gap: 8px; }
+  /* 下拉宽度收窄：620px 窗宽下「三修饰键 + 下拉 + = 预览」才排得下一行；
+     窄窗（最小 460）时整行换行，等号与预览作为一个整体一起换（不拆成孤零零的「=」）。 */
+  #keySelect { min-width: 88px; max-width: 124px; }
+  .kbd-preview { min-width: 92px; }
+  /* 非法组合（单键 / 系统键 / 与「打开设置」冲突）：预览框自己变红，不用去读下面那行小字 */
+  .kbd-preview.bad { border-color: var(--danger); color: var(--danger); }
+
   /* 捕获中状态 */
   .capturing {
     animation: pulse 1.2s infinite;
@@ -246,13 +274,30 @@
       <div class="card">
         <div class="row">
           <div class="label">唤醒快捷键（显示 / 隐藏主窗口）</div>
+          <!-- ① 当前生效值 + 直接捕获（按一下就是结果，不用关心怎么拼）。 -->
           <div class="ctrl">
             <span class="kbd" id="hkCurrent" title="当前生效的快捷键">—</span>
-            <button id="captureBtn">点击捕获</button>
-            <span class="muted">或手动选择：</span>
-            <select id="keySelect" title="选择主键"></select>
+            <button id="captureBtn" title="按下组合键直接捕获">点击捕获组合键</button>
+            <span class="muted">或手动组合 ↓</span>
           </div>
-          <div id="hkStatus" class="sub">默认不设置快捷键；可在下方选择或点击捕获一个组合键。</div>
+          <!-- ② 手动组合：修饰键 + 主键 = 组合键（与捕获共用同一个状态，改任一处都重画另一处）。
+               ⚠️ 刻意**不提供**「只用单个按键」：全局快捷键绑到裸键（A / F9 / Enter…）会把这
+                  个键在系统里的每一次输入都变成「切换窗口」，用户会在别处打不了字。 -->
+          <div class="hkbuild">
+            <label class="mod"><input type="checkbox" id="hkCtrl"/>Ctrl</label>
+            <label class="mod"><input type="checkbox" id="hkAlt"/>Alt</label>
+            <label class="mod"><input type="checkbox" id="hkShift"/>Shift</label>
+            <!-- 「+ 主键」作为一个整体：「+」与下拉不拆行（窄窗换行时不会出现孤零零的加号） -->
+            <span class="hk-key">
+              <span class="op">+</span>
+              <select id="keySelect" title="组合键的主键（组合里最后那一个键）"></select>
+            </span>
+            <span class="hk-eq">
+              <span class="op">=</span>
+              <span class="kbd kbd-preview" id="hkPreview" title="将要保存的组合键">未设置</span>
+            </span>
+          </div>
+          <div id="hkStatus" class="sub">组合键 = 修饰键（Ctrl / Alt / Shift 至少一个）+ 主键；不设置就保持“—”。单键会占满该键的输入，不能保存。</div>
         </div>
       </div>
 
@@ -338,16 +383,157 @@
     el.className = cls || "";
   }
 
+  // ---------- 唤醒快捷键：一套状态，两个入口 ----------
+  // `captured` 是唯一真源；「手动组合」（三个修饰键 + 主键）与「点击捕获」都只是它的编辑器，
+  // 任何一处改动都调 `renderHotkey()` 把**另一处一起重画** —— 这正是原来「显示 Alt+4、
+  // 下拉却是 4、且看不出有没有 Alt」的根治办法：界面不会同时存在两个互相矛盾的说法。
+  const HKMODS = [
+    { id: "hkCtrl", field: "ctrl" },
+    { id: "hkAlt", field: "alt" },
+    { id: "hkShift", field: "shift" }
+  ];
+  // 「当前生效」与「待保存」是两件事：左边那个 kbd 只在**保存成功后**才变，右边预览才是
+  // 手上正在拼的值 —— 否则「当前生效」会跟着勾选一起跳，说自己在报现状其实在报草稿。
+  let savedHotkey = { ctrl: false, alt: false, shift: false, key: "" };
+  // `get_settings` 失败（settings.json 被手改坏 / 反序列化失败等）：此时界面上的开关全是
+  // **默认值**，`captured` 也是 null —— 一旦放行保存，就是把用户真实配置整条覆盖成默认，
+  // 还回一句「已保存」。所以失败即封死保存，只允许关窗重开。
+  let loadFailed = false;
+  function sameHotkey(a, b) {
+    if (!a || !b) return false;
+    return !!a.ctrl === !!b.ctrl && !!a.alt === !!b.alt && !!a.shift === !!b.shift &&
+      (a.key || "") === (b.key || "");
+  }
+  // 系统占用的组合：注册一定失败（或被系统先吃掉），在保存**之前**就说清楚，
+  // 否则表现是「保存成功了但按下去没反应」——最难查的那类。
+  const HK_RESERVED = {
+    "Alt+Tab": "系统切换窗口",
+    "Alt+Space": "系统窗口菜单",
+    "Alt+F4": "关闭当前窗口",
+    "Alt+Escape": "系统切换窗口",
+    "Ctrl+Escape": "打开开始菜单",
+    // 中文 Windows 上这是输入法中英文切换：注册成全局键会**打断用户打字**，比不生效更糟
+    "Ctrl+Space": "输入法中英文切换",
+    "Ctrl+Alt+Delete": "系统安全界面"
+  };
+
+  /** 返回空串 = 可保存；否则是给人看的原因。 */
+  function hkProblem(hk) {
+    if (!hk || !hk.key) return ""; // 「不设置快捷键」永远合法
+    if (!hk.ctrl && !hk.alt && !hk.shift) {
+      return "只有单个按键（" + hkLabel(hk) + "）：全局快捷键会占满这个键的输入（在别处打不了字），" +
+        "请至少勾选一个修饰键（Ctrl / Alt / Shift）；不想要快捷键就把主键选成「无」";
+    }
+    const takenBy = HK_RESERVED[hkLabel(hk)];
+    if (takenBy) {
+      return hkLabel(hk) + " 已被占用（" + takenBy + "），注册了也会被抢走，请换一个";
+    }
+    if (hkLabel(hk) === "Shift+F1") {
+      return "Shift+F1 是「打开设置」的固定快捷键，不能占用";
+    }
+    return "";
+  }
+
+  /** 把列表外的键补进下拉，保证 `sel.value = key` 一定选得中。
+   *
+   *  ⚠️ 必须在**每次** `renderHotkey` 里调，不能只在初始化补一次：
+   *     捕获可以得到常用列表之外的键（`ArrowUp` / `Numpad3` / `BracketLeft`…），只在初始化补的话，
+   *     `sel.value = 'ArrowUp'` 会落空 ⇒ 下拉 `selectedIndex = -1`（看上去「什么都没选」），
+   *     而右边预览写着 `Ctrl+↑` —— 又一次两处说法不一致；更糟的是用户随后碰一下下拉，
+   *     `readManual` 就把刚捕获到的键整条丢掉，且看起来像是自己选的「无」。
+   *  文案不写「（当前）」：用户换成常用键之后这个标注会过期，反而变成假话。 */
+  function ensureKeyOption(code) {
+    if (!code) return;
+    const sel = document.getElementById("keySelect");
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === code) return;
+    }
+    const o = document.createElement("option");
+    o.value = code;
+    o.textContent = prettyKey(code) + "（其它键）";
+    sel.appendChild(o);
+  }
+
+  /** 把 `captured` 画到三处界面：当前生效值 / 待保存预览 / 修饰键勾选 + 主键下拉。 */
+  function renderHotkey() {
+    const hk = captured || { ctrl: false, alt: false, shift: false, key: "" };
+    const cur = document.getElementById("hkCurrent");
+    const prev = document.getElementById("hkPreview");
+    const sel = document.getElementById("keySelect");
+    const st = document.getElementById("hkStatus");
+    // 左边 = 真正在生效的那个（保存成功才更新）；右边 = 手上正在拼的
+    cur.textContent = hkLabel(savedHotkey);
+    cur.title = savedHotkey.key ? "当前生效的快捷键" : "当前未设置快捷键";
+    prev.textContent = hk.key ? hkLabel(hk) : "未设置";
+    ensureKeyOption(hk.key);
+    sel.value = hk.key || "";
+    HKMODS.forEach(function (m) {
+      const box = document.getElementById(m.id);
+      box.checked = !!hk[m.field];
+      // 用类名表达勾选态（不用 :has()，避免旧内核不认）
+      if (box.parentNode && box.parentNode.classList) {
+        box.parentNode.classList.toggle("on", !!hk[m.field]);
+      }
+    });
+    const problem = hkProblem(hk);
+    // ⚠️ 读失败时**不能**再宣称「未设置」：此时真实值只是「未知」（settings.json 没读出来），
+    //    说「未设置」等于报假情报 —— 用户会以为自己的快捷键丢了，其实只是没读到。
+    if (loadFailed) {
+      prev.classList.remove("bad");
+      st.className = "sub err";
+      st.textContent = "设置没有成功读取：当前快捷键未知（已禁用保存，请关闭本窗后重开）。";
+      return;
+    }
+    prev.classList.toggle("bad", !!problem);
+    if (problem) {
+      st.className = "sub err";
+      st.textContent = problem;
+    } else if (hk.key && !sameHotkey(hk, savedHotkey)) {
+      // ⚠️ 只在**有主键**时比较：勾了修饰键但还没选键，属于「正在拼」的草稿，
+      //    不是「待保存的组合键」（否则会冒出「待保存：—」这种读不懂的提示）。
+      st.className = "sub";
+      st.textContent = "待保存：" + hkLabel(hk) + "（当前生效的是 " + hkLabel(savedHotkey) + "，点「保存」后切换）";
+    } else {
+      st.className = "sub";
+      st.textContent = hk.key
+        ? "当前生效：" + hkLabel(hk) + "。要换一个就勾选修饰键并选主键，或点「点击捕获组合键」。"
+        : "未设置唤醒快捷键：勾选修饰键并选一个主键，或直接点「点击捕获组合键」。";
+    }
+  }
+
+  /** 手动组合 → 状态。
+   *  ⚠️ 主键为空时**不要**顺手清零修饰键：用户最自然的顺序就是「先勾 Ctrl，再选键」，
+   *     清零会让刚勾的那个勾选瞬间消失（勾了等于没勾），只能靠猜顺序。空主键在**保存时**
+   *     才归一成「不设置」（见 saveBtn），草稿阶段保留用户的勾选。 */
+  function readManual() {
+    const key = document.getElementById("keySelect").value;
+    captured = {
+      ctrl: document.getElementById("hkCtrl").checked,
+      alt: document.getElementById("hkAlt").checked,
+      shift: document.getElementById("hkShift").checked,
+      key: key || ""
+    };
+    renderHotkey();
+  }
+
   (async () => {
     try {
       const s = await invoke("get_settings");
-      document.getElementById("hkCurrent").textContent = hkLabel(s.wake_hotkey);
+      // 默认沿用当前（可能是旧版本捕获出来的单键配置：显示归显示，保存时会被下面的校验拦住）
+      captured = s.wake_hotkey;
+      savedHotkey = s.wake_hotkey || savedHotkey;
       document.getElementById("trayEnabled").checked = s.tray_enabled;
       document.getElementById("minimizeOnClose").checked = s.minimize_on_close;
       document.getElementById("floatEnabled").checked = !!s.float_enabled;
-      captured = s.wake_hotkey; // 默认沿用当前
     } catch (e) {
-      setStatus("加载设置失败：" + e, "err");
+      loadFailed = true;
+      const btn = document.getElementById("saveBtn");
+      btn.disabled = true;
+      btn.title = "设置没有成功读取：现在保存会把已有配置覆盖成默认值。请关闭本窗后重开。";
+      setStatus(
+        "加载设置失败：" + e + "。已禁用保存——现在保存会把已有配置覆盖成默认值，请关闭本窗后重开。",
+        "err"
+      );
     }
 
     const sel = document.getElementById("keySelect");
@@ -364,57 +550,84 @@
     });
     // 下拉框最前面加一个“无（不设置快捷键）”选项，对应空 key。
     const noneOpt = document.createElement("option");
-    noneOpt.value = ""; noneOpt.textContent = "无（不设置快捷键）";
+    noneOpt.value = ""; noneOpt.textContent = "无（不设置）";
     sel.prepend(noneOpt);
-    sel.value = (captured && captured.key) || "";
-    sel.addEventListener("change", () => {
-      if (sel.value === "") {
-        captured = { ctrl: false, alt: false, shift: false, key: "" };
-        document.getElementById("hkStatus").textContent = "已选择：不设置唤醒快捷键";
-        document.getElementById("hkCurrent").textContent = "—";
-      } else {
-        captured = { ctrl: false, alt: true, shift: false, key: sel.value };
-        document.getElementById("hkStatus").textContent = "已选键：" + hkLabel(captured);
-      }
+    // 列表外的键（历史配置 / 捕获所得）由 `renderHotkey` → `ensureKeyOption` 按需补进下拉，
+    // 不再在这里补一次：那会漏掉「运行中捕获到列表外的键」这条路径。
+    sel.addEventListener("change", readManual);
+    HKMODS.forEach(function (m) {
+      document.getElementById(m.id).addEventListener("change", readManual);
     });
+    renderHotkey();
   })();
 
-  // 捕获快捷键
+  // 捕获快捷键：按一下（修饰键 + 主键）就是结果。
+  // ⚠️ 捕获到**非法组合**（裸单键 / 系统键）时**不接收**、继续等下一次：收下来只会在保存时
+  //    报错或被系统忽略，不如当场说清楚（这是原来「手动选择」与「捕获」语义打架的另一半）。
   document.getElementById("captureBtn").addEventListener("click", () => {
     const st = document.getElementById("hkStatus");
     const btn = document.getElementById("captureBtn");
-    st.textContent = "请按下快捷键组合（例如 Alt+4，按 Esc 取消）…";
+    st.className = "sub";
+    st.textContent = "请按下组合键（Ctrl / Alt / Shift + 一个键，例如 Alt+4）；按 Esc 取消。";
     btn.textContent = "捕获中…";
     btn.classList.add("capturing");
 
     const handler = (e) => {
       if (e.key === "Escape") {
         cleanup();
-        st.textContent = "已取消捕获，沿用当前值。";
+        renderHotkey();
         return;
       }
       e.preventDefault();
       if (["Control","Alt","Shift","Meta"].includes(e.key)) return; // 仅修饰键，继续等待
+      if (e.metaKey) {
+        // Win 键组合：注册不上，而且存下来会被当成 Ctrl+X（不是用户按的那个）——直说
+        st.className = "sub err";
+        st.textContent = "Win 键组合被系统占用，请改用 Ctrl / Alt / Shift 再按一次（Esc 取消）。";
+        return;
+      }
       const hk = {
-        ctrl: e.ctrlKey || e.metaKey,
-        alt: e.altKey,
-        shift: e.shiftKey,
+        ctrl: !!e.ctrlKey,
+        alt: !!e.altKey,
+        shift: !!e.shiftKey,
         key: e.code
       };
+      const problem = hkProblem(hk);
+      if (problem) {
+        st.className = "sub err";
+        st.textContent = problem + "；请重新按一次（Esc 取消）。";
+        return;
+      }
       captured = hk;
-      document.getElementById("hkCurrent").textContent = hkLabel(hk);
-      st.textContent = "已捕获：" + hkLabel(hk);
       cleanup();
+      renderHotkey(); // 把手动组合那一行一起刷新（同一套状态）
     };
     const cleanup = () => {
       document.removeEventListener("keydown", handler, true);
-      btn.textContent = "点击捕获";
+      btn.textContent = "点击捕获组合键";
       btn.classList.remove("capturing");
     };
     document.addEventListener("keydown", handler, true);
   });
 
   document.getElementById("saveBtn").addEventListener("click", async () => {
+    // 兜底第二道：按钮已 disabled，但别让「以后谁把它重新启用」变成静默清零的入口。
+    if (loadFailed) {
+      setStatus("未保存：设置没有成功读取。现在保存会把已有配置覆盖成默认值，请关闭本窗后重开。", "err");
+      return;
+    }
+    // ⚠️ 保存前先过一遍组合键校验：这两类配置**存得进去但会毁掉体验**（裸键占满输入 /
+    //    系统键注册不上），而后端只负责「能不能解析、能不能注册」，不会替用户判断该不该要。
+    //    `captured` 为 null 说明 get_settings 就没成功 —— 按「不设置」处理，别把 null 发过去。
+    if (!captured) captured = { ctrl: false, alt: false, shift: false, key: "" };
+    // 草稿允许「勾了修饰键但还没选主键」；落盘前归一成「不设置」，别把半截状态写进 settings.json
+    if (!captured.key) captured = { ctrl: false, alt: false, shift: false, key: "" };
+    const problem = hkProblem(captured);
+    if (problem) {
+      renderHotkey(); // 让预览框与状态行自己变红（视觉指回问题所在）
+      setStatus("未保存：" + problem, "err");
+      return;
+    }
     const payload = {
       wake_hotkey: captured,
       tray_enabled: document.getElementById("trayEnabled").checked,
@@ -425,8 +638,20 @@
       // Tauri generate_handler 会把 Rust 的 snake_case 参数名转为 camelCase，
       // 因此后端 save_settings 的 `new_settings` 参数对应前端键名 `newSettings`。
       await invoke("save_settings", { newSettings: payload });
-      document.getElementById("hkCurrent").textContent = hkLabel(payload.wake_hotkey);
-      setStatus("已保存。快捷键立即生效；托盘 / 最小化选项将在下次相关操作时生效。", "ok");
+      savedHotkey = {
+        ctrl: !!captured.ctrl,
+        alt: !!captured.alt,
+        shift: !!captured.shift,
+        key: captured.key || ""
+      };
+      renderHotkey();
+      // 文案按**实际存下去的东西**说话：未设置快捷键时不该说「快捷键立即生效」
+      setStatus(
+        payload.wake_hotkey.key
+          ? "已保存。快捷键立即生效；托盘 / 最小化选项将在下次相关操作时生效。"
+          : "已保存：未设置唤醒快捷键（托盘 / 最小化选项将在下次相关操作时生效）。",
+        "ok"
+      );
     } catch (e) {
       setStatus("保存失败：" + (e || "未知错误"), "err");
     }

@@ -380,6 +380,23 @@ pub fn run() {
                     Err(e) => dlog!("[tabs] 首屏重试事件 payload 无法解析：{e}"),
                 }
             });
+
+            // tab 页面 Ctrl+W（tab_keys.js）→ 关闭该 tab。事件名与 tab_keys.js 字面量逐字一致
+            // （静态守卫 tab_close_shortcut_contract）；payload 带一次性 token 防伪，
+            // 首页那一签由 close_tab_inner 拒绝，本层不做首页判断。
+            let close_handle = handle.clone();
+            app.listen(tabs::TAB_CLOSE_EVENT, move |event| {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct TabClosePayload {
+                    label: String,
+                    token: String,
+                }
+                match serde_json::from_str::<TabClosePayload>(event.payload()) {
+                    Ok(p) => tabs::request_close_tab(&close_handle, p.label, p.token),
+                    Err(e) => dlog!("[tabs] Ctrl+W 关页签事件 payload 无法解析：{e}"),
+                }
+            });
         }
 
         // ---------- 移动端底栏（仅移动端）：注册首页导航缓存 + 三个核心事件监听 ----------

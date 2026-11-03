@@ -68,6 +68,7 @@ import { createSplashPage, SPLASH_BG } from './splash-page'
 import { runSmokeChecks } from './smoke'
 import { registerAppIpc } from './app-ipc'
 import {
+  attachCloseTabShortcut,
   attachContextMenu,
   attachDevtools,
   attachDownload,
@@ -478,6 +479,17 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
 
     // 窗口 resize → 重排全部视图 bounds
     win.on('resize', () => tabManager?.relayout())
+
+    // M5 快捷键：焦点在**标签栏（壳页面）**时 Ctrl+W 也要关当前页签。
+    // ⚠️ 壳页面 shell.html 自己也挂了一份同样的 keydown（Tauri 侧只有那条通路，双壳共用该文件），
+    //    这里不担心双触发：`before-input-event` 的 `preventDefault()` 会阻止该按键派发到页面
+    //    （Electron 文档明示「preventDefault 会阻止页面 keydown/keyup 与菜单快捷键」）。
+    // ⚠️ 不必 setImmediate：被关的是子 WebContentsView，不是当前正在派发事件的宿主 webContents。
+    attachCloseTabShortcut(win.webContents, () => {
+      const active = tabManager?.active
+      // 首页那一签不可关（isPinnedHome）—— 由 closeTab 拒绝，这里不重复判定。
+      if (tabManager && active) tabManager.closeTab(active.label)
+    })
   }
 
   // ---------- M4 页面行为：F12 / 右键菜单 ----------

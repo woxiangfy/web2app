@@ -71,6 +71,11 @@ pub(crate) const TAB_TITLE_EVENT: &str = "web2app:tab-title";
 /// 与 `src/loading.js` 字面量逐字一致（静态守卫）。payload 同样带一次性 token 防伪。
 pub(crate) const TAB_RETRY_EVENT: &str = "web2app:retry-bootstrap";
 
+/// tab 页面里 Ctrl+W 触发的事件 → Rust 关闭该 tab（`src/tab_keys.js`）。
+/// 与 `src/tab_keys.js` 里的字面量逐字一致（静态守卫 `tab_close_shortcut_contract`）。
+/// payload 同样带一次性 token 防伪（app.listen 的 Event 不带发送窗口标识）。
+pub(crate) const TAB_CLOSE_EVENT: &str = "web2app:close-tab";
+
 /// 多页签的托管状态。
 ///
 /// `navigation` 缓存首次启动解析出的导航信息（真实 URL / 账号密码 / 是否走本地代理），

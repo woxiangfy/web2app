@@ -9,7 +9,7 @@
 
 ## 硬约束速览（不知道就会踩坑）
 
-1. **单一真源**：`src/{titlebar.js,loading.js,tab_title.js,dnd_polyfill.js,shell.html,splash.html,floaticon.html}`、
+1. **单一真源**：`src/{titlebar.js,loading.js,tab_title.js,tab_keys.js,dnd_polyfill.js,shell.html,splash.html,floaticon.html}`、
    `src/{proxy.rs,resolve.rs}`、`dist/settings.html` 与 Electron 壳共用 —— 改动任一**必须双壳同步验证**。
    ⚠️ `mobilebar.js` **不在**此列（仅 Tauri 移动端），改它只需过本侧门禁。
 2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 282 通过 / 6 ignored）；`src/contract_tests/`（按领域 13 个子模块）

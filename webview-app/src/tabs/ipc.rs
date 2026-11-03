@@ -133,6 +133,20 @@ pub(crate) fn retry_tab_bootstrap(app: &tauri::AppHandle, label: String, token: 
     crate::nav::bootstrap_for_label(app.clone(), label);
 }
 
+/// tab 页面里 Ctrl+W（`src/tab_keys.js`）经核心事件到达后的落地：校验 label/token 后关闭该 tab。
+///
+/// ⚠️ 关闭统一走 [`close_tab_inner`]：首页那一签由它第 ① 步拒绝（固定第一位、不可关），
+/// 本函数**不重复判断首页** —— 「首页判定」全项目只有 [`is_home_index`] 一份实现。
+/// 拒绝路径只落日志：界面上首页本来就没有「×」，Ctrl+W 落到它身上应当是「什么都没发生」。
+pub(crate) fn request_close_tab(app: &tauri::AppHandle, label: String, token: String) {
+    if !tab_token_matches(app, &label, &token) {
+        dlog!("[tabs] 拒绝 Ctrl+W 关页签：label/token 与在册 tab 不匹配（label={label}）");
+        return;
+    }
+    dlog!("[tabs] 收到 Ctrl+W，关闭页签：{label}");
+    close_tab_inner(app, &label);
+}
+
 /// 计算 `target="_blank"` / `window.open()` 弹窗在**新 tab** 中应该落在哪里。
 ///
 /// 背景（这是“弹窗打开的网址一直是 app_url”的根因）：启用本地反向代理时，WebView 实际访问的是

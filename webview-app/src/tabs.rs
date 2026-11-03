@@ -53,9 +53,11 @@ pub(crate) use ipc::{
     __cmd__close_tab, __cmd__create_tab, __cmd__get_tabs, __cmd__switch_tab,
     __tauri_command_name_close_tab, __tauri_command_name_create_tab, __tauri_command_name_get_tabs,
     __tauri_command_name_switch_tab, close_tab, create_tab, get_tabs, open_new_tab_from_request,
-    report_tab_title, retry_tab_bootstrap, switch_tab,
+    report_tab_title, request_close_tab, retry_tab_bootstrap, switch_tab,
 };
-pub(crate) use state::{TabManager, SHELL_SCHEME, TAB_PREFIX, TAB_RETRY_EVENT, TAB_TITLE_EVENT};
+pub(crate) use state::{
+    TabManager, SHELL_SCHEME, TAB_CLOSE_EVENT, TAB_PREFIX, TAB_RETRY_EVENT, TAB_TITLE_EVENT,
+};
 pub(crate) use window::{
     __cmd__close_host, __cmd__minimize_host, __tauri_command_name_close_host,
     __tauri_command_name_minimize_host, close_host, close_tab_inner, create_host_window,

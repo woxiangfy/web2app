@@ -361,6 +361,69 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
     `label=${slowLabel}`)
   await sleep(100)
 
+  // ---------- P13：Ctrl+W 关闭当前页签（内容视图 / 壳页面两条焦点路径） ----------
+  // 双壳同一判据：Ctrl+W 只关**当前激活**页签；首页那一签拒绝关闭（isPinnedHome）；
+  // 长按不连关（isAutoRepeat 由 test/page-behavior.test.ts 毫秒级钉住）。
+  // 这里验的是两种**真实**输入：`sendInputEvent` → `before-input-event` → `TabManager.closeTab`
+  // （① ② ③），以及合成 keydown 直达 shell.html 的 handler（④，共享页唯一的实跑点）。
+  const closeBaseCount = tabs.count // [home, opener]
+  const ctrlW = (wc: Electron.WebContents) =>
+    wc.sendInputEvent({ type: 'keyDown', keyCode: 'w', modifiers: ['control'] })
+
+  // ① 焦点在网页里（用户正在页面里操作）→ 内容视图那条通路
+  const w1 = await tabs.spawnTab('about:blank')
+  p.check('P13 前提：临时页签创建并激活（焦点将放在网页内）',
+    !!w1 && tabs.active?.label === w1 && tabs.count === closeBaseCount + 1,
+    `label=${w1} active=${tabs.active?.label} count=${tabs.count}`)
+  tabs.active?.view.webContents.focus()
+  ctrlW(tabs.active!.view.webContents)
+  const closedByView = await waitUntil(async () => tabs.count === closeBaseCount, 2000)
+  p.check('P13 Ctrl+W（焦点在网页内）关闭当前页签，激活落到左邻',
+    closedByView && tabs.active?.label === opener,
+    `count=${tabs.count} active=${tabs.active?.label}`)
+
+  // ② 焦点在标签栏（壳页面）→ index.ts 挂在宿主 webContents 上那条通路
+  const w2 = await tabs.spawnTab('about:blank')
+  p.check('P13 前提：第二个临时页签创建并激活（焦点将放在标签栏）',
+    !!w2 && tabs.active?.label === w2 && tabs.count === closeBaseCount + 1,
+    `label=${w2} active=${tabs.active?.label} count=${tabs.count}`)
+  win.webContents.focus()
+  ctrlW(win.webContents)
+  const closedByShell = await waitUntil(async () => tabs.count === closeBaseCount, 2000)
+  p.check('P13 Ctrl+W（焦点在标签栏）同样关闭当前页签',
+    closedByShell && tabs.active?.label === opener,
+    `count=${tabs.count} active=${tabs.active?.label}`)
+
+  // ③ 首页不可关：Ctrl+W 落在首页上必须「什么都没发生」（与「标签栏不画 ×」成对）
+  tabs.activate(home)
+  win.webContents.focus()
+  ctrlW(win.webContents)
+  await sleep(300)
+  p.check('P13 首页页签拒绝 Ctrl+W 关闭（集合 / 激活 / 窗口都不动）',
+    tabs.count === closeBaseCount && tabs.active?.label === home && !win.isDestroyed(),
+    `count=${tabs.count} active=${tabs.active?.label} 窗口存活=${!win.isDestroyed()}`)
+
+  // ④ **壳页面自己的 keydown**（双壳共用 shell.html 的那段代码）：合成事件不走
+  //    before-input-event，所以这里唯一会响的就是 shell.html 的处理器 → invoke("close_tab")
+  //    → 主进程 tabs:close_tab。⚠️ Tauri 侧本机没有可跑的探针，这份**共享页面**能被真正
+  //    执行到的地方只有这里 —— 「双壳共用」的文件至少得有一侧真跑过一次。
+  const w3 = await tabs.spawnTab('about:blank')
+  await sleep(250) // 等 pushTabsToShell 把 active 标记刷到壳页面（异步 IPC）
+  p.check('P13 前提：第三个临时页签创建并激活（走壳页面自己的 keydown）',
+    !!w3 && tabs.active?.label === w3 && (await shellActiveLabel()) === w3 &&
+      tabs.count === closeBaseCount + 1,
+    `label=${w3} active=${tabs.active?.label} 壳active=${await shellActiveLabel()}`)
+  await win.webContents.executeJavaScript(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true })); true`,
+    true
+  )
+  const closedByShellHandler = await waitUntil(async () => tabs.count === closeBaseCount, 2000)
+  p.check('P13 壳页面 keydown（Ctrl+W）经 invoke("close_tab") 关闭当前页签',
+    closedByShellHandler && tabs.active?.label === opener,
+    `count=${tabs.count} active=${tabs.active?.label}`)
+  tabs.activate(opener)
+  await sleep(100)
+
   // ---------- 标签栏「设置」按钮（最小化左侧）→ 打开设置窗 ----------
   // 位置 + 链路成对断言。链路上「三处逐字一致」最容易断：shell.html 的
   // invoke("open_settings") ↔ shell-preload 的 ALLOWED 白名单 ↔ 主进程

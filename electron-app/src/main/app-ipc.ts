@@ -125,7 +125,8 @@ function registerTabsIpc(deps: AppIpcDeps): void {
 
   ipcMain.handle('tabs:get_tabs', (e) => {
     assertShell(e)
-    // 返回元组数组 [label,title,active]，对齐 Tauri get_tabs 的 Vec<(String,String,bool)>
+    // 返回元组数组 [label,title,active,home]，对齐 Tauri get_tabs 的
+    // Vec<(String,String,bool,bool)>（四元组：漏掉 home 时首页会退化成普通页签，见 listForIpc）
     return mgr().listForIpc()
   })
   ipcMain.handle('tabs:switch_tab', (e, args: { label?: unknown } | undefined) => {

@@ -16,6 +16,7 @@ import {
   contextMenuTemplate,
   devtoolsEnabled,
   isBuiltinUrl,
+  isCloseTabKey,
   isDevtoolsKey,
   saveDialogOptions,
   type MenuItemSpec,
@@ -58,8 +59,36 @@ test('isDevtoolsKey：只认 F12 的 keyDown（keyUp 不算，否则一次按键
   assert.equal(isDevtoolsKey(undefined), false)
 })
 
-// ---------- 右键菜单：对齐 Tauri 的裁剪（不给打印 / 另存为 / 更多工具） ----------
+// ---------- isCloseTabKey：只认 Ctrl+W（不带 Shift/Alt/Meta、不连按） ----------
 
+test('isCloseTabKey：只认 Ctrl+W 的 keyDown', () => {
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'w', control: true }), true)
+  // 大写锁定 / 非 US 布局可能给 'W'
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'W', control: true }), true)
+  // 没有 Ctrl 就不是关闭页签（裸 w 是打字）
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'w' }), false)
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'w', control: false }), false)
+  // keyUp 不算（否则一次按键关两个页签）
+  assert.equal(isCloseTabKey({ type: 'keyUp', key: 'w', control: true }), false)
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'q', control: true }), false)
+  assert.equal(isCloseTabKey(null), false)
+  assert.equal(isCloseTabKey(undefined), false)
+})
+
+test('isCloseTabKey：Ctrl+Shift/Alt/Meta 一律不算（关闭窗口 / 系统组合键不混进来）', () => {
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'W', control: true, shift: true }), false)
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'w', control: true, alt: true }), false)
+  assert.equal(isCloseTabKey({ type: 'keyDown', key: 'w', control: true, meta: true }), false)
+})
+
+test('isCloseTabKey：长按不连关（isAutoRepeat 直接否）', () => {
+  assert.equal(
+    isCloseTabKey({ type: 'keyDown', key: 'w', control: true, isAutoRepeat: true }),
+    false
+  )
+})
+
+// ---------- 右键菜单：对齐 Tauri 的裁剪（不给打印 / 另存为 / 更多工具） ----------
 test('右键菜单：不含打印 / 另存为 / 更多工具（与 Tauri 的裁剪口径一致）', () => {
   const ls = labels(contextMenuTemplate(blankParams(), FULL_NAV)).filter(Boolean) as string[]
   for (const banned of ['打印', '另存为', '保存', '更多工具']) {

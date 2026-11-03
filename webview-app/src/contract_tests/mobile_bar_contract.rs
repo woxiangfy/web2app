@@ -54,12 +54,8 @@ const REQUEST_IN_RUST: &str = concat!("\"", "web2app:request-tabs", "\"");
 const DOC_IN_JS: &str = concat!("'", "web2app:mobile-doc", "'");
 const DOC_IN_RUST: &str = concat!("\"", "web2app:mobile-doc", "\"");
 
-/// 只看「代码行」：剥掉整行注释后再匹配，否则针会被注释满足（本仓库踩过）。
-fn has_code_line(src: &str, needle: &str) -> bool {
-    src.lines()
-        .map(|l| l.split("//").next().unwrap_or(""))
-        .any(|l| l.contains(needle))
-}
+/// 只看「代码行」：剥掉整行注释后再匹配，否则针会被注释满足（见 `mod.rs::has_code_line`）。
+use super::has_code_line;
 
 /// ① 三个事件名：前端字面量 ↔ Rust 常量 ↔ Rust 监听点，缺一侧就是「点了没反应」。
 ///
