@@ -57,7 +57,9 @@ workflow 只调用它们，不各自内联（避免漂移）：
 | `patch-android-permissions.py` | 按打包字段 `android_permissions` 按需声明相机/麦克风/定位权限 |
 | `install-android-ndk.sh` | NDK 版本单一真源 |
 
-⚠️ **补丁执行顺序固定**：prepare-wry-kotlin + gradle 任务注入（前置）→
+⚠️ **补丁执行顺序以两份打包 workflow 的步骤为准**（workflow 是唯一权威，本文不再复述顺序，
+避免第二个真源）：`build-custom.yml` 与 `release.yml` 必须**同序**，顺序错位会让 Kotlin 模板 /
+`override` 的叠加关系静默错乱。当前顺序是 prepare-wry-kotlin + gradle 任务注入（前置）→
 insets → back → download → extras → schemes → fullscreen → permissions；
 构建期 gradle 再按 rustBuild<变体> → patchWry<变体>Step0..2 → compile<变体>Kotlin
 重放 extras → schemes → fullscreen（MainActivity 系补丁不被 build.rs 覆盖，只打一次；
@@ -66,6 +68,12 @@ download 复用 back 新建的 `onWebViewCreate` override 只插一行；extras 
 调用之后，改 client 的 onPageFinished，与改 shouldOverride 的 schemes 互不耦合；
 fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6。
 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
+
+⚠️ **「脚本有没有被接线」由目录派生，不靠名单**（`contract_tests/android_pipeline_contract.rs` ⑧）：
+管线脚本 = `.github/scripts/*.py` 里引用 `android_gen` 或文件名以 `patch-android-` 开头者
+（`android_gen.py` 自身除外）；每个都必须被**两份** workflow 真实调用（`echo "::error::…"`
+文案行不算），workflow 也不得调用目录里不存在的脚本，且两份 workflow 的调用顺序必须互相一致。
+CI 的 `--selftest` 循环同样按目录发现（只跑声明了 `--selftest` 的脚本，且发现结果非空 ⇒ 空集不许假绿）。
 
 ⚠️ **注入进 `build.gradle.kts` 的 Kotlin 片段必须能通过脚本编译**（它只在 gradle **配置期**才被编译，
 本地 `--selftest` 跑不出来——2026-11-01 就是这个盲区炸的，见 `docs/changes/2026-11-01.md`）：
@@ -101,7 +109,46 @@ CI 报错行号一致。
 
 底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移（**含窄幅悬浮按钮 FAB**：fixed 贴底件无宽度门槛，且保留元素原 px 底边距），否则页面页脚 / FAB 会被底栏切掉半截。加载转圈层经 `__web2appMobileBarH` + `web2app:chrome-ready` 让出底栏，加载期间底栏仍可见可点。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径。
 
-**`target="_blank"` / `window.open()` 进移动页签**（2026-10-14 起，仅多页签模式）：`mobilebar.js` document-start 装 blank guard —— 捕获阶段 click 向上找最近 `<a>` 命中 `_blank` 且 http(s) 即拦，`window.open` 同拦（非 http(s) 回落原实现交 schemes 外跳），统一发 `web2app:open-tab` `{url}`；`mobilebar.rs` 新事件（与无 payload 落首页的 `web2app:new-tab` 区分）只承接 http(s) 并复用单 webview 页签记录开新页。单页签包不装 guard。
+**`target="_blank"` / `window.open()` 进移动页签**（2026-10-14 起，仅多页签模式）：`mobilebar/tabs.js` document-start 装 blank guard —— 捕获阶段 click 向上找最近 `<a>` 命中 `_blank` 且 http(s) 即拦，`window.open` 同拦（非 http(s) 回落原实现交 schemes 外跳），统一发 `web2app:open-tab` `{url}`；`mobilebar.rs` 新事件（与无 payload 落首页的 `web2app:new-tab` 区分）只承接 http(s) 并复用单 webview 页签记录开新页。单页签包不装 guard。
+
+### 拆分后逐项真机验证清单（2026-11-07，`src/mobilebar/` 五片）
+
+> Android 侧**只有人工真机验证、没有自动化**（本仓库两壳都没有 JS 测试基建）。本轮把 1,260 行的
+> `mobilebar.js` 拆成 5 片（纯搬运：按行切片，函数声明提升 ⇒ 运行期无副作用次序依赖），
+> 行为等价由「契约测试 + 原文件逐行同源」保证，**但仍须按本清单在真机上逐项走一遍**。
+
+| # | 真机操作 | 预期现象 | 这步验证哪个能力（分片） |
+| --- | --- | --- | --- |
+| 1 | `mobile_bar=true`、`tabs_enabled=false` 打包安装并打开 | 底部 4 格：首页/后退/前进/更多（**无列表**）；高度正确、不盖住页面 | 注入时序（core 读 cfg）、按钮条件渲染（core） |
+| 2 | 点「后退」「前进」 | 与系统行为一致；无历史时置灰且点击无动作 | 导航落点判定（core） |
+| 3 | 点「首页」 | 已在首页则重新加载；否则回到 `app_url` | 首页按钮（core + `web2app:home`） |
+| 4 | 点「更多」 | 面板自底栏上沿升起，六行齐全；点遮罩 / 再点「更多」可收起 | 面板宿主（core）+ more.js |
+| 5 | 「更多」→ 刷新 / 复制链接 / 分享 / 在浏览器打开 | 刷新生效；复制后 toast；分享与浏览器打开拉起系统面板 | more.js + Kotlin 桥（密钥轮换） |
+| 6 | 「更多」→ 清除浏览数据（两步确认） | 首点变「再点一次」，3s 内不点自动撤防；确认后 toast 且站点数据清空 | more.js 的 `clearArmed` 状态机 |
+| 7 | 「更多」→ 退出 | 应用退出，不残留后台 | more.js |
+| 8 | 页面底部有 `position:fixed` 的 FAB / 客服球 | FAB 整体在底栏之上，不被切半；原 px 底边距保留 | bottom_space.js |
+| 9 | 打开 `100vh` 满屏页面 | 容器缩一格外加 safe-area，不出现双滚动条 | bottom_space.js |
+| 10 | 页面加载中（转圈层） | 转圈层只到「底栏之上」，底栏可见可点 | core 的 `markChromeReady` + loading.js |
+| 11 | 横竖屏 / 三大键↔手势导航切换 | 底栏高度稳定，安全区随设备生效 | bottom_space.js 重排 |
+| 12 | `tabs_enabled=true` 打包，点「列表」 | 页签面板可新建/切换/关闭；首页固定 0 号且不可关 | tabs.js |
+| 13 | 多页签下点 `target="_blank"` / 页面调 `window.open` | 链接进移动页签记录并加载，不再点击无反应 | tabs.js::installBlankGuard |
+| 14 | 切换页签后观察壳侧 | 页签标题与 url 跟随当前文档更新（不是空白 / 旧标题） | tabs.js::watchDoc + `web2app:mobile-doc` |
+| 15 | 打开内置启动页 / splash | 底栏不画、blank guard 不装（`mount.js` 早退分支生效） | mount.js 内置页早退 |
+
+**主要风险点**（按概率排序）：
+
+1. **分片顺序 / 拼接完整性**：必须按 `core → bottom_space → tabs → more → mount` 拼成**同一个 IIFE**。
+   顺序错或某片被改成独立 IIFE ⇒ 共享闭包状态（`tabRows` / `activePanel` / `clearArmed`）失联，
+   表象是「按钮在但点了没反应」「面板空白」。契约测试 ⑮ 钉住「以 `})();` 结尾」与防重标记唯一，
+   但**漏片 / 拼错片名**只能靠本清单 #12–#15 发现。
+2. **注入时序**：`config_script()` 必须仍排在底栏脚本之前（契约测试 ③ 钉着）。
+3. **原生桥契约**：`more.js` 的 `__web2appAndroid` / `__web2appAndroidKey` 与
+   `patch-android-extras.py` 的常量逐字一致，改名会**静默失效**（清单 #5–#7）。
+4. **行尾**：分片沿用原文件 CRLF，拼接后与拆分前逐行同源；编辑器批量改 LF 会让 diff 整文件翻新（不影响运行）。
+
+**快速回退**：单笔回退本轮变更即可 —— 恢复 `src/mobilebar.js`，把 `lib.rs` 的
+`concat!(include_str!(…))` 换回 `include_str!("mobilebar.js")`，契约测试同步改回单文件读取。
+因分片与原文件**内容逐行同源**，回退不需要重新对照行为。
 
 ## 启动问题排障史（v1.60–v1.65，改 Android 启动流程前必读）
 

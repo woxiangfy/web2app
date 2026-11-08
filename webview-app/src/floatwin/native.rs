@@ -942,3 +942,113 @@ fn register_class() -> windows::core::PCWSTR {
     }
     class
 }
+
+// ===========================================================================
+// 单测：只覆盖**纯像素**函数（v1.81 原生化后唯一能离线验证的部分）
+// ===========================================================================
+//
+// 窗口生命周期 / WndProc / UpdateLayeredWindow 仍只能靠真机 `--float-probe`（见
+// docs/float-ball.md）。这里钉住的是「毛刺回归」最先破的那三条不变量：
+// 缓冲区尺寸、四角全透明 / 内部不透明、以及**预乘**（DWM `AC_SRC_ALPHA` 的硬要求）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(buf: &[u8], n: i32, x: i32, y: i32) -> [u8; 4] {
+        let i = ((y * n + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    }
+
+    /// 预乘：`a=0` 必须全零（否则 DWM 会画出「幽灵像素」）、`a=255` 原样、
+    /// 以及任何像素都满足 `b,g,r <= a`（预乘定义，越界即通道溢出）。
+    #[test]
+    fn premultiply_bgra_follows_alpha() {
+        let mut buf = vec![
+            255, 255, 255, 0, // 全透明：必须压成 0
+            10, 20, 30, 255, // 不透明：原样
+            255, 128, 0, 128, // 半透明：按 128/255 缩放
+        ];
+        premultiply_bgra(&mut buf);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0], "a=0 的像素必须全零");
+        assert_eq!(&buf[4..8], &[10, 20, 30, 255], "a=255 的像素必须原样");
+        assert_eq!(buf[8], 128, "b: 255*128/255");
+        assert_eq!(buf[9], 64, "g: 128*128/255");
+        assert_eq!(buf[10], 0, "r: 0*128/255");
+        assert_eq!(buf[11], 128, "alpha 不变");
+    }
+
+    /// 球面尺寸 + alpha 契约：缓冲区是 `n*n*4`（`n = max(w,h)`）、四角全透明、
+    /// 盘内不透明，且整块满足预乘不变式。
+    #[test]
+    fn render_ball_keeps_alpha_contract() {
+        for (w, h) in [(56, 56), (40, 56), (96, 96)] {
+            let n = w.max(h);
+            let buf = render_ball(w, h, 1.0, false, false, false);
+            assert_eq!(
+                buf.len(),
+                (n * n * 4) as usize,
+                "{w}x{h} 缓冲区必须是 n*n*4"
+            );
+            assert_eq!(px(&buf, n, 0, 0)[3], 0, "{w}x{h} 左上角必须全透明");
+            assert_eq!(px(&buf, n, n - 1, 0)[3], 0, "{w}x{h} 右上角必须全透明");
+            assert_eq!(px(&buf, n, 0, n - 1)[3], 0, "{w}x{h} 左下角必须全透明");
+            assert_eq!(px(&buf, n, n - 1, n - 1)[3], 0, "{w}x{h} 右下角必须全透明");
+            // 盘内取样点：圆内、图标外、且远离 1px 描边（图标边长 36 ⇒ 纵向 [10,46)）。
+            let inside = px(&buf, n, n / 2, 4);
+            assert_eq!(inside[3], 255, "{w}x{h} 盘内必须不透明");
+            for (i, p) in buf.chunks_exact(4).enumerate() {
+                assert!(
+                    p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3],
+                    "{w}x{h} 第 {i} 个像素违反预乘不变式（b,g,r 必须 <= a）"
+                );
+            }
+        }
+    }
+
+    /// 状态微调只改平涂色，不碰 alpha / 几何：深色主题 hover 提亮、两主题 collapsed 压暗；
+    /// 浅色主题满值 255 被 clamp，hover 与常态同色（旧 CSS `brightness(1.12)` 的等价行为）。
+    #[test]
+    fn render_ball_state_tint_only_touches_color() {
+        const N: i32 = 56;
+        // 取样点同上：圆内（距圆心 24 < r=28）、图标外（y=4 < 10）、远离描边。
+        let sample = |dark, hover, collapsed| {
+            px(&render_ball(N, N, 1.0, dark, hover, collapsed), N, N / 2, 4)
+        };
+
+        let light = sample(false, false, false);
+        assert_eq!(light, [255, 255, 255, 255], "浅色常态盘面是纯白");
+        assert_eq!(
+            sample(false, true, false),
+            light,
+            "浅色 hover 的 1.06 被 clamp 到 255 ⇒ 与常态同色"
+        );
+        assert!(
+            sample(false, false, true)[0] < light[0],
+            "浅色 collapsed 必须压暗"
+        );
+
+        let dark = sample(true, false, false);
+        assert!(dark[0] < light[0], "深色盘面必须比浅色暗");
+        assert!(
+            sample(true, true, false)[0] > dark[0],
+            "深色 hover 必须提亮"
+        );
+        assert!(
+            sample(true, false, true)[0] < dark[0],
+            "深色 collapsed 必须压暗"
+        );
+        for (hover, collapsed) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(
+                sample(true, hover, collapsed)[3],
+                255,
+                "状态微调只改颜色，不得动 alpha"
+            );
+        }
+    }
+
+    /// 0 尺寸不能 panic（`n <= 0` 走提前返回；给 `UpdateLayeredWindow` 前不会被调用）。
+    #[test]
+    fn render_ball_tolerates_zero_size() {
+        assert!(render_ball(0, 0, 1.0, false, false, false).is_empty());
+    }
+}

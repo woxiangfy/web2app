@@ -35,6 +35,7 @@ import electron from 'electron'
 import type { SaveDialogOptions } from 'electron'
 import { extname, join } from 'node:path'
 import type { BrowserWindow, Session, WebContents } from 'electron'
+import { isSplashUrl } from './nav-text'
 
 const { app, clipboard, dialog, Menu } = electron
 
@@ -138,13 +139,10 @@ export interface NavFlags {
 }
 
 /**
- * 内置页面判定：内置启动页 splash 有两种 URL 形态 —— 原生 `splash://` scheme，与 wry 在
- * Windows/Android 改写后的 `http://splash.localhost/`。与 webview-app 的 titlebar.js
- * isBuiltinUrl 逐字对齐：内置页永远不该成为前进/后退落点（移动端规则同此）。
+ * 内置页面判定（历史落点用）：实现已收敛到 `nav-text.ts::isSplashUrl`（M-4），
+ * 这里保留旧名避免调用方与跨壳契约测试大改。内置页永远不该成为前进/后退落点。
  */
-export function isBuiltinUrl(url: string): boolean {
-  return /^splash:/i.test(url) || /^https?:\/\/splash\.localhost(?:[/?#]|$)/i.test(url)
-}
+export { isSplashUrl as isBuiltinUrl, isInternalUrl } from './nav-text'
 
 /**
  * 后退落点是否为真实网页：当前条目的上一条历史存在，且其 URL 不是内置 splash 页。
@@ -155,7 +153,7 @@ export function canHistoryGoBack(
   activeIndex: number
 ): boolean {
   const prev = entries[activeIndex - 1]
-  return !!prev && !isBuiltinUrl(prev.url)
+  return !!prev && !isSplashUrl(prev.url)
 }
 
 /** 前进落点同理：下一条历史存在且不是内置 splash 页。 */
@@ -164,7 +162,7 @@ export function canHistoryGoForward(
   activeIndex: number
 ): boolean {
   const next = entries[activeIndex + 1]
-  return !!next && !isBuiltinUrl(next.url)
+  return !!next && !isSplashUrl(next.url)
 }
 
 /**

@@ -40,7 +40,12 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 
 ### 3.4 其它全局约定（硬约束，不知道就会踩坑）
 
-1. **单一真源 · 改一必双壳验证**：注入脚本与页面（`titlebar.js`、`loading.js`、`tab_title.js`、`tab_keys.js`、`dnd_polyfill.js`、`shell.html`、`splash.html`、`floaticon.html`、`dist/settings.html`、`icons/*`）及代理 / 解析链路（`proxy.rs` → sidecar）为两壳共用。⚠️ 两个**例外**（单壳专属，改它只需过对应壳门禁 + 契约测试）：`mobilebar.js`（移动端底栏，Tauri 移动端专属）；`floaticon.html`（悬浮球页，**Electron 专属** —— Tauri 球 v1.81 起是 Win32 分层窗口 + 位图 alpha，不再加载任何页面）。
+1. **单一真源 · 改一必双壳验证（按「是否真被两壳消费」分三类，别混为一谈）**：
+   - **真共用**（`electron-app/scripts/stage-assets.cjs` 打包时从 `webview-app/` 复制）：`titlebar.js`、`loading.js`、`shell.html`、`splash.html`、`dist/settings.html`、`icons/*` —— 改动**必须双壳同步验证**。
+   - **行为契约对齐、实现不同**：Ctrl+W 关当前页签（Tauri 注入 `tab_keys.js` → 核心事件 `web2app:close-tab`；Electron 主进程 `before-input-event`）、页签真实标题回传（`tab_title.js` vs Electron 原生）—— 改一侧必须对照另一侧行为，**文件本身不共用**。
+   - **单壳专属**：`mobilebar/*.js`（Tauri 移动端；5 分片由 `lib.rs` 按序拼成同一 IIFE）、`tab_title.js` / `tab_keys.js` / `dnd_polyfill.js`（WebView2/Tauri 注入，Electron **不消费**）、`floaticon.html`（**Electron 专属** —— Tauri 球 v1.81 起是 Win32 分层窗口 + 位图 alpha，不加载任何页面）。
+
+   代理 / 解析链路（`proxy.rs` / `resolve.rs` → sidecar）走 `#[path]` **同源复用**，改一必双壳验证。
 2. **文本编码**：文档统一 UTF-8（无 BOM）、LF 换行，避免混用导致整文件 diff。
 3. **路径引用**：跨目录引用一律相对仓库根目录书写（如 `docs/electron-plan.md`）；同目录内可直接写文件名。
 4. **敏感文件**：`signing/` 下 keystore、`secrets.env` 等凭据不得提交或外发（已由根 `.gitignore` 忽略）；提交前确认 `git status` 内不含 `signing/`。
@@ -53,6 +58,8 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 | --- | --- |
 | 项目全盘分析与优化建议 / 架构与组织结构审查（2026-09-29） | `docs/project-analysis.md`、`docs/architecture-review-2026-09-29.md` |
 | webview-app 架构与组织结构审查（2026-10-25，模块/依赖/复用） | `docs/architecture-review-2026-10-25.md` |
+| webview-app 架构与组织结构审查（2026-11-07，workspace 四成员 + Android 补丁链 + 跨壳共用件） | `docs/architecture-review-2026-11-07.md` |
+| electron-app 架构与组织结构审查（2026-11-07，模块边界/依赖/跨壳复用，含分级问题与优化批次） | `docs/electron-app-architecture-review-2026-11-07.md` |
 | **本地脚本说明** | **`docs/local-scripts.md`** |
 | **打包配置 JSON 契约（21 字段，跨壳唯一权威）** | **`docs/packaging-config.md`** |
 | **Android 端优化清单（唯一任务清单）** | **`docs/android-improvements.md`** |
@@ -69,14 +76,11 @@ L1 根 `AGENTS.md`（全局规则，不记子项目细节）→ L2 `<project>/AG
 
 | 日期 | 摘要 |
 | --- | --- |
+| 2026-11-08 | 唤醒快捷键校验两壳对齐（Tauri 主进程补齐 Electron 五条判据：未设置 / 裸单键 / 系统占用 7 键 / `Shift+F1` / 无法映射，系统占用表三处逐字一致）；旧配置被判非法时启动回退「不设置」+ 设置页提示（进程内、保存后消失、不落盘）；`cargo test --all` 308 通过 / 6 ignored、parity 55/55 → `docs/changes/2026-11-08.md` |
+| 2026-11-07 | electron-app 六批架构优化（注入清单单一真源 / 特权 IPC 闸门 / 探针不进包 / 纯逻辑可测 / 路径与协议收口 / 守卫假绿治理）+ webview-app 架构诊断（报告 `docs/architecture-review-2026-11-07.md`）与四批落地（Android 补丁链目录派生校验、dead_code 收窄、settings.json 损坏备份、mobilebar.js 核心+功能拆分）→ `docs/changes/2026-11-07.md` |
 | 2026-11-03 | 设置页**「唤醒快捷键」交互重做**（使用者：手动选择分不清组合键还是单键）：旧实现两条入口语义相反 —— 下拉选键**隐式补 Alt**（选 F9 实存 Alt+F9 却不显示），捕获却能产出**裸单键**（按 F9 就是 F9）；现统一为「组合键 = 修饰键（Ctrl/Alt/Shift 至少一个）+ 主键」，`captured` 唯一状态、两个编辑器互相重画，「当前生效」与「待保存」分离，单键 / 系统键（Alt+Tab·Alt+Space·Alt+F4·Ctrl+Esc）/ `Shift+F1` 在**保存前**拦下（一个字节都不写盘）且捕获路径同样不接收；顺带修「先勾修饰键再选键时勾选被清空」与「历史键不在下拉里 ⇒ 显示无、一保存被抹掉」两个真缺陷。Electron 探针 13b 八条（150 → 158）。**复核轮**又修两处静默缺陷：① 捕获**列表之外**的键（`Ctrl+↑`）时下拉 `selectedIndex = -1`（预览说 Ctrl+↑、下拉什么都没选，用户碰一下就把捕获结果丢掉）⇒ 补 option 抽成 `ensureKeyOption`，改由 `renderHotkey` **每次**调用；② `get_settings` 失败后点保存会把快捷键/托盘/最小化**整条覆盖成默认值**还回「已保存」⇒ `loadFailed` + 禁用保存 + 保存处第二道，卡片状态行改说「当前快捷键未知」而不是「未设置」。新增 `contract_tests/settings_hotkey_contract`(5) 静态契约（`has_code_line` 上提 `mod.rs` 共用 —— 第一版用 `contains` 时被**注释**满足而假绿）。Rust **287 passed**、unit 123、`probe` **158/158**、`probe --tabs` 54/54、smoke 通过 → `docs/changes/2026-11-03.md` |
 | 2026-11-03 | 多页签支持 **Ctrl+W 关当前页签**（双壳）：Electron 在 `before-input-event` 上挂 `isCloseTabKey/attachCloseTabShortcut`（内容视图 + 壳页面两处），Tauri 新增注入脚本 `src/tab_keys.js` → 核心事件 `web2app:close-tab`（label+一次性 token，防伪与 `tab_title.js` 同一条通路）；首页那一签照旧拒绝（`close_tab_inner` / `isPinnedHome` 单点判定，新入口不重复判）；Ctrl+Shift+W 与长按不算。Rust 282 passed（+2 静态契约）、Electron unit 123、`probe --tabs` 54/54、`probe` 150/150、smoke 通过 → `docs/changes/2026-11-03.md` |
 | 2026-11-01 | 修 Android 真机「打开白屏 → 约 10 秒后自动退出」：`mobilebar::on_page_finished` 在 **Android UI 线程**里调 `window.url()`，而 wry 该 getter = `MainPipe::send` + `recv_timeout(10s)`、MAIN_PIPE 消费方正是这条 UI 线程（`onFirstActivityCreateWry` → `ThreadLooper::for_thread()`）⇒ 必然僵 10 秒超时，随后 `main_pipe.rs` 的 `tx.send(url).unwrap()` 撞上已丢弃的接收端 ⇒ panic ⇒ abort。改用缓存 `mobilebar::CurrentUrl`（写入 = `on_page_finished`（payload url）+ `web2app:mobile-doc`，读取 = `at_same_target`），并新增守卫 `mobile_bar_never_queries_webview_on_ui_thread`（⚠️ 初版只钉 `window.url()` 被 `w.url()` 变体绕过=假绿，改钉整个 `.url()` 形态后反向对照如期 FAILED）；Rust 280 passed / 6 ignored → `docs/changes/2026-11-01.md` |
 | 2026-11-01 | 修 CI「Build Android APK」零产物：注入模板里的 `val w2aScriptsDir = java.io.File(...)` 在 `build.gradle.kts` 里解析成**扩展访问器 `java` 的成员**（不是包名）⇒ `Unresolved reference 'io'`（`108:26`），gradle **配置期**脚本编译失败 ⇒ 任务图建不起来。改 `w2aRepoRoot.resolve(".github/scripts")`，自测补「禁 `java.io.*`」守卫（匹配前先剥 `//` 注释，否则针被注释满足）；并给两个打包 workflow 加「注入结果校验」步（打印 `github.sha` + 注入行、旧写法 1 分钟内直接红）—— 起因是第二轮贴来的失败日志与修复前逐字相同，实为**旧提交的 Re-run**；**同日第四轮** `java.io` 修好后暴露真错：注入块用 `parentFile.parentFile` **数层数**（`gen/android` 到仓库根是**三级**）⇒ `workingDir` 落到不存在的 `webview-app/.github/scripts`，而 Exec 的 `workingDir` **只在执行期**校验（白等 5 分钟才报「目录不存在」）⇒ 改为**逐级向上查找** `.github/scripts` + 注入时绝对路径兜底 + 配置期 `GradleException`，校验步再加 ④「必须含 `generateSequence`」⑤「独立复算目录存在」；**同日第五轮**：`patch-android-schemes.py` 的守卫把 `request`（`WebResourceRequest`）直接喂给形参 `uri: Uri` ⇒ kotlinc 报 `115:47 Argument type mismatch`（注入是纯字符串拼接、selftest 断言照抄了错串才一路绿灯）⇒ 改传 `request.url` + 新增「形参类型 ↔ 实参」核对；另定产物保留策略：全部 upload-artifact 统一 `retention-days: 1`、新增 `cleanup-runs.yml` 每日删 3 天前运行记录 → `docs/changes/2026-11-01.md` |
-| 2026-10-28 | Android 打包三连：① `config_url` 误填 JSON 的 `URLError`（解析器改「先判形态再取内容」）；② `cargo tauri android build \| tee` 失败被**吞成绿色**（缺 pipefail）⇒ 下游假报「未找到 *-unsigned.apk」，现补 `shell: bash` + `set -o pipefail` + 根因摘录 + 产物校验；③ 定性「零产物 = gradle 未启动」，加**环境指纹**步骤（tauri-cli/rustc/JDK/模板 AGP·Gradle·Kotlin/SDK/NDK）+ `W2A_SKIP_GRADLE_PATCH` 二分开关，并用**真模板**离线重放补丁链 11/11；连带 `cargo fmt --all`（v1.81 遗留）→ `docs/changes/2026-10-28.md` |
-| 2026-10-27 | 悬浮球 v1.81 根治边缘毛刺：Tauri 球弃 WebView2 改 **Win32 分层窗口**（`UpdateLayeredWindow` 预乘 ARGB + 4×4 超采样圆盘，像素 alpha 穿透），Electron 球改 canvas 超采样 alpha 位图；盘面弃蓝色渐变改跟随系统深浅色白/黑；吸附扩为**四边**就近择一（`DockEdge` 增 top/bottom），`floaticon.html` 转 Electron 专属、`capabilities/float-icon.json` 退役 → `docs/changes/2026-10-27.md` |
-| 2026-10-25 | webview-app 架构审查落盘 + 优化批次①②③④（P1–P4 全落地）：contract_tests.rs 拆 13 个领域子模块、打包配置字段表单源化（`scripts/packaging-fields.json`）、新建 `nav.rs` 切断 bootstrap 双向耦合（六模块归零）、electron 样例 17 键差异定性、debug_log/floatprobe 口径钉死、floatwin/tabs/proxy 三大文件垂直拆分（子模块化，proxy `#[path]` 双壳同源不破），Rust 282 全绿 / parity 55/55 → `docs/changes/2026-10-25.md` |
-| 2026-10-24 | electron-app 架构审查优化批次①–⑤ 落地（updateDocument 统一读-改-写 / index.ts 装配化 / probe-single 19 段函数化 / 设置页命令名三方守卫 / util.ts 与 protocols.ts 依赖收口 / 悬浮球决策纯函数化），unit 115/115、probe 149/150（预存环境项）、tabs 47/47 → `docs/changes/2026-10-24.md` |
-| 2026-10-15 | 修 Android 打包 `patch-android-extras.py` 的 `FileNotFoundError`（补丁链前置 `prepare-wry-kotlin.py` + build 后重放 task），连带修 Gradle API / 变体配对 / cargo metadata 缺陷；selftest 12/12 → `docs/changes/2026-10-15.md` |
 
 > 完整历史（含 v1.0–v1.29 仓库搭建与文档体系建立）见 `docs/changes/`。

@@ -145,3 +145,89 @@ test('storeLocation：读候选主位置优先、旧 %APPDATA% 位置兜底，�
   assert.deepEqual(out.float_window, SEED.float_window, '旧位置里的 float_window 段在升级首写时被清零了')
   assert.equal(out.tray_enabled, false)
 })
+
+// ---------- ⑥ 设置页入参：缺字段沿用当前值（H-2 兜底页不得清空唤醒快捷键） ----------
+
+test('mergeIncomingSettings：只提交三个开关时，wake_hotkey 原样保留', async () => {
+  const { mergeIncomingSettings } = await ready
+  const cur = {
+    wake_hotkey: { ctrl: false, alt: true, shift: false, key: 'Digit4' },
+    tray_enabled: true,
+    minimize_on_close: true,
+    float_enabled: true,
+  }
+  // 兜底设置页（FALLBACK_HTML）的提交形态：没有 wake_hotkey 这个键。
+  const next = mergeIncomingSettings(
+    { tray_enabled: false, minimize_on_close: false, float_enabled: false },
+    cur
+  )
+  assert.deepEqual(next.wake_hotkey, cur.wake_hotkey, '缺省的 wake_hotkey 必须沿用当前值，不能被清空')
+  assert.equal(next.tray_enabled, false)
+  assert.equal(next.minimize_on_close, false)
+  assert.equal(next.float_enabled, false)
+})
+
+test('mergeIncomingSettings：整份提交按页面值生效；hotkey 缺修饰键时逐字段沿用', async () => {
+  const { mergeIncomingSettings } = await ready
+  const cur = {
+    wake_hotkey: { ctrl: true, alt: true, shift: false, key: 'KeyA' },
+    tray_enabled: false,
+    minimize_on_close: false,
+    float_enabled: false,
+  }
+  const full = mergeIncomingSettings(
+    {
+      wake_hotkey: { ctrl: false, alt: false, shift: true, key: ' F9 ' },
+      tray_enabled: true,
+      minimize_on_close: true,
+      float_enabled: true,
+    },
+    cur
+  )
+  assert.deepEqual(full.wake_hotkey, { ctrl: false, alt: false, shift: true, key: 'F9' })
+  assert.equal(full.tray_enabled, true)
+
+  // 只给了 key：三个修饰键沿用当前值，key 取页面值（trim）。
+  const partial = mergeIncomingSettings({ wake_hotkey: { key: 'F10' } }, cur)
+  assert.deepEqual(partial.wake_hotkey, { ctrl: true, alt: true, shift: false, key: 'F10' })
+})
+
+test('mergeIncomingSettings：非对象入参 / 结构坏掉的 hotkey 一律沿用当前值', async () => {
+  const { mergeIncomingSettings } = await ready
+  const cur = {
+    wake_hotkey: { ctrl: false, alt: true, shift: false, key: 'Digit4' },
+    tray_enabled: true,
+    minimize_on_close: false,
+    float_enabled: true,
+  }
+  assert.deepEqual(mergeIncomingSettings(null, cur), cur)
+  assert.deepEqual(mergeIncomingSettings(undefined, cur), cur)
+  assert.deepEqual(mergeIncomingSettings('oops', cur), cur)
+  const badHotkey = mergeIncomingSettings({ wake_hotkey: 'F9' }, cur)
+  assert.deepEqual(badHotkey.wake_hotkey, cur.wake_hotkey, 'hotkey 结构坏掉时沿用当前值')
+  assert.equal(badHotkey.tray_enabled, true, '同批提交的其它字段仍应生效')
+})
+
+test('mergeIncomingSettings：显式提交但类型不对的布尔按严格语义收敛（只认 true）', async () => {
+  const { mergeIncomingSettings } = await ready
+  const cur = {
+    wake_hotkey: { ctrl: false, alt: false, shift: false, key: '' },
+    tray_enabled: true,
+    minimize_on_close: true,
+    float_enabled: true,
+  }
+  const next = mergeIncomingSettings({ tray_enabled: 'true', minimize_on_close: 1 }, cur)
+  assert.equal(next.tray_enabled, false, '字符串 "true" 不得当成 true（与旧 normalizeIncoming 一致）')
+  assert.equal(next.minimize_on_close, false)
+  assert.equal(next.float_enabled, true, '未提交的字段沿用当前值')
+})
+
+// ---------- ⑦ 兜底设置页提交形态回归守卫（H-2） ----------
+
+test('FALLBACK_HTML 不得再硬编码 wake_hotkey 提交（否则会清空用户的唤醒快捷键）', () => {
+  const src = readFileSync(join(process.cwd(), 'src', 'main', 'settings-window.ts'), 'utf8')
+  assert.ok(
+    !/wake_hotkey:\s*\{\s*ctrl:\s*false/.test(src),
+    '设置窗兜底页保存时不得提交空 wake_hotkey（主进程按缺省字段沿用当前值）'
+  )
+})

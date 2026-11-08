@@ -20,16 +20,13 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import {
-  app,
-  BrowserWindow,
-  ipcMain,
-  type BrowserWindow as BW,
-  type WebContents,
-} from 'electron'
+import { BrowserWindow, ipcMain, type BrowserWindow as BW, type WebContents } from 'electron'
 
 import { firstExisting } from './first-existing'
-import type { Settings } from './settings'
+import { injectFile, isPackaged } from './paths'
+import { hotkeyProblem } from './hotkey'
+import { assertTrustedSender } from './ipc-guard'
+import { mergeIncomingSettings, type Settings } from './settings'
 
 export const SETTINGS_URL = 'settings://localhost/'
 
@@ -56,8 +53,8 @@ const SETTINGS_BG = '#ffffff'
  */
 export function locateSettingsHtml(appPath: string): string | null {
   return firstExisting(
-    app.isPackaged
-      ? [join(appPath, 'out', 'inject', 'settings.html')]
+    isPackaged()
+      ? [injectFile('settings.html')]
       : [join(appPath, '..', 'webview-app', 'dist', 'settings.html'), join(appPath, 'dist', 'settings.html')],
   )
 }
@@ -95,7 +92,10 @@ inv('get_settings').then(function(s){document.getElementById('tray').checked=s.t
 document.getElementById('min').checked=s.minimize_on_close;
 document.getElementById('float').checked=!!s.float_enabled}).catch(function(e){document.getElementById('s').textContent='读取失败：'+e});
 document.getElementById('save').onclick=function(){
- inv('save_settings',{newSettings:{wake_hotkey:{ctrl:false,alt:false,shift:false,key:''},
+ // ⚠️ 只提交这三个开关：主进程对**缺省字段**沿用当前设置（见 settings.ts::mergeIncomingSettings）。
+ //    旧版在这里额外提交了一份硬编码的空 hotkey，等于用户只改托盘开关点保存，
+ //    就把已配置的唤醒快捷键静默清空（2026-11-07 架构审查 H-2）。
+ inv('save_settings',{newSettings:{
  tray_enabled:document.getElementById('tray').checked,
  minimize_on_close:document.getElementById('min').checked,
  float_enabled:document.getElementById('float').checked}})
@@ -145,13 +145,11 @@ let settingsWin: BW | null = null
 export function registerSettingsIpc(deps: SettingsWindowDeps): void {
   // 纵深防御：设置命令是高破坏面通道（save_settings 写盘、clear_web_data 清数据）。
   // 当前只有设置窗自己的 preload 能发出这些命令（内容视图的 preload 只暴露白名单窗口
-  // 动作），但仍显式校验 sender —— 与 index.ts 里 tabs IPC 的 assertShell 同一条纪律：
+  // 动作），但仍显式校验 sender —— 统一走 ipc-guard.ts 的同一条闸（2026-11-07 H-3）：
   // 将来若误给内容视图挂上带 invoke 的 preload，这里是最后一道闸。
   const assertSettingsSender = (sender: WebContents): void => {
     const expected = settingsWin && !settingsWin.isDestroyed() ? settingsWin.webContents.id : null
-    if (expected === null || sender.id !== expected) {
-      throw new Error(`拒绝非设置窗口调用设置命令（sender.id=${sender.id}，期望=${expected}）`)
-    }
+    assertTrustedSender(sender.id, expected, { label: '设置命令' })
   }
 
   ipcMain.handle('tauri:get_settings', (e) => {
@@ -163,7 +161,13 @@ export function registerSettingsIpc(deps: SettingsWindowDeps): void {
     assertSettingsSender(e.sender)
     const raw = args?.newSettings
     if (!raw || typeof raw !== 'object') throw new Error('参数错误：缺少 newSettings')
-    deps.saveSettings(normalizeIncoming(raw as Record<string, unknown>))
+    // 缺省字段沿用**当前**设置（兜底页只提交三个开关，不能因此清空 wake_hotkey）。
+    const next = mergeIncomingSettings(raw as Record<string, unknown>, deps.getSettings())
+    // 主进程侧第二道组合键校验（页面已有即时提示）：拦住绕过页面（手改 settings.json /
+    // 兜底页）写入裸单键、系统占用键、Shift+F1 的情况。判据见 hotkey.ts::hotkeyProblem。
+    const problem = hotkeyProblem(next.wake_hotkey)
+    if (problem) throw new Error(problem)
+    deps.saveSettings(next)
     return null
   })
 
@@ -198,25 +202,10 @@ export function registerSettingsIpc(deps: SettingsWindowDeps): void {
 
 /**
  * 设置页是**未信任输入**吗？不是 —— 但也不能直接信。
- * 这里只做「结构收敛」：不认识的字段丢掉，类型不对的回落默认值，
- * 避免页面上传进来的怪东西把 settings.json 写坏（写坏了下次启动两个壳都读不出来）。
+ * 入参收敛的实现在 `settings.ts::mergeIncomingSettings`（纯函数、可单测）：
+ * 不认识字段丢掉、类型不对按严格语义收敛、**缺省字段沿用当前值**。
+ * 放在那里而不是本模块，是因为本模块依赖 Electron，无法进 `pnpm run unit`。
  */
-function normalizeIncoming(o: Record<string, unknown>): Settings {
-  const hk = (o.wake_hotkey ?? {}) as Record<string, unknown>
-  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-  const bool = (v: unknown): boolean => v === true
-  return {
-    wake_hotkey: {
-      ctrl: bool(hk.ctrl),
-      alt: bool(hk.alt),
-      shift: bool(hk.shift),
-      key: str(hk.key).trim(),
-    },
-    tray_enabled: bool(o.tray_enabled),
-    minimize_on_close: bool(o.minimize_on_close),
-    float_enabled: bool(o.float_enabled),
-  }
-}
 
 /** 打开（或聚焦）设置窗。已存在时只做 show/unminimize/focus，与旧版一致。 */
 export function openSettingsWindow(deps: Pick<SettingsWindowDeps, 'preloadPath' | 'readHtml'>): void {

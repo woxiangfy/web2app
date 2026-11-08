@@ -16,7 +16,7 @@ webview-app/
 ├── src/
 │   ├── main.rs             # 桌面入口（薄壳，装配在 lib.rs）
 │   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
-│   ├── contract_tests/     # 静态契约测试（2026-10-25 按领域拆 13 个子模块：IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 页签首页 / 加载层模式标记 / 启动可见性 / 后退守卫 / Android 管线 / 悬浮球 / 启动日志归属 / 移动端底栏与打包字段；仅 cargo test 编译）
+│   ├── contract_tests/     # 静态契约测试（2026-10-25 按领域拆为 14 个子模块：IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 页签首页 / 加载层模式标记 / 启动可见性 / 后退守卫 / Android 管线（**目录派生**：脚本发现 + 双 workflow 真实调用与同序 + ci 循环非空）/ 悬浮球 / 启动日志归属 / 移动端底栏与打包字段 / 设置页快捷键；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
 │   ├── nav.rs              # 导航 / 窗口会话登记数据枢纽（Navigation / BootReady / label 登记 / 导航原语；功能模块一律 → nav）
 │   ├── bootstrap.rs        # 启动编排（后台解析真实地址 → 就绪后导航；对外入口经 nav 的 boot 回调转发）
@@ -38,9 +38,15 @@ webview-app/
 │   ├── shell.html          # 多页签外壳（标签栏）
 │   ├── floaticon.html      # 悬浮球页面（⚠️ v1.81 起 **Electron 专属**：Tauri 球已原生化不加载页面，见 ../AGENTS.md §3.4.1）
 │   ├── titlebar.js         # 自绘标题栏注入脚本（Windows）
-│   ├── mobilebar.js        # 移动端底部导航栏注入脚本（仅移动端；mobile_bar=true 时注入）
+│   ├── mobilebar/          # 移动端底栏注入脚本（5 个分片由 lib.rs 按序拼成同一 IIFE；仅移动端）
+│   │   ├── core.js         # 底座：配置/常量/样式/共享状态/底栏本体/面板宿主
+│   │   ├── bottom_space.js # 底部空间契约（让位/贴底元素上移/100vh 缩高）
+│   │   ├── tabs.js         # 页签能力（面板/文档 url·标题上报/_blank 拦截）
+│   │   ├── more.js         # 「更多」面板 + 原生桥 + 复制链接
+│   │   └── mount.js        # 入口生命周期（⚠️ 必须最后一片，负责关闭 IIFE）
 │   ├── loading.js          # 加载层注入脚本
 │   ├── tab_title.js        # 多页签真实标题回传
+│   ├── tab_keys.js         # 多页签快捷键（Ctrl+W 关当前页签 → 核心事件 web2app:close-tab，label + 一次性 token）
 │   └── dnd_polyfill.js     # WebView2 拖拽 polyfill
 ├── crates/
 │   ├── resolve-core/       # 纯加密核心（Ed25519 + AES-256-GCM + HKDF），零平台依赖
@@ -101,7 +107,8 @@ WebView2 钩子与配置清洗、`resolve-core` / `resolve-tool` 的加密往返
 capability / 跨文件事件名字面量（改动 `capabilities/*.json` 或注入脚本的事件名会被它拦下）。
 
 ```bash
-cargo test --all                # 全量单元测试（2026-10-25 实测 282 通过 / 6 ignored：resolve-core 19 + resolve-tool 22 + w2a-proxy 32 + 主 crate 209；主 crate 含 `contract_tests/` 静态契约守卫 79 条）
+cargo test --all                # 全量单元测试（2026-11-08 实测 308 通过 / 6 ignored：resolve-core 19 +
+                                #   resolve-tool 22 + w2a-proxy 32/3 ignored + 主 crate 235/3 ignored）
 cargo test --all -- --ignored   # 真 DNS 端到端测试（需联网）：TXT 查询 → 验签 → 解密全链路
 ```
 

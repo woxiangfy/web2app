@@ -72,30 +72,28 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   const snap = async (): Promise<Snapshot> =>
     (await win.webContents.executeJavaScript(SNAPSHOT_JS, true)) as Snapshot
 
-  // 跨段共享量：在编排层声明，各段函数以参数显式收发（段内局部变量留在段函数内）。
-  //   s=DOM 几何快照槽；fwd=段 1 的 window 滚动转发探测结果；side=段 10 的 sidecar 句柄；
-  //   clickBtn=点标题栏按钮（段 9 内定义、9.1/17 共用）；wc=主窗 webContents（段 15 内定义、16 共用）；
-  //   HK=快捷键构造（段 11 内定义、12/13/14 共用）。
-  let s!: Snapshot
-  let fwd!: FwdResult
-  let side: SidecarHandle | null = null
+  // 段与段**不共享可变状态**：每段自己 `snap()` 取快照（此前编排层的 `s/fwd/side`
+  // 三个「共享槽」实为伪共享 —— 各段函数只改自己的形参，编排层从未读取，见 2026-11-07
+  // 架构审查 M-6）。需要跨段复用的只有三样**纯构造物**：
+  //   clickBtn=点标题栏按钮（段 9 / 9.1 / 17 共用）；wc=主窗 webContents（段 15 / 16 共用）；
+  //   HK=快捷键构造（段 11 / 12 / 13 / 14 共用）。
   const clickBtn = (cls: string) =>
     win.webContents.executeJavaScript(`document.querySelector('#__web2app_titlebar__ .${cls}').click()`, true)
   const wc = win.webContents
   const HK = (o: Partial<Hotkey>): Hotkey => ({ ctrl: false, alt: false, shift: false, key: '', ...o })
 
-  await probeSec00Splash(ctx, p, snap, s)
-  await probeSec01PlainChrome(ctx, p, nav, snap, s, fwd)
-  await probeSec02FixedHeader(p, nav, snap, s)
-  await probeSec03VhShrink(p, nav, snap, s)
-  await probeSec04InsetShell(p, nav, snap, s)
-  await probeSec05StickyHeader(ctx, p, nav, snap, s)
-  await probeSec06StrictCsp(p, nav, snap, s)
-  await probeSec07EmptyBody(p, nav, snap, s)
-  await probeSec08OpenerNav(ctx, p, nav, snap, s)
+  await probeSec00Splash(ctx, p, snap)
+  await probeSec01PlainChrome(ctx, p, nav, snap)
+  await probeSec02FixedHeader(p, nav, snap)
+  await probeSec03VhShrink(p, nav, snap)
+  await probeSec04InsetShell(p, nav, snap)
+  await probeSec05StickyHeader(ctx, p, nav, snap)
+  await probeSec06StrictCsp(p, nav, snap)
+  await probeSec07EmptyBody(p, nav, snap)
+  await probeSec08OpenerNav(ctx, p, nav, snap)
   await probeSec09WindowButtons(ctx, p, nav, clickBtn)
   await probeSec91SettingsGear(ctx, p, clickBtn)
-  await probeSec10SidecarProxy(ctx, p, side)
+  await probeSec10SidecarProxy(ctx, p)
   await probeSec11SettingsContract(ctx, p, HK)
   await probeSec12TrayHotkey(ctx, p, HK)
   await probeSec13SettingsWindow(ctx, p, HK)
@@ -114,7 +112,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   return failed.length === 0
 }
 
-async function probeSec00Splash(ctx: ProbeContext, p: Probe, snap: SnapFn, s: Snapshot): Promise<void> {
+async function probeSec00Splash(ctx: ProbeContext, p: Probe, snap: SnapFn): Promise<void> {
   // ---------- 0. 启动页：窗口一出现就该有顶部栏 ----------
   // 启动页把两个脚本内联在**主世界**（不靠注入），这条断言就是「内联是否真的生效」。
   // 顺带验证：preload 暴露的 window.web2app 在启动页（splash: 协议）里也可用，
@@ -122,7 +120,7 @@ async function probeSec00Splash(ctx: ProbeContext, p: Probe, snap: SnapFn, s: Sn
   const { win } = ctx
   await win.loadURL('splash://localhost/')
   await sleep(500)
-  s = await snap()
+  const s = await snap()
   p.check('启动页：标题栏已内联挂载', s.barCount === 1 && !!s.barRect, `barCount=${s.barCount}`)
   p.near('启动页：标题栏高 38px', s.barRect?.h, 38, 0.5)
   p.check('启动页：壳标识已写入 DOM', s.shell === 'electron', `实际 ${s.shell}`)
@@ -133,14 +131,12 @@ async function probeSec01PlainChrome(
   ctx: ProbeContext,
   p: Probe,
   nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot,
-  fwd: FwdResult
+  snap: SnapFn
 ): Promise<void> {
   // ---------- 1. 普通页面：标题栏 + 38px 契约 ----------
   const { win } = ctx
   await nav('/plain.html')
-  s = await snap()
+  let s = await snap()
   p.check('标题栏已挂载（远程 http 页面）', s.barCount === 1 && !!s.barRect, `barCount=${s.barCount}`)
   p.near('标题栏贴顶且高 38px', s.barRect?.h, 38, 0.5)
   p.near('标题栏 top=0', s.barRect?.top, 0, 0.5)
@@ -187,7 +183,7 @@ async function probeSec01PlainChrome(
   // 回到顶部、阅读进度这类页面逻辑的公共依赖。
   // ⚠️ `scroll` 事件是**异步**派发的，必须等一帧再读 —— 同步读会永远得到「未触发」的假失败
   // （探针第一版就是这么写的，并且它差点让我以为转发坏了）。
-  fwd = JSON.parse(
+  const fwd = JSON.parse(
     await win.webContents.executeJavaScript(
       `(async () => {
       const b = document.body;
@@ -211,7 +207,7 @@ async function probeSec01PlainChrome(
     })()`,
       true
     )
-  ) as { y: number; byBody: number; fired: number; back: number; byHtmlEl: number; seIsBody: boolean }
+  ) as FwdResult
   p.near('window.scrollTo 仍能滚动（转发到 body）', fwd.y, 200, 40)
   p.near('window.scrollY 读到的是 body 的真实位置', fwd.byBody, fwd.y, 2)
   p.check('window 上的 scroll 事件仍会触发（异步）', fwd.fired > 0, `触发次数 ${fwd.fired}`)
@@ -251,42 +247,27 @@ async function probeSec01PlainChrome(
   p.near('页面正文未被标题栏压住', s.r.content?.top, 38, 2)
 }
 
-async function probeSec02FixedHeader(
-  p: Probe,
-  nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
-): Promise<void> {
+async function probeSec02FixedHeader(p: Probe, nav: NavFn, snap: SnapFn): Promise<void> {
   // ---------- 2. fixed 页头下移 ----------
   await nav('/fixed.html')
-  s = await snap()
+  const s = await snap()
   p.check('fixed 页头被打上 shift 标记', s.r.hdr !== null, '未找到 #hdr')
   p.near('fixed 页头下移到 38px', s.r.hdr?.top, 38, 1)
 }
 
-async function probeSec03VhShrink(
-  p: Probe,
-  nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
-): Promise<void> {
+async function probeSec03VhShrink(p: Probe, nav: NavFn, snap: SnapFn): Promise<void> {
   // ---------- 3. min-height:100vh 容器缩高 ----------
   await nav('/vh.html')
-  s = await snap()
+  const s = await snap()
   p.check('整页容器被打上 shrink 标记', s.shrinkAttr, '未打上 data-web2app-chrome-shrink')
   p.check('页脚底边不越出视口下沿', (s.r.ftr?.bottom ?? 1e9) <= s.view.ch + 1.5, `页脚 bottom=${s.r.ftr?.bottom}，视口底=${s.view.ch}`)
   p.check('页脚仍贴在视口底部（没有被压扁）', (s.r.ftr?.bottom ?? 0) >= s.view.ch - 6, `页脚 bottom=${s.r.ftr?.bottom}，视口底=${s.view.ch}`)
 }
 
-async function probeSec04InsetShell(
-  p: Probe,
-  nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
-): Promise<void> {
+async function probeSec04InsetShell(p: Probe, nav: NavFn, snap: SnapFn): Promise<void> {
   // ---------- 4. fixed;inset:0 整屏外壳 ----------
   await nav('/inset.html')
-  s = await snap()
+  const s = await snap()
   p.near('整屏外壳顶边下移到 38px', s.r.shell?.top, 38, 1.5)
   p.check('整屏外壳底边仍钉在视口底', (s.r.shell?.bottom ?? 0) >= s.view.ch - 2, `外壳 bottom=${s.r.shell?.bottom}，视口底=${s.view.ch}`)
 }
@@ -295,15 +276,14 @@ async function probeSec05StickyHeader(
   ctx: ProbeContext,
   p: Probe,
   nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
+  snap: SnapFn
 ): Promise<void> {
   // ---------- 5. sticky 页头滚动后仍在 38（而且**不需要我们动手**） ----------
   const { win } = ctx
   await nav('/sticky.html')
   await win.webContents.executeJavaScript('window.scrollTo(0, 700)', true)
   await sleep(350)
-  s = await snap()
+  const s = await snap()
   // ⚠️ 新契约下 sticky **不该**被打上 shift 标记：body 已经是滚动容器、盒子上沿就在 38px，
   // `top:0` 的 sticky 天然停在 y=38（正是要的位置）。再给它加 38 就成了 76px
   //（页面自己的吸顶导航凭空多出一条空白）。这条断言把两件事一起钉住：位置对 + 我们没多手。
@@ -312,15 +292,10 @@ async function probeSec05StickyHeader(
   p.near('sticky 页头滚动后停在 38px', s.r.hdr?.top, 38, 1.5)
 }
 
-async function probeSec06StrictCsp(
-  p: Probe,
-  nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
-): Promise<void> {
+async function probeSec06StrictCsp(p: Probe, nav: NavFn, snap: SnapFn): Promise<void> {
   // ---------- 6. 严格 CSP 页面 ----------
   await nav('/csp.html')
-  s = await snap()
+  const s = await snap()
   p.check('严格 CSP 页面：标题栏仍挂载', s.barCount === 1, `barCount=${s.barCount}`)
   // 这条断言最初是**失败**的：`<style>` 元素被 `style-src 'self'` 拦掉，标题栏裸奔
   //（透明背景、按钮挤成一团）。修法是改用构造函数式样式表（document.adoptedStyleSheets，
@@ -331,15 +306,10 @@ async function probeSec06StrictCsp(
     `body overflowY=${s.bodyOverflowY} html overflowY=${s.rootOverflowY} html paddingTop=${s.htmlPadTop}`)
 }
 
-async function probeSec07EmptyBody(
-  p: Probe,
-  nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
-): Promise<void> {
+async function probeSec07EmptyBody(p: Probe, nav: NavFn, snap: SnapFn): Promise<void> {
   // ---------- 7. 空 body 页面：加载层留在屏幕上 ----------
   await nav('/empty.html')
-  s = await snap()
+  const s = await snap()
   p.check('空 body 页面：加载层已铺上', s.overlay === true, '未找到加载层')
 }
 
@@ -347,15 +317,14 @@ async function probeSec08OpenerNav(
   ctx: ProbeContext,
   p: Probe,
   nav: NavFn,
-  snap: SnapFn,
-  s: Snapshot
+  snap: SnapFn
 ): Promise<void> {
   // ---------- 8. target=_blank / window.open 一律原地导航 ----------
   const { win } = ctx
   await nav('/opener.html')
   await win.webContents.executeJavaScript('document.getElementById("lnk").click()', true)
   await sleep(700)
-  s = await snap()
+  let s = await snap()
   p.check('target=_blank 链接原地导航（不开裸窗口）', s.path === '/opened.html', `实际路径 ${s.path}`)
   p.check('原地导航后窗口未增加', win.webContents.getURL().includes('/opened.html'), win.webContents.getURL())
 
@@ -422,12 +391,13 @@ async function probeSec91SettingsGear(ctx: ProbeContext, p: Probe, clickBtn: Cli
   p.check('设置按钮链路收尾：设置窗可关闭', gearClosed, '4s 内未关闭')
 }
 
-async function probeSec10SidecarProxy(ctx: ProbeContext, p: Probe, side: SidecarHandle | null): Promise<void> {
+async function probeSec10SidecarProxy(ctx: ProbeContext, p: Probe): Promise<void> {
   // ---------- 10. 本地反向代理 sidecar（M2） ----------
   //
   // 这一组断言合起来回答一个问题：**代理有没有给每一个请求（含 WebSocket 握手）注入
   // Authorization** —— 这正是 proxy.rs 存在的理由（WebView2 的原生鉴权事件对 WS 不生效），
   // 也是「Electron 侧复用同一份 Rust 代理」这件事值不值得的全部依据。
+  let side: SidecarHandle | null = null
   const { win, base } = ctx
   const upstream = new URL(base)
   const authUrl = `http://probe:secret@${upstream.host}/auth.html`

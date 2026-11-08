@@ -118,19 +118,10 @@ if (existsSync(userConfig)) {
 //    等价于把注入逻辑、甚至多页签壳页面整段替换，而使用者看不出任何区别。
 //    现在与 config.json 同等待遇：拷贝进 out/inject/，随 asar 封进包内，想改必须重新打包。
 //    运行时读取见 src/main/index.ts::injectDir() 与 settings-window.ts::locateSettingsHtml()。
-const injectSrcs = [
-  // [源（相对 webview-app），目标文件名]
-  ['webview-app/src/splash.html', 'splash.html'],
-  ['webview-app/src/titlebar.js', 'titlebar.js'],
-  ['webview-app/src/loading.js', 'loading.js'],
-  ['webview-app/src/floaticon.html', 'floaticon.html'],
-  // 悬浮球内的软件图标（与 floaticon.html 同目录，页面以相对路径 icon.png 引用）。
-  // 与托盘 / exe 图标同源：打包时 icon_url 会先覆盖 webview-app/icons/icon.png（见
-  // packlib/driver-electron.mjs），所以这里 stage 到的始终是本次配置的软件图标。
-  ['webview-app/icons/icon.png', 'icon.png'],
-  ['webview-app/src/shell.html', 'shell.html'],
-  ['webview-app/dist/settings.html', 'settings.html'],
-]
+// ⚠️ 清单的**单一真源**在 `staged-inject.cjs`（出包后的 asar 护栏按同一份清单校验，
+//    见 check-asar-config.cjs）。不要在这里再写一份数组 —— 2026-11-07 之前正是两份手写清单，
+//    新增 floaticon.html / icon.png 时只改了这里，护栏静默漏掉这两项。
+const { STAGED_INJECT: injectSrcs } = require('./staged-inject.cjs')
 const injectOutDir = join(outDir, 'inject')
 mkdirSync(injectOutDir, { recursive: true })
 let injectMissing = false

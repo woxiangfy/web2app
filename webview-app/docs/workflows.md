@@ -1,14 +1,15 @@
 # CI 与打包工作流
 
-> 本文是 webview-app 相关 GitHub Actions 的唯一详细说明（共 7 条 workflow 的完整用法）。
+> 本文是 webview-app 相关 GitHub Actions 的唯一详细说明（共 8 条 workflow 的完整用法）。
 > 摘要与入口见 [../AGENTS.md](../AGENTS.md)「自动构建」；打包配置 JSON 字段契约见
 > [../../docs/packaging-config.md](../../docs/packaging-config.md)。
 
-共 **7 条** workflow，统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移）：
-其中 **5 条服务本工程**（命令经 `defaults.run.working-directory: webview-app` 落到本工程目录，
+共 **8 条** workflow，统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移）：
+其中 **6 条服务本工程**（命令经 `defaults.run.working-directory: webview-app` 落到本工程目录，
 产物路径则显式带 `webview-app/` 前缀）——2 条**自动**（`ci.yml` / `release.yml`）+
-3 条**手动**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`，
-在 Actions 页手动 Run workflow）；另外 2 条服务 **Electron 绿色版壳**（工作目录是 `electron-app/`，
+4 条**手动 / 定时**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`
+在 Actions 页手动 Run workflow；`cleanup-runs.yml` 每日定时删除 3 天前的运行记录与旧产物，
+2026-11-01 新增）；另外 2 条服务 **Electron 绿色版壳**（工作目录是 `electron-app/`，
 用法见 `electron-app/AGENTS.md`）：自动的 `electron-ci.yml`（lint / 探针 e2e / 出包）与
 手动的 `electron-build-custom.yml`（自定义打包）。
 
@@ -23,10 +24,12 @@
 - **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译，并跑 `clippy` / `test`。
 - **Check (Android)**：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，并跑 **Android 目标 clippy**
   （**阻断**，不产出 APK）。NDK 由 `.github/scripts/install-android-ndk.sh` 安装（版本单一真源）。
-- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、**六个安卓共享脚本各自的
-  `--selftest`**、校验全仓库 workflow YAML 与 `.github/scripts/*.sh` 语法（`check-workflows.py`）、
+- **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、**按目录发现的安卓共享脚本
+  `--selftest`**（`.github/scripts/*.py` 里声明了 `--selftest` 的全部执行；当前发现 13 个 = 12 个
+  Android 管线脚本 + `parse-packaging-config.py`，且**发现结果必须非空**，否则规则写错也会假绿）、
+  校验全仓库 workflow YAML 与 `.github/scripts/*.sh` 语法（`check-workflows.py`）、
   逐个校验两份 `config.example.json` 与 `scripts/pack-local.mjs`
-  的 `--parity`（Node 复刻与 Python 解析器的 43 组用例必须逐条一致）。详见
+  的 `--parity`（Node 复刻与 Python 解析器的 55 组用例必须逐条一致，本机实跑 55/55）。详见
   `docs/packaging-config.md` §5。
 
 ## 2. 发版即编译 — `.github/workflows/release.yml`

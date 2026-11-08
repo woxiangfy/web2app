@@ -75,9 +75,19 @@ export type OverlayCommand =
 // .nodeIntegrationInSubFrames=true），今天这条分支属于纵深防御 + 前向兼容：
 // 一旦未来（或某人改配置）子框架开始执行 preload，桥梁也不会意外漏进第三方 iframe。
 // 单窗口探针第 16 节用同源 iframe 钉着「子框架无桥」这一运行期事实。
+//
+// 2026-11-07 架构审查 M-9：主体按「桥 / 注入 / overlay 指令」拆成三个函数 ——
+// ⚠️ 只能在**本文件内**分块，不能拆成独立模块：本 preload 跑在 `sandbox: true` 的渲染进程里，
+//    `require` 只放行 electron / events / timers / url，相对 require 会在运行期失败。
 if (window.self === window.top) {
   const boot = ipcRenderer.sendSync('web2app:bootstrap') as Bootstrap
+  installBridge(boot)
+  installOverlayChannel()
+  installInjectScripts(boot)
+}
 
+/** ① 桥：`window.web2app` 白名单方法 + `window.web2appExtra`。 */
+function installBridge(boot: Bootstrap): void {
   const api: Web2AppApi = {
     /** 壳标识，供注入脚本做能力探测 */
     isElectron: true,
@@ -102,54 +112,10 @@ if (window.self === window.top) {
   if (boot.extra && Object.keys(boot.extra).length > 0) {
     contextBridge.exposeInMainWorld('web2appExtra', boot.extra)
   }
+}
 
-  // ---------- 注入 ----------
-
-  function isInternalPage(): boolean {
-    try {
-      const p = location.protocol
-      return p === 'splash:' || p === 'about:' || p === 'chrome:'
-    } catch {
-      return true // 拿不到 location 时宁可不注入（注入失败会静默，跳过更安全）
-    }
-  }
-
-  /**
-   * 在主世界执行一段代码。
-   *
-   * 失败一律打到控制台：注入失败的表象是「顶部栏凭空消失」/「按钮点了没反应」，
-   * 没有日志就只能靠猜。但绝不把异常抛给宿主页面。
-   */
-  function evalInPage(label: string, code: string): void {
-    try {
-      const ret = webFrame.executeJavaScript(code, true) as unknown
-      if (ret && typeof (ret as Promise<unknown>).then === 'function') {
-        ;(ret as Promise<unknown>).catch((e: unknown) => {
-          console.error(`[web2app] ${label} 执行失败：`, e)
-        })
-      }
-    } catch (e) {
-      console.error(`[web2app] ${label} 执行失败：`, e)
-    }
-  }
-
-  function runInject(name: string, src: string): void {
-    if (!src) {
-      console.error(`[web2app] 注入脚本 ${name} 为空，已跳过`)
-      return
-    }
-    // 脚本是我们自己的资产（不是页面输入），且都是自执行 IIFE。
-    evalInPage(`注入 ${name}`, src)
-  }
-
-  // 桥梁对顶层框架的内部页面（splash 等）同样暴露，但脚本注入只对真实内容页：
-  // 启动页已把两份脚本内联在 HTML 里，再注入会得到两条标题栏。
-  if (!isInternalPage()) {
-    runInject('titlebar.js', boot.titlebarJs)
-    runInject('loading.js', boot.loadingJs)
-  }
-
-  // ---------- 壳 → 加载层 的指令通道 ----------
+/** ② overlay 指令通道：壳 → 加载层（必须跨到主世界执行）。 */
+function installOverlayChannel(): void {
   // Tauri 侧是在目标页面里 eval `window.__web2appLoading.fail(...)`（同一个世界）。
   // Electron 侧加载层挂在主世界，而本文件在隔离世界 —— 读不到对方的全局变量，
   // 所以这条指令同样要跨到主世界去执行（同一个 evalInPage 出口）。
@@ -172,4 +138,59 @@ if (window.self === window.top) {
       '})()'
     evalInPage('加载层指令', code)
   })
+}
+
+/** ③ 注入：标题栏 + 加载层（只对真实内容页，内部页面一律跳过）。 */
+function installInjectScripts(boot: Bootstrap): void {
+  function isInternalPage(): boolean {
+    try {
+      // 内部 scheme 全表（M-9）：splash / settings / shell / floaticon 都是我们自己的页面，
+      // 启动页与壳/设置页已自带标题栏或采用无边框自绘，误注入会得到两条标题栏或错误留白。
+      const p = location.protocol
+      return (
+        p === 'splash:' ||
+        p === 'about:' ||
+        p === 'chrome:' ||
+        p === 'settings:' ||
+        p === 'shell:' ||
+        p === 'floaticon:'
+      )
+    } catch {
+      return true // 拿不到 location 时宁可不注入（注入失败会静默，跳过更安全）
+    }
+  }
+
+  // 桥梁对顶层框架的内部页面（splash 等）同样暴露，但脚本注入只对真实内容页：
+  // 启动页已把两份脚本内联在 HTML 里，再注入会得到两条标题栏。
+  if (isInternalPage()) return
+  runInject('titlebar.js', boot.titlebarJs)
+  runInject('loading.js', boot.loadingJs)
+}
+
+/**
+ * 在主世界执行一段代码。
+ *
+ * 失败一律打到控制台：注入失败的表象是「顶部栏凭空消失」/「按钮点了没反应」，
+ * 没有日志就只能靠猜。但绝不把异常抛给宿主页面。
+ */
+function evalInPage(label: string, code: string): void {
+  try {
+    const ret = webFrame.executeJavaScript(code, true) as unknown
+    if (ret && typeof (ret as Promise<unknown>).then === 'function') {
+      ;(ret as Promise<unknown>).catch((e: unknown) => {
+        console.error(`[web2app] ${label} 执行失败：`, e)
+      })
+    }
+  } catch (e) {
+    console.error(`[web2app] ${label} 执行失败：`, e)
+  }
+}
+
+function runInject(name: string, src: string): void {
+  if (!src) {
+    console.error(`[web2app] 注入脚本 ${name} 为空，已跳过`)
+    return
+  }
+  // 脚本是我们自己的资产（不是页面输入），且都是自执行 IIFE。
+  evalInPage(`注入 ${name}`, src)
 }

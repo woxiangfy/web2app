@@ -7,7 +7,7 @@
 ///
 /// 覆盖：
 ///   · 前端 ↔ Rust 三个事件名逐字一致；
-///   · cfg 脚本必须排在 mobilebar.js 之前（初始化脚本按注册顺序执行）；
+///   · cfg 脚本必须排在 底栏脚本 之前（初始化脚本按注册顺序执行）；
 ///   · 按钮清单与顺序（首页 / 后退 / 前进 / [列表] / 更多）；
 ///   · 「列表」按钮**由页签可用性决定**，不是无条件渲染（死按钮守卫）；
 ///   · 「更多」面板无条件渲染且固定最后：六个动作 + Android 原生桥要素 + 密钥 + 两步清数据；
@@ -17,14 +17,44 @@
 ///     「字段在各真源里都存在」已数据驱动化 → packaging_field_contract.rs。
 const LIB_RS: &str = include_str!("../lib.rs");
 const BAR_RS: &str = include_str!("../mobilebar.rs");
-const BAR_JS: &str = include_str!("../mobilebar.js");
+/// 底栏脚本 = `lib.rs` 里 `include_str!("mobilebar/<part>.js")` 的**按序拼接**：
+/// 运行时就是**同一个 IIFE**（五片共享闭包作用域）。这里从 `lib.rs` 派生分片清单，
+/// 不手抄第二份，拼出与运行时逐字相同的整脚本。
+fn bar() -> &'static str {
+    use std::sync::OnceLock;
+    static SCRIPT: OnceLock<String> = OnceLock::new();
+    SCRIPT.get_or_init(|| {
+        let mut out = String::new();
+        let mut rest = LIB_RS;
+        while let Some(i) = rest.find("include_str!(\"mobilebar/") {
+            let start = i + "include_str!(\"".len();
+            let end = rest[start..]
+                .find('"')
+                .map(|x| start + x)
+                .unwrap_or_else(|| panic!("lib.rs 的 include_str!(\"mobilebar/ 缺闭合引号"));
+            let rel = &rest[start..end];
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join(rel);
+            out.push_str(
+                &std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("读不到底栏分片 {}：{e}", path.display())),
+            );
+            rest = &rest[end..];
+        }
+        assert!(
+            !out.is_empty(),
+            "lib.rs 没有按 `include_str!(\"mobilebar/…)` 注入底栏脚本"
+        );
+        out
+    })
+}
 const LOADING_JS: &str = include_str!("../loading.js");
 const CONFIG_RS: &str = include_str!("../config.rs");
 /// 「更多」面板的原生侧实现（Android 打包期注入，本机跑不到，只能静态钉住桥要素）。
 const EXTRAS_PY: &str = include_str!("../../../.github/scripts/patch-android-extras.py");
 const BUILD_CUSTOM_YML: &str = include_str!("../../../.github/workflows/build-custom.yml");
 const RELEASE_YML: &str = include_str!("../../../.github/workflows/release.yml");
-const CI_YML: &str = include_str!("../../../.github/workflows/ci.yml");
 const PARSER_PY: &str = include_str!("../../../.github/scripts/parse-packaging-config.py");
 const PARSER_MJS: &str = include_str!("../../../scripts/packlib/constants.mjs");
 /// Node 复刻的解析主体（DEFAULTS/白名单在 constants.mjs，归一函数在 parser.mjs）。
@@ -90,8 +120,8 @@ fn event_names_match_between_page_and_rust() {
         (DOC_IN_JS, "app.listen(DOC_EVENT", "web2app:mobile-doc"),
     ] {
         assert!(
-            BAR_JS.contains(js),
-            "src/mobilebar.js 缺少事件字面量 {name}（找的是 {js}）"
+            bar().contains(js),
+            "src/mobilebar/ 缺少事件字面量 {name}（找的是 {js}）"
         );
         assert!(
             has_code_line(BAR_RS, listen),
@@ -119,14 +149,14 @@ fn event_names_match_between_page_and_rust() {
 #[test]
 fn page_emits_core_events_not_app_commands() {
     assert!(
-        BAR_JS.contains("plugin:event|emit"),
-        "src/mobilebar.js 必须走核心事件通路（__TAURI_INTERNALS__ 兜底）"
+        bar().contains("plugin:event|emit"),
+        "src/mobilebar/ 必须走核心事件通路（__TAURI_INTERNALS__ 兜底）"
     );
     // 首页要能工作，capability 必须已经授予 emit —— default.json 那条由
     // capability_contract::main_capability_grants_remote_titlebar_permissions 钉着。
 }
 
-/// ③ cfg 脚本必须排在 mobilebar.js **之前**（初始化脚本按注册顺序执行）。
+/// ③ cfg 脚本必须排在底栏脚本**之前**（初始化脚本按注册顺序执行）。
 ///    顺序反了 ⇒ 底栏照画，但高度与「列表」按钮不再由壳决定（静默错位）。
 #[test]
 fn config_script_is_registered_before_bar_script() {
@@ -134,11 +164,11 @@ fn config_script_is_registered_before_bar_script() {
         .find("mobilebar::config_script()")
         .unwrap_or_else(|| panic!("lib.rs 必须注入 mobilebar::config_script()"));
     let js_at = LIB_RS
-        .find("include_str!(\"mobilebar.js\")")
-        .unwrap_or_else(|| panic!("lib.rs 必须注入 include_str!(\"mobilebar.js\")"));
+        .find("include_str!(\"mobilebar/")
+        .unwrap_or_else(|| panic!("lib.rs 必须按 `include_str!(\"mobilebar/…)` 注入底栏脚本"));
     assert!(
         cfg_at < js_at,
-        "cfg 脚本必须排在 mobilebar.js 之前注册（当前 cfg@{cfg_at} js@{js_at}）：\
+        "cfg 脚本必须排在底栏脚本之前注册（当前 cfg@{cfg_at} js@{js_at}）：\
              初始化脚本按注册顺序执行，反了会让底栏用默认值渲染"
     );
 }
@@ -157,16 +187,16 @@ fn bar_renders_home_back_forward_list_then_more() {
     let mut last = 0usize;
     for (cls, label) in kinds {
         let needle = format!("btn('{cls}',");
-        let at = BAR_JS
+        let at = bar()
             .find(&needle)
-            .unwrap_or_else(|| panic!("src/mobilebar.js 必须渲染「{label}」按钮（{needle}）"));
+            .unwrap_or_else(|| panic!("src/mobilebar/ 必须渲染「{label}」按钮（{needle}）"));
         assert!(
             at > last,
             "底栏按钮顺序必须是 首页 → 后退 → 前进 → [列表] → 更多（{label} 位置不对）"
         );
         last = at;
         assert!(
-            BAR_JS.contains(&format!("w2m-{cls}")),
+            bar().contains(&format!("w2m-{cls}")),
             "按钮 {label} 必须带 w2m-{cls} 类名（样式与交互选择器都靠它）"
         );
     }
@@ -177,20 +207,20 @@ fn bar_renders_home_back_forward_list_then_more() {
 #[test]
 fn more_button_is_unconditional() {
     let push = "items.push(btn('more'";
-    let at = BAR_JS
+    let at = bar()
         .find(push)
         .unwrap_or_else(|| panic!("必须无条件 items.push 更多按钮（找 {push}）"));
     // push 之前的同一行文本只允许是空白 —— 列表按钮那行的形态是
     // `if (HAS_TABS) items.push(...)`，更多按钮绝不能带这个条件前缀。
-    let line_start = BAR_JS[..at].rfind('\n').map_or(0, |i| i + 1);
-    let before_push = BAR_JS[line_start..at].trim();
+    let line_start = bar()[..at].rfind('\n').map_or(0, |i| i + 1);
+    let before_push = bar()[line_start..at].trim();
     assert!(
         before_push.is_empty(),
         "「更多」按钮必须独立成行无条件 push（行首不得有 if 等前缀），实际前缀：{before_push:?}"
     );
     // 列表仍必须保持条件渲染（防顺手把条件也删了）。
     assert!(
-        has_code_line(BAR_JS, "if (HAS_TABS) items.push(btn('list'"),
+        has_code_line(bar(), "if (HAS_TABS) items.push(btn('list'"),
         "列表按钮的 HAS_TABS 条件渲染必须保留"
     );
 }
@@ -208,10 +238,7 @@ fn more_panel_actions_and_bridge_contract() {
         "清除浏览数据",
         "退出应用",
     ] {
-        assert!(
-            BAR_JS.contains(label),
-            "「更多」面板必须含菜单项「{label}」"
-        );
+        assert!(bar().contains(label), "「更多」面板必须含菜单项「{label}」");
     }
     // 桥名 / 密钥 JS 变量必须与 patch-android-extras.py 注入侧逐字一致。
     for needle in [
@@ -223,33 +250,33 @@ fn more_panel_actions_and_bridge_contract() {
         "b.quitApp(bridgeKey()",
     ] {
         assert!(
-            BAR_JS.contains(needle),
-            "mobilebar.js 必须包含桥调用要素：{needle}"
+            bar().contains(needle),
+            "底栏脚本 必须包含桥调用要素：{needle}"
         );
     }
     // 主框架门控：第三方 iframe 内即便脚本被注入也不许调危险动作。
     assert!(
-        BAR_JS.contains("window.top === window.self"),
+        bar().contains("window.top === window.self"),
         "桥调用前必须判定主框架（window.top === window.self），挡住第三方 iframe"
     );
     // 清数据两步确认（首次进入 armed，二次才调桥；3s 自动撤防）。
     assert!(
-        BAR_JS.contains("再点一次确认清除") && BAR_JS.contains("clearArmed"),
+        bar().contains("再点一次确认清除") && bar().contains("clearArmed"),
         "清除浏览数据必须两步确认（armed 态 + 再点一次文案）"
     );
     assert!(
-        BAR_JS.contains("}, 3000)"),
+        bar().contains("}, 3000)"),
         "清数据确认态必须有超时自动撤防（3s）"
     );
     // 复制链接必须有 Clipboard API 之外的 execCommand 兜底（部分 WebView 无权限）。
     assert!(
-        BAR_JS.contains("navigator.clipboard.writeText")
-            && BAR_JS.contains("document.execCommand('copy')"),
+        bar().contains("navigator.clipboard.writeText")
+            && bar().contains("document.execCommand('copy')"),
         "复制链接必须 Clipboard API 优先 + execCommand 兜底"
     );
     // 反馈通道：toast 元素与桥缺失提示。
     assert!(
-        BAR_JS.contains("w2m-toast") && BAR_JS.contains("当前版本不支持该操作"),
+        bar().contains("w2m-toast") && bar().contains("当前版本不支持该操作"),
         "面板操作必须有 toast 反馈，且桥缺失时不能静默"
     );
 }
@@ -310,9 +337,10 @@ fn workflows_wire_extras_patch() {
             "{name} 的 Android job 必须调用 patch-android-extras.py（更多面板原生桥）"
         );
     }
+    // ci.yml 的自测循环已改为**按目录发现**（不再手写名单）⇒ 覆盖条件是「脚本自带 --selftest」。
     assert!(
-        CI_YML.contains("patch-android-extras"),
-        "ci.yml 的补丁 selftest 门禁必须收录 patch-android-extras"
+        EXTRAS_PY.contains("--selftest"),
+        "patch-android-extras.py 必须自带 --selftest，否则 ci.yml 的目录发现循环会跳过它"
     );
 }
 
@@ -321,7 +349,7 @@ fn workflows_wire_extras_patch() {
 #[test]
 fn list_button_is_conditional_on_tab_availability() {
     assert!(
-        has_code_line(BAR_JS, "if (HAS_TABS) items.push("),
+        has_code_line(bar(), "if (HAS_TABS) items.push("),
         "「列表」按钮必须由 HAS_TABS 决定是否渲染（无条件渲染 = 移动端出现死按钮）"
     );
     // 判据的另一半在壳侧：tabs_available() 必须直接取 TABS_ENABLED —— 移动端单
@@ -348,8 +376,8 @@ fn list_button_is_conditional_on_tab_availability() {
         "config_script() 必须把 tabs_available() 的结论一起下发"
     );
     assert!(
-        BAR_JS.contains("CFG.tabs === true"),
-        "src/mobilebar.js 必须按下发的 tabs 标记判定（不能用别处推断）"
+        bar().contains("CFG.tabs === true"),
+        "src/mobilebar/ 必须按下发的 tabs 标记判定（不能用别处推断）"
     );
     // 反例锁定：`tabs_available()` 不得返回常量 true（改坏这条测试应 FAIL）。
     assert!(
@@ -363,15 +391,15 @@ fn list_button_is_conditional_on_tab_availability() {
 #[test]
 fn mobile_tab_skeleton_is_wired_end_to_end() {
     assert!(
-        BAR_JS.contains("'web2app:new-tab'") && BAR_JS.contains("w2m-newrow"),
+        bar().contains("'web2app:new-tab'") && bar().contains("w2m-newrow"),
         "列表面板必须有「新建标签」行（class=w2m-newrow，emit new-tab）"
     );
     assert!(
-        BAR_JS.contains("'web2app:request-tabs'"),
+        bar().contains("'web2app:request-tabs'"),
         "打开面板时必须请求壳侧推最新行数据"
     );
     assert!(
-        BAR_JS.contains("'web2app:mobile-doc'") && BAR_JS.contains("watchDoc"),
+        bar().contains("'web2app:mobile-doc'") && bar().contains("watchDoc"),
         "页面必须经 mobile-doc 事件上报 url/标题（壳侧才能维护标签记录）"
     );
     assert!(
@@ -379,7 +407,7 @@ fn mobile_tab_skeleton_is_wired_end_to_end() {
         "壳侧必须经 eval setTabs 把行数据推回面板"
     );
     assert!(
-        BAR_RS.contains("HOME_TAB_LABEL") && BAR_JS.contains("if (!home)"),
+        BAR_RS.contains("HOME_TAB_LABEL") && bar().contains("if (!home)"),
         "首页标签固定不可关闭：Rust 侧挡 0 号位，JS 侧只给非首页画关闭按钮"
     );
 }
@@ -460,18 +488,18 @@ fn mobile_bar_never_queries_webview_on_ui_thread() {
 #[test]
 fn fixed_bottom_elements_shift_regardless_of_width() {
     assert!(
-        BAR_JS.contains("var bottomFixed = atBottom && pos === 'fixed'"),
+        bar().contains("var bottomFixed = atBottom && pos === 'fixed'"),
         "position:fixed 的贴底元素必须无宽度门槛上移（FAB / 客服球只有 40–64px 宽）"
     );
     assert!(
-        BAR_JS.contains("function shiftedBottom(")
-            && BAR_JS.contains("'calc(' + BAR_H + 'px + ' + SAFE + ' + ' + n + 'px)'"),
+        bar().contains("function shiftedBottom(")
+            && bar().contains("'calc(' + BAR_H + 'px + ' + SAFE + ' + ' + n + 'px)'"),
         "上移贴底元素时必须把它原本的 px 底边距加回（保留悬浮按钮与栏之间的空隙）"
     );
 }
 
 /// ⑤d 加载层必须让出底栏：loading.js 读 __web2appMobileBarH 设置 bottom 且把 height
-///     改成 calc（只设 bottom 挡不住 height:100vh 的层继续铺满底部）；mobilebar.js
+///     改成 calc（只设 bottom 挡不住 height:100vh 的层继续铺满底部）；底栏脚本
 ///     负责在挂好（及旋转）后设置该全局并广播 web2app:chrome-ready。
 #[test]
 fn loading_overlay_reserves_the_mobile_bar() {
@@ -484,18 +512,18 @@ fn loading_overlay_reserves_the_mobile_bar() {
         "loading.js 必须同时设置 bottom 与 calc 高度，否则加载层继续盖住底栏"
     );
     assert!(
-        BAR_JS.contains("window.__web2appMobileBarH = reservePx()")
-            && BAR_JS.contains("new Event('web2app:chrome-ready')"),
-        "mobilebar.js 挂好后必须广播实测底栏高度（加载层靠它让出底部一格）"
+        bar().contains("window.__web2appMobileBarH = reservePx()")
+            && bar().contains("new Event('web2app:chrome-ready')"),
+        "底栏脚本 挂好后必须广播实测底栏高度（加载层靠它让出底部一格）"
     );
     // 启动页不画底栏 ⇒ 早期近似值只能放在「内置页早退」之后，不能让 splash 加载层
     // 莫名空出一条底栏。
-    let early = BAR_JS
+    let early = bar()
         .find("window.__web2appMobileBarH = BAR_H")
-        .unwrap_or_else(|| panic!("mobilebar.js 必须在 document-start 先给 BAR_H 首帧近似值"));
-    let bail = BAR_JS
+        .unwrap_or_else(|| panic!("底栏脚本 必须在 document-start 先给 BAR_H 首帧近似值"));
+    let bail = bar()
         .find("isBuiltinUrl(location.href)")
-        .unwrap_or_else(|| panic!("mobilebar.js 必须保留内置页早退"));
+        .unwrap_or_else(|| panic!("底栏脚本 必须保留内置页早退"));
     assert!(
         bail < early,
         "首帧近似高度必须写在内置页早退之后（启动页没有底栏，不能留底部空白）"
@@ -507,25 +535,25 @@ fn loading_overlay_reserves_the_mobile_bar() {
 #[test]
 fn bottom_space_contract_mirrors_the_top_one() {
     assert!(
-            BAR_JS.contains("html{box-sizing:border-box!important;height:100%!important;overflow:hidden!important;}"),
+            bar().contains("html{box-sizing:border-box!important;height:100%!important;overflow:hidden!important;}"),
             "底部空间契约要求 html 不滚（body 当滚动容器），否则滚动条会画到底栏上"
         );
     assert!(
-        BAR_JS.contains("margin-bottom:"),
+        bar().contains("margin-bottom:"),
         "body 必须让出底部一格（margin-bottom）—— padding 会让滚动条穿过去"
     );
     assert!(
-        BAR_JS.contains("min-height:0!important;height:"),
+        bar().contains("min-height:0!important;height:"),
         "body 的 min-height 必须归零：页面常写 min-height:100vh，会把 body 撑高一格底栏"
     );
     // 页面自己的贴底固定条 / 100vh 容器也要一起适配
     assert!(
-        BAR_JS.contains("applyChromeFit") && BAR_JS.contains("SHRINK_ATTR"),
+        bar().contains("applyChromeFit") && bar().contains("SHRINK_ATTR"),
         "底栏必须把页面自己的「贴底固定条 / 按视口高度定尺寸的容器」一起适配"
     );
     // 安全区：手势导航条那一截由 env() 补，不能写死
     assert!(
-        BAR_JS.contains("env(safe-area-inset-bottom, 0px)"),
+        bar().contains("env(safe-area-inset-bottom, 0px)"),
         "底栏必须让出 env(safe-area-inset-bottom)：手势导航条高度随设备变化，写死必然压到系统条"
     );
 }
@@ -535,15 +563,15 @@ fn bottom_space_contract_mirrors_the_top_one() {
 #[test]
 fn back_forward_use_the_same_landing_guard_as_desktop() {
     assert!(
-        BAR_JS.contains("window.navigation"),
+        bar().contains("window.navigation"),
         "前进/后退必须经 Navigation API 判定落点（与 titlebar.js 同规则）"
     );
     assert!(
-        BAR_JS.contains("isBuiltinUrl"),
+        bar().contains("isBuiltinUrl"),
         "落点是内置启动页时必须拒绝（移动端不允许退回到内置页面）"
     );
     assert!(
-        BAR_JS.contains("backBtn.disabled") && BAR_JS.contains("fwdBtn.disabled"),
+        bar().contains("backBtn.disabled") && bar().contains("fwdBtn.disabled"),
         "无历史可走时按钮必须置灰（否则「点了没反应」没有任何解释）"
     );
 }
@@ -552,7 +580,7 @@ fn back_forward_use_the_same_landing_guard_as_desktop() {
 #[test]
 fn builtin_splash_page_renders_no_bar() {
     assert!(
-        has_code_line(BAR_JS, "isBuiltinUrl(location.href)"),
+        has_code_line(bar(), "isBuiltinUrl(location.href)"),
         "内置启动页必须早退（不画底栏）：那时没有可前进/后退的真实页面"
     );
 }
@@ -561,24 +589,24 @@ fn builtin_splash_page_renders_no_bar() {
 #[test]
 fn mobile_interaction_rules_are_present() {
     assert!(
-        BAR_JS.contains("touch-action:manipulation"),
+        bar().contains("touch-action:manipulation"),
         "必须 touch-action:manipulation（去掉双击缩放带来的点击延迟）"
     );
     assert!(
-        BAR_JS.contains("min-height:44px"),
+        bar().contains("min-height:44px"),
         "触摸目标必须 ≥ 44px（Apple HIG / Material 同为 44–48dp）"
     );
     assert!(
-        BAR_JS.contains("-webkit-tap-highlight-color:transparent"),
+        bar().contains("-webkit-tap-highlight-color:transparent"),
         "必须去掉系统点击高亮块（否则整格按钮按下时闪一个色块）"
     );
     assert!(
-        BAR_JS.contains("w2m-btn:active"),
+        bar().contains("w2m-btn:active"),
         "触摸设备没有可靠的 :hover ⇒ 反馈必须走 :active"
     );
     // 反面：不得再画桌面端那种 hover tooltip（触摸设备上要么不出现、要么粘住不走）
     assert!(
-        !BAR_JS.contains("data-tip"),
+        !bar().contains("data-tip"),
         "底栏不该有 tooltip：触摸设备上 :hover 不可靠，语义交给 aria-label"
     );
 }
@@ -602,11 +630,13 @@ fn mobile_bar_constant_is_mobile_only_and_injected_once() {
         "lib.rs 必须在移动端按 MOBILE_BAR 决定是否注入底栏脚本"
     );
     // 桌面端（Windows）不得注入底栏脚本：那条块整体 cfg(mobile)，这里按「注入点只有一个
-    // 且带 mobile 标记」间接钉住（include_str! 只应出现一次）。
+    // 且带 mobile 标记」间接钉住（分片清单只在 lib.rs 出现一次）。
     assert_eq!(
-        LIB_RS.matches("include_str!(\"mobilebar.js\")").count(),
+        LIB_RS
+            .matches("include_str!(\"mobilebar/core.js\")")
+            .count(),
         1,
-        "lib.rs 里 mobilebar.js 的注入点必须唯一（多一处就会重复挂载底栏）"
+        "lib.rs 里底栏脚本的注入点必须唯一（core.js 只应出现一次；多一处就会重复挂载底栏）"
     );
 }
 
@@ -673,9 +703,10 @@ fn android_permissions_semantics_and_manifest_wiring_are_pinned() {
             "{name} 的 Android job 必须调用 patch-android-permissions.py"
         );
     }
+    // ci.yml 的循环按目录发现 ⇒ 覆盖条件是「脚本自带 --selftest」。
     assert!(
-        CI_YML.contains("patch-android-permissions"),
-        "ci.yml 的补丁 selftest 门禁必须收录 patch-android-permissions"
+        PERMISSIONS_PY.contains("--selftest"),
+        "patch-android-permissions.py 必须自带 --selftest，否则 ci.yml 的目录发现循环会跳过它"
     );
     assert!(
             BUILD_CUSTOM_YML.contains("ANDROID_PERMISSIONS_VAL")
@@ -727,9 +758,10 @@ fn fullscreen_patch_replaces_wry_stub_and_is_wired() {
             "{name} 的 Android job 必须调用 patch-android-fullscreen.py"
         );
     }
+    // ci.yml 的循环按目录发现 ⇒ 覆盖条件是「脚本自带 --selftest」。
     assert!(
-        CI_YML.contains("patch-android-fullscreen"),
-        "ci.yml 的补丁 selftest 门禁必须收录 patch-android-fullscreen"
+        FULLSCREEN_PY.contains("--selftest"),
+        "patch-android-fullscreen.py 必须自带 --selftest，否则 ci.yml 的目录发现循环会跳过它"
     );
 }
 
@@ -758,13 +790,13 @@ fn blank_targets_open_in_new_mobile_tab() {
         "/^https?:\\/\\//i.test(u)",
     ] {
         assert!(
-            BAR_JS.contains(needle),
-            "mobilebar.js 的 _blank 拦截必须包含：{needle}"
+            bar().contains(needle),
+            "底栏脚本 的 _blank 拦截必须包含：{needle}"
         );
     }
     // 非页签模式不得安装（没有承接记录；grep HAS_TABS 门控行而非函数体即可）。
     assert!(
-        BAR_JS.contains("if (HAS_TABS) installBlankGuard();"),
+        bar().contains("if (HAS_TABS) installBlankGuard();"),
         "_blank 拦截必须由 HAS_TABS 门控（非页签模式不假装支持多窗口）"
     );
     // Rust 侧：监听已由 event_names_match 钉事件名，这里钉落点处理。
@@ -788,5 +820,43 @@ fn blank_targets_open_in_new_mobile_tab() {
     assert!(
         has_code_line(BAR_RS, "fn open_tab_url_of(payload: &str)"),
         "mobilebar.rs 必须从 open-tab payload 解析 url"
+    );
+}
+
+/// ⑭ 死代码豁免必须停在「移动端模块」这一层（架构审查 P2-2）。
+///    crate 级 `#![allow(dead_code)]` 会在桌面目标上掩盖**所有**真死代码（10-25 起一直
+///    是兜底）；本模块只在 `cfg(any(mobile, test))` 下编译，桌面/测试构建里它的实现天然
+///    没有调用方 —— 所以豁免只允许出现在 mobilebar.rs，且必须带 `not(mobile)` 条件，
+///    这样移动端构建仍能报出真死代码。改回全局豁免时本测试应立刻 FAIL。
+#[test]
+fn dead_code_allowance_stays_scoped_to_mobile_module() {
+    assert!(
+        !has_code_line(LIB_RS, "#![allow(dead_code)]"),
+        "lib.rs 不得再出现 crate 级 `#![allow(dead_code)]`：它会掩盖桌面目标上的真死代码"
+    );
+    assert!(
+        has_code_line(BAR_RS, "#![cfg_attr(not(mobile), allow(dead_code))]"),
+        "mobilebar.rs 必须用条件豁免（桌面/测试构建生效，移动端仍受检查）"
+    );
+}
+
+/// ⑮ 底栏脚本的分片**由 `lib.rs` 唯一权威派生**（不另抄名单）：按序拼成**同一个 IIFE**，
+///    core 开 IIFE、mount 必须最后一片并关掉它。改成分片各自独立 IIFE / 调换顺序时立刻红。
+#[test]
+fn bar_script_parts_are_derived_and_mount_closes_the_iife() {
+    let js = bar();
+    assert!(
+        js.contains("(function () {") && js.contains("'use strict';"),
+        "core 分片必须保留 IIFE 与其开头的严格模式（分片不是各自独立的闭包）"
+    );
+    assert!(
+        js.trim_end().ends_with("})();"),
+        "最后一片（mount.js）必须以 `}})();` 关闭 IIFE —— 末尾不是它，说明分片顺序被改错了"
+    );
+    // 防重标记只允许一处：`mount.js` 里多写一次会覆盖掉已挂载的实例。
+    assert_eq!(
+        js.matches("window.__web2appMobileBar = {").count(),
+        1,
+        "`window.__web2appMobileBar` 防重标记必须唯一"
     );
 }

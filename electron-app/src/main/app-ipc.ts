@@ -15,11 +15,10 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import type { AppConfig } from './config'
 import type { ResolvedTarget } from './navigate'
 import type { TabManager } from './tabs'
+import { assertTrustedSender } from './ipc-guard'
 import { canHistoryGoBack, canHistoryGoForward } from './page-behavior'
 
 export interface AppIpcDeps {
-  /** 多页签模式：特权命令必须校验 sender.id === 壳 webContents.id */
-  tabsMode: boolean
   /** 主窗口（ready 后唯一实例）；注册时窗口可能尚未创建，故为 getter */
   getMainWindow: () => BrowserWindow | null
   /** 标题栏 / 标签栏「设置」入口（与托盘菜单、Shift+F1 共用同一个函数） */
@@ -51,45 +50,51 @@ export function registerAppIpc(deps: AppIpcDeps): void {
   registerAuthHandler(deps)
 }
 
+/** 可信宿主（主窗）的 webContents.id；窗口未就绪 / 已销毁时为 null（闸门一律拒绝）。 */
+function expectedSenderId(deps: AppIpcDeps): number | null {
+  const w = deps.getMainWindow()
+  return w && !w.isDestroyed() ? w.webContents.id : null
+}
+
 function registerWindowIpc(deps: AppIpcDeps): void {
   const winOf = (e: Electron.IpcMainInvokeEvent) => BrowserWindow.fromWebContents(e.sender)
 
-  // ⚠️⚠️ 多页签模式下的安全硬化：内容视图（子 WebContentsView）的 webContents 经
+  // ⚠️⚠️ sender 闸门在**两种模式**下都校验（2026-11-07 架构审查 H-3）：
+  //   多页签模式下，内容视图（子 WebContentsView）的 webContents 经
   //   `BrowserWindow.fromWebContents()` **也会解析到宿主窗口**（两者 getType() 都是 'window'，
-  //   实测见设计文档 §3.5-2）。所以仅靠 fromWebContents 无法区分「壳发的」还是「内容页发的」。
-  //   窗口按钮这类特权命令必须校验 sender.id === 壳 webContents.id，不匹配**记日志并拒绝**
-  //   （绝不允许静默失效——那正是本项目最忌的失败形态）。
-  //
-  //   单窗口模式下壳 webContents == 主窗口 webContents，这条校验天然通过，行为零变化。
+  //   实测见设计文档 §3.5-2），所以仅靠 fromWebContents 无法区分「壳发的」还是「内容页发的」。
+  //   单窗口模式此前认为「只有一个窗口」而跳过校验 —— 但安全边界应按「sender 是否可信」定义，
+  //   而不是按「是否多页签」定义：一旦误把带 invoke 的 preload 挂到内容视图 / 子框架，
+  //   远程页面即可关窗、开设置，且无日志。现在两种模式统一要求
+  //   `sender.id === 主窗 webContents.id`，不匹配**记日志并拒绝**（绝不允许静默失效）。
   const assertPrivileged = (e: Electron.IpcMainInvokeEvent): void => {
-    if (!deps.tabsMode) return
-    const host = deps.getMainWindow()
-    if (!host || host.isDestroyed()) throw new Error('宿主窗口不存在')
-    if (e.sender.id !== host.webContents.id) {
-      console.warn(
-        `[web2app] 拒绝内容视图发起的窗口命令（sender.id=${e.sender.id} ≠ 壳=${host.webContents.id}）`
-      )
-      throw new Error('拒绝：仅壳页面可操作窗口')
-    }
+    assertTrustedSender(e.sender.id, expectedSenderId(deps), { label: '窗口命令' })
   }
 
   // ⚠️ 三个都用 handle（而不是 on）：调用失败要能变成 Promise rejection 传到页面，注入脚本
   // 会把它打到控制台。用 on 的话「按钮点了没反应」在页面侧完全无声（Tauri 版栽过这个坑）。
   ipcMain.handle('win:minimize', (e) => {
     assertPrivileged(e)
-    winOf(e)?.minimize()
+    const w = winOf(e)
+    if (!w) throw new Error('找不到窗口')
+    w.minimize()
   })
-  ipcMain.handle('win:toggle-maximize', (e) => {
+  ipcMain.handle('win:toggle-maximize', async (e) => {
     assertPrivileged(e)
     const w = winOf(e)
     if (!w) throw new Error('找不到窗口')
     if (w.isMaximized()) w.unmaximize()
     else w.maximize()
+    // 最大化 / 还原是异步落到窗口上的：先让出一轮再读，否则可能拿到切换前的旧值
+    //（2026-11-07 架构审查 L-3）。
+    await new Promise<void>((resolve) => setImmediate(resolve))
     return w.isMaximized()
   })
   ipcMain.handle('win:close', (e) => {
     assertPrivileged(e)
-    winOf(e)?.close()
+    const w = winOf(e)
+    if (!w) throw new Error('找不到窗口')
+    w.close()
   })
   // 标题栏「设置」按钮（最小化左侧）—— 与托盘菜单 / Shift+F1 共用 openSettings()。
   ipcMain.handle('win:open-settings', (e) => {
@@ -109,13 +114,8 @@ function registerWindowIpc(deps: AppIpcDeps): void {
  */
 function registerTabsIpc(deps: AppIpcDeps): void {
   const assertShell = (e: Electron.IpcMainInvokeEvent): BrowserWindow => {
-    const w = deps.getMainWindow()
-    if (!w || w.isDestroyed()) throw new Error('宿主窗口不存在')
-    if (e.sender.id !== w.webContents.id) {
-      console.warn(`[web2app] 拒绝非壳页签命令（sender.id=${e.sender.id} ≠ 壳=${w.webContents.id}）`)
-      throw new Error('拒绝：仅壳页面可操作页签')
-    }
-    return w
+    assertTrustedSender(e.sender.id, expectedSenderId(deps), { label: '页签命令' })
+    return deps.getMainWindow()!
   }
   const mgr = () => {
     const t = deps.getTabManager()
@@ -190,6 +190,21 @@ function registerTabsIpc(deps: AppIpcDeps): void {
  */
 function registerBootstrapIpc(deps: AppIpcDeps): void {
   ipcMain.on('web2app:bootstrap', (e) => {
+    // 与窗口命令同一条闸：只有主窗 webContents 能取注入源码（约 80KB + extra），
+    // 且必须是**顶层框架** —— preload 默认对子框架也执行（见 renderer/preload.ts 的
+    // `window.self === window.top` 判断），这里补主进程侧的同一道闸（2026-11-07 H-3）。
+    try {
+      assertTrustedSender(e.sender.id, expectedSenderId(deps), { label: 'bootstrap 命令' })
+    } catch {
+      // on 的处理器抛错会变成未捕获异常：这里必须吞掉并给 sendSync 一个明确返回。
+      e.returnValue = null
+      return
+    }
+    if (e.senderFrame !== e.sender.mainFrame) {
+      console.warn('[web2app] 拒绝子框架读取 bootstrap 注入源码')
+      e.returnValue = null
+      return
+    }
     e.returnValue = {
       chromeH: deps.bootstrap.chromeH,
       shell: 'electron' as const,

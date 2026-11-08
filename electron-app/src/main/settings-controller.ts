@@ -10,7 +10,8 @@
  * 全部经 deps 由入口注入，使这里的「成组回滚」编排是壳无关、可脱离窗口推理的纯逻辑。
  * 与 Tauri 侧 `settings.rs::save_settings` / `tray.rs` 的职责切分对齐。
  */
-import { createTray, destroyTray, type TrayActions } from './tray'
+import { createTray, destroyTray, hasTray, type TrayActions } from './tray'
+import { isFloatAlive } from './float-window'
 import { applyWakeHotkey } from './shortcuts'
 import { hotkeyLabel, sameHotkey } from './hotkey'
 import { DEFAULT_SETTINGS, saveSettings, type Settings, type StoreLocation } from './settings'
@@ -125,7 +126,9 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
           if (!ok) throw new Error('托盘创建失败（未找到 icons/icon.png）')
           trayCreatedThisCall = true
         } else {
-          trayExistedBefore = true
+          // 实测而非无条件置 true：托盘可能从未建成（冷启动时 tray_enabled=false 且本机
+          // 图标缺失等），回滚不该凭空造出一个「本来不存在」的托盘（2026-11-07 M-8）。
+          trayExistedBefore = hasTray()
           destroyTray()
         }
       }
@@ -137,7 +140,7 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
           deps.showFloatWindow()
           floatCreatedThisCall = true
         } else {
-          floatExistedBefore = true
+          floatExistedBefore = isFloatAlive()
           deps.destroyFloatWindow()
         }
       }

@@ -240,7 +240,7 @@
     iv = setInterval(attempt, 16);
   }
 
-  /// 自绘标题栏（titlebar.js）占据顶部 __web2appChromeH；移动端底栏（mobilebar.js）
+  /// 自绘标题栏（titlebar.js）占据顶部 __web2appChromeH；移动端底栏（src/mobilebar/）
   /// 占据底部 __web2appMobileBarH：加载层让出这两格，避免把它们盖住 —— 页面转圈期间
   /// 用户仍可经底栏回首页 / 后退 / 前进 / 切换标签。
   /// 两脚本的注入顺序不固定，故用「全局标记 + 事件」双向同步（顶 / 底两条各发各的

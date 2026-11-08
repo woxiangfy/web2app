@@ -417,7 +417,7 @@ pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
 // ---------- 移动端底栏（mobile_bar，仅移动端）----------
 // true  = 屏幕底部常驻一条导航条，左→右：**首页**（回到 app_url）/ 后退 / 前进 /
 //         列表 / **更多**。「列表」按钮只在**当前构建真的有页签可切**时才渲染（判定见
-//         `mobilebar::tabs_available`，下发到页面后由 `mobilebar.js` 决定是否画它）——
+//         `mobilebar::tabs_available`，下发到页面后由底栏脚本决定是否画它）——
 //         否则会出现一个点了没有任何反应的死按钮；「更多」则无条件渲染且恒在最后一格，
 //         升起的面板含刷新 / 复制链接 / 分享 / 浏览器打开 / 清数据 / 退出（后四个走
 //         Kotlin 桥，见 patch-android-extras.py 与 docs/android-improvements.md #4/#8）。

@@ -40,6 +40,3 @@ contextBridge.exposeInMainWorld('__TAURI_INTERNALS__', {
     return ipcRenderer.invoke('tabs:' + cmd, args ?? {})
   },
 })
-
-/** 壳标识：供注入脚本/调试判断（与 settings-preload 保持一致）。 */
-contextBridge.exposeInMainWorld('web2appShell', 'electron')

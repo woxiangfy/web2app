@@ -338,11 +338,19 @@ export class TabManager {
       })
   }
 
-  /** 更新页签标题（page-title-updated 回传后调用）。 */
+  /**
+   * 更新页签标题（page-title-updated 回传后调用）。
+   *
+   * ⚠️ `trim()` + 「空标题不覆盖旧标题」与 Tauri 注入脚本 `tab_title.js::report()` 逐字对齐：
+   * 页面把 `<title>` 清空时，Tauri 保留旧标题，Electron 此前会把标签栏变成空白 —— 双壳同
+   * 一套页面却两种表现（2026-11-07 架构审查 M-2）。
+   */
   setTabTitle(label: string, title: string): void {
     const t = this.tabs.get(label)
     if (!t) return
-    t.title = title
+    const next = title.trim()
+    if (!next) return
+    t.title = next
     this.pushToShell()
   }
 }

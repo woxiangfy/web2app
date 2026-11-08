@@ -163,6 +163,44 @@ export function parseSettings(v: unknown): Settings {
   }
 }
 
+/**
+ * 设置页入参收敛（2026-11-07，架构审查 H-2）。
+ *
+ * 与 [`parseSettings`] 的区别只在「缺省字段怎么办」：
+ *   - `parseSettings` 是**读盘**语义，缺字段 → 默认值（文件被手改坏时的兜底）；
+ *   - 这里是**界面提交**语义，缺字段 → 沿用 `current`（当前内存态）。
+ *
+ * ⚠️ 为什么必须沿用而不是重置：设置窗的兜底页（`FALLBACK_HTML`）只渲染三个开关、
+ *    只提交这三个字段；若把「没提交的 `wake_hotkey`」当成空值，用户只改一次托盘开关点保存，
+ *    已配置的唤醒快捷键就会被静默清空并落盘。正常设置页提交整份 `Settings`，
+ *    两种形态共用这一条入口。
+ *
+ * 显式提交但类型不对的字段仍按严格语义收敛（布尔只认 `true`，字符串 trim）——
+ * 与旧实现一致，不放大对「页面传怪值」的容忍度。
+ */
+export function mergeIncomingSettings(v: unknown, current: Settings): Settings {
+  if (!v || typeof v !== 'object') return { ...current }
+  const o = v as Record<string, unknown>
+  const bool = (x: unknown, fallback: boolean): boolean => (x === undefined ? fallback : x === true)
+  const hkOf = (x: unknown, fallback: Hotkey): Hotkey => {
+    // 缺省 / 结构不对一律沿用当前值；结构对但字段缺失的，逐字段沿用。
+    if (!x || typeof x !== 'object') return fallback
+    const h = x as Record<string, unknown>
+    return {
+      ctrl: bool(h.ctrl, fallback.ctrl),
+      alt: bool(h.alt, fallback.alt),
+      shift: bool(h.shift, fallback.shift),
+      key: h.key === undefined ? fallback.key : toStr(h.key).trim(),
+    }
+  }
+  return {
+    wake_hotkey: hkOf(o.wake_hotkey, current.wake_hotkey),
+    tray_enabled: bool(o.tray_enabled, current.tray_enabled),
+    minimize_on_close: bool(o.minimize_on_close, current.minimize_on_close),
+    float_enabled: bool(o.float_enabled, current.float_enabled),
+  }
+}
+
 export interface LoadedSettings {
   settings: Settings
   /** 实际命中的文件；都没有时为 null（用默认值） */
@@ -306,7 +344,7 @@ export function writeDocument(
  * `patch` 里**出现**的键（含显式 `undefined`）表示「这一段要改」，缺省的键原样保留
  * （`window` / `float_window` 保持 `unknown` 原样透传，语义解释归各自的模块）。
  * 三个写入方（[`saveSettings`] / `window-state.ts::saveWindowState` /
- * `float-window.ts::persistGeometry`）都收敛到这里，各自只替换自己那一段，
+ * `float-window.ts::persistFloatWinGeometry`）都收敛到这里，各自只替换自己那一段，
  * 「挪窗口 + 改设置」同时发生时谁也不会吃掉谁。
  * ⚠️ 「读」走 [`readRawForUpdate`]（候选顺序，主位置优先）而不是写入位置：
  * 落点刚搬到数据目录时，写入位置还没有文件，老设置还在旧位置 —— 见那里的说明。

@@ -17,13 +17,12 @@
 //! - [`window_state`]  窗口几何持久化（仅桌面端）
 //! - [`debug_log`]     诊断日志（默认关闭；`dlog!` 宏 + 启动信息落盘）
 
-// 允许各平台下未被使用的编译期常量（例如 Android 上不使用的 DEVTOOLS_ENABLED 等），
-// 避免出现 dead_code 警告导致 `cargo clippy -D warnings` 在 CI 中失败。
-// ⚠️ 纪律（架构审查 P1-3）：这是给「本机无法验证的 Android 目标」留的兜底，**新增代码一律
-//    不得依赖它** —— 平台分叉 item 应自行挂精确 cfg（如 `#[cfg(any(not(windows), test))]`）
-//    或行级 `#[allow(dead_code)]` 并注明该目标为何用不到。改完可用「临时注释本行 →
-//    cargo check --all-targets」复查是否还有被豁免毯掩盖的真死代码。
-#![allow(dead_code)]
+// 死代码豁免**不再放在 crate 级**（架构审查 P2-2）：全局 `#![allow(dead_code)]` 会把桌面
+// 目标上的真死代码一并掩盖。唯一合法的豁免是 `mobilebar.rs` 里的
+// `#![cfg_attr(not(mobile), allow(dead_code))]` —— 那个模块只在 `cfg(any(mobile, test))`
+// 下编译，桌面/测试构建里它的实现天然没有调用方，移动端构建仍受检查。
+// 其它模块若出现 dead_code：优先删掉；确属「某目标才有调用方」就挂精确 cfg
+// （如 `#[cfg(any(not(windows), test))]`）或行级 `#[allow(dead_code)]` 并注明哪个目标用不到。
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -527,7 +526,7 @@ pub fn run() {
                 let finished = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
                 nav::on_page_load(window.app_handle(), window.label(), finished);
                 // 移动端单 webview 页签：每次真实文档加载完成，把最终 url 记进活动标签
-                //（标题由 mobilebar.js 的 web2app:mobile-doc 事件另补；启动页 url 在其内部被忽略）。
+                //（标题由底栏脚本的 `web2app:mobile-doc` 事件另补；启动页 url 在其内部被忽略）。
                 // ⚠️ 顺序与旧实现（原 bootstrap::on_page_load 内联）一致：先经 nav::on_page_load
                 //    置位 BootReady，再记页签；这里不放回 nav 是为避免 nav → mobilebar 的层级环。
                 // ⚠️⚠️ url **必须从这里传进去**，不能让 mobilebar 回头调 `window.url()`：
@@ -542,15 +541,25 @@ pub fn run() {
             });
 
             // ---------- 移动端底栏（`mobile_bar=true`）----------
-            // ⚠️⚠️ cfg 脚本**必须**排在 mobilebar.js **之前**：初始化脚本按注册顺序执行，
-            //    而 mobilebar.js 开头要读 `window.__web2appMobileBarCfg`（高度 / 是否有页签）。
+            // ⚠️⚠️ cfg 脚本**必须**排在底栏脚本**之前**：初始化脚本按注册顺序执行，
+            //    而底栏脚本开头要读 `window.__web2appMobileBarCfg`（高度 / 是否有页签）。
             //    顺序反了它只会落进「默认值」分支 —— 底栏照画，但高度与按钮清单不再由壳决定，
             //    是最难从表象反推的一类错位（与上面「模式标记必须排在 OVERLAY_SCRIPT 之前」
             //    同一条契约，由 contract_tests::mobile_bar_contract 钉住）。
+            // ⚠️ 底栏脚本是 `src/mobilebar/` 下五个**分片**按序拼成的**同一个 IIFE**（共享闭包
+            //    作用域）：core（底座）→ bottom_space（让位）→ tabs（页签）→ more（更多面板）
+            //    → mount（生命周期 + 闭 IIFE）。**顺序在此处唯一权威**，契约测试按这里派生分片
+            //    清单，不要另抄一份。`mount.js` 必须最后一片。
             #[cfg(mobile)]
             let wb = if crate::config::MOBILE_BAR {
                 wb.initialization_script(crate::mobilebar::config_script())
-                    .initialization_script(include_str!("mobilebar.js"))
+                    .initialization_script(concat!(
+                        include_str!("mobilebar/core.js"),
+                        include_str!("mobilebar/bottom_space.js"),
+                        include_str!("mobilebar/tabs.js"),
+                        include_str!("mobilebar/more.js"),
+                        include_str!("mobilebar/mount.js"),
+                    ))
             } else {
                 wb
             };

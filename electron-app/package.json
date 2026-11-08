@@ -12,6 +12,7 @@
     "unit": "node --import ./test/ts-resolver.mjs --test \"test/**/*.test.ts\"",
     "sidecar": "cargo build --release --manifest-path ../webview-app/Cargo.toml -p w2a-proxy",
     "stage": "node scripts/stage-assets.cjs",
+    "prune": "node scripts/prune-probe.cjs",
     "shot": "node scripts/diag/layout-shot.cjs",
     "lab": "node scripts/diag/scrollbar-lab.cjs",
     "diag": "node scripts/diag/titlebar-diag.cjs",
@@ -21,10 +22,10 @@
     "start": "pnpm run build && node scripts/launch.cjs",
     "smoke": "pnpm run build && node scripts/launch.cjs --smoke",
     "probe": "pnpm run sidecar && pnpm run build && node scripts/launch.cjs --probe",
-    "pack": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win --dir",
-    "dist": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win zip portable",
-    "dist:installer": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win nsis -c.extraMetadata.distribution=nsis --config.directories.output=../tests/pack",
-    "dist:all": "pnpm run sidecar && pnpm run build && pnpm run stage && electron-builder --win zip portable && electron-builder --win nsis -c.extraMetadata.distribution=nsis --config.directories.output=../tests/pack"
+    "pack": "pnpm run sidecar && pnpm run build && pnpm run stage && pnpm run prune && electron-builder --win --dir",
+    "dist": "pnpm run sidecar && pnpm run build && pnpm run stage && pnpm run prune && electron-builder --win zip portable",
+    "dist:installer": "pnpm run sidecar && pnpm run build && pnpm run stage && pnpm run prune && electron-builder --win nsis -c.extraMetadata.distribution=nsis --config.directories.output=../tests/pack",
+    "dist:all": "pnpm run sidecar && pnpm run build && pnpm run stage && pnpm run prune && electron-builder --win zip portable && electron-builder --win nsis -c.extraMetadata.distribution=nsis --config.directories.output=../tests/pack"
   },
   "devDependencies": {
     "@types/node": "^24.13.5",

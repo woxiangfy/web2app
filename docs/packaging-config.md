@@ -281,7 +281,7 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
    · 切换：按目标标签记录的 url **重新加载**（与桌面端「多 webview 并行、状态保留」不同，
      移动端切换后页面状态不保留，这是平台限制下的刻意取舍）；
    · 关闭：关当前标签则导航到左邻；**首页固定在位次 0、不可关闭**（与桌面端同一约定）；
-   · 当前文档的 url / 标题由 `mobilebar.js` 经 `web2app:mobile-doc` 事件上报（DCL/load/
+   · 当前文档的 url / 标题由 `mobilebar/tabs.js` 经 `web2app:mobile-doc` 事件上报（DCL/load/
      pageshow/popstate/hashchange/title 变化/pushState 包装），壳侧经 eval `setTabs` 推回面板。
 
    只开 `tabs_enabled`、不开 `mobile_bar` 时移动端**没有任何入口**（按钮画在底栏里）；
@@ -292,11 +292,11 @@ Electron 运行期 `toVersion`（`src/main/config.ts`），CI 模板断言保证
    · 贴底识别对 `position:fixed` 元素**不设宽度门槛**：悬浮按钮（FAB）/ 客服球通常只有
      40–64px 宽，半屏宽门槛会把它们整类漏掉（真机上被底栏切掉半截的就是 FAB）；元素原有的
      px `bottom` 边距会以 `calc(52px + safe-area + Npx)` 保留，不会把悬浮按钮顶死在栏边上。
-   · **加载转圈层会让出底栏**：`mobilebar.js` 挂好后设置 `window.__web2appMobileBarH` 并
+   · **加载转圈层会让出底栏**：`mobilebar/` 挂好后设置 `window.__web2appMobileBarH` 并
      广播 `web2app:chrome-ready`，`loading.js` 据此把遮罩的 `bottom` / `height` 缩到「底栏
      之上」—— 页面转圈期间底栏始终可见、可直接操作（回首页 / 后退 / 切换标签）。
 
-> 底栏高度与按钮清单的**真源在 `webview-app/src/mobilebar.js`**，由
+> 底栏高度与按钮清单的**真源在 `webview-app/src/mobilebar/`**（core 分片），由
 > `webview-app/src/mobilebar.rs` 把「高度 / 是否有页签」两个值注入给它；
 > 契约测试 `mobile_bar_contract` 钉住按钮顺序、列表按钮的渲染条件与底部空间契约。
 

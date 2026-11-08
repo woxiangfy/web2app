@@ -1,5 +1,5 @@
 /**
- * 三个本地自定义协议的处理器（splash:// / settings:// / shell://）—— 从 index.ts 抽出。
+ * 四个本地自定义协议的处理器（splash:// / settings:// / shell:// / floaticon://）—— 从 index.ts 抽出。
  *
  * scheme 的**特权声明**仍留在 index.ts 顶部（`protocol.registerSchemesAsPrivileged`
  * 必须早于 app ready，是严格启动顺序第 3 步）；本文件只负责 ready 之后的 `protocol.handle`
@@ -7,6 +7,9 @@
  *
  * 本模块不持有可变状态：渲染 / 读取 / 重试编排全部由 deps 注入，与 index.ts 的
  * 启动期闭包状态（target / navStarted / …）解耦。
+ *
+ * 2026-11-07 架构审查 M-10：每个 scheme 一个 handler 函数（此前四段处理逻辑全塞在
+ * `registerProtocols` 里，且 `/retry` 不校验方法 —— 任意 GET 都能清掉启动失败态并重试）。
  */
 import { protocol } from 'electron'
 
@@ -41,10 +44,15 @@ export interface ProtocolDeps {
 
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
 
-export function registerProtocols(deps: ProtocolDeps): void {
-  protocol.handle('splash', (req) => {
-    const path = new URL(req.url).pathname.replace(/\/+$/, '')
-    if (path === '/retry') {
+/** splash://：始终返回启动页；`/retry` 是唯一带副作用的路径。 */
+function handleSplash(deps: ProtocolDeps, req: Request): Response {
+  const path = new URL(req.url).pathname.replace(/\/+$/, '')
+  if (path === '/retry') {
+    // ⚠️ 只接受顶层 GET：该路径会清掉启动失败态并重新 bootstrap，
+    //    不能让任意方法 / 子资源请求顺手触发一次导航（M-10）。
+    if (req.method !== 'GET') {
+      console.warn(`[web2app] 忽略非 GET 的启动页重试请求：${req.method} ${req.url}`)
+    } else {
       console.log('[web2app] 启动页请求重试，重新走一遍启动流程')
       deps.setSplashPendingFail(null)
       // 先把手上的响应交出去，再触发导航，避免同一次请求里嵌套导航
@@ -52,54 +60,62 @@ export function registerProtocols(deps: ProtocolDeps): void {
         deps.onSplashRetry()
       })
     }
-    return new Response(deps.renderSplash(), { headers: HTML_HEADERS })
-  })
+  }
+  return new Response(deps.renderSplash(), { headers: HTML_HEADERS })
+}
 
-  // settings:// → 设置页 HTML（单一真源：webview-app/dist/settings.html）
-  protocol.handle('settings', () => {
-    const html = deps.readSettingsHtml()
-    if (!html) {
-      console.warn('[web2app] 未找到 settings.html，设置窗使用内置精简页')
-    }
-    return new Response(html ?? deps.fallbackHtml, { headers: HTML_HEADERS })
-  })
+/** settings:// → 设置页 HTML（单一真源：webview-app/dist/settings.html）。 */
+function handleSettings(deps: ProtocolDeps): Response {
+  const html = deps.readSettingsHtml()
+  if (!html) {
+    console.warn('[web2app] 未找到 settings.html，设置窗使用内置精简页')
+  }
+  return new Response(html ?? deps.fallbackHtml, { headers: HTML_HEADERS })
+}
 
-  // shell:// → 多页签壳页面（单一真源：webview-app/src/shell.html，零改动）
-  protocol.handle('shell', () => {
-    const html = deps.readInject('shell.html')
-    if (!html) {
-      console.warn('[web2app] 未找到 shell.html，壳页面缺失（多页签模式将白屏）')
-    }
-    return new Response(
-      html ??
-        '<!doctype html><meta charset="utf-8"><body style="background:#f7f8fa">标签栏资源缺失</body>',
-      { headers: HTML_HEADERS }
-    )
-  })
+/** shell:// → 多页签壳页面（单一真源：webview-app/src/shell.html，零改动）。 */
+function handleShell(deps: ProtocolDeps): Response {
+  const html = deps.readInject('shell.html')
+  if (!html) {
+    console.warn('[web2app] 未找到 shell.html，壳页面缺失（多页签模式将白屏）')
+  }
+  return new Response(
+    html ?? '<!doctype html><meta charset="utf-8"><body style="background:#f7f8fa">标签栏资源缺失</body>',
+    { headers: HTML_HEADERS }
+  )
+}
 
-  // floaticon:// → 悬浮球本地页与软件图标（与 Tauri 侧 handle_floaticon 逐条对齐）：
-  //   /          → floaticon.html（双壳单一真源）
-  //   /icon.png  → 软件图标（打包配置 icon_url 替换后的那一份）
-  //   其它路径   → 404（本协议只暴露这两个内置资源）
-  protocol.handle('floaticon', (req) => {
-    const path = new URL(req.url).pathname
-    if (path === '/icon.png') {
-      const png = deps.readFloatIcon()
-      if (!png) {
-        console.warn('[web2app] 未找到 icon.png，悬浮球图标缺失')
-        return new Response(null, { status: 404 })
-      }
-      // Blob 携带 image/png 类型。TS 5.7 的 Uint8Array 是 Uint8Array<ArrayBufferLike>，
-      // 不能直接做 BlobPart（SharedArrayBuffer 不在联合内），这里拷到独立 ArrayBuffer。
-      const ab = new ArrayBuffer(png.length)
-      new Uint8Array(ab).set(png)
-      return new Response(new Blob([ab], { type: 'image/png' }), {
-        headers: { 'cache-control': 'no-store' },
-      })
+/**
+ * floaticon:// → 悬浮球本地页与软件图标（与 Tauri 侧 handle_floaticon 逐条对齐）：
+ *   /          → floaticon.html（双壳单一真源）
+ *   /icon.png  → 软件图标（打包配置 icon_url 替换后的那一份）
+ *   其它路径   → 404（本协议只暴露这两个内置资源）
+ */
+function handleFloaticon(deps: ProtocolDeps, req: Request): Response {
+  const path = new URL(req.url).pathname
+  if (path === '/icon.png') {
+    const png = deps.readFloatIcon()
+    if (!png) {
+      console.warn('[web2app] 未找到 icon.png，悬浮球图标缺失')
+      return new Response(null, { status: 404 })
     }
-    if (path === '/' || path === '') {
-      return new Response(deps.readInject('floaticon.html') ?? '', { headers: HTML_HEADERS })
-    }
-    return new Response(null, { status: 404 })
-  })
+    // Blob 携带 image/png 类型。TS 5.7 的 Uint8Array 是 Uint8Array<ArrayBufferLike>，
+    // 不能直接做 BlobPart（SharedArrayBuffer 不在联合内），这里拷到独立 ArrayBuffer。
+    const ab = new ArrayBuffer(png.length)
+    new Uint8Array(ab).set(png)
+    return new Response(new Blob([ab], { type: 'image/png' }), {
+      headers: { 'cache-control': 'no-store' },
+    })
+  }
+  if (path === '/' || path === '') {
+    return new Response(deps.readInject('floaticon.html') ?? '', { headers: HTML_HEADERS })
+  }
+  return new Response(null, { status: 404 })
+}
+
+export function registerProtocols(deps: ProtocolDeps): void {
+  protocol.handle('splash', (req) => handleSplash(deps, req))
+  protocol.handle('settings', () => handleSettings(deps))
+  protocol.handle('shell', () => handleShell(deps))
+  protocol.handle('floaticon', (req) => handleFloaticon(deps, req))
 }

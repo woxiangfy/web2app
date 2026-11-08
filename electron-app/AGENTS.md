@@ -32,8 +32,9 @@ pnpm run unit        # 纯函数单测（node:test，毫秒级）
 
 pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json
+pnpm run prune       # 打包前置：剔除 out/ 下的探针产物（probe*、tabs-probe-preload）
 pnpm run smoke       # 冒烟自检（内部强制 debug=true），退出码即结论
-pnpm run probe       # 兼容契约探针：150 条断言，退出码即结论
+pnpm run probe       # 兼容契约探针：158 条断言，退出码即结论
 pnpm run shot        # 布局取证：四条判据 + PNG
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/
@@ -54,10 +55,41 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 4. **单一真源与本壳共用**：`titlebar.js` / `loading.js` / `splash.html` / `settings.html` / `proxy.rs` / `resolve.rs` ——
    改动后跑 `probe`（唯一能发现「另一个壳被带坏」的手段）。
 5. **设置页命令名三处逐字一致**：`settings.html` 字面量 / `settings-preload.ts` 白名单 / 主进程 IPC 名。
-6. **`settings.json` 三个写入方一律读-改-写**（`saveSettings` / `saveWindowState` / `persistGeometry`），否则互相覆盖。
+6. **`settings.json` 三个写入方一律读-改-写**（`saveSettings` / `saveWindowState` / `persistGeometry`（主窗）/
+   `persistFloatWinGeometry`（球窗）），否则互相覆盖。
 7. **「exe 同级」定位一律走 `installRoot()`**，不要写 `app.getPath('exe')`（单文件模式下它指向 `%TEMP%` 解压副本）。
 8. **`pnpm run` 传参不要写 `--` 分隔符**；装依赖前必须设 `ELECTRON_MIRROR` / `ELECTRON_BUILDER_BINARIES_MIRROR` 两个镜像环境变量。
 9. **`data_dir=""` 是有意义的值**（系统默认目录），不能写成 `data_dir || 'data'`。
+10. **特权 IPC 一律走 `src/main/ipc-guard.ts::assertTrustedSender`**：窗口 / 页签 / 设置 / 悬浮球四类命令
+   **两种模式都校验** `sender.id === 宿主 webContents.id`；`web2app:bootstrap` 还要求顶层框架。
+   不要按「是否多页签」决定是否校验（2026-11-07 架构审查 H-3）。
+11. **注入资源清单只在 `scripts/staged-inject.cjs` 维护**：`stage-assets.cjs`（铺 `out/inject/`）与
+   `check-asar-config.cjs`（出包后护栏）共用这一份，别在任一侧再写一份数组（否则新增文件时护栏会静默漏项）。
+12. **唤醒快捷键主进程也要校验**：保存前 `hotkey.ts::hotkeyProblem`（裸单键 / 系统占用 / `Shift+F1` /
+   无法映射的按键），页面提示之外的第二道。跨壳字面量（内置页正则、`TAB_BAR_HEIGHT`/`MAX_TABS`、
+   占用快捷键表、页签标题 trim）改一侧必须改另一侧 —— `test/cross-shell-contract.test.ts` 同时读两侧源码对照。
+13. **探针 / 冒烟只能运行期动态加载**：`src/main/index.ts` 顶部只允许 `import type { ProbeServer }`，
+   调用点一律 `await import('./probe.js')` / `await import('./smoke.js')`（静态 import 会把约 2300 行
+   探针连同 `out/` 一起打进 `app.asar`）。打包前 `scripts/prune-probe.cjs` 剔除 `out/main/probe*` 与
+   `out/renderer/tabs-probe-preload.js(.map)`，`check-asar-config.cjs` 反向断言包内不含它们 —— 新增打包
+   命令时必须保留 `pnpm run prune` 这一步，这是 `test/probe-isolation.test.ts` 钉的顺序（build→stage→prune→builder）。
+14. **主窗显隐判据只有一条**：`src/main/window-toggle.ts::planToggle(visible, minimized)`（可见且非最小化才隐藏），
+   托盘左键 / 悬浮球单击都走它，不要各自写内联表达式。
+15. **窗口几何的纯判定在 `src/main/window-plan.ts`**：`parseWindowState` / `planRestore` 不得再依赖
+   `electron`（`screen` 只允许出现在 `window-state.ts` 适配层），否则单测 import 不进来（M-5）。
+   同理：新增纯逻辑优先放零 Electron 依赖的模块，`node:test` 才能覆盖。
+16. **资源路径只有 `src/main/paths.ts` 一个出口**：`injectDir` / `injectFile` / `floatIconPath` /
+   `configRoot` / `preloadPath`。新增「打包态读 asar、开发态读仓库」的资源时加在这里，不得在入口
+   再写 `app.isPackaged ? … : …` 三元；判据用 `app.isPackaged`，**不是**「文件是否存在」（`stage`
+   会在开发目录生成 `out/inject/`）。导航失败文案 / 内部页判定同理：`nav-text.ts` 单一真源。
+17. **preload 不得相对 require**：`preload.ts` / `shell-preload.ts` / `settings-preload.ts` 都跑在
+   `sandbox: true` 渲染进程里（`require` 只放行 electron / events / timers / url）。需要共享的桥逻辑
+   只能在**文件内**分块，跨文件的形状一致性由 `test/preload-contract.test.ts` 锁（不抽共享模块）。
+
+## 刻意不动（已定，勿再提拆分）
+
+- **探针大结构维持现状**：`probe-single.ts` 不按段拆目录、`probe-tabs.ts` 的 514 行编排不按 P 段函数化 —— 探针改动的唯一验收手段是「断言行与改动前逐字一致」，纯机械搬迁约 1900 行的回归风险大于可读性收益。
+- **`index.ts`（约 950 行）不继续大拆**：它的装配顺序与副作用时序（谁先注册协议、谁先建窗、探针何时动态加载）本身就是硬约束，拆成多文件只会把它们变成跨文件的隐式契约，回归面大于收益。新增逻辑仍按硬约束 15 下沉到零依赖模块。
 
 ## 验证清单（改了什么就必跑什么）
 
@@ -66,10 +98,16 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 | `titlebar.js` / `loading.js` / `splash.html`（两壳单一真源） | `probe` |
 | `proxy.rs` / `resolve.rs`、sidecar 契约 | `probe` + `cargo test` |
 | 设置 / 托盘 / 快捷键 / 窗口几何链路 | `probe` |
+| 特权 IPC / sender 闸门（`ipc-guard.ts`、`app-ipc.ts`） | `unit` + `probe`（单窗口）+ `probe`（`--tabs`，P11 拒绝面） |
+| 跨壳字面量 / 契约（内置页 URL、标签栏高度、标题 trim、快捷键表） | `unit`（`cross-shell-contract.test.ts` 同时读两侧源码） |
 | `float-window.ts` / `float-layout.ts` / 设置开关接线 | `unit` + `probe` + **真机目视**（五步清单见 [float-ball.md](docs/float-ball.md)） |
-| `config.ts`、路径装配（`portable.ts`） | `smoke` |
+| 资源路径（`paths.ts`）、导航失败文案 / 内部页判定（`nav-text.ts`） | `unit` + `smoke` + `probe` |
+| 自定义协议（`protocols.ts`，含 `/retry` 闸门） | `unit` + `probe` + `真机点启动页重试` |
+| 任何 preload（`src/renderer/*preload.ts`） | `unit`（`preload-contract`）+ `probe` |
+| sidecar 参数拼装 / 可执行文件定位（`sidecar.ts`） | `unit` + `probe` |
+| 导航状态机（`navigation.ts`：target 缓存 / 自动 bootstrap 名额 / 重试重置） | `unit` + `probe` |
 | 启动日志（`startup-log.ts`）、`debug` 开关与 `silenceConsole()` | `smoke` |
-| 打包配置 / 出包前后 | `probe` + 真机双击产物 |
+| 打包配置 / 出包前后 | `probe` + `真机双击产物` + 核对包内无 `out/main/probe*`（`prune` 与 asar 反向断言） |
 | 任何提交前 | `typecheck` |
 
 > 逐条原因见各专项文档。产物侧的 `--probe` 必须用 `Start-Process -Wait -PassThru` 取 `$p.ExitCode`
@@ -96,3 +134,4 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 | [docs/float-ball.md](docs/float-ball.md) | 桌面悬浮球：IPC / 布局常量 / `placeFloat`、v1.68–v1.80 演进、守卫与真机验证 |
 | [docs/titlebar-scrollbar.md](docs/titlebar-scrollbar.md) | 自绘标题栏与页面滚动条：换滚动根契约、对照实验、判据表与 diag 工具 |
 | [docs/changelog.md](docs/changelog.md) | 本壳全量变更记录 |
+| [../docs/electron-app-architecture-review-2026-11-07.md](../docs/electron-app-architecture-review-2026-11-07.md) | 本壳架构与组织结构审查（2026-11-07）：分级问题、跨壳漂移、优化批次顺序（批次①–⑥ 已落地，逐批改动见 [../docs/changes/2026-11-07.md](../docs/changes/2026-11-07.md)） |

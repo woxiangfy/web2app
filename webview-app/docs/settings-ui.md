@@ -28,7 +28,24 @@
 可配置项：
 
 1. **唤醒快捷键**：显示 / 隐藏主窗口的全局快捷键。支持“点击捕获”（按下组合键即可，按 Esc 取消）或从下拉框选择常用键。**默认不启用**（未设置时不注册任何全局快捷键）。
-   - 保存后立即生效；不能与「打开设置(Shift+F1)」冲突。
+   - 保存后立即生效。**判据与 Electron 主进程同一套**（`settings.rs::hotkey_problem` ↔ `hotkey.ts::hotkeyProblem`，
+     由 `contract_tests/settings_hotkey_contract.rs` 逐项对照），按顺序共五条：
+     1. **未设置**（主键为空）→ 合法；
+     2. **裸单键**（Ctrl / Alt / Shift 一个都没勾）→ 拒绝：全局键会占满该键，用户在别处打不了字；
+     3. **系统占用键** → 拒绝：`Alt+Tab`、`Alt+Space`、`Alt+F4`、`Alt+Escape`、`Ctrl+Escape`、
+        `Ctrl+Space`（中文 Windows 的输入法切换）、`Ctrl+Alt+Delete`；
+     4. **`Shift+F1`** → 拒绝（固定用于打开设置）；
+     5. **无法映射的键** → 拒绝：只接受 `KeyA–Z`、`Digit0–9`、`Numpad0–9`、
+        `NumpadDecimal/Add/Subtract/Multiply/Divide`、`F1–F24`、`Space/Enter/Escape/Tab/Backspace/
+        Delete/Insert/Home/End/PageUp/PageDown/↑↓←→` 与 `Minus/Equal/BracketLeft/BracketRight/
+        Backslash/Semicolon/Quote/Comma/Period/Slash/Backquote`（与 Electron `CODE_TO_KEY` 同一套）。
+        ⚠️ 第 5 条只有主进程能做：在两壳共用的设置页里捕获到表外的键（如 `CapsLock`），
+        会在**保存时**由主进程拒绝并提示「不支持的按键」。
+   - **旧配置被判非法时（用户可见行为）**：启动即按「不设置」处理（**不注册**），`settings.json` **不改写**；
+     设置页快捷键卡片的状态行会显示「旧配置里的唤醒快捷键 X 不再被接受：<原因>。已回退为「不设置」
+     （配置文件未改动）；重新设置并保存后本条提示消失」。用户重新选好并保存成功后提示即消失。
+     该提示只是进程内状态（`#[serde(skip)]` + `get_settings` 的 `hotkey_notice` 字段），**不落盘**，
+     所以改好之后重启不会复活。
 2. **是否启用托盘图标**：关闭后启动不创建托盘图标（关闭窗口即退出）。
 3. **关闭窗口后最小化到托盘**：勾选且同时启用托盘时，点关闭按钮 = 最小化到托盘；**只启用悬浮图标（v1.75）时点关闭 = 隐藏（点球唤回）**；两者都没有才「关闭窗口即退出应用」。
 4. **启用桌面悬浮图标（悬浮球）**（v1.67 引入）：勾选后立即创建小球，取消立即销毁；另有「立即显示悬浮图标」按钮（命令 `show_float_window`）。**单击球切换原来的主窗口显隐**；球可拖动、屏幕四边半隐藏吸附（上 / 下 / 左 / 右就近择一，悬停展开、移开延迟 300ms 缩回）、**右键 = 关闭悬浮图标功能 + 唤回主窗口**（v1.76）；几何 / 吸附边写入 `settings.json` 的 `float_window` 段。实现见 `src/floatwin.rs`（v1.81 起球窗是 Win32 分层窗口，无球页 / 无协议 / 无能力文件，详见 [float-ball.md](float-ball.md)）。
@@ -53,11 +70,15 @@
 > ⚠️ 只有上面 1–4 项落在 `settings.json` 里；**第 5 项不落盘** —— 它是一次性动作，不是配置项。
 > ⚠️ **窗口几何也在这同一个 `settings.json` 的 `window` 段里**（2026-09-23 起；
 > 此前单独占一个 `window-state.json`，该文件已不再读写，可手工删除）；**悬浮球几何在 `float_window` 段**
-> （v1.67 起：`{x,y,width,height,edge}`，物理像素，`edge` 为 `none`/`left`/`right`，无几何时整段不出现）。
+> （v1.67 起：`{x,y,width,height,edge}`，物理像素，`edge` 为 `none`/`left`/`right`/`top`/`bottom`，
+> 无几何时整段不出现）。
 > 三个写入方（设置页保存 / 关窗记主窗几何 / 悬浮球拖动与退出）一律走 `src/store.rs` 的**读-改-写**，互不覆盖。
 > 写盘是**原子的**（同目录临时文件 → `sync_all` → rename，与 Electron 侧 `writeDocument` 同策略）：
 > 写一半被杀 / 断电不会留下截断的 `settings.json` —— 否则下次启动整份解析失败，
 > 四个设置项与主窗 / 悬浮球几何会一起被回默认值，**且不报错**。
+> ⚠️ 兜底再补一层（2026-11-07）：**顶层 JSON 损坏时先把原文件改名保留为 `settings.json.bad`
+> 再回默认值**（重名依次 `.bad.1`、`.bad.2`…，不覆盖上一次现场），备份失败只记日志、仍照常启动。
+> 否则紧接着的读-改-写会把那份损坏文件覆盖掉，用户的原始内容就永久没了。
 
 界面后续可在 `dist/settings.html` 上继续扩展更多能力（Rust 命令通道 `get_settings` / `save_settings` /
 `close_settings_window` / `clear_web_data` / `show_float_window` / `quit_app` 即可复用）。

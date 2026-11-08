@@ -7,6 +7,7 @@
  * `resolveInitialTarget`，只解析、不导航壳页面；导航目标是本内容视图。
  */
 import type { ResolvedTarget } from './navigate'
+import { isInternalUrl, navFailText } from './nav-text'
 import { attachCloseTabShortcut, attachContextMenu, attachDevtools } from './page-behavior'
 import type { TabManager, TabsOptions } from './tabs'
 
@@ -34,10 +35,12 @@ export function makeTabSpawn(deps: TabSpawnDeps): TabsOptions['onSpawn'] {
     //   1) 动作是「新建页签」（走 spawnTab → resolveTarget 的代理/DNS 完整链路），不是原地导航；
     //   2) 不做 new URL 预校验 —— spawnTab 内部解析目标时自会失败（失败进页签标题 + 遮罩），
     //      单窗口版那道校验是为了区分「原地导航失败交给 did-fail-load」才需要的。
-    //   两边共享的只有 about: 拒绝这一条（1 行表达式），抽 helper 反而要参数化行为分叉。
+    //   两边共享的只有内部页面拒绝这一条，现在共用 nav-text.ts::isInternalUrl。
     view.webContents.setWindowOpenHandler(({ url: opened }) => {
       console.warn(`[web2app] 页签模式拦截到新窗口请求：${opened}`)
-      if (!opened || opened === 'about:blank' || opened.startsWith('about:')) {
+      // 内部页面（about: / chrome: / 启动页）没有可独立显示的实体页 → 拒绝。
+      // 与单窗口版共用 nav-text.ts::isInternalUrl 一条判据（M-4）。
+      if (isInternalUrl(opened)) {
         return { action: 'deny' }
       }
       setImmediate(() => {
@@ -56,7 +59,7 @@ export function makeTabSpawn(deps: TabSpawnDeps): TabsOptions['onSpawn'] {
     //   -3 = ERR_ABORTED：正常重定向 / 被后续导航顶掉，不是错误。
     view.webContents.on('did-fail-load', (_e, code, desc, url2, isMainFrame) => {
       if (!isMainFrame || code === -3) return
-      const detail = `无法打开 ${url2}（${desc}，${code}）`
+      const detail = navFailText(url2, desc, code)
       console.error(`[web2app] 页签加载失败：${detail}`)
       getTabManager()?.setTabTitle(_label, '加载失败')
     })

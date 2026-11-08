@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { Menu, Tray, nativeImage, type BrowserWindow } from 'electron'
 
 import { firstExisting } from './first-existing'
+import { planToggle } from './window-toggle'
 
 export interface TrayActions {
   /** 左键单击：显隐主窗口 */
@@ -119,12 +120,10 @@ export function destroyTray(): void {
  */
 export function toggleMainWindow(win: BrowserWindow | null): void {
   if (!win || win.isDestroyed()) return
-  const visible = win.isVisible()
-  const minimized = win.isMinimized()
-  if (visible && !minimized) {
+  if (planToggle(win.isVisible(), win.isMinimized()) === 'hide') {
     win.hide()
   } else {
-    if (minimized) win.restore()
+    if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
   }

@@ -8,7 +8,7 @@
  * 用户看到的是「打包打了个空壳」，而构建日志全绿。这正是本项目反复强调的那类
  * 「错了也静默」的缺陷，必须用一条会亮红灯的判据盯住。
  *
- * 注入资源（titlebar.js / loading.js / splash.html / shell.html / settings.html）同理：
+ * 注入资源（titlebar.js / loading.js / splash.html / floaticon.html / icon.png / shell.html / settings.html）同理：
  * 它们若漏进包，标题栏 / 加载层 / 多页签壳 / 设置页至少一样会静默退化（白屏 / 兜底页 /
  * 按钮点了没反应），比 config.json 缺失更难从表象反推。所以一起纳入护栏。
  *
@@ -26,8 +26,10 @@ const { join, resolve } = require('node:path')
 const appDir = resolve(__dirname, '..')
 const releaseDir = join(appDir, 'release')
 
-/** 必须随 asar 分发的注入资源（stage-assets.cjs 拷贝到 out/inject/ 的文件名）。 */
-const REQUIRED_INJECT = ['titlebar.js', 'loading.js', 'splash.html', 'shell.html', 'settings.html']
+/** 必须随 asar 分发的注入资源 —— 清单与 stage 侧共用同一份（`staged-inject.cjs`），
+ *  避免「stage 加了、护栏没加」这类静默漏件（2026-11-07 架构审查 H-1）。 */
+const { STAGED_INJECT } = require('./staged-inject.cjs')
+const REQUIRED_INJECT = STAGED_INJECT.map(([, name]) => name)
 
 /** 在 release/ 下找任意一份 app.asar（zip/portable/dir 三种目标的中间产物路径可能不同）。 */
 function findAsar() {
@@ -95,7 +97,8 @@ if (hit.length === 0) {
   process.exit(1)
 }
 
-// 注入资源护栏：out/inject/ 下的 5 个文件缺一不可（否则标题栏 / 加载层 / 壳 / 设置页静默退化）。
+// 注入资源护栏：out/inject/ 下的清单项缺一不可（否则标题栏 / 加载层 / 球页 / 设置页静默退化）。
+// 清单来自 `staged-inject.cjs`（与 stage-assets.cjs 同一份），项数随清单变化。
 const missingInject = REQUIRED_INJECT.filter(
   (name) => !entries.includes(`/out/inject/${name}`)
 )
@@ -109,5 +112,20 @@ if (missingInject.length > 0) {
   process.exit(1)
 }
 console.log(`注入资源: ${REQUIRED_INJECT.length} 项齐全 ✓`)
+
+// 开发期产物不得进包（2026-11-07 架构审查 H-4）：打包脚本里 `pnpm run prune` 会删掉它们，
+// 这里做**反向断言** —— 删漏了（或 files 规则变化带回来了）就立刻红灯，而不是让探针代码
+// 静默随包分发。
+const leakedProbe = entries.filter(
+  (f) => f.startsWith('/out/main/probe') || f === '/out/renderer/tabs-probe-preload.js'
+)
+if (leakedProbe.length > 0) {
+  console.error(
+    `::error::app.asar 内混入了开发期产物：${leakedProbe.join(', ')}\n` +
+      '  排查：pkg/dist 脚本必须在 electron-builder 之前跑 `pnpm run prune`（scripts/prune-probe.cjs）。',
+  )
+  process.exit(1)
+}
+console.log('开发期产物: 未混入 ✓')
 
 console.log('asar 配置护栏通过 ✓')

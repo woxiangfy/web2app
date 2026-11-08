@@ -24,6 +24,229 @@
 use super::{count_code_lines, has_code_line, strip_line_comments};
 
 const SETTINGS_HTML: &str = include_str!("../../dist/settings.html");
+/// 本 crate 的设置实现（判据 `hotkey_problem` / 启动回退都在这里）。
+const SETTINGS_RS: &str = include_str!("../settings.rs");
+/// 跨壳基准：Electron 主进程的判据与 accelerator 键表。**只读**它作为参照，
+/// 本仓库不改 electron-app（那边的未提交改动属于同事）。
+const ELECTRON_HOTKEY_TS: &str = include_str!("../../../electron-app/src/main/hotkey.ts");
+
+/// 从 `start_marker` 起、到 `end_marker` 止的块里，逐行抽键值字面量（键可带引号也可裸写）：
+/// `'Alt+Tab': '系统切换窗口',` / `"Alt+Tab": "系统切换窗口",` / `NumpadDecimal: 'numdec',`。
+/// 注释先被剥掉，避免把说明文字里的引号当成数据；`Array.from({ length: 26 }, …)`
+/// 这类代码行（键里带括号 / 空格 / 点）会被跳过。
+fn literal_pairs(src: &str, start_marker: &str, end_marker: &str) -> Vec<(String, String)> {
+    let code = strip_line_comments(src);
+    let start = code
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("找不到 {start_marker}"));
+    let rest = &code[start..];
+    let end = rest
+        .find(end_marker)
+        .unwrap_or_else(|| panic!("{start_marker} 后找不到结束标记"));
+    let mut out = Vec::new();
+    for line in rest[..end].lines() {
+        let t = line.trim();
+        let Some(colon) = t.find(':') else {
+            continue;
+        };
+        let mut key = t[..colon].trim().to_string();
+        if key.len() >= 2 {
+            let quoted = (key.starts_with('\'') && key.ends_with('\''))
+                || (key.starts_with('"') && key.ends_with('"'));
+            if quoted {
+                key = key[1..key.len() - 1].to_string();
+            }
+        }
+        if key.is_empty()
+            || key
+                .chars()
+                .any(|c| matches!(c, '(' | ')' | '{' | '}' | '.' | ' ' | '='))
+        {
+            continue;
+        }
+        // 值 = 冒号之后第一段引号内容（两侧都写成字符串字面量）
+        let tail = &t[colon + 1..];
+        let mut buf = String::new();
+        let mut in_quote = false;
+        let mut quote = ' ';
+        let mut value = None;
+        for ch in tail.chars() {
+            if !in_quote {
+                if ch == '\'' || ch == '"' {
+                    in_quote = true;
+                    quote = ch;
+                }
+            } else if ch == quote {
+                value = Some(std::mem::take(&mut buf));
+                break;
+            } else {
+                buf.push(ch);
+            }
+        }
+        if let Some(v) = value {
+            out.push((key, v));
+        }
+    }
+    out
+}
+
+/// ⑥ 系统占用表**三处逐字一致**：Rust（主进程）/ Electron（主进程）/ 共用设置页。
+///
+/// 存在理由：这张表是「注册了也会被系统抢走」的清单，任何一处落后都会出现
+/// 「Tauri 拦了、Electron 放行」或「页面说能存、主进程拒绝」—— 两侧行为差异，
+/// 而各自的测试都绿。
+#[test]
+fn reserved_hotkey_table_is_identical_in_three_places() {
+    let rust: Vec<(String, String)> = crate::settings::RESERVED_HOTKEYS
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let electron = literal_pairs(ELECTRON_HOTKEY_TS, "const RESERVED_HOTKEYS", "\n}");
+    let page = literal_pairs(SETTINGS_HTML, "const HK_RESERVED = {", "\n  };");
+    assert!(
+        !rust.is_empty() && rust.len() == electron.len() && rust.len() == page.len(),
+        "三处表项数必须一致：Rust {} / Electron {} / 页面 {}",
+        rust.len(),
+        electron.len(),
+        page.len()
+    );
+    assert_eq!(
+        rust, electron,
+        "Rust 与 Electron 的系统占用表（含原因文案）已漂移"
+    );
+    assert_eq!(
+        rust, page,
+        "Rust 与共用设置页的系统占用表（含原因文案）已漂移"
+    );
+}
+
+/// ⑦ 五条判据 + accelerator 键集两侧同一套（Tauri 主进程对齐 Electron 主进程）。
+///
+/// 判据顺序：未设置 → 裸单键 → 系统占用 → `Shift+F1` → 无法映射。
+/// 注：页面（两壳共用）只做前三类 + `Shift+F1` 的即时提示，「无法映射」只有主进程能做到
+/// （Electron `CODE_TO_KEY` / Tauri `is_supported_key`）。
+#[test]
+fn hotkey_criteria_and_key_set_do_not_drift_between_shells() {
+    // Electron 侧的五条判据（原文锚点）
+    for needle in [
+        "if (!h.ctrl && !h.alt && !h.shift) {",
+        "const takenBy = RESERVED_HOTKEYS[label]",
+        "if (label === SETTINGS_SHORTCUT)",
+        "if (!CODE_TO_KEY[key])",
+    ] {
+        assert!(
+            has_code_line(ELECTRON_HOTKEY_TS, needle),
+            "Electron 判据锚点变了：{needle} —— 先确认它是否仍等价，再同步本文件与 Tauri 侧"
+        );
+    }
+    // Tauri 侧的同一套判据（顺序即执行顺序）
+    for needle in [
+        "if !h.ctrl && !h.alt && !h.shift {",
+        "RESERVED_HOTKEYS.iter().find",
+        "if label == \"Shift+F1\" {",
+        "if !is_supported_key(key) {",
+    ] {
+        assert!(
+            has_code_line(SETTINGS_RS, needle),
+            "Tauri 判据缺一条：{needle}（判据必须与 Electron hotkeyProblem 同一套、同一顺序）"
+        );
+    }
+    // 同一判据必须同时用于「保存」和「启动回退」：只写一处 ⇒ 另一条路径静默放行旧配置
+    let uses = count_code_lines(SETTINGS_RS, "hotkey_problem(");
+    assert!(
+        uses >= 3,
+        "hotkey_problem 至少 3 处使用（定义 + save_settings + fallback_invalid_hotkey），实际 {uses}"
+    );
+
+    // accelerator 键集：Electron 的静态列名项必须与 Tauri 的 SUPPORTED_EXTRA_KEYS 完全一致
+    let electron_static: Vec<String> =
+        literal_pairs(ELECTRON_HOTKEY_TS, "const CODE_TO_KEY", "\n}")
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+    let mut rust_extra: Vec<String> = crate::settings::SUPPORTED_EXTRA_KEYS
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    let mut electron_sorted = electron_static.clone();
+    electron_sorted.sort();
+    rust_extra.sort();
+    assert_eq!(
+        rust_extra, electron_sorted,
+        "键集漂移：SUPPORTED_EXTRA_KEYS 与 Electron CODE_TO_KEY 的列名项必须逐项相同"
+    );
+    // 由前缀区间生成的几族（26 字母 / 10 主键数字 / 10 小键盘数字 / F1–F24）也要两侧对得上
+    for marker in ["length: 26", "length: 24"] {
+        assert!(
+            has_code_line(ELECTRON_HOTKEY_TS, marker),
+            "Electron 键集族标记消失：{marker}"
+        );
+    }
+    let digits = count_code_lines(ELECTRON_HOTKEY_TS, "length: 10");
+    assert!(
+        digits >= 2,
+        "主键数字与小键盘数字两族都应是 length: 10，实际 {digits} 处"
+    );
+
+    let prob = |key: &str| {
+        crate::settings::hotkey_problem(&crate::settings::Hotkey {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            key: key.to_string(),
+        })
+    };
+    for key in ["KeyZ", "Digit9", "Numpad9", "F24", "ArrowUp", "Backquote"] {
+        assert_eq!(prob(key), "", "{key} 在两侧都应可映射");
+    }
+    for key in ["CapsLock", "F25", "IntlRo", "MediaPlayPause"] {
+        assert!(
+            prob(key).contains("不支持的按键"),
+            "{key} 在两侧都应被拒（Electron CODE_TO_KEY 里没有它）"
+        );
+    }
+}
+
+/// ⑧ 旧配置被判非法时：启动回退成「不设置」+ 设置页可见提示 + 保存后提示消失。
+///
+/// 三种静默失效都要堵住：① 不回退 ⇒ 旧裸键继续占满输入；② 回退但无提示 ⇒
+/// 用户以为程序坏了；③ 提示落盘或永不清 ⇒ 改好之后还在报旧问题。
+#[test]
+fn invalid_old_hotkey_falls_back_with_visible_notice() {
+    assert!(
+        has_code_line(
+            SETTINGS_RS,
+            "fn fallback_invalid_hotkey(s: &mut Settings) -> bool {"
+        ),
+        "缺少启动回退：旧配置不合法时必须按「不设置」处理（不注册），而不是硬注册"
+    );
+    assert!(
+        has_code_line(SETTINGS_RS, "fallback_invalid_hotkey(&mut s);"),
+        "load_settings 必须调用回退（只定义不调用 = 旧配置照旧注册）"
+    );
+    assert!(
+        has_code_line(SETTINGS_RS, "#[serde(skip)]"),
+        "提示必须 `#[serde(skip)]`：写进 settings.json 后重启会「复活」一条旧提示"
+    );
+    assert!(
+        has_code_line(SETTINGS_RS, "let hotkey_notice = s.hotkey_notice.clone();"),
+        "get_settings 必须把提示发给页面（SettingsView），否则界面无从展示"
+    );
+    // 页面：读取 → 渲染 → 保存成功归零
+    assert!(
+        has_code_line(SETTINGS_HTML, "loadNotice = s.hotkey_notice || \"\";"),
+        "设置页必须读取 hotkey_notice"
+    );
+    assert!(
+        has_code_line(SETTINGS_HTML, "st.textContent = loadNotice;"),
+        "提示必须出现在快捷键卡片的状态行（只存不发 = 静默）"
+    );
+    let resets = count_code_lines(SETTINGS_HTML, "loadNotice = \"\";");
+    assert!(
+        resets >= 2,
+        "loadNotice 至少两处归零（初始化 + 保存成功），实际 {resets}"
+    );
+}
 
 /// ① 界面必须把「组合键」显式构造出来（修饰键 + 主键 + 预览），而不是一个裸下拉。
 ///

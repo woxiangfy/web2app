@@ -69,13 +69,13 @@ export const SIDECAR_ERROR_KINDS = [
 ] as const
 
 export class SidecarError extends Error {
-  constructor(
-    message: string,
-    /** 区分失败阶段，便于上层给出准确文案（对齐 sidecar 的 kind 字段） */
-    readonly kind: (typeof SIDECAR_ERROR_KINDS)[number],
-  ) {
+  /** 区分失败阶段，便于上层给出准确文案（对齐 sidecar 的 kind 字段） */
+  readonly kind: (typeof SIDECAR_ERROR_KINDS)[number]
+
+  constructor(message: string, kind: (typeof SIDECAR_ERROR_KINDS)[number]) {
     super(message)
     this.name = 'SidecarError'
+    this.kind = kind
   }
 }
 

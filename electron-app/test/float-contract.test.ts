@@ -31,6 +31,7 @@ const floatLayout = readFileSync(join(main, 'float-layout.ts'), 'utf8')
 const protocols = readFileSync(join(main, 'protocols.ts'), 'utf8')
 const floatController = readFileSync(join(main, 'settings-controller.ts'), 'utf8')
 const indexTs = readFileSync(join(main, 'index.ts'), 'utf8')
+const pathsTs = readFileSync(join(main, 'paths.ts'), 'utf8')
 const lifecycleTs = readFileSync(join(main, 'lifecycle.ts'), 'utf8')
 const floatPreload = readFileSync(join(renderer, 'float-preload.ts'), 'utf8')
 const floatIconHtml = readFileSync(join(tauriSrc, 'floaticon.html'), 'utf8')
@@ -38,15 +39,37 @@ const settingsHtml = readFileSync(join(tauriSrc, '..', 'dist', 'settings.html'),
 const settingsPreload = readFileSync(join(renderer, 'settings-preload.ts'), 'utf8')
 const settingsWindow = readFileSync(join(main, 'settings-window.ts'), 'utf8')
 const smokeTs = readFileSync(join(main, 'smoke.ts'), 'utf8')
-const stage = readFileSync(join(scripts, 'stage-assets.cjs'), 'utf8')
+// 注入资源清单的单一真源（2026-11-07 架构审查 H-1：stage 与 asar 护栏共用这份）。
+const stagedInject = readFileSync(join(scripts, 'staged-inject.cjs'), 'utf8')
 
 /** 取引号内的 JS 字符串字面量出现次数（防止把同名子串误判）。 */
 const countQuoted = (src: string, lit: string): number =>
   (src.match(new RegExp(`['"\`]${lit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]`, 'g')) ?? []).length
 
+/**
+ * 剥掉 JS / HTML 注释再断言（2026-11-07 架构审查批次⑥）：
+ * 这些文件里大量注释**故意提到**被禁 / 必须出现的字面量（「不得用 title=」「v1.7x 起改为…」），
+ * 不剥就会把注释满足当成代码满足 —— 假绿与假红都出现过（11-03 的 `has_code_line` 就是这么翻车的）。
+ */
+const stripJsComments = (src: string): string =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+
+/**
+ * ⚠️ 本文件里两类断言要分开看（批次⑥「实现镜像 vs 真契约」）：
+ *   · **真契约**：跨文件 / 跨壳的字面量（`floaticon.html` ↔ `float-preload` ↔ 主进程通道、
+ *     设置页命令三方表、Tauri capability 退役）。红了 = 功能真的断了。
+ *   · **实现镜像**（标题带「实现镜像：」）：单壳内部的接线细节（入口怎么拼 deps、谁先谁后）。
+ *     红了通常只是重构后换了写法，先看是不是该更新镜像，而不是判断功能坏了。
+ */
+
 test('floaticon.html ↔ float-preload：七个桥方法名逐字一致（含单击调出主窗 / down / cancel）', () => {
+  // 只认 `E.<方法>(` —— 旧写法还接受「裸方法名出现过」，于是注释里提到 floatClick 也能过（假绿）。
+  const htmlCode = stripJsComments(floatIconHtml)
   for (const m of ['floatClick', 'floatDown', 'floatMove', 'floatCancel', 'floatDragEnd', 'floatPeek', 'floatHide']) {
-    assert.ok(floatIconHtml.includes(`E.${m}`) || floatIconHtml.includes(m), `floaticon.html 缺少桥方法 ${m}`)
+    assert.ok(htmlCode.includes(`E.${m}(`), `floaticon.html 未通过桥方法 ${m}（注释里的同名文字不算）`)
     assert.ok(floatPreload.includes(`${m}:`), `float-preload 未暴露 ${m}`)
   }
   // isElectron 能力探测标记两側都在（页面靠它区分 Electron / Tauri 桥）。
@@ -275,7 +298,7 @@ test('安全：七条特权 IPC 全部经 sender 校验，preload 有主框架�
   }
 })
 
-test('悬浮球只加载内置本地页：floaticon:// 协议加载，不导航远程、不 bootstrap、不碰 sidecar', () => {
+test('实现镜像：悬浮球只加载内置本地页（floaticon:// 协议加载，不导航远程、不 bootstrap、不碰 sidecar）', () => {
   assert.ok(!floatWin.includes('launchSidecar'), 'float-window 不得触发 sidecar')
   assert.ok(!floatWin.includes('resolveTarget('), 'float-window 不得自行解析入口')
   assert.ok(!floatWin.includes('getTargetUrl'), '球页不再读启动期 target 缓存')
@@ -299,10 +322,12 @@ test('悬浮球只加载内置本地页：floaticon:// 协议加载，不导航�
     "index.ts 必须把 floaticon 声明为特权 scheme（standard/secure/supportFetchAPI）"
   )
   assert.ok(
-    /function floatIconPath\(\)/.test(indexTs) &&
-      /'out', 'inject', 'icon\.png'/.test(indexTs) &&
-      /'webview-app', 'icons', 'icon\.png'/.test(indexTs),
-    'index.ts 必须提供 floatIconPath：打包态 out/inject/icon.png、开发态 webview-app/icons/icon.png'
+    /import \{[^}]*floatIconPath[^}]*\} from '\.\/paths'/.test(indexTs),
+    'index.ts 必须从 paths.ts 引入 floatIconPath（M-3 收口，不得在入口再写一份三元）'
+  )
+  assert.ok(
+    /injectFile\('icon\.png'\)/.test(pathsTs) && /'webview-app', 'icons', 'icon\.png'/.test(pathsTs),
+    'paths.ts 必须提供 floatIconPath：打包态 out/inject/icon.png（injectFile）、开发态 webview-app/icons/icon.png'
   )
   // 旧的远程注入脚本必须已删除（防止单一真源两份并存）。
   assert.ok(!existsSync(join(tauriSrc, 'floatbar.js')), 'webview-app/src/floatbar.js 必须删除')
@@ -320,8 +345,8 @@ test('floaticon:// 协议分发：/ 返回球页、/icon.png 返回软件图标�
   )
   // stage 必须把单一真源图标拷进打包资源（与 floaticon.html 同目录，页面相对路径 icon.png）。
   assert.ok(
-    stage.includes("['webview-app/icons/icon.png', 'icon.png']"),
-    'stage-assets.cjs 必须登记 webview-app/icons/icon.png → out/inject/icon.png'
+    stagedInject.includes("['webview-app/icons/icon.png', 'icon.png']"),
+    'staged-inject.cjs 必须登记 webview-app/icons/icon.png → out/inject/icon.png'
   )
   // 页面侧：img 取 icon.png，旧的统一 SVG 图形必须移除。
   assert.ok(floatIconHtml.includes('src="icon.png"'), 'floaticon.html 必须用 <img src="icon.png"> 渲染软件图标')
@@ -332,24 +357,24 @@ test('floaticon:// 协议分发：/ 返回球页、/icon.png 返回软件图标�
   )
 })
 
-test('单击球必须【切换】原来主窗口的显隐（v1.71：不再只是调出）', () => {
+test('实现镜像：单击球必须【切换】原来主窗口的显隐（v1.71：不再只是调出）', () => {
   assert.ok(floatWin.includes('toggleMainWindow: () => void'), 'FloatWindowDeps 必须声明 toggleMainWindow')
   assert.ok(
     floatWin.includes('deps?.toggleMainWindow()'),
     'float-click 处理器必须调 deps.toggleMainWindow()'
   )
   assert.ok(!floatWin.includes('showMainWindow'), 'float-window 不得再依赖只显示不隐藏的 showMainWindow')
-  // index.ts 接线：可见且非最小化 → hide；否则 presentMainWindow（含多页签自愈）。
+  // index.ts 接线：visible/minimized 交给 planToggle 判据，hide 分支才算隐藏（2026-11-07 M-8）。
   const wiring = indexTs.slice(indexTs.indexOf('registerFloatWindow({'))
   assert.ok(
-    /toggleMainWindow: \(\) => \{[\s\S]*?mainWindow\.isVisible\(\)[\s\S]*?mainWindow\.isMinimized\(\)[\s\S]*?mainWindow\.hide\(\)[\s\S]*?presentMainWindow\(\)/.test(
+    /toggleMainWindow: \(\) => \{[\s\S]*?mainWindow\.isVisible\(\)[\s\S]*?mainWindow\.isMinimized\(\)[\s\S]*?planToggle\(visible, minimized\)[\s\S]*?mainWindow!?\.hide\(\)[\s\S]*?presentMainWindow\(\)/.test(
       wiring
     ),
-    'index.ts 必须把 toggle 语义（可见非最小化→hide，否则 presentMainWindow）接给 registerFloatWindow'
+    'index.ts 必须把 toggle 语义（planToggle → hide / presentMainWindow）接给 registerFloatWindow'
   )
 })
 
-test('设置页 / 设置 preload / stage：float 接线一处不漏', () => {
+test('实现镜像：设置页 / 设置 preload / stage：float 接线一处不漏', () => {
   // settings.html 单页含开关、显示按钮、保存字段与 invoke 命令。
   for (const lit of ['id="floatEnabled"', 'id="showFloatBtn"', 'float_enabled', 'show_float_window']) {
     assert.ok(settingsHtml.includes(lit), `settings.html 缺少 ${lit}`)
@@ -363,8 +388,15 @@ test('设置页 / 设置 preload / stage：float 接线一处不漏', () => {
   )
   assert.ok(settingsPreload.includes("'show_float_window'"))
   // floaticon.html 必须进打包资源清单（缺了 stage 会 exit 1，但先在这里钉住清单登记）。
-  assert.ok(stage.includes("['webview-app/src/floaticon.html', 'floaticon.html']"))
-  assert.ok(!stage.includes('floatbar.js'), 'stage 清单不得再登记 floatbar.js')
+  assert.ok(stagedInject.includes("['webview-app/src/floaticon.html', 'floaticon.html']"))
+  assert.ok(!stagedInject.includes('floatbar.js'), 'stage 清单不得再登记 floatbar.js')
+  // 单一真源接线：stage 与 asar 护栏都必须 require 这份清单，不得退回去各写一份数组。
+  for (const f of ['stage-assets.cjs', 'check-asar-config.cjs']) {
+    assert.ok(
+      readFileSync(join(scripts, f), 'utf8').includes("require('./staged-inject.cjs')"),
+      `${f} 必须从 staged-inject.cjs 读注入资源清单`
+    )
+  }
 })
 
 test('Tauri capability 随球页退役：float-icon.json / float-remote.json 必须不存在', () => {
@@ -382,7 +414,7 @@ test('Tauri capability 随球页退役：float-icon.json / float-remote.json 必
   }
 })
 
-test('退出路径：悬浮球的 close 默认转隐藏，但 app 退出必须放行', () => {
+test('实现镜像：退出路径（悬浮球的 close 默认转隐藏，但 app 退出必须放行）', () => {
   // close 处理器必须同时认「主动销毁（allowClose）」与「应用正在退出（isQuitting）」。
   // 只认前者时，app.quit() 会被这一窗的 preventDefault 整个取消（实测复现：
   // 主窗已关、球窗只剩隐藏、进程仍活着）⇒ 用户看到「开着悬浮球就退不掉程序」。
@@ -401,7 +433,7 @@ test('退出路径：悬浮球的 close 默认转隐藏，但 app 退出必须�
   )
 })
 
-test('v1.70 拖动协议：页面上报屏幕绝对坐标，主进程按抓取偏移绝对定位（不能再用 clientX 增量）', () => {
+test('实现镜像：v1.70 拖动协议（页面上报屏幕绝对坐标，主进程按抓取偏移绝对定位）', () => {
   // 页面侧：阈值判定与移动上报必须用 screenX/screenY；真实代码行里不得再出现
   // clientX/clientY（先剥 HTML 注释块与行内 // 注释，避免解释性注释满足 / 骗过守卫）。
   // 旧实现用相对球窗视口的增量，窗口每帧 setBounds 后下一帧增量被自身位移抵消（半速跟手 / 抖动）。
@@ -441,7 +473,7 @@ test('v1.70 拖动协议：页面上报屏幕绝对坐标，主进程按抓取�
   )
 })
 
-test('v1.70 悬停缩回：延迟 + 代际 + 真实光标位置校验（治边缘抖动）', () => {
+test('实现镜像：v1.70 悬停缩回（延迟 + 代际 + 真实光标位置校验，治边缘抖动）', () => {
   assert.ok(floatWin.includes('COLLAPSE_DELAY_MS'), '必须经共享常量延迟缩回')
   assert.ok(floatWin.includes('finishPeekLeave'), '必须有延迟到期的统一收口函数')
   assert.ok(floatWin.includes('getCursorScreenPoint'), '到期必须读真实光标位置（在缩回后矩形内则不缩）')
@@ -455,12 +487,12 @@ test('v1.70 悬停缩回：延迟 + 代际 + 真实光标位置校验（治边�
   assert.ok(floatWin.includes('cancelPendingCollapse'), '展开 / 隐藏 / 销毁 / 起拖必须取消排队中的缩回')
 })
 
-test('v1.70 建窗：ready-to-show 后再显现透明球（防 Windows 黑块 / 空窗）', () => {
+test('实现镜像：v1.70 建窗（ready-to-show 后再显现透明球，防 Windows 黑块 / 空窗）', () => {
   assert.ok(floatWin.includes("win.once('ready-to-show', reveal)"), '透明球窗必须等 ready-to-show 再 show')
   assert.ok(!/applyInitialGeometry\(win, saved\)\s*\n\s*win\.show\(\)/.test(floatWin), '不得建窗后立刻 show')
 })
 
-test('v1.71 几何定位：唯一入口 placeFloat 始终带固定 56×56 完整 rect（治出屏移动后 getBounds 宽漂移）', () => {
+test('实现镜像：v1.71 几何定位（唯一入口 placeFloat 始终带固定 56×56 完整 rect）', () => {
   // Windows 上 frameless + transparent 球窗出屏 / 负坐标移动后，部分字段 setBounds 会让
   // getBounds() 的宽逐次漂移（harness 实测 56→58→60），几何盲信 b.width 半球落点就会
   // -28→-30→-32 越带越偏：必须用「带固定宽高的完整 rect」唯一定位，并与 Tauri live_px 对齐。
@@ -511,7 +543,7 @@ test('v1.71 几何定位：唯一入口 placeFloat 始终带固定 56×56 完整
   )
 })
 
-test('启动期必须建立进程级副作用：走 applyInitialSettings（prev = DEFAULT_SETTINGS）', () => {
+test('实现镜像：启动期必须建立进程级副作用（走 applyInitialSettings，prev = DEFAULT_SETTINGS）', () => {
   // 若入口用 applySettings(loadedSettings.settings) 做冷启动：runtimeSettings 已是同一份，
   // 托盘 / 悬浮球的「变化才动」diff 恒为 false ⇒ 一个副作用都不会建立（实测调用数 0），
   // 表现是「勾了启用托盘 / 悬浮球，重启后图标与悬浮球都不再出现」。
@@ -613,7 +645,7 @@ test('v1.72 球窗圆形区域：setShape(circleShapeRects(...)) 必须存在且
   assert.ok(after.includes('catch'), 'try 之后必须有 catch（降级分支）')
 })
 
-test('v1.75 关窗驻留：只启用悬浮图标时点 ✕ 必须转隐藏（否则球成孤儿 + 进程僵尸）', () => {
+test('实现镜像：v1.75 关窗驻留（只启用悬浮图标时点 ✕ 必须转隐藏，否则球成孤儿 + 进程僵尸）', () => {
   // 真机缺陷（2026-10-11 使用者实测，他机器上的 settings.json 就是
   // tray_enabled:false / minimize_on_close:false / float_enabled:true）：
   // 关窗走原来的 else ⇒ 主窗被【真销毁】，而球窗还活着 ——
@@ -738,7 +770,7 @@ test('设置页命令名三方一致：invoke 字面量 ⊆ 垫片 ALLOWED ⊆ �
   }
 })
 
-test('v1.76 右键球 = 关闭悬浮图标功能 + 唤回主窗口（不是「只把球藏起来」）', () => {
+test('实现镜像：v1.76 右键球 = 关闭悬浮图标功能 + 唤回主窗口（不是「只把球藏起来」）', () => {
   // 真机缺陷（2026-10-11 使用者实测，策略 tray_enabled:false / minimize_on_close:false /
   // float_enabled:true）：主窗「关闭」只等于隐藏到球（驻留理由②），球成了桌面上**唯一**
   // 可见的入口；此刻右键把球一藏 —— 进程因 float_enabled 仍为 true 继续驻留，桌面上却

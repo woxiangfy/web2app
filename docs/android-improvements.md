@@ -52,16 +52,16 @@
 | 4 | P1 | Android 清除浏览数据入口（桥内补全配方，详见 §2 #4/#8） | ✅ 已实施（2026-10-14） | `patch-android-extras.py`（JS 原生桥，**非** `web_data.rs`）+ 更多面板 |
 | 5 | P1 | 相机 / 麦克风 / 定位权限声明 | ✅ 已实施（2026-10-14） | 打包字段 `android_permissions`（21 键）+ `patch-android-permissions.py` |
 | 6 | P1 | 网页视频全屏（wry 0.57 的 onShowCustomView 是空实现） | ✅ 已实施（2026-10-14） | `patch-android-fullscreen.py`（整体替换 onShow/onHide） |
-| 7 | P1 | `target=_blank` / `window.open` 拦截进移动页签 | ✅ 已实施（2026-10-14） | `mobilebar.js` blank guard + `mobilebar.rs` 新事件 `web2app:open-tab` |
-| 8 | P1 | 底栏「更多」面板（刷新 / 复制链接 / 分享 / 浏览器打开 / 清数据 / 退出） | ✅ 已实施（2026-10-14） | `mobilebar.js` + `patch-android-extras.py`（Kotlin 桥；`mobilebar.rs` 零改动） |
+| 7 | P1 | `target=_blank` / `window.open` 拦截进移动页签 | ✅ 已实施（2026-10-14） | `src/mobilebar/tabs.js` blank guard + `mobilebar.rs` 新事件 `web2app:open-tab` |
+| 8 | P1 | 底栏「更多」面板（刷新 / 复制链接 / 分享 / 浏览器打开 / 清数据 / 退出） | ✅ 已实施（2026-10-14） | `src/mobilebar/more.js` + `patch-android-extras.py`（Kotlin 桥；`mobilebar.rs` 零改动） |
 | 9 | P2 | 返回键优先关闭页签列表面板等浮层 | 待办 | `patch-android-back.py` 增强 |
 | 10 | P2 | 无历史时「再按一次退出」而不是立即 finish | 待办 | `patch-android-back.py` 增强 |
 | 11 | P2 | 页签切换重载丢状态：先文案明示，后评估快照 | 待办 | 空状态文案先行 |
-| 12 | P2 | 软键盘弹出时底栏让位（visualViewport） | 待办 | `mobilebar.js` |
+| 12 | P2 | 软键盘弹出时底栏让位（visualViewport） | 待办 | `src/mobilebar/bottom_space.js` |
 | 13 | P2 | 暗色启动底色（SPLASH_BG 随 prefers-color-scheme + 原生主题） | 待办 | `bootstrap.rs` / `splash.html` / res 主题 |
 | 14 | P2 | DNS TXT 解析结果持久化（冷启动秒开 + 后台静默更新） | 待办 | `bootstrap.rs` + settings.json |
 | 15 | P2 | 代理模式可达性探测穿到真实上游（而非只探 127.0.0.1） | 待办 | `bootstrap.rs::spawn_reachability_probe` |
-| 16 | P2 | 平板 / 横屏底栏限宽居中 | 待办 | `mobilebar.js` |
+| 16 | P2 | 平板 / 横屏底栏限宽居中 | 待办 | `src/mobilebar/core.js` |
 | 17 | P2 | 移动页签记录跨启动持久化 | 待办 | `mobilebar.rs` + settings.json |
 | 18 | 安全 | 明文流量收敛：仅放行 localhost（networkSecurityConfig） | 待办 | 替换两个 workflow 里的 sed 步骤 |
 | 19 | 分发 | 增加 x86_64 / universal APK；评估 AAB | 待办 | 两个 workflow 的 android build 步骤 |
@@ -135,7 +135,7 @@
     老签名（只可能是主框架回调），方法体首行轮换密钥并经 `evaluateJavascript` 注入
     `window.__web2appAndroidKey='<uuid>'`。evaluateJavascript 只作用于主框架，
     跨源 iframe 读不到顶层变量；每个桥方法第一参 `key`，`web2appBridgeOk` 不符即静默 return。
-- 页面侧（`mobilebar.js`，Tauri 移动端专属）：底栏**无条件**新增第 5 格「更多」
+- 页面侧（`src/mobilebar/more.js`，Tauri 移动端专属）：底栏**无条件**新增第 5 格「更多」
   （顺序 home → back → fwd → [list] → more），面板从底栏上沿升起（复用 w2m-sheet 样式语言），
   六行：刷新 / 复制链接（Clipboard API + execCommand 兜底）/ 分享 / 在浏览器打开 /
   **清除浏览数据（两步确认，3s 自动撤防）** / 退出应用；toast 浮层做反馈；
@@ -201,7 +201,7 @@
   表现为点击无反应或被丢在原页；而移动底栏已有页签记录（#8 同批落地的单 webview 多页签），
   正好承接「打开新页」。
 - 方案（纯注入层 + Rust 新事件，不动 Kotlin）：
-  - `mobilebar.js` 新增 `installBlankGuard()`，仅 `HAS_TABS`（多页签开启）且非内置页时
+  - `src/mobilebar/tabs.js` 新增 `installBlankGuard()`，仅 `HAS_TABS`（多页签开启）且非内置页时
     在 document-start 安装：①document **捕获阶段** click 监听，从点击目标向上找最近
     `<a>`，命中 `target="_blank"`（词边界匹配，防 `x_blank` 误伤）且 href 是 http(s)
     则 preventDefault + stopPropagation，发 `web2app:open-tab` 事件 `{url}`；

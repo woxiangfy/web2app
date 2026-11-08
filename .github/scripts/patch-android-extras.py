@@ -3,7 +3,7 @@
 
 ## 背景（为什么需要）
 
-移动端底栏「更多」面板（src/mobilebar.js，2026-10-14 起）有四个动作在**页面里做不到**：
+移动端底栏「更多」面板（src/mobilebar/more.js，2026-10-14 起）有四个动作在**页面里做不到**：
 
   · 系统分享（Intent.ACTION_SEND + 选择器）—— WebView 不实现 navigator.share；
   · 在系统浏览器打开当前页 —— 只能靠原生 Intent(ACTION_VIEW)；
@@ -59,7 +59,7 @@ from android_gen import (  # noqa: E402
 MARKER = "web2app-android-extras"
 # 幂等标记（RustWebViewClient 侧；与 MainActivity 标记分开，两处可独立识别）。
 CLIENT_MARKER = "web2app-android-bridge-key"
-# 暴露给页面的桥名 / 密钥变量名（也是 mobilebar.js 里逐字依赖的契约，改这里必须同步 JS）。
+# 暴露给页面的桥名 / 密钥变量名（也是 src/mobilebar/more.js 里逐字依赖的契约，改这里必须同步 JS）。
 BRIDGE_NAME = "__web2appAndroid"
 KEY_VAR = "__web2appAndroidKey"
 

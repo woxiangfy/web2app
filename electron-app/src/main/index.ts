@@ -23,7 +23,16 @@ import {
 import { sanitizeDirName } from './util'
 import { needsSidecar } from './navigate'
 import { locateSidecar } from './sidecar'
-import { runProbe, runTabsProbe, startProbeServer, type ProbeServer } from './probe'
+import { configRoot, floatIconPath, injectDir, injectFile, preloadPath } from './paths'
+import { isInternalUrl, isSplashUrl, navFailText } from './nav-text'
+/**
+ * ⚠️ 探针与冒烟自检是**开发期工具**，只用 `import type` 保留类型：
+ * 运行期按需 `await import(...)`（2026-11-07 架构审查 H-4）。
+ * 静态 import 会把约 2300 行探针拉进生产入口，并随 `out/` 下的全部产物进 asar；
+ * 打包前 `scripts/prune-probe.cjs` 会剔除 `out/main/probe*.js` 与探针 preload，
+ * `check-asar-config.cjs` 反向断言包内不含它们。
+ */
+import type { ProbeServer } from './probe'
 import {
   loadSettings,
   saveSettings,
@@ -65,8 +74,8 @@ import { MAX_TABS, TAB_BAR_HEIGHT, TabManager } from './tabs'
 import { hideShellStartupError, showShellStartupError } from './shell-overlay'
 import { printStartupSummary, rawConsole, silenceConsole, startFileLogging } from './startup-log'
 import { createSplashPage, SPLASH_BG } from './splash-page'
-import { runSmokeChecks } from './smoke'
 import { registerAppIpc } from './app-ipc'
+import { planToggle } from './window-toggle'
 import {
   attachCloseTabShortcut,
   attachContextMenu,
@@ -130,23 +139,7 @@ if (PROBE || process.env.WEB2APP_NO_GPU === '1' || hasFlag('--disable-gpu')) {
 // 明文放在 asar 外等于注入逻辑形同虚设，任何人都能改掉标题栏 / 加载层 / 多页签壳，
 // 再原样分发出去而使用者看不出区别。现在想改必须重新打包（与 Tauri 版一致）。
 // 开发时（electron .）直接读 webview-app/src，避免复制出第二份会分叉的脚本。
-// ⚠️ 用 `app.isPackaged` 区分而非 `existsSync`：stage 也会在开发目录生成 out/inject/，
-//    若按「存在即打包副本」判，开发态会误读 stage 副本、失去单一真源。
-function injectDir(): string {
-  if (app.isPackaged) return join(app.getAppPath(), 'out', 'inject')
-  return join(__dirname, '..', '..', '..', 'webview-app', 'src')
-}
-
-/**
- * 悬浮球内软件图标（icon.png）的路径：打包态在 out/inject/（stage 同源拷贝），
- * 开发态直接读单一真源 webview-app/icons/icon.png（floaticon.html 在 src/，
- * 两目录不同级，故不能靠 loadFile 的相对路径，必须走 floaticon:// 协议分发）。
- */
-function floatIconPath(): string {
-  if (app.isPackaged) return join(app.getAppPath(), 'out', 'inject', 'icon.png')
-  return join(__dirname, '..', '..', '..', 'webview-app', 'icons', 'icon.png')
-}
-
+// ⚠️ 候选集与打包/开发判据统一在 paths.ts（M-3）；这里只管读取与缓存。
 const injectCache = new Map<string, string | null>()
 
 function readInject(name: string): string | null {
@@ -154,7 +147,7 @@ function readInject(name: string): string | null {
   if (hit !== undefined) return hit
   let out: string | null = null
   try {
-    out = readFileSync(join(injectDir(), name), 'utf8')
+    out = readFileSync(injectFile(name), 'utf8')
   } catch {
     out = null
   }
@@ -172,10 +165,6 @@ function readInject(name: string): string | null {
 // - 打包后：`app.getAppPath()` = `…\resources\app.asar`，配置在 `app.asar\out\config.json`
 //   （Electron 的 fs 对 asar 透明，`readFileSync` 直接可读）；
 // - 开发态：项目根目录的 `config.json`（`pnpm run stage` 会把它同步到 `out/`）。
-function configRoot(): string {
-  return app.isPackaged ? join(app.getAppPath(), 'out') : join(__dirname, '..', '..')
-}
-
 const loaded = loadConfigAny([configRoot()])
 const cfg: AppConfig = loaded.config
 
@@ -340,8 +329,8 @@ const nav = createNavigator({
 function registerWindowOpenHandler(win: BrowserWindow): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
     console.warn(`[web2app] 单窗口模式拦截到新窗口请求：${url}`)
-    if (!url || url === 'about:blank' || url.startsWith('about:')) {
-      console.warn('[web2app] 忽略无地址的 window.open()（单窗口模式无法提供独立窗口）')
+    if (isInternalUrl(url)) {
+      console.warn('[web2app] 忽略无地址的内部页面 window.open()（单窗口模式无法提供独立窗口）')
       return { action: 'deny' }
     }
     try {
@@ -434,7 +423,7 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     // -3 = ERR_ABORTED：正常重定向 / 被后续导航顶掉，不是错误
     if (!isMainFrame || code === -3) return
-    const detail = `无法打开 ${url}（${desc}，${code}）`
+    const detail = navFailText(url, desc, code)
     console.error(`[web2app] ${detail}`)
     nav.sendOverlay({ kind: 'fail', title: '加载失败', detail })
   })
@@ -449,7 +438,9 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   // 启动页加载完成 → 解析目标地址并导航过去（Tauri 侧同样是「启动页先出，后台准备完再跳」）
   win.webContents.on('did-finish-load', () => {
     const cur = win.webContents.getURL()
-    if (cur.startsWith('splash:')) {
+    // 两种形态都要认（`splash://` 与 wry 改写后的 `https://splash.localhost/`）；
+    // 单窗口此前只认前者，见 2026-11-07 架构审查 M-4。
+    if (isSplashUrl(cur)) {
       if (PROBE) return // 探针自己控制导航节奏
       // 「仅首次 splash 自动解析」的名额闸门（splashAutoBootConsumed）见 navigation.ts。
       nav.autoBootFromSplash()
@@ -508,12 +499,12 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
 
 /** 设置窗专用 preload 的绝对路径 */
 function settingsPreloadPath(): string {
-  return join(__dirname, '..', 'renderer', 'settings-preload.js')
+  return preloadPath('settings-preload.js')
 }
 
 /** 悬浮窗专用 preload 的绝对路径 */
 function floatPreloadPath(): string {
-  return join(__dirname, '..', 'renderer', 'float-preload.js')
+  return preloadPath('float-preload.js')
 }
 
 function readSettingsPageHtml(): string | null {
@@ -692,6 +683,7 @@ if (!gotLock) {
     let probeBase = ''
     let probeServer: ProbeServer | null = null
     if (PROBE) {
+      const { startProbeServer } = await import('./probe.js')
       const srv = await startProbeServer()
       probeServer = srv
       probeBase = srv.url
@@ -702,7 +694,6 @@ if (!gotLock) {
     }
 
     registerAppIpc({
-      tabsMode: TABS_MODE,
       getMainWindow: () => mainWindow,
       openSettings,
       getTabManager: () => tabManager,
@@ -749,16 +740,11 @@ if (!gotLock) {
       // 可见且非最小化 → 隐藏；隐藏中 / 最小化 → 经 presentMainWindow 恢复并聚焦，
       // 多页签空壳时还会自愈补建首个页签（不能直接调 toggleMainWindow，会漏掉自愈）。
       toggleMainWindow: () => {
-        if (
-          mainWindow &&
-          !mainWindow.isDestroyed() &&
-          mainWindow.isVisible() &&
-          !mainWindow.isMinimized()
-        ) {
-          mainWindow.hide()
-        } else {
-          presentMainWindow()
-        }
+        const visible = !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
+        const minimized = !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()
+        // 与托盘 / 快捷键共用同一条判据（window-toggle.ts::planToggle）。
+        if (planToggle(visible, minimized) === 'hide') mainWindow!.hide()
+        else presentMainWindow() // 呈现走 presentMainWindow：多页签空壳时会自愈补建首个页签
       },
       // 右键球（v1.76）= 关闭悬浮图标功能 + 唤回主窗口。实现见 hideFloatFromIcon ——
       // 与 Tauri 侧 `floatwin::disable_float_from_icon` 逐条对齐，且**同一个函数**也经
@@ -833,6 +819,7 @@ if (!gotLock) {
         await mainWindow.loadURL('shell://localhost/').catch((e: Error) => {
           console.error(`[web2app] 壳页面加载失败：${e.message}`)
         })
+        const { runTabsProbe } = await import('./probe.js')
         const ok = await runTabsProbe({
           win: mainWindow,
           base: probeBase,
@@ -848,6 +835,7 @@ if (!gotLock) {
 
       // 探针自己 loadURL，窗口保持可见（最小化 / 最大化断言需要真实窗口状态）
       mainWindow.show()
+      const { runProbe } = await import('./probe.js')
       const ok = await runProbe({
         win: mainWindow,
         base: probeBase,
@@ -902,6 +890,7 @@ if (!gotLock) {
     // 冒烟自检：WEB2APP_SMOKE=1 时打完启动信息就退出，不需要人眼看着窗口。
     // 检查项与退出码规则见 smoke.ts（探针之外的第二条 CI 取证通道）。
     if (SMOKE) {
+      const { runSmokeChecks } = await import('./smoke.js')
       const bad = runSmokeChecks({
         title: cfg.title,
         actualTitle: mainWindow.getTitle(),

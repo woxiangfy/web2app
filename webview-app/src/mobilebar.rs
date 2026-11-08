@@ -6,11 +6,12 @@
 //! `.github/scripts/patch-android-back.py`），没有前进、也没有「回到入口」。
 //! `mobile_bar=true` 时就在屏幕**底部**常驻一条导航条补上这几个动作。
 //!
-//! 前端真源是 `src/mobilebar.js`，本模块负责四类事：
+//! 前端真源是 `src/mobilebar/`（core + bottom_space + tabs + more + mount 五片，由 `lib.rs` 按序
+//! 拼成**同一个 IIFE**），本模块负责四类事：
 //!   1. 把「底栏高度 / 是否有页签可切」两个值注入给它（**必须在它之前**注册）；
 //!   2. 缓存启动期解析出的首页导航信息，供「首页」按钮复用；
 //!   3. 监听前端发来的核心事件并落地（远程页面调不了应用命令，只能发事件 —— 见
-//!      `src/mobilebar.js` 文件头与 `capabilities/default.json` 的 `core:event:allow-emit`）；
+//!      `src/mobilebar/core.js` 文件头与 `capabilities/default.json` 的 `core:event:allow-emit`）；
 //!   4. `tabs_enabled=true` 时维护移动端【单 webview 页签】记录（见下）。
 //!
 //! # 移动端页签：单 webview + 记录
@@ -60,6 +61,10 @@
 //! 绝不再向 webview 现问。静态守卫：`contract_tests::mobile_bar_contract` 的
 //! `mobile_bar_never_queries_webview_on_ui_thread`。
 
+// 桌面目标（仅 `test` 形态编译）里本模块的实现没有调用方，故按条件豁免：移动端构建
+// 仍然受死代码检查约束（架构审查 P2-2，禁止再用全 crate 的 `#![allow(dead_code)]`）。
+#![cfg_attr(not(mobile), allow(dead_code))]
+
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Listener, Manager};
@@ -71,7 +76,7 @@ use crate::nav::Navigation;
 ///
 /// 安全区那一段由页面里的 `env(safe-area-inset-bottom, 0px)` 自行补上 —— 它随设备与
 /// 导航方式（三大键 / 手势）变化，编译期写死不了。
-/// ⚠️ 这是**唯一真源**：前端 `mobilebar.js` 的底栏 CSS、底部让位高度、页面贴底元素上移的
+/// ⚠️ 这是**唯一真源**：前端 `src/mobilebar/core.js` 的底栏 CSS、底部让位高度、页面贴底元素上移的
 ///    距离全部来自这里（经 [`config_script`] 下发），改高度只改这一处。
 pub(crate) const BAR_HEIGHT: i32 = 52;
 
@@ -91,7 +96,7 @@ pub(crate) const fn tabs_available() -> bool {
 
 /// 注入给页面的配置脚本。
 ///
-/// ⚠️⚠️ 必须排在 `mobilebar.js` **之前**注册（初始化脚本按注册顺序执行）：脚本开头要读
+/// ⚠️⚠️ 必须排在 `底栏脚本` **之前**注册（初始化脚本按注册顺序执行）：脚本开头要读
 /// `window.__web2appMobileBarCfg`，顺序反了它就会落进「默认值」分支 —— 底栏照画、
 /// 但高度与按钮清单不再由壳决定，是最难从表象反推的一类错位。
 /// 与 `lib.rs::build_main_window` 里「模式标记必须排在 OVERLAY_SCRIPT 之前」同一条契约。
@@ -103,7 +108,7 @@ pub(crate) fn config_script() -> String {
     )
 }
 
-/// 「首页」按钮的事件名（与 `src/mobilebar.js` 里的字面量逐字一致，契约测试钉着）。
+/// 「首页」按钮的事件名（与 `src/mobilebar/tabs.js` 里的字面量逐字一致，契约测试钉着）。
 pub(crate) const NAV_HOME_EVENT: &str = "web2app:nav-home";
 /// 页签列表里点某一行（切换）的事件名。
 pub(crate) const SWITCH_TAB_EVENT: &str = "web2app:switch-tab";
@@ -114,7 +119,7 @@ pub(crate) const NEW_TAB_EVENT: &str = "web2app:new-tab";
 /// 页面请求「在新页签里打开指定 url」的事件名（payload `{url}`）。
 ///
 /// 与 [`NEW_TAB_EVENT`]（无 payload、落首页）区分开：这个事件承接网页里
-/// `target="_blank"` 链接与 `window.open(url)`（见 `mobilebar.js::installBlankGuard`）——
+/// `target="_blank"` 链接与 `window.open(url)`（见 `mobilebar/tabs.js::installBlankGuard`）——
 /// wry Android 不支持多窗口，不拦截则链接静默无反应，拦截后落到单 webview 页签记录里。
 pub(crate) const OPEN_TAB_EVENT: &str = "web2app:open-tab";
 /// 打开列表面板时请求壳侧推一份最新行数据（无 payload）。
@@ -256,7 +261,7 @@ impl MobileTabs {
         changed
     }
 
-    /// 推给 `mobilebar.js` 的四元组 JSON：`[[label,title,active,home],…]`（顺序即位次）。
+    /// 推给 `底栏脚本` 的四元组 JSON：`[[label,title,active,home],…]`（顺序即位次）。
     fn rows_json(&self) -> String {
         let rows: Vec<serde_json::Value> = self
             .tabs
@@ -296,7 +301,7 @@ fn display_title(tab: &MTab, index: usize) -> String {
     tab.label.clone()
 }
 
-/// 内置启动页地址判定（与 `mobilebar.js::isBuiltinUrl` 同一条规则）：
+/// 内置启动页地址判定（与 `mobilebar/core.js::isBuiltinUrl` 同一条规则）：
 /// `splash:` 协议 或 wry 改写后的 `http(s)://splash.localhost/`。
 fn is_builtin_url(u: &str) -> bool {
     match url::Url::parse(u) {
@@ -630,7 +635,7 @@ fn doc_reported(app: &AppHandle, payload: &str) {
     }
 }
 
-/// 把最新页签行 eval 推给页面里的 `mobilebar.js`。
+/// 把最新页签行 eval 推给页面里的 `底栏脚本`。
 ///
 /// 远程 origin 页面调应用命令会被 ACL 拒，但**壳侧 eval 页面**没有这层限制；
 /// 面板开着时 `setTabs` 内部会立即重渲染。
@@ -833,7 +838,7 @@ mod tests {
 
     #[test]
     fn event_names_are_stable() {
-        // 事件名是跨文件契约（前端字面量 ↔ 本模块常量），改这里必须同步改 mobilebar.js。
+        // 事件名是跨文件契约（前端字面量 ↔ 本模块常量），改这里必须同步改 底栏脚本。
         assert_eq!(NAV_HOME_EVENT, "web2app:nav-home");
         assert_eq!(SWITCH_TAB_EVENT, "web2app:switch-tab");
         assert_eq!(CLOSE_TAB_EVENT, "web2app:close-tab");

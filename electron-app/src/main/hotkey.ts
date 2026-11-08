@@ -126,3 +126,46 @@ export function sameHotkey(a: Hotkey | null | undefined, b: Hotkey | null | unde
 
 /** 打开设置窗口的固定快捷键（不可在设置里修改，对齐 `settings.rs::settings_open_shortcut`）。 */
 export const SETTINGS_SHORTCUT = 'Shift+F1'
+
+/**
+ * 系统占用的组合（注册一定失败 / 被系统先吃掉）。键是 `hotkeyLabel()` 的输出，
+ * 必须与 `webview-app/dist/settings.html` 的 `HK_RESERVED` **逐字一致**（跨壳契约，
+ * 由 `test/cross-shell-contract.test.ts` 钉住）。
+ */
+const RESERVED_HOTKEYS: Record<string, string> = {
+  'Alt+Tab': '系统切换窗口',
+  'Alt+Space': '系统窗口菜单',
+  'Alt+F4': '关闭当前窗口',
+  'Alt+Escape': '系统切换窗口',
+  'Ctrl+Escape': '打开开始菜单',
+  // 中文 Windows 上这是输入法中英文切换：注册成全局键会**打断用户打字**，比不生效更糟
+  'Ctrl+Space': '输入法中英文切换',
+  'Ctrl+Alt+Delete': '系统安全界面',
+}
+
+/**
+ * 校验一个唤醒快捷键：**空串 = 可保存**，否则是给人看的原因。
+ *
+ * 与设置页 `settings.html::hkProblem` 同一套判据（页面已有即时提示，这里是主进程的第二道，
+ * 拦住「绕过页面直接写 settings.json / 页面被替换成兜底页」的路径）。2026-11-07 架构审查 M-2：
+ * 此前 Electron 主进程完全不校验，手改 `settings.json` 写入裸 `F9` 会占满该键且无提示。
+ *
+ * 判据顺序与页面一致：未设置 → 裸单键 → 系统占用 → Shift+F1 冲突；
+ * 最后补一条页面做不到的「accelerator 无法映射」（见 `CODE_TO_KEY` 的注释）。
+ */
+export function hotkeyProblem(h: Hotkey): string {
+  const key = h.key.trim()
+  if (!key) return '' // 「不设置快捷键」永远合法
+  const label = hotkeyLabel(h)
+  if (!h.ctrl && !h.alt && !h.shift) {
+    return (
+      `只有单个按键（${label}）：全局快捷键会占满这个键的输入（在别处打不了字），` +
+      '请至少勾选一个修饰键（Ctrl / Alt / Shift）；不想要快捷键就把主键选成「无」'
+    )
+  }
+  const takenBy = RESERVED_HOTKEYS[label]
+  if (takenBy) return `${label} 已被占用（${takenBy}），注册了也会被抢走，请换一个`
+  if (label === SETTINGS_SHORTCUT) return 'Shift+F1 是「打开设置」的固定快捷键，不能占用'
+  if (!CODE_TO_KEY[key]) return `不支持的按键（${label}），请换一个`
+  return ''
+}

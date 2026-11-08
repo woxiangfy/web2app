@@ -50,7 +50,7 @@
 //! ## 与 Electron 壳的关系
 //! Electron 没有原生窗口可用，仍走共享页 `src/floaticon.html`，但同样改成 **canvas 超采样
 //! alpha 位图**（浏览器内上限）。`floaticon.html` 与 `floaticon://` 协议在 **Tauri 侧已退役**，
-//! 该文件改为 **Electron 专属**（例外登记见根 `AGENTS.md` §3.4.1，仿 `mobilebar.js`）。
+//! 该文件改为 **Electron 专属**（例外登记见根 `AGENTS.md` §3.4.1，仿 `src/mobilebar/`）。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;

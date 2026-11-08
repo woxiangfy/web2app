@@ -399,6 +399,10 @@
   // **默认值**，`captured` 也是 null —— 一旦放行保存，就是把用户真实配置整条覆盖成默认，
   // 还回一句「已保存」。所以失败即封死保存，只允许关窗重开。
   let loadFailed = false;
+  // 启动时被主进程判为非法、已回退成「不设置」的旧快捷键说明（Tauri 侧 `get_settings`
+  // 的 `hotkey_notice`）。只在「没有其它问题、也没有待保存草稿」时展示 ——
+  // 用户在设置页**重新保存一次**即清空（保存成功的分支里归零）。
+  let loadNotice = "";
   function sameHotkey(a, b) {
     if (!a || !b) return false;
     return !!a.ctrl === !!b.ctrl && !!a.alt === !!b.alt && !!a.shift === !!b.shift &&
@@ -488,6 +492,11 @@
     if (problem) {
       st.className = "sub err";
       st.textContent = problem;
+    } else if (loadNotice) {
+      // 旧配置已被回退：先说清「之前那个键不再接受、现在没有快捷键」，再给下一步动作。
+      // 放在「待保存」之后：用户正在拼新组合时，优先告诉他手上这个还没保存。
+      st.className = "sub err";
+      st.textContent = loadNotice;
     } else if (hk.key && !sameHotkey(hk, savedHotkey)) {
       // ⚠️ 只在**有主键**时比较：勾了修饰键但还没选键，属于「正在拼」的草稿，
       //    不是「待保存的组合键」（否则会冒出「待保存：—」这种读不懂的提示）。
@@ -522,6 +531,7 @@
       // 默认沿用当前（可能是旧版本捕获出来的单键配置：显示归显示，保存时会被下面的校验拦住）
       captured = s.wake_hotkey;
       savedHotkey = s.wake_hotkey || savedHotkey;
+      loadNotice = s.hotkey_notice || "";
       document.getElementById("trayEnabled").checked = s.tray_enabled;
       document.getElementById("minimizeOnClose").checked = s.minimize_on_close;
       document.getElementById("floatEnabled").checked = !!s.float_enabled;
@@ -644,6 +654,8 @@
         shift: !!captured.shift,
         key: captured.key || ""
       };
+      // 保存成功 ⇒ 旧配置的「已回退」提示作废（后端内存态也随 new_settings 一起清空）。
+      loadNotice = "";
       renderHotkey();
       // 文案按**实际存下去的东西**说话：未设置快捷键时不该说「快捷键立即生效」
       setStatus(

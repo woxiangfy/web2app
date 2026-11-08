@@ -34,6 +34,7 @@
  */
 import { BrowserWindow, ipcMain, screen } from 'electron'
 
+import { assertTrustedSender } from './ipc-guard'
 import {
   FLOAT_WINDOW_KEY,
   readRawForUpdate,
@@ -211,12 +212,10 @@ function finiteCoord(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
-/** 特权 IPC 闸门：只有悬浮球窗自己的 webContents 能驱动它（仿 app-ipc.ts 的 assertShell）。 */
+/** 特权 IPC 闸门：只有悬浮球窗自己的 webContents 能驱动它（统一走 ipc-guard.ts，2026-11-07 H-3）。 */
 function assertFloatSender(senderId: number): void {
-  if (!floatWin || floatWin.isDestroyed() || senderId !== floatWin.webContents.id) {
-    console.warn(`[web2app] 拒绝非悬浮球窗发起的 float IPC（sender.id=${senderId}）`)
-    throw new Error('拒绝：仅悬浮球窗可操作悬浮球')
-  }
+  const expected = floatWin && !floatWin.isDestroyed() ? floatWin.webContents.id : null
+  assertTrustedSender(senderId, expected, { label: '悬浮球命令' })
 }
 
 // ===========================================================================
@@ -256,7 +255,7 @@ export function destroyFloatWindow(): void {
     clearDragRuntime()
     return
   }
-  persistGeometry(floatWin)
+  persistFloatWinGeometry(floatWin)
   allowClose = true
   floatWin.close()
   dock = null
@@ -275,7 +274,7 @@ export function hideFloatWindow(): void {
   if (!w || w.isDestroyed()) return
   // 吸附态 dock 保留（再显现时恢复半球）；只取消一次性的悬停 / 拖动运行期状态。
   cancelPendingCollapse()
-  persistGeometry(w)
+  persistFloatWinGeometry(w)
   w.hide()
   // 收窗即清拖动标志：拖动途中被隐藏时 pointerup 不会再来，
   // 残留的 moving=true 会让下一次悬停展开 / 移开缩回永久失效（事件被「拖动中」早退挡掉）。
@@ -292,7 +291,7 @@ export function toggleFloatWindow(): void {
 /** 退出前持久化（app 'will-quit' 调用）。 */
 export function persistFloatGeometry(): void {
   const w = floatWin
-  if (w && !w.isDestroyed()) persistGeometry(w)
+  if (w && !w.isDestroyed()) persistFloatWinGeometry(w)
 }
 
 // ===========================================================================
@@ -390,7 +389,7 @@ function createFloatWindow(): void {
   //    `allowClose` 只覆盖「设置里关掉开关 / 主动销毁」，管不到 app 级退出。
   win.on('close', (e) => {
     if (allowClose || deps?.isQuitting()) {
-      persistGeometry(win)
+      persistFloatWinGeometry(win)
       return
     }
     e.preventDefault()
@@ -551,14 +550,14 @@ function onDragEnd(): void {
     // 另一轴钳回），落盘展开态坐标，随即缩回成半球。
     placeFloat(win, plan.x, plan.y)
     dock = { edge: plan.edge, mon, collapsed: false }
-    persistGeometry(win)
+    persistFloatWinGeometry(win)
     collapse(dock)
   } else {
     // 自由态：完整钳回显示器内（旧实现不钳，球可停在屏外，没有标题栏就抓不回来了）。
     // placeFloat 每次都带固定宽高，顺带把已发生的尺寸漂移纠正回 56×56。
     placeFloat(win, plan.x, plan.y)
     dock = null
-    persistGeometry(win)
+    persistFloatWinGeometry(win)
     pushState(null)
   }
   clearDragRuntime()
@@ -652,10 +651,12 @@ function pushState(d: Dock | null): void {
   if (!win || win.isDestroyed()) return
   const edge: FloatEdge = d?.edge ?? 'none'
   const collapsed = d?.collapsed ?? false
-  const anchor = d?.edge === 'right' ? 'r' : 'l'
+  // ⚠️ 局部名用 side 而不是 anchor：模块级 `anchor` 是拖动抓取偏移（DIP），同名遮蔽会让
+  //    grep「anchor」时无法区分两处含义（2026-11-07 架构审查 M-7）。
+  const side = d?.edge === 'right' ? 'r' : 'l'
   const code =
     'window.__web2appFloat&&window.__web2appFloat.setState(' +
-    `{edge:${JSON.stringify(edge)},collapsed:${collapsed},anchor:${JSON.stringify(anchor)}});`
+    `{edge:${JSON.stringify(edge)},collapsed:${collapsed},anchor:${JSON.stringify(side)}});`
   win.webContents.executeJavaScript(code, true).catch(() => {
     /* 文档尚未就绪：忽略，did-finish-load 会重推 */
   })
@@ -670,7 +671,7 @@ function pushState(d: Dock | null): void {
  * 左 / 右吸附用展开贴边 x、y 保持当前纵向钳回值；上 / 下吸附用展开贴边 y、x 保持
  * 当前横向钳回值；自由态原样。宽高恒为固定 56（物理像素，与 Tauri FloatWinGeom 同形）。
  */
-function persistGeometry(win: BrowserWindow): void {
+function persistFloatWinGeometry(win: BrowserWindow): void {
   if (!deps) return
   try {
     const b = win.getBounds() // 只取位置（DIP）；尺寸恒为固定 56，不读可能漂移的宽高

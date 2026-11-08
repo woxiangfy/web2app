@@ -26,23 +26,20 @@ const NDK_SH: &str = include_str!("../../../.github/scripts/install-android-ndk.
 /// NDK 版本。⚠️ 用 concat! 拆段：避免「守卫的针」与「被测字面量」同在一处而被自己满足。
 const NDK_VERSION: &str = concat!("27.0.", "12077973");
 
-/// ① 两个 Android 打包 workflow 必须调用**全部**共享脚本（而不是内联实现）。
+/// ① 两个 Android 打包 workflow 与 CI 必须共用同一份 NDK 安装脚本（版本单一真源，见 ④）。
+///
+/// ⚠️ 「共享脚本有没有被调用」不再靠**手写名单** —— 名单会变成第二个真源（新增脚本不自动
+///    纳入、删脚本还要回来改测试）。那份检查现在由 ⑧ 的目录派生版承担。
 #[test]
-fn workflows_call_shared_android_scripts() {
+fn workflows_share_the_ndk_installer() {
     for (name, yml) in [
         ("build-custom.yml", BUILD_CUSTOM_YML),
         ("release.yml", RELEASE_YML),
     ] {
-        for script in [
-            "prepare-android-conf.py",
-            "apply-android-labels.py",
-            "patch-android-insets.py",
-            "set-android-apk-name.py",
-            "patch-android-back.py",
-            "install-android-ndk.sh",
-        ] {
-            assert!(yml.contains(script), "{name} 必须调用共享脚本 {script}");
-        }
+        assert!(
+            yml.contains("install-android-ndk.sh"),
+            "{name} 必须调用共享脚本 install-android-ndk.sh"
+        );
     }
     assert!(
         CI_YML.contains("install-android-ndk.sh"),
@@ -221,4 +218,167 @@ fn android_build_step_must_not_swallow_failures() {
              —— 这行只是结果不是原因，历史上正是它把排查方向带偏"
         );
     }
+}
+
+/// 读取 `.github/scripts/` 下的全部 `.py`（文件名 + 源码），按文件名排序保证报错可复现。
+///
+/// 用 `CARGO_MANIFEST_DIR` 定位，避免依赖 `cargo test` 的 cwd。
+fn python_scripts() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/scripts");
+    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("读不到 {}：{e}", dir.display()))
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|x| x.to_string_lossy() == "py")
+                .unwrap_or(false)
+        })
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let src = std::fs::read_to_string(e.path()).unwrap_or_default();
+            (name, src)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// 从 workflow 正文里抽「**真的**调用了哪个脚本、在第几行」。
+///
+/// 只认 `python3 … <name>.py` 形态：整行注释先被 `code_only` 剥掉，含 `::error::` 的
+/// 提示文案行与 `python3 -c` / `-m` 一律不算 —— 上一版正是被 `echo "::error::…"` 里的
+/// 脚本名满足过一次（假绿）。`$GITHUB_WORKSPACE/` 前缀会先剥掉；其余 `$` 变量拼接的
+/// 路径静态推不出来，直接跳过（本仓库的 Android 脚本调用都不走这种形态）。
+fn real_calls(yml: &str) -> Vec<(String, usize)> {
+    let code = code_only(yml);
+    let mut out = Vec::new();
+    for (i, line) in code.lines().enumerate() {
+        if !line.contains("python3") || line.contains("::error::") {
+            continue;
+        }
+        for tok in line.split_whitespace() {
+            let t = tok
+                .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                .replace("$GITHUB_WORKSPACE/", "")
+                .replace("${GITHUB_WORKSPACE}/", "");
+            if !t.ends_with(".py") || t.contains('$') {
+                continue;
+            }
+            if let Some(base) = t.rsplit('/').next() {
+                out.push((base.to_string(), i));
+            }
+        }
+    }
+    out
+}
+
+/// ⑧ **补丁链的调用关系一律由目录派生**（2026-11-07 第二轮修正）。
+///
+/// 上一版把 9 条链 + 3 个旁路脚本**手写**成两个常量数组 —— 那等于「测试又抄了一份打包名单」：
+/// 新增脚本不会自动纳入、删脚本还得回来改测试，名单本身成了第二个真源。而现在唯一的权威是
+/// **打包 workflow 的步骤本身**，测试只做派生：
+///
+/// ① 从 `.github/scripts/` **目录**发现管线脚本（机械判据见下，不用任何人写名单）；
+/// ② 每个被发现者都必须被**两份**打包 workflow 真实调用；
+/// ③ 反向：workflow 里不得调用目录里**不存在**的脚本（改名/删文件忘了同步会红）；
+/// ④ 两份 workflow 的调用顺序必须**互相一致**（跨 workflow 自洽，而不是照抄文档里的顺序）；
+/// ⑤ 管线脚本必须自带 `--selftest`，否则 `ci.yml` 的目录发现循环会**静默跳过**它；
+/// ⑥ `ci.yml` 的自测循环必须是「按目录发现 + 非空断言」形态（空集不许假绿）。
+#[test]
+fn android_pipeline_is_derived_from_scripts_dir_and_wired_consistently() {
+    let scripts = python_scripts();
+    assert!(
+        !scripts.is_empty(),
+        "读不到 .github/scripts/*.py —— 路径或读取逻辑有问题"
+    );
+
+    // 机械判据（不写名单）：
+    //   a) 源码里引用 `android_gen` —— 凡是改 `gen/android` 的脚本都共用那份工程根解析；
+    //   b) 文件名以 `patch-android-` 开头 —— 兜住「不改 Kotlin 只改 JS/资源」的补丁脚本。
+    // `android_gen.py` 自身是那个被 import 的模块，不算管线脚本。
+    let pipeline: Vec<String> = scripts
+        .iter()
+        .filter(|(n, src)| {
+            n.as_str() != "android_gen.py"
+                && (src.contains("android_gen") || n.starts_with("patch-android-"))
+        })
+        .map(|(n, _)| n.clone())
+        .collect();
+    assert!(
+        !pipeline.is_empty(),
+        "管线脚本发现结果为空 ⇒ 判据写错会让整条守卫空集假绿"
+    );
+
+    // ② 每个管线脚本都必须被两份打包 workflow 真实调用。
+    for (name, yml) in [
+        ("build-custom.yml", BUILD_CUSTOM_YML),
+        ("release.yml", RELEASE_YML),
+    ] {
+        let calls = real_calls(yml);
+        for script in &pipeline {
+            assert!(
+                calls.iter().any(|(s, _)| s == script),
+                "{name} 没有真实调用 {script}（只被 echo/注释提到不算）—— 删掉它不会让任何测试\
+                 变红，但 Android 侧对应能力会静默消失，只有真机才能发现"
+            );
+        }
+    }
+
+    // ③ 反向：workflow 不得调用目录里不存在的脚本。
+    let known: Vec<&str> = scripts.iter().map(|(n, _)| n.as_str()).collect();
+    for (name, yml) in [
+        ("build-custom.yml", BUILD_CUSTOM_YML),
+        ("release.yml", RELEASE_YML),
+        ("ci.yml", CI_YML),
+    ] {
+        for (script, line) in real_calls(yml) {
+            assert!(
+                known.contains(&script.as_str()),
+                "{name}:{line} 调用了不存在的脚本 {script} —— 改名或删文件后忘了同步调用点"
+            );
+        }
+    }
+
+    // ④ 两份 workflow 的管线脚本调用顺序必须一致（派生不变量：顺序错位会让 Kotlin 模板 /
+    //    `override` 的叠加关系静默错乱，而任何单侧命令都跑不出问题）。
+    let order = |yml: &str| -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for (s, _) in real_calls(yml) {
+            if pipeline.contains(&s) && !seen.contains(&s) {
+                seen.push(s);
+            }
+        }
+        seen
+    };
+    assert_eq!(
+        order(BUILD_CUSTOM_YML),
+        order(RELEASE_YML),
+        "两份打包 workflow 的补丁链调用顺序不一致 —— 以 workflow 步骤为唯一权威，两侧必须同序"
+    );
+
+    // ⑤ 管线脚本必须有自测入口，否则 ⑥ 的目录发现循环会静默跳过它。
+    for (n, src) in &scripts {
+        if pipeline.contains(n) {
+            assert!(
+                src.contains("--selftest"),
+                "{n} 没有 --selftest —— ci.yml 的目录发现循环会跳过它，该脚本的自测在 CI 永不执行"
+            );
+        }
+    }
+
+    // ⑥ ci.yml 的自测循环必须由目录发现驱动（不得再手写脚本名清单），且发现结果非空。
+    let ci = code_only(CI_YML);
+    assert!(
+        ci.contains("for f in .github/scripts/*.py"),
+        "ci.yml 的自测循环必须按目录发现，不得再手写脚本名清单"
+    );
+    assert!(
+        ci.contains("grep -q -- '--selftest'"),
+        "ci.yml 的循环必须按能力过滤：纯模块（android_gen.py）与 CI 工具（check-workflows.py）没有 --selftest"
+    );
+    assert!(
+        ci.contains("found=0") && ci.contains("::error::"),
+        "ci.yml 的循环必须断言「至少发现一个脚本」，否则规则写错时空集也全绿"
+    );
 }

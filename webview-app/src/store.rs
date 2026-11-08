@@ -154,7 +154,8 @@ pub fn candidates(app: &AppHandle) -> Vec<PathBuf> {
 }
 
 /// 读取整份文档：按 [`candidates`] 顺序取第一份**存在**的文件；都不存在（首次启动）
-/// 或顶层 JSON 损坏时给默认值（不抛错）。
+/// 或顶层 JSON 损坏时给默认值（不抛错）。**顶层损坏时原文件会先改名备份为 `<名>.bad`**，
+/// 以免随后的写盘把用户的原始内容冲掉。
 pub fn load(app: &AppHandle) -> Document {
     read_doc(&candidates(app))
 }
@@ -203,9 +204,63 @@ fn load_at(p: &Path) -> Document {
     match parse_document(&text) {
         Ok(doc) => doc,
         Err(e) => {
+            // ⚠️ **先改名保留，再回默认值**：后续任何写盘都是「读-改-写」，读到默认值后
+            // 会把这份文件覆盖掉 —— 不先备份，用户那份损坏的原内容（多半是截断写 / 手改错）
+            // 就永久没了。备份失败只记日志、继续回默认值：故障路径上再抛错等于「坏了还起不来」。
             dlog!("[store] 解析失败，已回退默认值（{e}）：{}", p.display());
+            preserve_corrupt(p);
             Document::default()
         }
+    }
+}
+
+/// 顶层 JSON 损坏时把原文件**改名保留**（不复制、不改内容）；失败**只记日志**，不向上抛。
+fn preserve_corrupt(p: &Path) -> Option<PathBuf> {
+    let dst = backup_path(p);
+    match preserve_corrupt_at(p, &dst) {
+        Ok(()) => {
+            dlog!(
+                "[store] 损坏的配置文件已保留为 {}（原文件 {}）",
+                dst.display(),
+                p.display()
+            );
+            Some(dst)
+        }
+        Err(e) => {
+            dlog!(
+                "[store] 损坏的配置文件备份失败（{e}），仍回落默认值：{}",
+                p.display()
+            );
+            None
+        }
+    }
+}
+
+/// 备份改名本身：抽出来是为了让「改名失败」这条降级路径能被单测直接打到
+/// （在真实文件系统上很难可靠地制造一次 rename 失败）。
+fn preserve_corrupt_at(p: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::rename(p, dst)
+}
+
+/// 备份落点：`<原名>.bad`，重名时依次 `.bad.1`、`.bad.2`…… —— 损坏往往不止发生一次，
+/// 不能覆盖上一次留下的现场。
+fn backup_path(target: &Path) -> PathBuf {
+    let candidate = |suffix: &str| {
+        let mut s = target.as_os_str().to_owned();
+        s.push(suffix);
+        PathBuf::from(s)
+    };
+    let first = candidate(".bad");
+    if !first.exists() {
+        return first;
+    }
+    let mut i = 1u32;
+    loop {
+        let p = candidate(&format!(".bad.{i}"));
+        if !p.exists() {
+            return p;
+        }
+        i += 1;
     }
 }
 
@@ -339,6 +394,7 @@ mod tests {
             tray_enabled: true,
             minimize_on_close: false,
             float_enabled: false,
+            hotkey_notice: String::new(),
         }
     }
 
@@ -353,6 +409,7 @@ mod tests {
             tray_enabled: false,
             minimize_on_close: true,
             float_enabled: true,
+            hotkey_notice: String::new(),
         }
     }
 
@@ -617,16 +674,95 @@ mod tests {
         assert_eq!(doc.window, None);
     }
 
-    /// 顶层 JSON 损坏 → 整份回默认值（与旧 `load_settings` 的行为一致，不抛错）。
+    /// 顶层 JSON 损坏 → 原文件**改名备份**、整份回默认值（不抛错）。
     #[test]
     fn broken_top_level_json_falls_back_to_defaults() {
         assert!(parse_document("{ 不是 JSON").is_err());
         with_temp("broken", |p| {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, "{ 不是 JSON").unwrap();
+            // ⚠️ 备份落点要在 load 之前算：load 之后 `.bad` 已存在，再算就会指向下一个名字。
+            let bad = backup_path(p);
             let doc = load_at(p);
             assert!(!doc.settings.tray_enabled);
             assert_eq!(doc.window, None);
+
+            // 原文件已被改名保留，内容逐字不变
+            assert!(
+                !p.exists(),
+                "损坏的原文件应已改名，而不是留在原处被下次写盘覆盖"
+            );
+            assert_eq!(
+                fs::read_to_string(&bad).unwrap(),
+                "{ 不是 JSON",
+                "备份内容必须与损坏的原文件逐字一致"
+            );
+        });
+    }
+
+    /// ⚠️⚠️ **损坏 → 备份存在 → 写入不再丢原文件**：顶层损坏后走一次正常的读-改-写，
+    /// 新文件可解析，而损坏前的原始内容仍留在 `.bad` 里。
+    #[test]
+    fn corrupt_file_is_backed_up_before_next_write() {
+        with_temp("corrupt-then-write", |p| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "{\"tray_enabled\": true, 截断").unwrap();
+            // 备份落点要在写入之前算（写入后 `.bad` 已存在）。
+            let bad = backup_path(p);
+
+            // 读-改-写：读盘时解析失败 ⇒ 备份 + 默认值，再写入新文档
+            update_at(p, |d| d.settings = settings_b()).unwrap();
+
+            assert_eq!(
+                fs::read_to_string(&bad).unwrap(),
+                "{\"tray_enabled\": true, 截断",
+                "写入前必须先备份：否则这份损坏的原文件被覆盖，用户再也找不回来"
+            );
+            assert!(p.exists(), "新文档应落到原位置");
+            let back = load_at(p);
+            assert_eq!(back.settings.wake_hotkey.key, "F9", "新设置没写进去");
+        });
+    }
+
+    /// 多次损坏不能覆盖上一次的现场：已有 `.bad` 时依次落到 `.bad.1` / `.bad.2`。
+    #[test]
+    fn backup_does_not_overwrite_previous_corrupt_file() {
+        with_temp("backup-no-overwrite", |p| {
+            let dir = p.parent().unwrap();
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(format!("{FILE}.bad")), "第一次损坏").unwrap();
+            fs::write(p, "第二次损坏").unwrap();
+
+            let doc = load_at(p);
+            assert!(!doc.settings.tray_enabled);
+            assert_eq!(
+                fs::read_to_string(dir.join(format!("{FILE}.bad"))).unwrap(),
+                "第一次损坏",
+                "上一次的备份被覆盖了"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.join(format!("{FILE}.bad.1"))).unwrap(),
+                "第二次损坏"
+            );
+        });
+    }
+
+    /// 备份改名失败时只降级（返回 `Err` 供调用方记日志），**不 panic、不阻断启动**。
+    /// 目标给一个已存在的目录，跨平台都会让 rename 失败。
+    #[test]
+    fn backup_failure_degrades_without_panicking() {
+        with_temp("backup-failure", |p| {
+            let dir = p.parent().unwrap();
+            fs::create_dir_all(dir).unwrap();
+            fs::write(p, "{ 坏").unwrap();
+            let blocked = dir.join("blocked");
+            fs::create_dir_all(&blocked).unwrap();
+
+            assert!(
+                preserve_corrupt_at(p, &blocked).is_err(),
+                "rename 到已存在的目录必须失败（否则这个用例没在测降级路径）"
+            );
+            assert!(p.exists(), "备份失败时原文件应留在原处");
         });
     }
 

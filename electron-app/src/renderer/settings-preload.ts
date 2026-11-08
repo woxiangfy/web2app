@@ -36,6 +36,3 @@ contextBridge.exposeInMainWorld('__TAURI_INTERNALS__', {
     return ipcRenderer.invoke('tauri:' + cmd, args ?? {})
   },
 })
-
-/** 壳标识：与主窗口保持一致，便于将来设置页做渐进增强时判断。 */
-contextBridge.exposeInMainWorld('web2appShell', 'electron')
