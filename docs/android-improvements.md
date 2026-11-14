@@ -21,10 +21,11 @@
    **固定顺序（2026-10-15 起）**：
    **prepare-wry-kotlin → 注入 gradle 补丁任务链**（两个前置环节，2026-10-15 新增，见下）→
    insets → back → download → **extras** → schemes →
-   **fullscreen → permissions**（extras 复用 download 建好的 `onWebViewCreate` 且调用必须排在其后；
-   它改的是 `onPageFinished`，与改 `shouldOverrideUrlLoading` 的 schemes 互不耦合；
-   fullscreen 整体替换 `RustWebChromeClient` 的 onShow/onHide 两方法；permissions 只动
-   AndroidManifest 且与 download 各用各的 marker，先后仅以脚本假设为准）。
+   **fullscreen → permissions → cleartext**（extras 复用 download 建好的 `onWebViewCreate`
+   且调用必须排在其后；它改的是 `onPageFinished`，与改 `shouldOverrideUrlLoading` 的 schemes
+   互不耦合；fullscreen 整体替换 `RustWebChromeClient` 的 onShow/onHide 两方法；permissions 只动
+   AndroidManifest 且与 download 各用各的 marker；cleartext 写 `res/xml` 并改 Manifest 的明文开关，
+   与 permissions 同文件但属性不重叠，2026-11-14 起取代原先 CI 里的全局 `usesCleartextTraffic=true` sed）。
    - **为什么需要两个前置环节**：wry 的 Kotlin 文件（RustWebViewClient 等）不是 init 产物，
      而是 wry `build.rs` 在 **Rust 编译期**才生成到 `java/<包名>/generated/`，补丁脚本在
      build 之前跑会 `FileNotFoundError`；且 build.rs 编译时还会覆盖提前打的补丁。
@@ -54,20 +55,20 @@
 | 6 | P1 | 网页视频全屏（wry 0.57 的 onShowCustomView 是空实现） | ✅ 已实施（2026-10-14） | `patch-android-fullscreen.py`（整体替换 onShow/onHide） |
 | 7 | P1 | `target=_blank` / `window.open` 拦截进移动页签 | ✅ 已实施（2026-10-14） | `src/mobilebar/tabs.js` blank guard + `mobilebar.rs` 新事件 `web2app:open-tab` |
 | 8 | P1 | 底栏「更多」面板（刷新 / 复制链接 / 分享 / 浏览器打开 / 清数据 / 退出） | ✅ 已实施（2026-10-14） | `src/mobilebar/more.js` + `patch-android-extras.py`（Kotlin 桥；`mobilebar.rs` 零改动） |
-| 9 | P2 | 返回键优先关闭页签列表面板等浮层 | 待办 | `patch-android-back.py` 增强 |
-| 10 | P2 | 无历史时「再按一次退出」而不是立即 finish | 待办 | `patch-android-back.py` 增强 |
-| 11 | P2 | 页签切换重载丢状态：先文案明示，后评估快照 | 待办 | 空状态文案先行 |
-| 12 | P2 | 软键盘弹出时底栏让位（visualViewport） | 待办 | `src/mobilebar/bottom_space.js` |
-| 13 | P2 | 暗色启动底色（SPLASH_BG 随 prefers-color-scheme + 原生主题） | 待办 | `bootstrap.rs` / `splash.html` / res 主题 |
-| 14 | P2 | DNS TXT 解析结果持久化（冷启动秒开 + 后台静默更新） | 待办 | `bootstrap.rs` + settings.json |
-| 15 | P2 | 代理模式可达性探测穿到真实上游（而非只探 127.0.0.1） | 待办 | `bootstrap.rs::spawn_reachability_probe` |
-| 16 | P2 | 平板 / 横屏底栏限宽居中 | 待办 | `src/mobilebar/core.js` |
-| 17 | P2 | 移动页签记录跨启动持久化 | 待办 | `mobilebar.rs` + settings.json |
-| 18 | 安全 | 明文流量收敛：仅放行 localhost（networkSecurityConfig） | 待办 | 替换两个 workflow 里的 sed 步骤 |
-| 19 | 分发 | 增加 x86_64 / universal APK；评估 AAB | 待办 | 两个 workflow 的 android build 步骤 |
+| 9 | P2 | 返回键优先关闭页签列表面板等浮层 | ✅ 已实施（2026-11-14） | `patch-android-back.py`（`evaluateJavascript` 续延）+ `core.js::closeSheetIfOpen` |
+| 10 | P2 | 无历史时「再按一次退出」而不是立即 finish | ✅ 已实施（2026-11-14） | `patch-android-back.py`（Toast + 2s 窗口） |
+| 11 | P2 | 页签切换重载丢状态：先文案明示，后评估快照 | ✅ 文案已实施（2026-11-14）；快照评估仍待 | `src/mobilebar/tabs.js` 面板 `.w2m-hint` |
+| 12 | P2 | 软键盘弹出时底栏让位（visualViewport） | ✅ 已实施（2026-11-14） | `src/mobilebar/bottom_space.js::installKeyboardAvoid` |
+| 13 | P2 | 暗色启动底色（SPLASH_BG 随 prefers-color-scheme + 原生主题） | ⏸ 待决策（Web 层已完成，原生层见 §5） | `nav.rs::SPLASH_BG` + res 主题 |
+| 14 | P2 | DNS TXT 解析结果持久化（冷启动秒开 + 后台静默更新） | ⏸ 待决策（安全 / 失效回退，见 §5） | `bootstrap.rs` + settings.json |
+| 15 | P2 | 代理模式可达性探测穿到真实上游（而非只探 127.0.0.1） | ✅ 已实施（2026-11-14） | `bootstrap.rs::probe_target` + `probe_auth_message` |
+| 16 | P2 | 平板 / 横屏底栏限宽居中 | ✅ 已实施（2026-11-14） | `src/mobilebar/core.js` 宽屏断点 |
+| 17 | P2 | 移动页签记录跨启动持久化 | ⏸ 待决策（恢复语义，见 §5） | `mobilebar.rs` + settings.json |
+| 18 | 兼容 | 明文流量放行：本地代理与 http 站点直连均可用（networkSecurityConfig） | ✅ 已实施（2026-11-14；收紧后当日回退） | `patch-android-cleartext.py`（替代 workflow 内 sed） |
+| 19 | 分发 | 增加 x86_64 / universal APK；评估 AAB | ⏸ 待决策（体积 / 分发渠道，见 §5） | 两个 workflow 的 android build 步骤 |
 | 20 | 流程 | 真机能力验收清单入回归（见 §4） | 进行中（本文件 §4 即清单） | 每次打包后人工执行 |
 
-状态取值：待办 / 进行中 / ✅ 已实施（日期）。
+状态取值：待办 / 进行中 / ✅ 已实施（日期）/ ⏸ 待决策（理由见 §5）。
 
 ---
 
@@ -218,6 +219,71 @@
   仍在当前页签导航，不被拦截；④`window.open('tel:10086')` 走外跳而非吞掉；
   ⑤单页签包（tabs_enabled=false）不拦截、不报错。
 
+### P2 批次（2026-11-14，本机可验证部分已闭环，真机项见 §4）
+
+先说明判定口径：本机**没有 Android SDK/NDK**，这批改动只做到「静态契约 + 纯逻辑单测 +
+补丁链按序试打」；凡需真机才能判定的行为一律列进 §4，不拿「测试绿」当「功能已验」。
+
+**#9 返回键优先关浮层 + #10 再按一次退出**（同一脚本 `patch-android-back.py`）
+
+- 形态：`handleOnBackPressed` 先 `evaluateJavascript` 问页面
+  `window.__web2appMobileBar.closeSheet()`，返回 `1` 即消费本次返回；否则进 `web2appBack()`
+  （真实历史 → `goBack()`；没有 → 2s 窗口内双按才 `finish()`，首次只 Toast「再按一次退出」）。
+- 两个易回退点：① eval 串必须返回**数字**（布尔/字符串会被回调再包一层引号，`r == "1"`
+  永远不成立）；② 浮层判定必须在后退**之前**（反了 = 面板开着时按返回直接离开页面）。
+- 本机取证：`--selftest` 7 组 + 3 条反向对照（数字返回值 / 顺序 / 双按窗口各自改坏均 FAIL）；
+  契约测试 `back_key_closes_sheet_before_navigating`、`back_key_requires_double_press_to_exit`；
+  补丁链实测 back → download → extras 共用**唯一** `onWebViewCreate` 且叠加正确。
+- 真机验收：§4 第 7 项。
+
+**#11 页签切换 = 重新加载（只做文案）**
+
+- 面板「新建标签」下方固定一行「切换标签会重新加载页面（移动端同时只保留一个页面）」。
+- 不做状态快照：单 webview 下要序列化 `history.state` + 表单 + 滚动位置，收益与风险不对等
+  （§5 记为「不建议做」）。
+- 真机验收：§4 第 6 项顺带看一眼。
+
+**#12 软键盘让位**（`bottom_space.js::installKeyboardAvoid`）
+
+- 判据是 `visualViewport` 与 `innerHeight` 差值 ≥ 60px（地址栏伸缩远小于此）；`adjustResize`
+  模式下 layout viewport 本身变矮、差值为 0，天然无操作 —— 不需要按 `windowSoftInputMode` 分支。
+- 抬升只改底栏 inline `bottom`，**不动** body 的底部让位（键盘覆盖的是 layout 视口下沿，
+  那是页面滚动的事）。
+- 真机验收：§4 第 8 项。
+
+**#15 代理模式探测真实上游**（`bootstrap.rs::probe_target`）
+
+- 旧实现探 `nav.url`，代理模式下是 `127.0.0.1:<port>` ⇒ 只能证明本地代理活着。现在：代理 +
+  上游 origin 已知 → 探上游并标记 `via_proxy`；否则退回导航地址。
+- 401/403 在代理模式下单独成类（`probe_auth_message`）：「上游可达但鉴权未通过」——
+  不能再把用户引去查 WebView 内核。
+- 本机取证：`probe_target_prefers_upstream_origin_when_proxied`（4 例）、
+  `probe_auth_message_separates_unauthorized_from_render_failure`、`probe_ok_message` 的
+  via_proxy 变体。
+- 真机验收：§4 第 11 项（失败卡指向真实上游主机名；密码错时给 401 结论）。
+
+**#16 宽屏底栏限宽居中**（`core.js` 的 `@media (min-width:600px)`）
+
+- 底栏与面板 `max-width:560px` + `left:50%` + `translateX(-50%)`。`syncBarWidth` 仍钉
+  `innerWidth`，max-width 会把它收在上限内 —— 因此**不用改 JS**（少一处状态就少一类不同步）。
+- 真机验收：§4 第 9 项（平板 / 横屏下底栏居中不拉满，面板与底栏同宽）。
+
+**#18 明文流量放行**（`patch-android-cleartext.py`）
+
+- 生成 `res/xml/network_security_config.xml`：`base-config cleartextTrafficPermitted="true"`
+  （**全放行**）；Manifest 的 `android:usesCleartextTraffic="…"` 换成
+  `android:networkSecurityConfig="@xml/…"`。
+- **为什么不直接用 `usesCleartextTraffic="true"`**：只为把策略收成**单一落点** —— 两个 workflow
+  共用同一份脚本、不再各写一份 sed，日后按域收紧也只改一处常量。
+- **曾收紧、当日回退**：首版为「仅 `127.0.0.1` / `localhost`」，导致直连 `http://` 目标站点被系统
+  拦下（`ERR_CLEARTEXT_NOT_PERMITTED`），而目标站点大量只有 http ⇒ 产品侧判定不可接受，改回全放行。
+  ⚠️ **若日后重新收紧，`domain-config` 必须保留回环例外**，否则本地代理链路先断。
+- 本机取证：`--selftest` 9 组（含「两属性并存只留一个」「自闭合 application」「缺标签报错」），
+  并含一条反例断言（XML 本体出现 `cleartextTrafficPermitted="false"` 即失败）；契约测试
+  `cleartext_http_stays_allowed` 只取 `<network-security-config>` 本体判定，避免脚本注释 / 自测
+  字面量把用例顶成假红（该用例已做反向对照：改回 `false` 必 FAILED）。
+- 真机验收：§4 第 11 项 + 直接输入 `http://` 外站应能正常打开（不得出现 `ERR_CLEARTEXT_NOT_PERMITTED`）。
+
 ### P0 / P1 落地后的静态验证记录（2026-10-14，真机验收待出包）
 
 - 补丁脚本在临时目录对**真实 wry 0.57 / tauri-cli 2.12.2 模板**按序试打
@@ -251,9 +317,10 @@
   两方法且加 import 后重算匹配下标，模板已自带真全屏时补丁显式报错；
   ③ #7 用**新事件** `web2app:open-tab`（带 `{url}`）而非复用无 payload 落首页的
   `web2app:new-tab`，Rust 与 JS 双侧只承接 http(s)，非页签模式不装 guard。
-- **#14/#17 持久化**：都落 settings.json，注意「缓存地址失效时的回退 + 弱网竞态」。
-- **#18 安全收敛**：新增 `res/xml/network_security_config.xml`（cleartext 仅
-  `127.0.0.1`/`localhost`），Manifest 改引用它；删掉两个 workflow 里全局置 true 的 sed。
+- **#14/#17 持久化**：⏸ 待决策。两者都落 settings.json，核心难点不是写盘而是
+  「缓存地址失效时的回退 + 弱网竞态」，以及「恢复出来的记录其实没有加载」的语义问题（见 §5）。
+- **#18 明文流量**：✅ 已实施（2026-11-14）—— 见 §2.7。原计划「`res/xml` + Manifest 引用 + 删 sed」
+  已落地（sed 换成独立补丁脚本 `patch-android-cleartext.py`）；策略由首版「仅回环」**回退为全放行**。
 
 ## 4. 真机能力验收清单（#20，每次出包人工回归）
 
@@ -273,4 +340,64 @@ wry 升级会改变下列行为（项目已有升级后行为漂移的先例）�
 11. 代理模式：带鉴权站点经 `127.0.0.1` 加载成功；失败卡诊断指向上游真实结论（#15）；
 12. 「更多」面板（#4/#8，逐条见 §2 验收 ①–⑧）：六行齐全；复制链接成功有 toast；
     分享 / 浏览器打开拉起正确；清数据两步确认 + 自动 reload 后 Cookie 与登录态消失需重新登录；
-    退出无最近任务残留；跨源 iframe 无密钥调桥无效；旧包（无桥）点原生动作只 toast 不崩。
+    退出无最近任务残留；跨源 iframe 无密钥调桥无效；旧包（无桥）点原生动作只 toast 不崩；
+13. 明文直连（#18）：直接打开 `http://` 目标站点能正常渲染，**不得**出现
+    `ERR_CLEARTEXT_NOT_PERMITTED`；同一次运行里代理模式（`127.0.0.1`）仍可用。
+
+---
+
+## 5. ⏸ 待决策项（2026-11-14 审查后暂缓）
+
+四项都不是「技术上做不了」，而是会改变产品语义或分发方式，需要先定口径。每项给选项与
+建议；选定后按 §0 的约定落地（补丁脚本 / 契约测试 / 真机验收，三样缺一不算完成）。
+
+### #13 暗色启动底色的「原生层」
+
+- 现状：Web 层已完成 —— `splash.html` 与 `loading.js` 都有 `prefers-color-scheme: dark`
+  分支（`#14181f`）。缺的是**首帧之前**：`nav::SPLASH_BG` 是编译期常量 `#f7f8fa`，经
+  `background_color()` 交给窗口，暗色系统下会闪一下浅色。
+- A：加 `values-night/themes.xml` 的暗色 `windowBackground`，并在 Android 上去掉 Tauri
+  的 `background_color`（交给主题）。
+  - 优：语义正确、随系统切换；劣：新增 res 补丁 + 改窗口构建参数，只能真机验证，且桌面端
+    窗口背景要单独保留（`cfg` 分叉，本机是盲区）。
+- B：`SPLASH_BG` 改成中性深色（如 `#1b1f26`）。
+  - 优：一处常量、零平台分支；劣：亮色用户会看到深色闪一下 —— 只是把问题换给另一半用户。
+- **建议 A**；B 属于「用一个缺陷对冲另一个缺陷」，不做。
+
+### #14 DNS TXT 解析结果持久化（冷启动秒开）
+
+- 问题：现在每次冷启动都要 DNS + 验签（预算 25s，弱网可感知）。缓存能秒开，但要同时回答三件事：
+  1. **安全语义**：入口由 DNS TXT + 签名下发，本意是「远端可控」。落盘明文等于给了本机一份
+     长期有效的旁路 —— 下发方撤销/轮换后，旧缓存仍可用（直到过期）。
+  2. **失效回退**：「先导航缓存、后台重解析、成功再替换」这条链路与用户操作（登录态、页签）
+     会打架，替换时机没有无损选择。
+  3. **可见性**：用户/排查者必须能看出「这次走的是缓存还是最新」。
+- A：TTL 缓存（建议 6h）+ 冷启动先用缓存、后台静默刷新、失败静默沿用、过期回完整流程；
+  设置页显示「入口地址：缓存 / 最新」。
+  - 优：弱网体验收益明确（25s → <1s）；劣：实现面最大（settings.json + 状态机 + UI），
+    且安全语义需产品确认。
+- B：只缓存上次成功的 URL、不设 TTL、失败即回退。
+  - 优：实现小；劣：地址可能长期失效，用户先看到白屏再重试，体验反而更差。
+- C：不做。优：零风险；劣：弱网首启仍慢。
+- **建议 A**，但需先定「缓存有效期」与「是否允许离线启动」。
+
+### #17 移动页签记录跨启动持久化
+
+- 问题：移动端页签只是记录，真正存活的页面只有当前这一个。恢复后列表里会有一堆「点开才加载」
+  的条目，用户容易以为「后台还在跑」，与 #11 的文案预期冲突。
+- A：只持久化**非首页**记录，启动后 active 固定首页、不自动加载（点开才加载）。
+  - 优：语义诚实（配合 #11）；劣：恢复的 url 可能已失效，点开是白屏，需要额外错误态。
+- B：全量恢复并自动加载上次的 active 页。
+  - 优：最接近桌面端习惯；劣：把冷启动变成「等上次的页面加载」，与 #14 的收益打架。
+- C：不做。
+- **建议 A**；B 在单 webview 模型下只会拖慢启动。
+
+### #19 x86_64 / universal APK 与 AAB
+
+- 现状：只出 aarch64（真机唯一需要的 ABI）。
+- A：加 x86_64（模拟器专用）。优：CI 可用模拟器跑冒烟；劣：APK +30–40%，CI 时间翻倍。
+- B：universal（arm64 + armv7 + x86_64）。优：一个包通吃老设备；劣：体积最大（约 2.5×），
+  与「绿色小包」定位相悖。
+- C：AAB。优：上架时按 ABI 分发；劣：本项目走 GitHub Release 直发 APK，AAB 不能直接安装。
+- **建议都不做**，除非出现「必须跑模拟器回归」或「要上架」的明确需求；真要跑模拟器，
+  x86_64 只在 CI 临时构建、不进 Release。

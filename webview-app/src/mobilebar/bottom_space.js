@@ -176,3 +176,54 @@
     } catch (e) { /* noop */ }
   }
 
+  // ---------------------------------------------------------------------
+  // 软键盘让位（visualViewport，#12）
+  // ---------------------------------------------------------------------
+  // 三种情况要分开看：
+  //   · `adjustResize`（WebView 默认 resize 模式）：键盘弹起时 **layout viewport 变矮**，
+  //     `innerHeight` 跟着变小、fixed 底栏自然被顶上来 ⇒ 这里算出的差值是 0，不动作。
+  //   · `adjustPan` / edge-to-edge 沉浸 / `adjustNothing`：layout viewport 不变，键盘是
+  //     **盖在页面上**的图层，fixed bottom:0 的底栏会被整个挡住 ⇒ 把底栏抬到键盘上沿。
+  //   · 地址栏自动收起：visualViewport 也会变大，但幅度远小于键盘（一般 < 60px）。
+  // 所以判据是「可视视口比 layout 视口矮 60px 以上」—— 只认键盘，不认浏览器 UI 抖动。
+  // 抬升只改底栏的 inline bottom；页面 body 的底部让位（layout 坐标）不跟着改：
+  // 键盘覆盖的是 layout 视口下沿，那是页面自身滚动的事，不该由底栏替它补偿。
+  var W2M_KB_MIN_GAP = 60;
+  var w2mKbTimer = 0;
+
+  function applyKeyboardInset() {
+    try {
+      var bar = document.getElementById('__web2app_mobilebar__');
+      if (!bar || !bar.style) return;
+      var vv = window.visualViewport;
+      if (!vv) {
+        bar.style.removeProperty('bottom');
+        bar.removeAttribute('data-w2m-keyboard');
+        return;
+      }
+      var gap = Math.round((window.innerHeight || 0) - (vv.height + vv.offsetTop));
+      if (gap >= W2M_KB_MIN_GAP) {
+        bar.style.setProperty('bottom', gap + 'px', 'important');
+        bar.setAttribute('data-w2m-keyboard', '1');
+      } else {
+        bar.style.removeProperty('bottom');
+        bar.removeAttribute('data-w2m-keyboard');
+      }
+    } catch (e) { /* 绝不把异常抛给宿主页面 */ }
+  }
+
+  function installKeyboardAvoid() {
+    try {
+      var vv = window.visualViewport;
+      if (!vv) return; // 老内核没有 visualViewport：保持现状（adjustResize 仍然可用）
+      var schedule = function () {
+        if (w2mKbTimer) clearTimeout(w2mKbTimer);
+        // 80ms 去抖：键盘弹出动画期间 visualViewport 会连发十几帧，逐帧写 style 会抖。
+        w2mKbTimer = setTimeout(applyKeyboardInset, 80);
+      };
+      vv.addEventListener('resize', schedule);
+      vv.addEventListener('scroll', schedule);
+      applyKeyboardInset();
+    } catch (e) { /* noop */ }
+  }
+

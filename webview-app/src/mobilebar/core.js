@@ -250,7 +250,22 @@
     'min-height:0!important;height:' + FIT_H + '!important;overflow-y:auto!important;',
     'scroll-behavior:inherit!important;}',
     '[' + SHIFT_ATTR + ']{bottom:' + RESERVE + '!important;}',
-    '[' + SHRINK_ATTR + ']{height:' + FIT_H + '!important;min-height:' + FIT_H + '!important;}'
+    '[' + SHRINK_ATTR + ']{height:' + FIT_H + '!important;min-height:' + FIT_H + '!important;}',
+    /* 页签面板顶部说明：移动端「切换 = 重新加载」，不说清楚会被当成丢状态的 bug（#11）。 */
+    '#__web2app_mobilebar__ .w2m-hint{',
+    'padding:8px 14px!important;font-size:11px!important;line-height:1.45!important;opacity:.62!important;',
+    'border-bottom:1px solid rgba(0,0,0,.06)!important;}',
+    '@media (prefers-color-scheme:dark){#__web2app_mobilebar__ .w2m-hint{',
+    'border-bottom-color:rgba(255,255,255,.06)!important;}}',
+    /* 宽屏（平板 / 横屏）：底栏与面板限宽居中 —— 否则一排按钮被拉成一米宽，拇指够不着（#16）。
+     * 只改 max-width / left / transform：inline 钉的 width 仍由 syncBarWidth 负责，
+     * max-width 会把它限制在上限内，不需要动 JS。 */
+    '@media (min-width:600px){',
+    '#__web2app_mobilebar__{max-width:560px!important;left:50%!important;right:auto!important;',
+    'transform:translateX(-50%)!important;border-radius:12px 12px 0 0!important;}',
+    '#__web2app_mobilebar__ .w2m-sheet{max-width:560px!important;left:50%!important;right:auto!important;',
+    'transform:translateX(-50%)!important;border-radius:12px 12px 0 0!important;}',
+    '}'
   ].join('\n');
 
   // 内置页面（启动页）判定：两种 URL 形态都要认 —— 原生 `splash://` scheme，与 wry 改写后的
@@ -504,6 +519,29 @@
         if (btn0) btn0.style.removeProperty('background');
       });
     } catch (e) { /* noop */ }
+  }
+
+  /// 供 **Android 系统返回键**调用（#9）：有面板开着就关掉并返回 true。
+  ///
+  /// 原生侧 `patch-android-back.py` 在 `handleOnBackPressed` 里先 `evaluateJavascript`
+  /// 调它，拿到 1 就不再后退 —— 否则用户按返回会直接离开当前页，浮层反而留在历史里
+  /// （面板是 DOM，不是 history 条目，系统返回根本看不见它）。
+  /// 返回值必须是**数字**：Android 的 `evaluateJavascript` 回调对字符串会再包一层引号。
+  function closeSheetIfOpen() {
+    try {
+      if (!activePanel) return false;
+      var bar0 = document.getElementById('__web2app_mobilebar__');
+      if (!bar0) {
+        // 底栏被 SPA 抹掉了：面板已不可见，但仍要消费这次返回。
+        activePanel = null;
+        clearArmedClear();
+        return true;
+      }
+      closeSheet(bar0);
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   function renderSheet() {

@@ -59,7 +59,7 @@ webview-app/
 ├── examples/               # 仅测试目标的验证示例（probe_dom_ready.rs / probe_new_window.rs / probe_clear_data.rs）
 ├── capabilities/           # Tauri ACL 能力声明（default.json=主窗；settings-window.json=无边框设置窗；tabs-remote.json=多页签 tab-* 远程页，仅授事件发送；⚠️ v1.81 起无 float-icon.json —— 悬浮球是原生窗口，不经 WebView IPC）
 ├── icons/                  # 应用图标（icon.ico / icon.png 等）
-├── txttest_keys/           # 验签测试密钥对（⚠️ **当前工作区已不存在**：私钥被 .gitignore 忽略、目录整体已移除，见 ../docs/txttest-verify-materials.md 的换钥说明）
+├── txttest_keys/           # 验签测试密钥对（⚠️ 当前工作区已不存在；需要密钥对时按 ../docs/txttest-verify-materials.md 的本机步骤生成）
 └── （CI 与打包工作流已上移至仓库根 `.github/workflows/`，见 [workflows.md](workflows.md)）
 ```
 

@@ -545,12 +545,13 @@ jobs:
         #（连运行时授权弹窗都不会弹）；运行时申请弹窗本身 wry 已实现，这里只补 Manifest。
         run: python3 ../.github/scripts/patch-android-permissions.py
 
-      - name: Allow cleartext HTTP (localhost proxy)
-        # 应用通过本地反向代理加载 http://127.0.0.1:<port>；Android 9+ 默认禁止明文 HTTP，
-        # release 构建的 usesCleartextTraffic 默认为 false，必须置 true 否则鉴权代理真机上加载失败。
-        run: |
-          sed -i -E 's/android:usesCleartextTraffic="[^"]*"/android:usesCleartextTraffic="true"/' gen/android/app/src/main/AndroidManifest.xml
-          grep -n "usesCleartextTraffic" gen/android/app/src/main/AndroidManifest.xml
+      - name: Allow cleartext HTTP (local proxy + http sites)
+        # 两条链路都要明文 HTTP：① 应用经本地反向代理加载 http://127.0.0.1:<port>；
+        # ② 用户直连的目标站点本身只有 http。而 Android 9+ 默认禁止明文 HTTP ⇒ 不放开
+        # 会在真机直接 ERR_CLEARTEXT_NOT_PERMITTED。
+        # 策略落点只有一个：.github/scripts/patch-android-cleartext.py 写
+        # network_security_config.xml（base-config 全放行），两 workflow 共用，不再各写 sed。
+        run: python3 ../.github/scripts/patch-android-cleartext.py
 
       - name: 设置 Android 产物文件名（APK 文件名 ← app_name）
         # 逻辑在 .github/scripts/set-android-apk-name.py —— 两壳共用，产物名就此对齐

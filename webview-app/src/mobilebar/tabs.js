@@ -22,6 +22,13 @@
     });
     sheet.appendChild(addBtn);
 
+    // 移动端是单 webview 页签：切换 = 按记录地址重新加载，页面内状态不保留（#11）。
+    // 先说清楚，比事后被当成「切回来内容丢了」的 bug 便宜得多。
+    var hint = document.createElement('div');
+    hint.className = 'w2m-hint';
+    hint.textContent = '切换标签会重新加载页面（移动端同时只保留一个页面）';
+    sheet.appendChild(hint);
+
     if (!tabRows.length) {
       var empty = document.createElement('div');
       empty.className = 'w2m-empty';

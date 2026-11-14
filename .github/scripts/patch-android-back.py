@@ -45,9 +45,11 @@ from android_gen import (  # noqa: E402
 MARKER = "web2app-android-back-guard"
 
 # 需要补的 import（缺失才加）。
+# Toast：无历史时「再按一次退出」的唯一可见反馈（少了它用户只会觉得「按了没反应」）。
 NEEDED_IMPORTS = (
     "import android.webkit.WebView",
     "import androidx.activity.OnBackPressedCallback",
+    "import android.widget.Toast",
 )
 
 # 注入到类体内的 Kotlin 代码（2 空格缩进，对齐 Tauri 模板）。
@@ -55,28 +57,56 @@ NEEDED_IMPORTS = (
 KOTLIN_BLOCK = """  // {marker}：接管系统返回键。
   // Tauri 自带的 AppPlugin 只认 WebView.canGoBack()，而启动时内置 splash 启动页
   //（http://splash.localhost/）就在历史里 ⇒ 首个目标页按返回会退回到内置页。
-  // 本回调注册更晚（onWebViewCreate）、在 OnBackPressedDispatcher 中优先级更高，
-  // 按 copyBackForwardList 的相邻条目 URL 判定：落点是真实网页才 goBack；
-  // 否则 finish()（与「无历史时系统默认」同手感：回桌面/后台），绝不停在内置页。
+  // 本回调注册更晚（onWebViewCreate）、在 OnBackPressedDispatcher 中优先级更高，按序处理：
+  //   ① 底栏浮层（页签列表 / 更多面板）开着 → 先关浮层，本次返回到此为止（#9）；
+  //   ② 上一条历史是真实网页 → goBack()；
+  //   ③ 没有可退的真实页面 → 「再按一次退出」，2 秒内两次才 finish（#10）。
+  // ⚠️ 绝不能「关掉本回调再重分发」：AppPlugin 的回调仍启用，会把 splash 当可后退页。
+  private var web2appLastBackAt = 0L
+
   override fun onWebViewCreate(webView: WebView) {{
     super.onWebViewCreate(webView)
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {{
       override fun handleOnBackPressed() {{
-        val list = webView.copyBackForwardList()
-        val idx = list.currentIndex
-        if (idx > 0) {{
-          val prevUrl = list.getItemAtIndex(idx - 1)?.url ?: ""
-          if (!isWeb2appBuiltInPage(prevUrl)) {{
-            webView.goBack()
-            return
-          }}
+        // ① 先问页面「底栏浮层开着吗」。evaluateJavascript 是异步的，只能续延不能同步 return：
+        //    拿到 1 = 已关浮层、本次返回消费完毕；0 / null = 继续走后退逻辑。
+        //    ⚠️ 页面侧刻意返回**数字**：字符串会被回调再包一层引号（拿到 "1" 而不是 1）。
+        webView.evaluateJavascript(WEB2APP_CLOSE_SHEET_JS) {{ r ->
+          if (r != null && r.trim() == "1") return@evaluateJavascript
+          web2appBack(webView)
         }}
-        // 没有可退的真实页面：不触发后退，直接 finish。
-        // 不能「关闭本回调后重分发」：AppPlugin 的回调仍启用，会把 splash 当可后退页。
-        finish()
       }}
     }})
   }}
+
+  /// 真正的后退动作（浮层已关 / 没有浮层时进入）。
+  private fun web2appBack(webView: WebView) {{
+    val list = webView.copyBackForwardList()
+    val idx = list.currentIndex
+    if (idx > 0) {{
+      val prevUrl = list.getItemAtIndex(idx - 1)?.url ?: ""
+      if (!isWeb2appBuiltInPage(prevUrl)) {{
+        webView.goBack()
+        return
+      }}
+    }}
+    // ③ 没有可退的真实页面：Android 的既有手感是「再按一次退出」，而不是按一下就没。
+    val now = System.currentTimeMillis()
+    if (now - web2appLastBackAt <= 2000L) {{
+      finish()
+      return
+    }}
+    web2appLastBackAt = now
+    Toast.makeText(this, "再按一次退出", Toast.LENGTH_SHORT).show()
+  }}
+
+  /// 与 `src/mobilebar/core.js::closeSheetIfOpen` 同一条契约（JS 侧暴露为
+  /// `window.__web2appMobileBar.closeSheet`，两侧由 `mobile_bar_contract` 钉住）。
+  /// 1 = 关掉了浮层；0 = 没有浮层（底栏未注入 / 内置页 / 执行异常）。
+  private val WEB2APP_CLOSE_SHEET_JS =
+    "(function(){{try{{var b=window.__web2appMobileBar;" +
+      "if(b&&typeof b.closeSheet==='function'){{return b.closeSheet()?1:0;}}}}catch(e){{}}" +
+      "return 0;}})()"
 
   private fun isWeb2appBuiltInPage(url: String): Boolean {{
     return url.startsWith("splash:") ||
@@ -155,10 +185,36 @@ def selftest() -> int:
         "finish()",
         NEEDED_IMPORTS[0],
         NEEDED_IMPORTS[1],
+        NEEDED_IMPORTS[2],
+        # #9 浮层优先：问页面的 eval 串 + 页面侧方法名必须逐字对齐。
+        "evaluateJavascript(WEB2APP_CLOSE_SHEET_JS)",
+        "b.closeSheet()",
+        # #10 再按一次退出：Toast + 文案 + 双按时间窗。
+        "Toast.makeText",
+        "再按一次退出",
+        "web2appLastBackAt",
     ):
         assert needle in patched, f"补丁缺少要素：{needle}"
     # 原有 onCreate 必须原样保留
     assert "enableEdgeToEdge()" in patched and "super.onCreate(savedInstanceState)" in patched
+
+    # 1b) 顺序契约（成对判据，改坏必须 FAIL）：
+    #   · #9 必须先问浮层、再后退 —— 反了就是「面板开着时按返回直接离开页面」；
+    #   · #10 finish() 必须落在双按时间窗之后 —— 否则又退回「按一下就没」。
+    h = patched.index("override fun handleOnBackPressed")
+    close_at = patched.index("evaluateJavascript(WEB2APP_CLOSE_SHEET_JS)", h)
+    back_at = patched.index("web2appBack(webView)", h)
+    assert close_at < back_at, "handleOnBackPressed 必须先关浮层（evaluateJavascript）再 web2appBack"
+    win_at = patched.index("<= 2000L")
+    fin_at = patched.index("finish()", win_at)
+    assert win_at < fin_at, "finish() 必须被「再按一次退出」的时间窗包住，不能无条件 finish"
+    # Toast 分支必须在 finish 分支**之后**（即第一次按只提示、不退出；走到它说明窗口未命中）。
+    toast_at = patched.index("Toast.makeText")
+    assert fin_at < toast_at, "Toast 必须挂在「窗口未命中」分支：第一次返回只提示、不退出"
+
+    # 1c) 桥字符串自身的反向断言：页面方法名与返回值类型都不能漂。
+    assert ".closeSheet" in patched, "eval 串必须调页面侧 closeSheet（与 core.js 同名）"
+    assert "?1:0" in patched, "eval 串必须返回数字 1/0（字符串会被回调再包一层引号）"
 
     # 2) 幂等：再打一次结果逐字不变
     assert patch_src(patched) == patched, "补丁不是幂等的"

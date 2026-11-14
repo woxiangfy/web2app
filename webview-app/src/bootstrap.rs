@@ -387,6 +387,11 @@ fn prepare_navigation(
 ///
 /// `label`：目标窗口 label（单窗口为 `"main"`，多页签为 `tab-N`）。
 fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
+    // ⚠️ 探测目标必须在 `nav.proxy_abort` 被 move 之前算出来 —— 部分移动之后就不能再
+    //    整体借用 `nav` 了（清单 #15：代理模式要探上游，不能探 127.0.0.1）。
+    #[cfg(not(windows))]
+    let (probe_url, via_proxy) = probe_target(&nav);
+
     // 代理句柄先入库，保证退出 / 重试时能优雅终止。
     // 多页签模式下：本地代理是单实例共享，句柄只由首次启动入库一次；后续 tab 复用的
     // Navigation 里的 proxy_abort 是同一个句柄的克隆，重复入库会覆盖，属无害但应避免。
@@ -444,7 +449,9 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
                         // 探测本身：Android WebView 网络失败时停在「空白错误文档」（桌面端浏览器
                         // 那种带错误码的页面在 WebView 上不渲染），仅靠加载层固定超时只能给通用
                         // 文案；探测可在数秒内把 DNS / 连接 / 超时 / TLS 的具体原因推给失败卡。
-                        spawn_reachability_probe(app.clone(), label, nav.url.clone());
+                        // ⚠️ 探的是 `probe_target` 算出的**上游**：代理模式下 nav.url 是
+                        //    `127.0.0.1:<port>`，探它只能证明本地代理进程活着（清单 #15）。
+                        spawn_reachability_probe(app.clone(), label, probe_url, via_proxy);
                         // 落点校验：探测管「网络通不通」，这里管「导航到底有没有生效」。
                         // 两者互补 —— 真机上这两件事曾经都只能靠猜。见 `ensure_navigation_committed`。
                         ensure_navigation_committed(app, label, &url);
@@ -557,18 +564,65 @@ fn probe_failure_message(kind: ProbeFailure, host: &str) -> (String, String) {
 /// 没有任何结论的兜底卡，完全无从下手。
 ///
 /// `host` 只放主机名（理由同 [`probe_failure_message`]）；`status` 为 `None` 表示内核没给出
-/// 状态码。
+/// 状态码；`via_proxy` = 探测走的是「本地代理 → 上游」，文案必须点明，否则用户会以为
+/// 结论说的是 `127.0.0.1`（清单 #15）。
 #[cfg(any(not(windows), test))]
-fn probe_ok_message(host: &str, status: Option<u16>, ms: u128) -> String {
+fn probe_ok_message(host: &str, status: Option<u16>, ms: u128, via_proxy: bool) -> String {
     let st = match status {
         Some(code) => format!("HTTP {code}"),
         None => "已收到响应".to_string(),
     };
+    if via_proxy {
+        return format!(
+            "可达性探测：经本地代理访问上游 {host} 已连通（{st}，{ms}ms），但页面未渲染 —— \
+             问题多半在本机 WebView 内核（版本过旧 / TLS 协商 / 渲染），不在网络。\
+             可先升级系统「Android System WebView」，或换一台设备比对同一网址。"
+        );
+    }
     format!(
         "可达性探测：{host} 已连通（{st}，{ms}ms），但页面未渲染 —— \
          问题多半在本机 WebView 内核（版本过旧 / TLS 协商 / 渲染），不在网络。\
          可先升级系统「Android System WebView」，或换一台设备比对同一网址。"
     )
+}
+
+/// 代理模式下上游返回 401/403 时的结论（#15）。
+///
+/// 为什么单独一类：[`probe_once`] 把「拿到任意 HTTP 响应」都算可达，401 也算 —— 但对
+/// **带鉴权**的站点而言，401 恰恰说明本地代理那层 Authorization 注入没生效。这与
+/// 「内核不渲染」是两条完全不同的分诊线，混在一起会把排查引到错误方向。
+///
+/// `host` 只放上游主机名（不带路径，避免把入口令牌带进用户可见文案）。
+#[cfg(any(not(windows), test))]
+fn probe_auth_message(host: &str, status: u16) -> String {
+    format!(
+        "可达性探测：上游 {host} 返回 HTTP {status}（未授权）—— 上游可达，但本地代理注入的\
+         鉴权未通过。请检查打包配置里的账号密码，或改用无需鉴权的入口地址。"
+    )
+}
+
+/// 可达性探测的目标（#15）：代理模式下探**真实上游**，否则探导航地址本身。
+///
+/// 返回 `(url, via_proxy)`。旧实现一律探 `nav.url`，代理模式下那是
+/// `http://127.0.0.1:<port>` —— 只能证明本地代理进程活着，证明不了上游可达；
+/// 用户看到的「127.0.0.1 已连通」与我们真正想回答的问题（上游通不通）无关，
+/// 属于「取证方法错 ⇒ 结论错」。
+///
+/// 上游 origin 缺失（理论上不该发生：`prepare_navigation` 一定会填）时退回探
+/// `nav.url`，退化成旧行为但绝不 panic。
+#[cfg(any(not(windows), test))]
+fn probe_target(nav: &Navigation) -> (String, bool) {
+    if nav.use_local_proxy {
+        if let Some(origin) = nav
+            .upstream_origin
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return (origin.to_string(), true);
+        }
+    }
+    (nav.url.clone(), false)
 }
 
 /// 导航提交后发起可达性探测；把结论（**成功 / 失败分类**）在主线程 eval 给加载层卡片。
@@ -577,11 +631,11 @@ fn probe_ok_message(host: &str, status: Option<u16>, ms: u128) -> String {
 /// 按类别给出带主机的具体原因（见 [`probe_failure_message`]）。只报失败会让「壳内不渲染」这类
 /// 故障只剩一张零信息的兜底卡 —— 而那恰恰是最需要判据的情形。
 ///
-/// `url` 即 WebView 实际导航的地址。⚠️ 已知局限：代理模式下它是 `127.0.0.1:<port>`，探到的是
-/// **本地代理自身**（只能证明代理进程活着，证明不了上游），要修需改成探测真实上游。
+/// `url` 是 [`probe_target`] 算出的**探测目标**：代理模式下是上游 origin，不再是
+/// `127.0.0.1:<port>`（清单 #15 修的就是这一点）；`via_proxy` 决定成功 / 401 文案的措辞。
 /// `AppHandle` 按值传入：探测跑在 `'static` 的 Tokio 任务里，不能借用调用方的引用。
 #[cfg(not(windows))]
-fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String) {
+fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String, via_proxy: bool) {
     let host = Url::parse(&url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
@@ -610,7 +664,13 @@ fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String) {
                 });
             }
             ProbeOutcome::Reachable { status, ms } => {
-                let line = probe_ok_message(&host, status, ms);
+                // 代理模式下的 401/403：上游可达但鉴权没过，单独一条结论（清单 #15）。
+                let line = match (via_proxy, status) {
+                    (true, Some(code)) if code == 401 || code == 403 => {
+                        probe_auth_message(&host, code)
+                    }
+                    _ => probe_ok_message(&host, status, ms, via_proxy),
+                };
                 let a = app.clone();
                 let l = label.clone();
                 let _ = app.run_on_main_thread(move || crate::loading::show_note(&a, &l, &line));
@@ -742,7 +802,7 @@ mod tests {
     fn probe_ok_message_reports_reachability_and_points_at_webview() {
         // 成功路径也必须给出结论：只报失败会让「Rust 侧能连通、壳内却不渲染」这类故障
         // 只剩一张零信息的兜底卡 —— 而那正是真机取证（2026-10-09）遇到的实际情况。
-        let m = probe_ok_message("ai260926.osfipin.com", Some(200), 812);
+        let m = probe_ok_message("ai260926.osfipin.com", Some(200), 812, false);
         assert!(m.contains("ai260926.osfipin.com"), "应含主机名：{m}");
         assert!(m.contains("HTTP 200"), "应含状态码：{m}");
         assert!(m.contains("812ms"), "应含耗时：{m}");
@@ -751,11 +811,63 @@ mod tests {
             "结论必须指向「本机 WebView 内核」，否则用户会继续往网络上找：{m}"
         );
         // 老内核 / 重定向后拿不到状态码时，不得把 Option 的 Debug 形态漏到用户文案里。
-        let m2 = probe_ok_message("h.example", None, 5);
+        let m2 = probe_ok_message("h.example", None, 5, false);
         assert!(m2.contains("已收到响应"), "无状态码时应给中性表述：{m2}");
         assert!(
             !m2.contains("None"),
             "不得把 Option 的 Debug 形态漏进用户文案：{m2}"
         );
+        // 代理模式：必须点明「经本地代理访问上游」，否则用户会把结论读成 127.0.0.1（#15）。
+        let mp = probe_ok_message("up.example", Some(502), 30, true);
+        assert!(
+            mp.contains("经本地代理访问上游") && mp.contains("up.example"),
+            "代理模式的结论必须说明经代理访问的是上游：{mp}"
+        );
+    }
+
+    /// #15 的成对判据：代理模式探上游、上游缺失才退回导航地址；直连不受影响。
+    #[test]
+    fn probe_target_prefers_upstream_origin_when_proxied() {
+        let nav = |url: &str, proxy: bool, upstream: Option<&str>| Navigation {
+            url: url.to_string(),
+            user: String::new(),
+            pass: String::new(),
+            use_local_proxy: proxy,
+            proxy_abort: None,
+            upstream_origin: upstream.map(str::to_string),
+        };
+        // 代理 + 上游已知 → 探上游。
+        let (u, via) = probe_target(&nav(
+            "http://127.0.0.1:51234/",
+            true,
+            Some("https://ai260926.osfipin.com"),
+        ));
+        assert_eq!(u, "https://ai260926.osfipin.com");
+        assert!(via, "代理模式下必须把 via_proxy 传给文案层");
+        // 代理但上游信息缺失 → 退回导航地址（不 panic）。
+        let (u2, via2) = probe_target(&nav("http://127.0.0.1:51234/", true, None));
+        assert_eq!(u2, "http://127.0.0.1:51234/");
+        assert!(!via2);
+        // 直连：导航地址本身就是上游。
+        let (u3, via3) = probe_target(&nav("https://a.com/", false, Some("https://a.com")));
+        assert_eq!(u3, "https://a.com/");
+        assert!(!via3);
+        // 上游是空白串也要退回（防「字段有值但没内容」）。
+        let (u4, _) = probe_target(&nav("http://127.0.0.1:1/", true, Some("   ")));
+        assert_eq!(u4, "http://127.0.0.1:1/");
+    }
+
+    /// #15：401/403 单独成类 —— 「鉴权没过」与「内核不渲染」不是同一条分诊线。
+    #[test]
+    fn probe_auth_message_separates_unauthorized_from_render_failure() {
+        let m = probe_auth_message("ai260926.osfipin.com", 401);
+        assert!(m.contains("ai260926.osfipin.com"), "应含上游主机名：{m}");
+        assert!(m.contains("HTTP 401"), "应含状态码：{m}");
+        assert!(m.contains("鉴权"), "必须点明是鉴权问题：{m}");
+        assert!(
+            !m.contains("WebView 内核"),
+            "未授权不能引导用户去查内核渲染：{m}"
+        );
+        assert!(probe_auth_message("h.example", 403).contains("HTTP 403"));
     }
 }

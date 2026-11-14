@@ -64,6 +64,10 @@ const ELECTRON_CONFIG: &str = include_str!("../../../electron-app/src/main/confi
 const PERMISSIONS_PY: &str = include_str!("../../../.github/scripts/patch-android-permissions.py");
 /// #6 H5 视频全屏的 RustWebChromeClient 补丁脚本（同上，只能静态钉住要素）。
 const FULLSCREEN_PY: &str = include_str!("../../../.github/scripts/patch-android-fullscreen.py");
+/// #9 / #10 返回键补丁（浮层优先 + 再按一次退出），与 JS 侧 closeSheet 是跨文件契约。
+const BACK_PY: &str = include_str!("../../../.github/scripts/patch-android-back.py");
+/// #18 明文流量开关补丁（network_security_config，两壳 workflow 共用同一脚本）。
+const CLEARTEXT_PY: &str = include_str!("../../../.github/scripts/patch-android-cleartext.py");
 // 字段在各真源里的**存在性**（含两份 config.example.json）由 packaging_field_contract.rs
 // 按 `scripts/packaging-fields.json` 数据驱动巡检；本文件只钉语义形态。
 
@@ -859,4 +863,187 @@ fn bar_script_parts_are_derived_and_mount_closes_the_iife() {
         1,
         "`window.__web2appMobileBar` 防重标记必须唯一"
     );
+}
+
+/// ⑯ #9 系统返回键**先关浮层再后退**：JS 侧暴露 `closeSheet`、Kotlin 侧调同名方法。
+///
+/// 缺陷形态（缺任一侧）：页签面板 / 更多面板开着时按返回，面板是 DOM 不是 history 条目，
+/// 系统返回看不见它 ⇒ 直接离开当前页，用户以为「面板关不掉、还把手滑了」。两侧都静默，
+/// 只有真机能发现，所以钉成跨文件契约。
+#[test]
+fn back_key_closes_sheet_before_navigating() {
+    assert!(
+        has_code_line(bar(), "function closeSheetIfOpen()"),
+        "底栏脚本必须有 closeSheetIfOpen（有面板时关掉并返回 true）"
+    );
+    assert!(
+        bar().contains("closeSheet: closeSheetIfOpen"),
+        "必须把它暴露成 window.__web2appMobileBar.closeSheet（Kotlin 侧按这个名字调）"
+    );
+    assert!(
+        bar().contains("if (!activePanel) return false;"),
+        "无面板时必须返回 false，让原生继续走后退逻辑"
+    );
+    // Kotlin 侧：eval 串里必须出现同名方法，且判定排在 web2appBack 之前。
+    assert!(
+        BACK_PY.contains("b.closeSheet()"),
+        "patch-android-back.py 的 eval 串必须调页面侧 closeSheet（与 core.js 同名）"
+    );
+    let js_at = BACK_PY
+        .find("evaluateJavascript(WEB2APP_CLOSE_SHEET_JS)")
+        .unwrap_or_else(|| panic!("返回键补丁必须先问页面浮层状态"));
+    let back_at = BACK_PY
+        .find("web2appBack(webView)")
+        .unwrap_or_else(|| panic!("返回键补丁必须有真正的后退动作"));
+    assert!(
+        js_at < back_at,
+        "浮层判定必须排在后退之前（反了 = 面板开着时按返回直接离开页面）"
+    );
+    // 返回值类型也是契约：数字 1/0（字符串会被 evaluateJavascript 回调再包一层引号）。
+    assert!(
+        BACK_PY.contains("?1:0"),
+        "eval 串必须返回数字 1/0，不能用布尔/字符串"
+    );
+}
+
+/// ⑰ #10 无真实历史时「再按一次退出」：一按就 finish 会被当成闪退。
+#[test]
+fn back_key_requires_double_press_to_exit() {
+    assert!(
+        BACK_PY.contains("Toast.makeText") && BACK_PY.contains("再按一次退出"),
+        "第一次返回必须给可见提示（Toast + 文案），否则用户以为按了没反应"
+    );
+    assert!(
+        BACK_PY.contains("web2appLastBackAt") && BACK_PY.contains("<= 2000L"),
+        "双按判定必须有时间戳与 2s 窗口"
+    );
+    // 成对：时间窗**之后**出现的第一个 finish() 才是退出分支 —— 从窗口位置往后找，
+    // 否则会命中模块文档字符串里的 `finish()` 说明（那是注释，不是代码）。
+    let win = BACK_PY.find("<= 2000L").unwrap();
+    let fin = BACK_PY[win..]
+        .find("finish()")
+        .map(|i| win + i)
+        .unwrap_or_else(|| panic!("双按窗口之后必须有 finish() 退出分支"));
+    assert!(win < fin, "finish() 必须被双按窗口包住，不能无条件退出");
+}
+
+/// ⑱ #11 页签切换会重载：面板里必须真的画出这句说明（移动端单 webview 的固有限制）。
+#[test]
+fn tabs_sheet_explains_reload_semantics() {
+    assert!(
+        bar().contains("切换标签会重新加载页面"),
+        "页签面板必须明示「切换 = 重新加载」，否则会被当成丢状态的 bug"
+    );
+    assert!(
+        bar().contains("w2m-hint"),
+        "说明行必须有独立 class（样式与断言都靠它）"
+    );
+    let add = bar().find("w2m-newrow").unwrap();
+    let hint = bar().find("w2m-hint").unwrap();
+    assert!(
+        add < hint,
+        "说明必须排在「新建标签」之后（顺序反了用户根本看不到）"
+    );
+}
+
+/// ⑲ #12 软键盘让位：只认 visualViewport 的显著差值，且不破坏底部让位契约。
+#[test]
+fn keyboard_avoidance_uses_visual_viewport() {
+    assert!(
+        bar().contains("window.visualViewport"),
+        "键盘让位必须读 visualViewport（layout viewport 不变时 fixed bottom:0 会被键盘整个盖住）"
+    );
+    assert!(
+        bar().contains("W2M_KB_MIN_GAP"),
+        "必须有最小差值阈值：地址栏自动收起也会改 visualViewport，不能当成键盘"
+    );
+    assert!(
+        bar().contains("data-w2m-keyboard"),
+        "抬升状态要可观测（断言与真机排查都靠这个属性）"
+    );
+    // 让位只改底栏 inline bottom；body 的 margin-bottom 契约必须原样保留。
+    assert!(
+        bar().contains("margin-bottom:"),
+        "键盘让位不得顺手改掉 body 的底部让位契约"
+    );
+    let fit = bar().find("scheduleChromeFit();").unwrap();
+    let kb = bar().find("installKeyboardAvoid();").unwrap();
+    assert!(
+        fit < kb,
+        "键盘让位必须在底栏布局（scheduleChromeFit）之后安装"
+    );
+}
+
+/// ⑳ #16 宽屏（平板 / 横屏）：底栏与面板限宽居中，避免一排按钮被拉成一米宽。
+#[test]
+fn wide_screen_bar_is_centered_and_capped() {
+    assert!(
+        bar().contains("@media (min-width:600px)"),
+        "必须有宽屏断点（600px 是平板竖屏的最小常见宽度）"
+    );
+    assert!(
+        bar().contains("max-width:560px"),
+        "宽屏必须限宽：否则底栏按钮横跨整块平板，拇指够不到"
+    );
+    assert!(
+        bar().contains("left:50%!important") && bar().contains("transform:translateX(-50%)"),
+        "限宽后必须居中（left + transform，不改布局流）"
+    );
+    assert!(
+        bar().contains("#__web2app_mobilebar__ .w2m-sheet{max-width:560px"),
+        "面板必须与底栏同步限宽，否则底栏窄、面板满宽，视觉断裂"
+    );
+}
+
+/// ㉑ #18 明文 HTTP **必须可用**：脚本写 network_security_config 全放行，workflow 不再各写 sed。
+///
+/// 曾被收紧成「仅 127.0.0.1 / localhost」，结果直连 http 站点被系统拦下
+///（`ERR_CLEARTEXT_NOT_PERMITTED`）⇒ 产品侧要求回退为全放行，本用例把这条口径钉住：
+/// 配置本体一旦重新出现禁明文，用例即失败。
+#[test]
+fn cleartext_http_stays_allowed() {
+    for needle in [
+        "web2app-android-cleartext",
+        "network_security_config",
+        "cleartextTrafficPermitted=\"true\"",
+        "android:usesCleartextTraffic",
+        "--selftest",
+    ] {
+        assert!(
+            CLEARTEXT_PY.contains(needle),
+            "patch-android-cleartext.py 必须包含：{needle}"
+        );
+    }
+    // 判定只看资源文件本体：脚本注释与自测里的「反例 / 历史说明」不参与，否则一改文案就假红。
+    const NSC_OPEN: &str = "<network-security-config>";
+    const NSC_CLOSE: &str = "</network-security-config>";
+    let open = CLEARTEXT_PY
+        .find(NSC_OPEN)
+        .expect("脚本必须写出 <network-security-config>");
+    let close = CLEARTEXT_PY
+        .find(NSC_CLOSE)
+        .expect("脚本必须闭合 </network-security-config>");
+    let xml = &CLEARTEXT_PY[open..close + NSC_CLOSE.len()];
+    assert!(
+        xml.contains("cleartextTrafficPermitted=\"true\""),
+        "明文必须放行：直连 http 站点不允许被系统拦下"
+    );
+    let banned = concat!("cleartextTrafficPermitted=", "\"false\"");
+    assert!(
+        !xml.contains(banned),
+        "明文不得被禁：直连 http 站点会被系统拦下（ERR_CLEARTEXT_NOT_PERMITTED）"
+    );
+    for (name, yml) in [
+        ("build-custom.yml", BUILD_CUSTOM_YML),
+        ("release.yml", RELEASE_YML),
+    ] {
+        assert!(
+            yml.contains("patch-android-cleartext.py"),
+            "{name} 的 Android job 必须调用 cleartext 补丁"
+        );
+        assert!(
+            !yml.contains("sed -i -E 's/android:usesCleartextTraffic"),
+            "{name} 不得再用 sed 全局放行明文 HTTP（已改为 network_security_config 白名单）"
+        );
+    }
 }

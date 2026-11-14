@@ -27,7 +27,7 @@ onCustomViewHidden() 仍会立刻取消）：
     SHOW_TRANSIENT_BARS_BY_SWIPE），低版本走 systemUiVisibility 标志（minSdk=24）。
 
 补丁链固定顺序（见 docs/android-improvements.md §0）：
-insets → back → download → extras → schemes → fullscreen → permissions → cleartext sed。
+insets → back → download → extras → schemes → fullscreen → permissions → cleartext。
 fullscreen 只改 RustWebChromeClient.kt，与只改 Manifest 的 permissions 补丁互不冲突。
 
 gen/android 每次构建现生成，两个 workflow（build-custom.yml / release.yml）

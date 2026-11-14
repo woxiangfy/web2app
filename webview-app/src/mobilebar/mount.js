@@ -4,7 +4,13 @@
   // =====================================================================
   // 立刻置位防重入：挂载是异步的（要等 DOM 宿主节点），期间可能被再次注入。
   // notify：供外部探针 / 同世界脚本弹同一个 toast（与「更多」面板操作反馈同款）。
-  window.__web2appMobileBar = { setTabs: setTabs, notify: toast };
+  // closeSheet：给 Android 系统返回键用（#9）—— 有面板开着时先关面板，别直接后退。
+  // 读取方在 `.github/scripts/patch-android-back.py` 的 evaluateJavascript 里，两侧逐字对齐。
+  window.__web2appMobileBar = {
+    setTabs: setTabs,
+    notify: toast,
+    closeSheet: closeSheetIfOpen
+  };
 
   // 启动页（内置页）不画底栏：那时还没有可前进 / 后退的真实页面，画出来只会误导。
   // ⚠️ 这里不 return 之前已置位的防重标记 —— 换文档后本脚本会被重新注入，新的 JS 环境里
@@ -32,6 +38,8 @@
 
     ensureScrollRoot(mounted ? mounted.style : null);
     scheduleChromeFit();
+    // 软键盘让位（#12）：只对「键盘覆盖页面」的引擎模式生效，resize 模式自动无操作。
+    installKeyboardAvoid();
 
     if (!mounted) return;
     var bar = mounted.bar;

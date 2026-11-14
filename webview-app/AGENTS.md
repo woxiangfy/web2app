@@ -81,4 +81,3 @@ Windows / Android 的完整环境要求、Android 构建命令、测试分组计
 | [docs/float-ball.md](docs/float-ball.md) | 桌面悬浮球：功能行为、设置项、v1.67–v1.80 演进与真机取证、`--float-probe` |
 | [docs/workflows.md](docs/workflows.md) | 8 条 workflow 完整用法、打包字段说明、动态解析与安全模型、Android 签名 |
 | [docs/android.md](docs/android.md) | Android 构建准备、共享补丁脚本与补丁链契约、移动端底栏、启动排障史（v1.60–v1.65）、数据目录与包名 |
-| [../docs/architecture-review-2026-11-07.md](../docs/architecture-review-2026-11-07.md) | 本轮架构与组织结构审查（分级问题 / 优化批次 / 刻意不动清单 / 门禁实测） |
