@@ -50,7 +50,7 @@
 | `version` | string | `"0.0.1"` | 全平台（**构建期消费**） | **打包产物版本号**：三段数字 `"主.次.补丁"`，主次 ≤ 255、补丁 ≤ 65535。写入 Tauri 的 `tauri.conf.json.version`（MSI ProductVersion / exe 版本资源 / Android versionName）与 Electron 的 `extraMetadata.version`（产物文件名 / exe 版本资源）。规则与边界见 §3.6 |
 | `extra` | 任意 JSON | `{}` | 全平台 | 注入被包裹网页的附加参数，前端读 `window.web2appExtra` |
 | `icon_url` | string | `""` | 全平台（**构建期消费**） | 应用图标 PNG 的 URL；空 = 沿用仓库默认图标 |
-| `proxy_enabled` | **`bool`** | `false` | 仅 Windows | 启用本地反向代理（统一注入 Basic 鉴权，覆盖 WebSocket） |
+| `proxy_enabled` | **`bool`** | `false` | 全平台（`proxy_http` / `proxy_https` / `proxy_bypass` 三个外部代理字段仅 Windows） | 启用本地反向代理（统一注入 Basic 鉴权，覆盖 WebSocket）。移动端没有 `--proxy-server`，开它就是本地反向代理 |
 | `proxy_http` | string | `""` | 仅 Windows | 外部 HTTP 代理地址 |
 | `proxy_https` | string | `""` | 仅 Windows | 外部 HTTPS 代理地址（留空 = 复用 `proxy_http`） |
 | `proxy_bypass` | string | `"localhost;127.0.0.1;<-loopback>"` | 仅 Windows | 不走代理的地址，**分号分隔** |
@@ -350,7 +350,7 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
 | `tabs_enabled` | ✅ 有效（多 WebView 标签栏） | ✅ 有效（底栏内单 webview 页签记录；需同时开 `mobile_bar`） | ✅ 有效（多 WebContentsView） |
 | `mobile_bar` | ❌ 忽略（常量为 `#[cfg(mobile)]`，桌面目标无此代码路径） | ✅ 有效（底栏模式） | ❌ 忽略 |
 | `debug` | ✅ 写 `<数据目录>\logs\startup.log` | ✅ 写应用私有目录下的 `logs\startup.log` | ✅ 写 `<数据目录>\logs\startup.log`；探针 / 冒烟**强制开** |
-| `proxy_*` | ✅ 有效 | ❌ 忽略 | ✅ 有效 |
+| `proxy_*` | ✅ 有效 | ⚠️ 仅 `proxy_enabled`（`nav::local_proxy_enabled` 的非 Windows 分支 = `PROXY_ENABLED`，恒走本地反向代理）；`proxy_http/https/bypass` 无消费方 | ✅ 有效 |
 | `data_dir` | 见 §4.3 | ❌ 忽略（始终私有目录） | 见 §4.3 |
 | `icon_url` | 构建期 `cargo tauri icon` | 同左 | 构建期交给 electron-builder 转 ico |
 | `android_*`（4 个签名字段） | ❌ 忽略 | ✅ 用于签名 | ❌ 忽略（且不写进包内 config.json） |
@@ -502,7 +502,7 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
 | `icon_url` 非 http(s) | warning（打包时下载失败会回落默认图标） |
 | `resolve_secret` 未配置 | ⚠️ **仅当 `app_url` 是域名数组**才 warning（共享默认密钥，安全门槛较低）；单 URL 字符串模式只打一行说明、**不告警**——该模式运行期不解密 TXT，`SECRET` 没有任何调用点 |
 | **Android**：`app_url` 单 URL 内嵌 `user:pass@` 且 `proxy_enabled=false` | **硬失败**（仅 CI android job 传 `--target android` 时校验）：Android 壳没有 Basic 鉴权钩子，该组合真机必 401；报错给出「开代理 / 删凭据」两种修法。Windows 直连有 WebView2 鉴权钩子，不受此限 |
-| **Android**：域名数组 + `proxy_enabled=false` | warning（解密结果静态不可知：若真实地址需要 Basic Auth 同样必须开代理） |
+| **Android**：域名数组 + `proxy_enabled=false` | **不告警**（2026-11-14 起）：密文打包期解不开，真实地址运行时才存在 ⇒ 无从判断，无条件告警等于在**每个默认组合**的 Android 构建里刷噪声（注解变背景墙，真问题被淹没）。目标站需要 Basic Auth 时必须配 `proxy_enabled: true`——Android 壳没有鉴权钩子，只有本地反向代理能注入 `Authorization` |
 | `android_*` 出现在 Electron 侧 | 忽略并提示（同一份契约，本壳不实现） |
 | 字段值为 `null` | 视为**用默认值** |
 

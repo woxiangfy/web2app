@@ -109,7 +109,8 @@
   鉴权的唯一跨端机制是本地反向代理（`proxy_enabled=true`）。
 - 方案：解析器新增 `--target android`（仅 CI android job 传）：
   - 单 URL **含 `user:pass@` 且 `proxy_enabled=false`** → 硬失败，文案给出两种修法；
-  - 域名数组 + 关代理 → warning（解密结果静态不可知，提示「若真实地址需要 Basic Auth 必须开代理」）。
+  - 域名数组 + 关代理 → **不输出任何东西**（打包期解不出真实地址，无条件告警只会在每个
+    默认组合的 Android 构建里刷噪声；2026-11-14 起，理由见 `docs/packaging-config.md` §5）。
   - Node 复刻侧加同名纯函数与自测，`--parity` 覆盖无 target 主路径。
 - 验收：CI android job 对该组合直接红；Windows / Electron 打包不受影响；
   `parse-packaging-config.py --selftest` 与 `pack-local.mjs --selftest` 全绿。
@@ -316,7 +317,7 @@
   `cargo test --workspace` **205** 测试全绿、rustfmt 干净；Electron 侧
   `pnpm run unit` **101** 全绿（含 `toAndroidPermissions` 新用例）；parity 55/55。
 - `--target android` CLI 端到端四组合验证：内嵌凭据+直连硬失败（URL 经 mask 脱敏）、
-  内嵌凭据+代理通过、无 target（Windows 路径）不受影响、域名数组+直连降级 warning。
+  内嵌凭据+代理通过、无 target（Windows 路径）不受影响、域名数组+直连**零注解**（2026-11-14 起）。
 - 真机行为以上面各条「验收」为准，列入 §4 第 1、2、4、5、6、12 项。
 
 ---

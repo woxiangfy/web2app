@@ -495,13 +495,15 @@ def validate_for_target(target: str | None, merged: dict[str, str]) -> None:
     app_url = str(merged["app_url"]).strip()
     proxy_on = str(merged["proxy_enabled"]).strip().lower() == "true"
 
-    # 域名数组模式：解密结果静态不可知，只能提示（真实地址若含账号密码同样必须走代理）。
+    # 域名数组模式：**不产生任何输出**（2026-11-14 起）。
+    #
+    # 曾经在这里无条件打一条 `::warning::`：「若解密出的真实地址含 user:pass@，Android 将 401」。
+    # 那是纯噪声 —— 它不依赖任何可判定的配置事实（密文在打包期解不开，地址运行时才存在），
+    # 于是每一次「域名数组 + proxy_enabled=false」的 Android 构建都会触发，而这是**默认组合**，
+    # 也就是最常见的配置。注解变成背景墙之后，真该修的配置问题反而更容易被忽略。
+    # 真出事时的表现是「页面 401 / 白屏」，解法和成因写在 docs/packaging-config.md §5 校验表
+    # 与 docs/android-improvements.md：目标站需要登录 ⇒ 配 "proxy_enabled": true。
     if app_url.startswith("["):
-        if not proxy_on:
-            print("::warning::目标为 Android 且 proxy_enabled=false：域名数组模式下若解密出的"
-                  "真实地址包含账号密码（user:pass@host），Android 无法注入 Basic 鉴权"
-                  "（只有本地反向代理能注入），真机将 401。目标站需要登录时请改配 "
-                  '"proxy_enabled": true。')
         return
 
     if url_contains_userinfo(app_url) and not proxy_on:
@@ -914,23 +916,26 @@ def _selftest_cases() -> None:
     except ConfigError as e:
         assert "proxy_enabled" in str(e) and "401" in str(e), f"报错要给修法与后果：{e}"
         assert "***@" in str(e), "报错里的 URL 必须脱敏"
-    # 域名数组 + Android + 关代理：只 warning（解密结果静态不可知），不硬失败
-    m = build_merged({"app_url": ["a.com"], "public_key": "K"})
+    # 域名数组 + Android + 关代理：**一个字都不打**。（2026-11-14）这里原本是一条
+    # 「若解密出的地址含账号密码，Android 将 401」的 warning —— 它不依托任何配置事实，
+    # 每次默认组合的 Android 构建都会触发，等于把 CI 注解变成背景墙。反向钉住：谁把它
+    # 加回来，本断言立刻红。
     import io as _io
-
-    buf = _io.StringIO()
     import contextlib as _cl
 
+    arr_merged = build_merged({"app_url": ["a.com"], "public_key": "K"})
+    buf = _io.StringIO()
     with _cl.redirect_stdout(buf):
-        validate_for_target("android", m)
-    assert "::warning::" in buf.getvalue() and "proxy_enabled" in buf.getvalue()
-    # 数组 + 开代理：不应再有本校验的代理警告（数组模式仍可能有 resolve_secret 的既有警告，
-    # 那是 build_merged 的职责，这里只按代理关键词判定）。
+        validate_for_target("android", arr_merged)
+    assert buf.getvalue() == "", f"域名数组模式不该产生任何注解，实际：{buf.getvalue()!r}"
+    # 数组 + 开代理：同样安静（曾用来验「代理开后不再警告」，现在两侧都必须无输出）。
+    # ⚠️ build_merged 自身会打 resolve_secret 相关的 warning，必须**在 redirect 之外**构建，
+    # 否则本断言量到的是 build_merged 的输出、而不是 validate_for_target 的。
+    arr_proxied = build_merged({"app_url": ["a.com"], "public_key": "K", "proxy_enabled": True})
     buf2 = _io.StringIO()
     with _cl.redirect_stdout(buf2):
-        validate_for_target("android", build_merged(
-            {"app_url": ["a.com"], "public_key": "K", "proxy_enabled": True}))
-    assert "proxy_enabled" not in buf2.getvalue()
+        validate_for_target("android", arr_proxied)
+    assert buf2.getvalue() == "", f"数组 + 开代理也不该有输出，实际：{buf2.getvalue()!r}"
 
     # write_env：空串必须写成 `DATA_DIR=`（而不是整行消失），否则 Rust 侧读不到「用系统目录」这个意图
     with tempfile.TemporaryDirectory() as d:

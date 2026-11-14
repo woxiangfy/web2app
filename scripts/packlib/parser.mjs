@@ -293,24 +293,22 @@ export function urlContainsUserInfo(text) {
 /**
  * 打包目标相关的组合校验。目前只有 Android 有必须在打包期挡住的组合：
  * 内嵌账号密码 + proxy_enabled=false（Android 无 Basic 鉴权钩子 ⇒ 真机必 401）。
- * 抛 ConfigError = 硬失败；其余情况静默或 emit 一条 ::warning::。
+ * 抛 ConfigError = 硬失败；**其余情况一律静默**（不 emit 任何注解，见下方域名数组的注释）。
  */
 export function validateForTarget(target, merged) {
   if (target !== 'android') return
   const appUrl = pyStr(merged.app_url).trim()
   const proxyOn = pyStr(merged.proxy_enabled).trim().toLowerCase() === 'true'
 
-  // 域名数组模式：解密结果静态不可知，只能提示。
-  if (appUrl.startsWith('[')) {
-    if (!proxyOn) {
-      emit(
-        '::warning::目标为 Android 且 proxy_enabled=false：域名数组模式下若解密出的' +
-          '真实地址包含账号密码（user:pass@host），Android 无法注入 Basic 鉴权' +
-          '（只有本地反向代理能注入），真机将 401。目标站需要登录时请改配 "proxy_enabled": true。',
-      )
-    }
-    return
-  }
+  // 域名数组模式：**不打印任何东西**（2026-11-14 起，与 Python 版逐字对齐）。
+  //
+  // 这里曾无条件 emit 一条「若解密出的真实地址含 user:pass@，Android 将 401」的 ::warning::。
+  // 那是纯噪声 —— 它不依赖任何可判定的配置事实（密文在打包期解不开，地址运行时才存在），
+  // 于是每次「域名数组 + proxy_enabled=false」的 Android 构建都会触发，而这是**默认组合**。
+  // 注解变背景墙之后，真该修的配置问题反而更容易被忽略。
+  // 真出事时的表现是「页面 401 / 白屏」，成因与解法见 docs/packaging-config.md §5 与
+  // docs/android-improvements.md：目标站需要登录 ⇒ 配 "proxy_enabled": true。
+  if (appUrl.startsWith('[')) return
 
   if (urlContainsUserInfo(appUrl) && !proxyOn) {
     throw new ConfigError(

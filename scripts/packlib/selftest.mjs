@@ -237,19 +237,16 @@ export function selftest() {
       assertThat(e.message.includes('proxy_enabled') && e.message.includes('401'), `报错要给修法与后果：${e.message}`)
       assertThat(e.message.includes('***@'), '报错 URL 必须脱敏')
     }
-    // 域名数组 + Android + 关代理：只 warning
-    let vout = captureOutput(() =>
-      validateForTarget('android', buildMerged({ app_url: ['a.com'], public_key: 'K' })),
-    ).lines.join('\n')
-    assertThat(vout.includes('::warning::') && vout.includes('proxy_enabled'), '数组模式应只告警')
-    // 数组 + 开代理：无本校验警告
-    vout = captureOutput(() =>
-      validateForTarget(
-        'android',
-        buildMerged({ app_url: ['a.com'], public_key: 'K', proxy_enabled: true }),
-      ),
-    ).lines.join('\n')
-    assertThat(!vout.includes('proxy_enabled'), '数组 + 开代理不应有代理警告')
+    // 域名数组 + Android + 关代理：**不产生任何输出**（2026-11-14）。这里原本是一条
+    // 「若解密出的地址含账号密码，Android 将 401」的 ::warning:: —— 它不依托任何配置事实，
+    // 每次默认组合的 Android 构建都会触发，把 CI 注解变成背景墙。反向钉住：加回来就红。
+    const arrMerged = buildMerged({ app_url: ['a.com'], public_key: 'K' })
+    let vout = captureOutput(() => validateForTarget('android', arrMerged)).lines.join('\n')
+    assertThat(vout === '', `域名数组模式不该产生任何输出，实际：${vout}`)
+    // 数组 + 开代理：同样安静
+    const arrProxied = buildMerged({ app_url: ['a.com'], public_key: 'K', proxy_enabled: true })
+    vout = captureOutput(() => validateForTarget('android', arrProxied)).lines.join('\n')
+    assertThat(vout === '', `数组 + 开代理也不该有输出，实际：${vout}`)
 
     // toConfigJson：bool 保持真 bool、数组保持数组、android_* 不落盘
     const merged = buildMerged({
