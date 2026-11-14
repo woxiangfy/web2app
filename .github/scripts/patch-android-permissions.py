@@ -23,7 +23,7 @@ getUserMedia / geolocation 永远 reject。运行时弹窗本身 wry 已经实�
 本脚本据此按需注入；空数组 = 什么都不注入（直接跳过）。
 
 补丁链固定顺序（见 docs/android-improvements.md §0）：
-insets → back → download → extras → schemes → fullscreen → permissions → cleartext。
+insets → back → download → extras → schemes → fullscreen → permissions → cleartext → splash-theme。
 
 gen/android 每次构建现生成，两个 workflow（build-custom.yml / release.yml）
 都必须在 init 之后调用本脚本。

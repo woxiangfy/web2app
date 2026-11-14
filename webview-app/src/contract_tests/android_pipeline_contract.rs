@@ -382,3 +382,71 @@ fn android_pipeline_is_derived_from_scripts_dir_and_wired_consistently() {
         "ci.yml 的循环必须断言「至少发现一个脚本」，否则规则写错时空集也全绿"
     );
 }
+
+/// ⑨ #13 启动底色：主题补丁里的两个色值必须与 `src/splash.html` 的 `background` 逐字一致。
+///
+/// 为什么要跨文件比：这一项的全部正确性就是「窗口底色 == 启动页底色」。两边各存一份色值、
+/// 谁也管不到谁 ⇒ 只改一侧就是启动瞬间一次颜色跳变（暗色下尤其刺眼），而任何单侧断言都
+/// 发现不了。⚠️ 只取**常量赋值**与 HTML 的 `background:` 取值，注释里的历史说明不参与判定
+///（`mobile_bar_contract` 上踩过「针被注释满足」的坑）。
+#[test]
+fn splash_theme_colors_match_splash_html() {
+    const PY: &str = include_str!("../../../.github/scripts/patch-android-splash-theme.py");
+    const HTML: &str = include_str!("../splash.html");
+
+    fn py_color(src: &str, name: &str) -> String {
+        let key = format!("{name} = \"#");
+        let i = src
+            .find(&key)
+            .unwrap_or_else(|| panic!("脚本缺常量赋值 {name} = \"#…\""));
+        let hex: String = src[i + key.len()..].chars().take(6).collect();
+        assert!(
+            hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "{name} 取值异常：{hex}"
+        );
+        format!("#{hex}")
+    }
+    let light = py_color(PY, "SPLASH_LIGHT");
+    let dark = py_color(PY, "SPLASH_DARK");
+    assert_ne!(light, dark, "日夜两色相同 ⇒ 等于没做");
+
+    // splash.html 里所有 `background:` 的取值。
+    let mut html_colors: Vec<String> = Vec::new();
+    let mut rest = HTML;
+    while let Some(i) = rest.find("background:") {
+        let tail = rest[i + "background:".len()..].trim_start();
+        if let Some(h) = tail.strip_prefix('#') {
+            let hex: String = h.chars().take(6).collect();
+            if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                html_colors.push(format!("#{hex}"));
+            }
+        }
+        rest = &rest[i + "background:".len()..];
+    }
+    for (label, want) in [("亮色", &light), ("暗色", &dark)] {
+        assert!(
+            html_colors.contains(want),
+            "splash.html 没有{label} {want} —— 脚本与页面已漂移：{html_colors:?}"
+        );
+    }
+
+    // 暗色只能出现在 `prefers-color-scheme: dark` 之后；写在全局就是「亮色用户也看到暗底」。
+    let media = HTML
+        .find("prefers-color-scheme: dark")
+        .expect("splash.html 缺暗色媒体查询");
+    let dark_use = HTML.find(&dark).expect("splash.html 缺暗色字面量");
+    assert!(dark_use > media, "暗色必须落在 dark 媒体查询内");
+
+    // 主题引用与两份资源落点（名字写错等于整条补丁静默不生效）。
+    for needle in [
+        "android:windowBackground",
+        "@color/web2app_splash",
+        "values-night",
+        "--selftest",
+    ] {
+        assert!(
+            PY.contains(needle),
+            "patch-android-splash-theme.py 必须包含：{needle}"
+        );
+    }
+}

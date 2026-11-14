@@ -101,6 +101,10 @@ URL      : https://www.example.com/app/
 ## 4. 发布 DNS TXT 记录
 
 1. 在域名控制台给跳板域名（如 `node1.example.com`）新增一条 **TXT 记录**，值 = 第 2 步的密文那一行。
+   ⚠️ **记录名里别在中间塞下划线**：`txt_w2a_abc.example.com` 这类名字在 2026-11-14 之前会被客户端
+   静默判成非法（客户端只看到「服务器连接失败」，而 `nslookup` / 浏览器一切正常，极易误判为网络问题）。
+   现在客户端已放宽（`Name::from_str_relaxed`），但仍建议用 `txt-w2a-abc.example.com` 或
+   `_txt-w2a-abc.example.com` —— 见 `docs/changes/2026-11-14.md`。
 2. 值必须是**单行纯密文**：不带引号、不带 `#` 注释、不带空格换行。控制台显示时加的引号是 DNS 展示格式，不属于记录值；若控制台把长值拆成多段，客户端会自动拼接各段，可用。
 3. 多个跳板域名可各挂一条（用 `--count` 出的多份密文分散），运行时**按 `app_url` 数组顺序**逐个尝试，任一成功即用；全部失败报「服务器连接失败」。
 4. 等 DNS 生效后本机核对：
@@ -155,6 +159,8 @@ node scripts/pack-local.mjs --config tests/json/resolve-local.json --target elec
 | 第 3 步本地 `decrypt` 就失败 | Secret 与 `--secret` 不一致（最常见）；公钥私钥不成对；密文带空格/换行/抄漏                                           |
 | `nslookup` 看不到记录      | DNS 未生效或记录加错域名 / 记录类型；等 TTL 刷新后再试                                                          |
 | 客户端报「服务器连接失败」         | 先看 `nslookup` 与 `startup.log`；再核对 `app_url` 是否为数组、`public_key` / `resolve_secret` 是否与生成时同源 |
+| 客户端报「服务器连接失败」但 `nslookup` 正常 | **看记录名的下划线位置**：`txt_w2a_abc.example.com` 这种「下划线在 label 中间」的名字，2026-11-14 之前的客户端会在构造查询名时就拒绝（hickory 走 IDNA/STD3），请求根本没发出去 ⇒ 用户只看到「服务器连接失败」。已修（`Name::from_str_relaxed`），旧包需重新打包 |
+| 解析成功但页面打不开（错误页 / ERR_NAME_NOT_RESOLVED） | **密文里的 URL 本身不可用**：主机 NXDOMAIN 或没有 A 记录（`nslookup <主机> 1.1.1.1` 一并核）；此时客户端解析是全绿的，问题在签发数据 ⇒ 用正确地址重新 `resolve-tool encrypt` 并更新 TXT |
 | DNS 有记录但客户端拒绝         | TXT 值带了引号 / `#` 注释 / 换行；`--ttl-days` 已过期；密文是旧工具签发的格式（客户端只认当前格式，按本手册重签）                     |
 | 只改了 DNS / 配置，忘了重打包    | 换了 Secret 或公钥 ⇒ 客户端里编死的值没变，必须重新打包                                                          |
 | 重跑过 bat               | 身份全变 ⇒ 公钥、Secret、TXT 密文、包整套重做                                                              |

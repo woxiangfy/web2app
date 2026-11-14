@@ -14,6 +14,7 @@
 //! 往本文件里加 `use tauri::...` 会立刻编译不过 —— 这是有意的护栏。
 
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::Name;
 use hickory_resolver::system_conf::read_system_conf;
 use hickory_resolver::Resolver;
 
@@ -22,6 +23,30 @@ pub use resolve_core::{
     decrypt_txt, generate_keypair, normalize_domain, parse_domains, parse_public_key,
     sign_and_encrypt, VerifyingKey, RESOLVE_FAILED,
 };
+
+/// 把配置里的域名转成查询用的 [`Name`]。
+///
+/// ⚠️⚠️ **必须用 `from_str_relaxed`，不能用默认的 `txt_lookup(&str)`。**
+/// `Resolver::txt_lookup` 对 `&str` 走 `Name::from_utf8` ⇒ 每个 label 过 IDNA(`AsciiDenyList::STD3`)，
+/// 而 STD3 **只允许字母/数字/连字符**，于是**下划线**只在「label 首字符」被特判放过
+/// （SRV 记录那种 `_dmarc` / `_acme-challenge`），**出现在中间就整条拒绝**：
+///
+/// ```text
+/// _dmarc.example.com   → OK          （首字符特判）
+/// txt_w2a_abc.lcjm.cc  → 报错 protocol error: Label contains invalid characters: Err(Errors)
+/// ```
+///
+/// 这个报错发生在**构造查询名字**这一步，请求根本没发出去，日志里只会看到
+/// 「域名 X 解析失败」，用户侧则是「服务器连接失败，请检查网络后重试」——**指向网络，实际是命名**。
+/// 2026-11-14 实测就是 `txt_w2a_lcjm26.*` 这种「下划线在中间」的 TXT 记录名，
+/// 三个候选域名全部这样 ⇒ 装完必然打不开（且看起来像网络问题）。
+///
+/// `Name::from_str_relaxed` = 先按严格规则试，失败再按 `from_ascii`（允许 `_`、`*` 等）构造，
+/// 与 hickory 文档给出的正是这个用途。DNS 协议本身允许 owner name 含下划线，严格校验只是解析器的
+/// 自我约束 ⇒ 放宽后既能查 `_dmarc` 这类规范记录，也能查 `txt_w2a_*` 这类实际存在的记录。
+fn lookup_name(domain: &str) -> Result<Name, String> {
+    Name::from_str_relaxed(domain).map_err(|e| format!("域名 {domain} 不是合法的 DNS 名称：{e}"))
+}
 
 /// 查询一个域名的【所有】 TXT 记录（每条拼接其字符串段），返回全部非空值。
 ///
@@ -48,8 +73,9 @@ async fn query_txt_all(
     resolver: &Resolver<TokioRuntimeProvider>,
     domain: &str,
 ) -> Result<Vec<String>, String> {
+    let name = lookup_name(domain)?;
     let lookup = resolver
-        .txt_lookup(domain)
+        .txt_lookup(name)
         .await
         .map_err(|e| format!("查询 {domain} TXT 记录失败：{e}"))?;
 
@@ -123,9 +149,13 @@ pub async fn resolve_url_from_domains(
         }
         let txts = match query_txt_all(&resolver, domain).await {
             Ok(t) => t,
-            Err(_) => {
-                // 单个域名查询失败：记录后尝试下一个域名。
-                dlog!("[resolve] 域名 {domain} 解析失败，尝试下一个");
+            Err(e) => {
+                // 单个域名查询失败：记录**具体原因**后尝试下一个域名。
+                // ⚠️ 必须带上 `{e}`：这里曾写成 `Err(_)`，把「查询失败 / 无 TXT 记录」的唯一线索
+                //    吞掉，用户只能看到「服务器连接失败」而无法判断是 DNS 配置、查询超时还是真的没记录
+                //    （与 `startup_visibility_contract` 对主 crate 的要求同一条纪律）。
+                //    `dlog!` 走 stderr，不会污染 sidecar 的 stdout 单行 JSON 协议。
+                dlog!("[resolve] 域名 {domain} 解析失败：{e}，尝试下一个");
                 continue;
             }
         };
@@ -230,5 +260,38 @@ mod tests {
         let public_key = parse_public_key(&pub_b64).unwrap();
         let txts = vec!["垃圾1".to_string(), "垃圾2".to_string()];
         assert!(decrypt_first_valid_txt(&public_key, &txts).is_err());
+    }
+
+    /// 记录名里**下划线在中间**必须能构造出查询名（2026-11-14 线上事故的回归用例）。
+    ///
+    /// 旧实现直接 `resolver.txt_lookup(&str)` ⇒ 走 IDNA/STD3 ⇒ `txt_w2a_…` 报
+    /// `Label contains invalid characters`，请求根本没发出去，用户只看到「服务器连接失败」。
+    #[test]
+    fn lookup_name_accepts_underscore_inside_label() {
+        for d in [
+            "txt_w2a_lcjm26.lcjm.cc",   // 事故现场的真实记录名
+            "txt_w2a_lcjm26.lassl.vip", // 同批其它候选域名
+            "_dmarc.google.com",        // 首字符下划线（本来就能过，别被放宽改坏）
+            "txttest1.lcjm.cc",         // 不含下划线
+            "a.b.c",                    // 多级
+        ] {
+            let name = lookup_name(d).unwrap_or_else(|e| panic!("{d} 应可构造查询名：{e}"));
+            // 尾部补点/大小写归一不影响「能查」，这里只断言 label 数与原文一致。
+            assert_eq!(
+                name.num_labels() as usize,
+                d.split('.').count(),
+                "{d} 的 label 数变了：{name}"
+            );
+        }
+    }
+
+    /// 真正非法的名字（含空格）仍然要报错，不能把校验整体关掉。
+    ///
+    /// ⚠️ 空串**不在此列**：hickory 把它当根域名 `.`（`from_ascii("")` 合法），而空串在
+    /// `resolve_url_from_domains` 里已被 `if domain.is_empty() { continue; }` 提前跳过 ⇒
+    /// 这里断言它报错会写出一个与实现不符的「假期望」。
+    #[test]
+    fn lookup_name_rejects_truly_invalid() {
+        assert!(lookup_name("bad name.example.com").is_err());
     }
 }

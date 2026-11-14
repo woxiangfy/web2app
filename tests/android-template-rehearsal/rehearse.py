@@ -145,6 +145,16 @@ STRINGS = """<resources>
 </resources>
 """
 
+# 真模板的主题文件（`app/src/main/res/values/themes.xml`）：patch-android-splash-theme.py
+# 往 `<style name="Theme.<identifier>">` 里插 `android:windowBackground`。
+THEMES = """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.web2app" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
+"""
+
 # CI 里的执行顺序（build-custom.yml），跳过大改 tauri.conf.json 的 prepare-android-conf
 STEPS = [
     ("apply-android-labels.py", {}),
@@ -157,6 +167,8 @@ STEPS = [
     ("patch-android-schemes.py", {}),
     ("patch-android-fullscreen.py", {}),
     ("patch-android-permissions.py", {}),
+    ("patch-android-cleartext.py", {}),
+    ("patch-android-splash-theme.py", {}),
     ("set-android-apk-name.py", {}),
 ]
 
@@ -175,6 +187,7 @@ def build_skeleton() -> pathlib.Path:
         "app/src/main/AndroidManifest.xml": MANIFEST,
         f"app/src/main/java/{IDENT.replace('.', '/')}/MainActivity.kt": MAIN_ACTIVITY,
         "app/src/main/res/values/strings.xml": STRINGS,
+        "app/src/main/res/values/themes.xml": THEMES,
     }.items():
         p = gen / rel
         p.parent.mkdir(parents=True, exist_ok=True)

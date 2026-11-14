@@ -31,7 +31,7 @@
 若 override 尚不存在（单独运行 / 模板变化）也能自己补出完整 override。
 
 补丁链固定顺序（见 docs/android-improvements.md §0）：
-insets → back → download → extras → schemes → fullscreen → permissions → cleartext。
+insets → back → download → extras → schemes → fullscreen → permissions → cleartext → splash-theme。
 本脚本排第三：复用 back 新建的 override；其后的 extras 又复用本脚本，它的调用行必须
 排在本脚本之后。
 

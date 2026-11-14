@@ -139,12 +139,18 @@ jobs:
           echo "托盘图标已同步为同一张图（webview-app/icons/icon.png）"
           echo "ICON_PNG=build/icon.png" >> "$GITHUB_ENV"
 
-      - name: 编译 TypeScript + 铺打包资源
+      - name: 编译 TypeScript + 铺打包资源 + 剔除开发期产物
         # stage 会把 config.json 复制到 out/config.json（随 asar 进包），并校验三种布尔字段
         # 的类型 —— 写错就在这里失败，而不是等用户双击。
+        # ⚠️⚠️ `prune` 必须在 `electron-builder` **之前**（与 `pnpm run dist`、本地
+        #    `pack-local.mjs` 同一个顺序）：`electron-builder.yml` 的 `files: out/**` 会把
+        #    tsc 产出的 `probe*.js`（约 2300 行）与 `tabs-probe-preload.js` 一起打进 app.asar。
+        #    本 workflow 自己拼步骤（不调 `pnpm run dist`，因为要按勾选组合出包），
+        #    于是 2026-11-07 那次整改同样漏在这里 —— 直到 2026-11-14 本地实测同一缺陷才发现。
         run: |
           pnpm run build
           pnpm run stage
+          pnpm run prune
 
       - name: 出包（electron-builder）
         shell: bash

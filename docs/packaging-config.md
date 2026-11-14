@@ -114,6 +114,14 @@ URL 里的 `user:pass@`（userinfo）由**本地代理**转换成 `Authorization
 AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自动尝试下一个，全部失败则报
 "服务器连接失败"。
 
+> ⚠️⚠️ **记录名（域名）里的下划线只能当 label 的「首字符」**，`txt_w2a_abc.example.com` 这种
+> 「下划线夹在中间」的名字在 2026-11-14 之前会**一条都查不出去**（hickory 走 IDNA/STD3 校验，
+> 直接在构造查询名时拒绝，请求根本没发出），用户侧只看到「服务器连接失败，请检查网络后重试」
+> —— 指向网络，实际是命名。客户端已改用 `Name::from_str_relaxed` 放宽（`_dmarc.example.com` 与
+> `txt_w2a_abc.example.com` 都能查），**无需改 DNS**；但新配置仍建议用连字符
+> （`txt-w2a-abc.example.com`）或首字符下划线，避免别的客户端/工具链踩同一个坑。
+> 详见 `docs/changes/2026-11-14.md`。
+
 > ⚠️ **数组形态必须提供 `public_key`** —— 没有公钥就无法验签。解析器在打包期就会强制校验。
 >
 > **兼容**：老配置里 `"app_url": "[\"a.com\"]"`（字符串形态的 JSON 数组文本）仍可用，
@@ -652,7 +660,15 @@ node scripts/pack-local.mjs --parity
 | 壳 | 配置被读的时刻 | 本地要做的 | 对应本地命令 |
 |---|---|---|---|
 | Tauri | **编译期**（`option_env!` → 二进制常量） | 在 `cargo tauri build` **之前**把环境变量设好 | `cargo tauri build` |
-| Electron | **打包期**（读 `config.json` → 进 `app.asar`） | 先落一份**规范化**的 `config.json` | `pnpm run dist`（sidecar → tsc → stage → electron-builder） |
+| Electron | **打包期**（读 `config.json` → 进 `app.asar`） | 先落一份**规范化**的 `config.json` | `pnpm run dist`（sidecar → tsc → stage → prune → electron-builder） |
+
+> ⚠️ Electron 侧**三条出包入口的步骤必须一致**：① `electron-app/package.json` 的 `pack` / `dist*`
+> （sidecar → build → stage → **prune** → builder）；② 本地打包脚本的 `packlib/driver-electron.mjs`
+> （同序，另加出包后的 `check-asar-config.cjs` 校验）；③ `.github/workflows/electron-build-custom.yml`
+> 自己拼的那一段（go 组合出包，不调 `pnpm run dist`）。`prune` 漏了不会让构建失败，只是把
+> `out/main/probe*`（约 2300 行探针）与 `tabs-probe-preload.js` 静默打进 `app.asar` —— 由护栏报红。
+> （2026-11-07 加 prune 时只改了①，②③ 漏到 2026-11-14 才发现：本地实测报红、CI 侧为同型缺陷一并补上；
+> 现由 `electron-app/test/probe-isolation.test.ts` 分别钉住三条入口的顺序。）
 
 **⚠️ 「写 env 文件」那条路的三个坑**（Node 版完全不走这条路 ⇒ 天然不存在；手工用解析器的
 `--env-out` 或读 CI 的 `$GITHUB_ENV` 时会踩）：

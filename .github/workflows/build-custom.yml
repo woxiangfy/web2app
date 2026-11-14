@@ -553,6 +553,13 @@ jobs:
         # network_security_config.xml（base-config 全放行），两 workflow 共用，不再各写 sed。
         run: python3 ../.github/scripts/patch-android-cleartext.py
 
+      - name: Splash background follows light/dark theme
+        # 首帧之前那一层是 Activity 主题的 windowBackground（模板默认浅色）⇒ 暗色系统上启动
+        # 会闪白。⚠️ 改 Rust 的 `nav::SPLASH_BG` 没用：tao 对 Android 的 background_color 是
+        # 空实现。所以只改资源：插 `<item name="android:windowBackground">` 指向一个颜色资源，
+        # 再由 values / values-night 两份文件给亮/暗两色 —— 日夜切换交给系统。
+        run: python3 ../.github/scripts/patch-android-splash-theme.py
+
       - name: 设置 Android 产物文件名（APK 文件名 ← app_name）
         # 逻辑在 .github/scripts/set-android-apk-name.py —— 两壳共用，产物名就此对齐
         #（此前只有 build-custom.yml 有这一步，release.yml 出的 APK 一直是通用的

@@ -82,10 +82,18 @@ export async function doElectron(args, merged, env, name, rr) {
   //    ⚠️⚠️ 顺序关键：`w2a-proxy.exe` 必须**在 RESOLVE_SECRET 存在的同一环境里**编译。
   //    resolve-core 的 Secret 是 `option_env!("RESOLVE_SECRET")` 的编译期常量，
   //    先编后设 ⇒ sidecar 内置公开默认 Secret，用户配的 resolve_secret **静默失效**。
-  emit('\n[3/4] 编译 sidecar（继承 RESOLVE_SECRET）→ 编译 TS → 铺打包资源')
+  emit('\n[3/4] 编译 sidecar（继承 RESOLVE_SECRET）→ 编译 TS → 铺打包资源 → 剔除开发期产物')
   run(['pnpm', 'run', 'sidecar'], ELECTRON, env, dry)
   run(['pnpm', 'run', 'build'], ELECTRON, env, dry)
   run(['pnpm', 'run', 'stage'], ELECTRON, env, dry)
+  // ⚠️⚠️ `prune` 必须夹在 build/stage 与 electron-builder **之间**（2026-11-14 实测）：
+  //    electron-builder.yml 的 `files: out/**` 会把 tsc 产出的 `probe*.js`（约 2300 行）
+  //    与 `tabs-probe-preload.js` 一并打进 app.asar —— 探针代码随包分发，且只在
+  //    `check-asar-config.cjs` 的反向断言处发作（出包本身是成功的、双击也能开）。
+  //    本脚本 2026-11-07 那次整改只改了 `package.json` 的 pack/dist 脚本，
+  //    **本地打包这条路（build-electron-all.bat → 本文件）被漏掉**，直到实测才暴露。
+  //    顺序也不可换：prune 只删 `out/` 里的产物，放在 build 之前等于删完又被生成回来。
+  run(['pnpm', 'run', 'prune'], ELECTRON, env, dry)
 
   // 4) 出包
   const forms = []

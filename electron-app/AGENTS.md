@@ -73,6 +73,12 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    探针连同 `out/` 一起打进 `app.asar`）。打包前 `scripts/prune-probe.cjs` 剔除 `out/main/probe*` 与
    `out/renderer/tabs-probe-preload.js(.map)`，`check-asar-config.cjs` 反向断言包内不含它们 —— 新增打包
    命令时必须保留 `pnpm run prune` 这一步，这是 `test/probe-isolation.test.ts` 钉的顺序（build→stage→prune→builder）。
+   ⚠️ **出包入口有三个，每个都要有 prune**：① 本目录 `package.json` 的 `pack` / `dist*`；
+   ② **本地打包**（根 `scripts/packlib/driver-electron.mjs`，被 `tests/build-electron-all.bat` 调起）；
+   ③ **`.github/workflows/` 里自己拼步骤的**（`electron-build-custom.yml` 按勾选组合出包，
+   不调 `pnpm run dist`）。2026-11-07 首次整改只改了① ⇒ 2026-11-14 本地与 CI 两条路都被实测出
+   混进探针产物。三者的顺序现由 `probe-isolation.test.ts` 分别钉住：① 查 `package.json` 脚本、
+   ② 查驱动源码、③ 扫描 `.github/workflows/*.yml`（自己拼步骤的必须显式 prune 且位置在前）。
 14. **主窗显隐判据只有一条**：`src/main/window-toggle.ts::planToggle(visible, minimized)`（可见且非最小化才隐藏），
    托盘左键 / 悬浮球单击都走它，不要各自写内联表达式。
 15. **窗口几何的纯判定在 `src/main/window-plan.ts`**：`parseWindowState` / `planRestore` 不得再依赖

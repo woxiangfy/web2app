@@ -112,3 +112,8 @@ def strings_xml(gen_root: pathlib.Path) -> pathlib.Path:
 def android_manifest(gen_root: pathlib.Path) -> pathlib.Path:
     """AndroidManifest.xml。"""
     return gen_root / "app" / "src" / "main" / "AndroidManifest.xml"
+
+
+def res_dir(gen_root: pathlib.Path) -> pathlib.Path:
+    """资源根 `app/src/main/res`（`values/`、`values-night/`、`xml/` 的父目录）。"""
+    return gen_root / "app" / "src" / "main" / "res"

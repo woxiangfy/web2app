@@ -26,8 +26,8 @@ Manifest 侧把 `android:usesCleartextTraffic="..."` 换成
 `<application>`。gen/android 每次构建现生成，所以资源文件也由本脚本写入，不放进源码树。
 
 补丁链固定顺序（见 docs/android-improvements.md §0）：
-insets → back → download → extras → schemes → fullscreen → permissions → **cleartext**。
-（本脚本是链条最后一环：只写 res/xml 与 Manifest，与前序脚本互不重叠。）
+insets → back → download → extras → schemes → fullscreen → permissions → **cleartext** →
+splash-theme。（本脚本只写 res/xml 与 Manifest，与 splash-theme 只改 res/values 互不重叠。）
 
 用法：
     python3 .github/scripts/patch-android-cleartext.py            # 打补丁（自动探测工程根）
