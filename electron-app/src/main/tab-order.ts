@@ -28,6 +28,26 @@ export function isPinnedHome(labels: readonly string[], label: string): boolean 
 }
 
 /**
+ * 下载开始后，发起下载的页签是否应**自动关闭**。
+ *
+ * 对齐浏览器对 `target="_blank"` / `window.open()` 指向附件地址的行为：新页签只是为了
+ * 承接那次下载而开，下载响应**不会提交文档**（没有可显示的页面），浏览器在下载开始后
+ * 就把它关掉、回到点击时的页面。
+ *
+ * 判据只有一条：**这个页签是否提交过文档**（`did-navigate` 之后为 true）。
+ *   · 从未提交（`false`）→ 关。典型就是 window.open 一个 `Content-Disposition: attachment`
+ *     地址：页签自建出来就是空白，下载完留着毫无意义；
+ *   · 已提交（`true`）→ 不关。页面里点下载（比如 `location.href` 指向附件）时浏览器
+ *     也保留当前页签，把用户正在看的页面关掉是另一类事故。
+ *
+ * ⚠️ 首页页签（`isPinnedHome`）即使从未提交也不关：`closeTab` 会拒绝，本函数不重复判定
+ *    （「首页判定」全项目只有 `isPinnedHome` 一份实现）。
+ */
+export function shouldCloseTabAfterDownload(hasCommittedDocument: boolean): boolean {
+  return !hasCommittedDocument
+}
+
+/**
  * 关闭一个页签后，激活态应落到哪个幸存页签。
  *
  * 与 Tauri `webview-app/src/tabs.rs::close_tab_inner` 同一条规则：

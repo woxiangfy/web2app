@@ -7,7 +7,7 @@
  *   BrowserWindow（壳，窗口自身页面 = shell.html 画标签栏）
  *   └─ contentView[i]：子 WebContentsView，bounds = { x:0, y:38, w:W, h:H-38 }
  *
- * ⚠️ 硬约束（都来自实测，Electron 44.4.1）：
+ * ⚠️ 硬约束（都来自实测：Electron 44.4.1 定基线，45.3.2 复测一致）：
  *   1. 内容视图 bounds 必须用 **getContentBounds()** 推算（无边框窗口在 Windows 上与
  *      getBounds() 差 1px，用错会在右/上边留缝或压住 1px）—— 见 §3.5-3。
  *   2. 切换用 setVisible（双向可读、不触发重排）；抬层用 remove+add（View 无 setZIndex）。
@@ -25,13 +25,21 @@
 import { WebContentsView, type BrowserWindow } from 'electron'
 // 页签的纯顺序 / 归属规则（关闭后的邻接选择、首页判定）抽在无 Electron 依赖的 tab-order.ts
 // 里，可直接 node:test 钉住（tabs.ts 顶层 import electron，node 下加载必炸）。
-import { isPinnedHome, nextActiveLabelAfterClose } from './tab-order'
+import { isPinnedHome, nextActiveLabelAfterClose, shouldCloseTabAfterDownload } from './tab-order'
 
 /** 标签栏高度（逻辑像素）。与 shell.html 的 `--bar-h`、Tauri 的 `TAB_BAR_HEIGHT` 一致，勿改。 */
 export const TAB_BAR_HEIGHT = 38
 
 /** 页签上限：对齐 Tauri `MAX_TABS`（防「异常建窗风暴」，见 tabs.rs 注释）。 */
 export const MAX_TABS = 32
+
+/**
+ * 「弹窗兜底重复下载」的识别窗口（毫秒）。
+ *
+ * 站点兜底是近同步发生的（`window.open()` 返回 null 后立即 `location.href = 同一地址`），
+ * 3s 足够宽；窗口越短，越不容易误伤「用户真的又点了一次同一个下载链接」。
+ */
+const POPUP_FALLBACK_WINDOW_MS = 3000
 
 /** 单个页签。 */
 export interface Tab {
@@ -41,6 +49,21 @@ export interface Tab {
   view: WebContentsView
   /** 页签标题（page-title-updated 回传，标签栏显示用） */
   title: string
+  /**
+   * 是否已提交过文档（`did-navigate` 之后置 true，由 `tab-spawn.ts` 的钩子写入）。
+   *
+   * 下载响应**不产生文档提交**，所以「为一个下载而开的页签」始终是 `false` ——
+   * 这正是 `closeTabAfterDownload()` 判断该不该自动关页签的唯一依据
+   * （规则本体在 `tab-order.ts::shouldCloseTabAfterDownload`）。
+   */
+  committed: boolean
+  /**
+   * 打开本页签的那个页签 label（只有 `window.open` / `target="_blank"` 建的页签才有）。
+   *
+   * 下载完成后自动关页签时用它把激活态拉回**点击时的页面**（浏览器语义），
+   * 而不是 `closeTab` 默认的「相邻页签」（页签栈里打开者未必紧挨在左边）。
+   */
+  opener?: string
 }
 
 /** 推给壳页面渲染的页签条目（字段与 shell.html 的 render(items) 消费契约一致）。 */
@@ -84,6 +107,43 @@ export class TabManager {
   private readonly tabs = new Map<string, Tab>()
   private activeLabel: string | null = null
   private seq = 0
+  /**
+   * `window.open` 目标 URL → 打开它的页签 webContents id（带过期时间）。
+   *
+   * ⚠️ 这是**纵深防御**，不是主判据。历史：页签模式曾 `deny` 弹窗 ⇒ 页面 `window.open()`
+   * 拿到 **null** ⇒ 站点据此判「弹窗被拦截」并对同一地址再做 `location.href` 兜底 ⇒ 两次
+   * 下载、两个「另存为」。现在改为 allow + 隐藏窗口（页面拿到真实 WindowProxy，见
+   * `tab-spawn.ts` 的 `did-create-window`），这条兜底不再触发；本登记只用于兜住「站点在
+   * 隐藏窗口被销毁后轮询 `w.closed` 再兜底」这类写法（同地址 + 同打开者 + 3s，见
+   * `shouldDropPopupFallback`）。
+   */
+  private readonly expectedPopupDownloads = new Map<
+    string,
+    { openerWebContentsId: number; expiresAt: number }
+  >()
+  /** 被判定为「弹窗兜底重复下载」而取消的次数（观测用，页签探针 P15 断言依赖）。 */
+  private droppedPopupFallbacks = 0
+  /**
+   * 「隐藏弹窗窗口」登记：webContents id → 收尾（幂等销毁该窗口）+ 兜底定时器。
+   *
+   * 页签模式不再 `deny` 弹窗（否则页面的 `window.open()` 返回 null，站点会走
+   * `location.href` 兜底造成双下载），而是允许 Electron 建一个**隐藏窗口**让页面拿到真实
+   * WindowProxy。这个窗口的生命周期必须**覆盖整次下载**：站点常见的拦截判据是
+   * `if (!w || w.closed)`，甚至延迟几十~几百毫秒再查 —— 太早销毁会让 `w.closed === true`，
+   * 站点照样兜底，于是又出现第二个「另存为」（只靠 URL 判重挡不住地址不同字的兜底）。
+   *
+   * 收尾时机：下载 `done`（完成 / 取消 / 中断）、它提交了文档（普通页面弹窗）、或兜底超时。
+   */
+  private readonly hiddenPopups = new Map<
+    number,
+    {
+      cleanup: () => void
+      timer: ReturnType<typeof setTimeout>
+      tabLabel?: string
+      /** 它自己已经发起过下载（此后即使有文档提交事件也不能提前销毁） */
+      downloading?: boolean
+    }
+  >()
 
   constructor(opts: TabsOptions) {
     this.host = opts.host
@@ -117,8 +177,10 @@ export class TabManager {
    * 不等待页面加载完成 —— 与 Tauri spawn_tab_with_target 的「先发起导航、立刻激活」对齐。
    *
    * @returns 新页签的 label；超限返回 null（上层据此拒绝或提示，绝不静默建窗）。
+   * @param url 目标地址（首屏为 undefined；window.open 场景是具体 URL）
+   * @param opener 发起这次打开的页签 label（仅 window.open 场景传入，供下载后回到原页签）
    */
-  async spawnTab(url?: string): Promise<string | null> {
+  async spawnTab(url?: string, opener?: string): Promise<string | null> {
     if (this.tabs.size >= MAX_TABS) {
       console.warn(`[web2app] 页签数已达上限 ${MAX_TABS}，拒绝新建`)
       return null
@@ -141,7 +203,7 @@ export class TabManager {
     // 顶住首帧白闪（WebContentsView 默认白底；#f7f8fa 与启动页 / 加载层底色一致）
     view.setBackgroundColor('#f7f8fa')
 
-    const tab: Tab = { label, view, title: '' }
+    const tab: Tab = { label, view, title: '', committed: false, ...(opener ? { opener } : {}) }
     this.tabs.set(label, tab)
 
     // 先挂进 contentView 再定位：addChildView 之后 setBounds 才能稳定生效
@@ -217,6 +279,10 @@ export class TabManager {
     }
 
     this.tabs.delete(label)
+    // 绑在这个页签上的隐藏弹窗（只为让它的 window.open() 拿到非 null）随页签一起收尾
+    for (const [id, rec] of [...this.hiddenPopups]) {
+      if (rec.tabLabel === label) this.releaseHiddenPopup(id)
+    }
     try {
       // ⚠️ 必须显式 removeChildView：只调 webContents.close() 时，视图对象仍挂在
       //   contentView.children 里（探针实测 children 不减少、关闭的视图仍可见），
@@ -252,6 +318,165 @@ export class TabManager {
     return true
   }
 
+  /**
+   * 标记页签已提交过文档（`tab-spawn.ts` 的 `did-navigate` 钩子调用）。
+   * 下载响应不提交文档，故「只为下载而开」的页签永远是未提交状态。
+   */
+  markTabCommitted(label: string): void {
+    const t = this.tabs.get(label)
+    if (t) t.committed = true
+  }
+
+  /** 按 webContents id 找页签（下载回调用）。找不到 = 不是页签（宿主窗口 / 已关闭）。 */
+  private findByWebContentsId(webContentsId: number): Tab | null {
+    for (const t of this.tabs.values()) {
+      if (t.view.webContents.id === webContentsId) return t
+    }
+    return null
+  }
+
+  /**
+   * 在 `setWindowOpenHandler` 里**同步**登记「即将交给新页签的目标地址」。
+   *
+   * `deny` 会让页面的 `window.open()` 返回 null，站点常据此判定「弹窗被拦截」并立即对
+   * 同一地址做 `location.href` 兜底（同一次点击 → 两次下载 / 两个「另存为」）。这里提前
+   * 记下 URL + 打开者，等那条兜底下载到达时由 {@link shouldDropPopupFallback} 认出来取消。
+   * 普通页面 URL 也会登记，但判重只在真的发生下载时生效，对导航无影响。
+   */
+  noteExpectedPopupDownload(openerLabel: string, url: string): void {
+    const opener = this.tabs.get(openerLabel)
+    if (!opener) return
+    this.expectedPopupDownloads.set(url, {
+      openerWebContentsId: opener.view.webContents.id,
+      expiresAt: Date.now() + POPUP_FALLBACK_WINDOW_MS,
+    })
+  }
+
+  /**
+   * 登记「临时隐藏弹窗窗口」（见 {@link hiddenPopups}）。由 tab-spawn 在 `did-create-window`
+   * 里、建窗之后立刻调用。
+   *
+   * @param webContentsId 隐藏窗口的 webContents id（也是它发起下载时的发起者 id）
+   * @param cleanup 幂等收尾（销毁那个窗口）；由本类在下载结束 / 提交文档 / 超时时调用
+   * @param capMs 兜底存活上限：既没下载也没提交文档（站点开了窗却什么也没做）时强制收尾
+   */
+  registerHiddenPopup(webContentsId: number, cleanup: () => void, capMs: number): void {
+    const timer = setTimeout(() => {
+      console.warn(`[web2app] 隐藏弹窗 ${webContentsId} 超时未产生下载或页面，已销毁`)
+      this.releaseHiddenPopup(webContentsId)
+    }, capMs)
+    // 不让这个兜底定时器成为「进程为何不退出」的理由
+    ;(timer as unknown as { unref?: () => void }).unref?.()
+    this.hiddenPopups.set(webContentsId, { cleanup, timer })
+  }
+
+  /** 这个 webContents 是不是「隐藏弹窗窗口」（它发起的下载都要丢弃）。 */
+  isHiddenPopup(webContentsId: number): boolean {
+    return this.hiddenPopups.has(webContentsId)
+  }
+
+  /**
+   * 隐藏弹窗开始下载了 ⇒ 它要活到下载结束，取消兜底定时器。
+   *
+   * ⚠️ 不能在这里就销毁窗口：WebView2/Chromium 的下载依附发起它的 webContents，
+   *    下载中途销毁会让文件截断；收尾一律等 `onDownloadDone`。
+   */
+  noteHiddenPopupDownloadStarted(webContentsId: number): void {
+    const rec = this.hiddenPopups.get(webContentsId)
+    if (!rec) return
+    rec.downloading = true
+    clearTimeout(rec.timer)
+  }
+
+  /**
+   * 隐藏弹窗提交了文档 ⇒ 说明这是**普通页面弹窗**（不是下载），可以收尾了。
+   *
+   * ⚠️ 已经发起过下载的绝不在此收尾：那会让页面里的 `w.closed` 变 true，站点据此兜底
+   *    再下一次（「一次点击两个另存为」）。那种情况只能等页签关闭。
+   */
+  releaseHiddenPopupOnNavigate(webContentsId: number): void {
+    const rec = this.hiddenPopups.get(webContentsId)
+    if (!rec || rec.downloading) return
+    this.releaseHiddenPopup(webContentsId)
+  }
+
+  /**
+   * 把隐藏弹窗绑到「承载它这次下载的那个新页签」：页签关闭（下载结算后自动关）时才销毁它。
+   *
+   * 这是最精确的收尾时机 —— 早于下载结算就销毁，页面里的 `w.closed` 会变 true，站点据此
+   * 兜底再下一次（用户看到的第二个「另存为」就是这么来的）。页签已不在（极端竞态）则立即收尾。
+   */
+  attachHiddenPopupToTab(webContentsId: number, tabLabel: string): void {
+    const rec = this.hiddenPopups.get(webContentsId)
+    if (!rec) return
+    if (!this.tabs.has(tabLabel)) {
+      this.releaseHiddenPopup(webContentsId)
+      return
+    }
+    rec.tabLabel = tabLabel
+  }
+
+  /** 收尾并销毁某个隐藏弹窗（幂等）。下载结束、提交文档、超时、宿主退出时调用。 */
+  releaseHiddenPopup(webContentsId: number): void {
+    const rec = this.hiddenPopups.get(webContentsId)
+    if (!rec) return
+    this.hiddenPopups.delete(webContentsId)
+    clearTimeout(rec.timer)
+    try {
+      rec.cleanup()
+    } catch (e) {
+      console.error(`[web2app] 销毁隐藏弹窗失败：${(e as Error).message}`)
+    }
+  }
+
+  /** 被判定为「弹窗兜底重复下载」而取消的次数（页签探针断言用）。 */
+  get droppedPopupFallbackCount(): number {
+    return this.droppedPopupFallbacks
+  }
+
+  /**
+   * 判重：这次下载是不是站点「弹窗被拦截」的兜底重复下载。
+   *
+   * 判据三条同时成立才丢：① 地址与刚才交给新页签的 `window.open` 目标**逐字相同**；
+   * ② 发起下载的是**那个打开者页签**；③ 在 `POPUP_FALLBACK_WINDOW_MS` 内。命中即消费
+   * 记录并返回 true（调用方 `item.cancel()`，不弹「另存为」）。
+   *
+   * ⚠️ 不能只按「打开者 + 时间窗」丢：页面在弹框遮挡前仍可能程序化批量下载多个文件，
+   *   那些地址不同，必须放行。
+   */
+  shouldDropPopupFallback(webContentsId: number, url: string): boolean {
+    const rec = this.expectedPopupDownloads.get(url)
+    if (!rec) return false
+    if (Date.now() > rec.expiresAt) {
+      this.expectedPopupDownloads.delete(url)
+      return false
+    }
+    if (rec.openerWebContentsId !== webContentsId) return false
+    this.expectedPopupDownloads.delete(url)
+    this.droppedPopupFallbacks += 1
+    return true
+  }
+
+  /**
+   * 下载落盘 / 取消后调用：若发起下载的页签**从未提交过文档**（只为这次下载而开），
+   * 自动关掉它并把激活态拉回打开它的页签（浏览器语义）。
+   *
+   * @param webContentsId `will-download` 里发起下载的 webContents id
+   * @returns 是否真的关掉了某个页签
+   *
+   * ⚠️ 已加载过页面的页签不关（`shouldCloseTabAfterDownload` 的唯一判据）；首页页签
+   *   由 `closeTab` 的 `isPinnedHome` 拒绝，这里不重复判定。
+   */
+  closeTabAfterDownload(webContentsId: number): boolean {
+    const target = this.findByWebContentsId(webContentsId)
+    if (!target || !shouldCloseTabAfterDownload(target.committed)) return false
+    const opener = target.opener
+    if (!this.closeTab(target.label)) return false
+    // closeTab 选的是相邻页签；浏览器语义是回到**点击时的页面**（打开者），补一次激活。
+    if (opener && this.tabs.has(opener)) this.activate(opener)
+    return true
+  }
+
   /** 窗口 resize → 重算所有视图 bounds（DIP 一次到位，无需闭环校准）。 */
   relayout(): void {
     const b = this.contentBounds()
@@ -279,6 +504,8 @@ export class TabManager {
 
   /** 销毁全部页签（宿主退出前显式 close，官方明示视图不随窗口销毁自动回收）。 */
   destroyAllTabs(): void {
+    // 隐藏弹窗窗口是独立 BrowserWindow，同样不随宿主视图回收 ⇒ 一并收尾
+    for (const id of [...this.hiddenPopups.keys()]) this.releaseHiddenPopup(id)
     for (const t of this.tabs.values()) {
       try {
         this.host.contentView.removeChildView(t.view)

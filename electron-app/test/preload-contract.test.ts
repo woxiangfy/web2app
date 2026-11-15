@@ -2,8 +2,8 @@
  * preload 三件套的结构契约（2026-11-07 架构审查 M-9 / L-4）。
  *
  * ⚠️ 为什么这里只做文本对照、不抽 `tauri-shim.ts` 共享模块：三个 preload 都跑在
- * `sandbox: true` 的渲染进程里，那里 `require` 只放行 electron / events / timers / url，
- * **相对 require 会在运行期失败**。所以两个 invoke 垫片只能各自内联，靠本测试锁住
+ * `sandbox: true` 的渲染进程里，那里 `require` 只放行 electron（Electron 45 起 events / timers /
+ * url shim 已移除），**相对 require 会在运行期失败**。所以两个 invoke 垫片只能各自内联，靠本测试锁住
  * 「形状一致」，防的是改了 A 忘了 B 的漂移。
  */
 import assert from 'node:assert/strict'

@@ -12,10 +12,10 @@
 1. **单一真源**：分三类（详见 `../AGENTS.md` §3.4.1）——
    **真共用**（Electron 打包时从本工程复制）：`src/{titlebar.js,loading.js,shell.html,splash.html}`、`dist/settings.html`、
    `icons/*`；**行为对齐但实现不同**：Ctrl+W 关页签（`tab_keys.js` vs Electron `before-input-event`）、页签标题回传（`tab_title.js`）；
-   **单壳专属**：`tab_title.js` / `tab_keys.js` / `dnd_polyfill.js`（WebView2/Tauri 注入，Electron 不消费）、
+   **单壳专属**：`tab_title.js` / `tab_keys.js` / `tab_doc_ready.js` / `dnd_polyfill.js`（WebView2/Tauri 注入，Electron 不消费）、
    `mobilebar/*.js`（仅 Tauri 移动端；5 个分片由 `lib.rs` 按序拼成同一个 IIFE）、`floaticon.html`（仅 Electron）。
    `src/{proxy.rs,resolve.rs}` 经 sidecar `#[path]` 同源复用 —— 改一必双壳验证。
-2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 308 通过 / 6 ignored）；`src/contract_tests/`（按领域 14 个子模块）
+2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 324 通过 / 6 ignored）；`src/contract_tests/`（按领域 14 个子模块）
    是静态契约守卫 —— 改 `capabilities/*.json` 或注入脚本的事件名会被它拦下。
 3. **配置是编译期常量**：所有运行期参数在 `src/config.rs` 由 `option_env!` 注入，**改完必须重新编译**；
    打包 workflow 通过环境变量注入。全文见 [docs/tauri-config.md](docs/tauri-config.md)。
@@ -35,6 +35,20 @@
    共用设置页**三处逐字一致**；`contract_tests/settings_hotkey_contract.rs` ⑥⑦ 钉住漂移。
    同一判据必须同时用于「保存」和「启动回退」—— 旧配置被判非法时按「不设置」处理并在设置页提示，
    别只校验保存路径（否则旧裸键会照旧注册、占满用户输入）。
+10. **下载页签自动关闭（多页签）判据只有「是否提交过真实文档」**：`committed` 由
+   `tab_doc_ready.js` 回传（本地占位页 `tauri.localhost` 必须早退），`DownloadStarting` 在
+   取消时立即关、确认保存时等 `StateChanged` 终态再关 —— **销毁发起下载的 webview 会中断
+   下载且不可续传（UserShutdown）**。首页与已提交文档的页签不关；关闭走
+   `close_tab_after_download`（后台线程 + `run_on_main_thread` 延后）。任一环被改坏都是
+   静默失效，`contract_tests/capability_contract.rs` ⑨ 与 `tabs/tests.rs` 单测守着。
+   **另：`window.open()` 在本壳返回 null**（`NewWindowRequested` 被 `SetHandled` 收走），
+   站点常据此走 `location.href` 同地址兜底 ⇒ 一次点击两次下载、两个「另存为」。必须在
+   `NewWindowRequested` **同步**登记目标 URL + 打开者（晚了就认不出），并在
+   `DownloadStarting` **弹框前** `should_drop_popup_fallback` 取消第二条（同地址 + 同打开者
+   + 3s）。⚠️ 这是**事后判重**（兜底地址带新签名时不命中），只作兜底：Electron 侧已从根上
+   改为 `allow` + 隐藏窗口让 `window.open()` 返回非 null，且该窗口**活到下载结算**
+   （`tab-spawn.ts` 的 `did-create-window` + `tabs.ts::attachHiddenPopupToTab`），本壳若要
+   等价需 `put_NewWindow` 另建一个 WebView2，**尚未做**。
 
 ## 功能特性
 
@@ -43,7 +57,7 @@
 | 内嵌网址 · 设置界面（Shift+F1）· 托盘 · 全局快捷键（默认不启用）· 下载接管 · 登录密码保存 · 窗口几何记忆 · 拖拽 polyfill · F12 DevTools | Windows |
 | Basic 鉴权 + WebSocket 鉴权（本地反向代理统一注入）· Cookie 会话保持 | Windows / Android |
 | 自绘标题栏（38px 通栏；前进/后退带落点守卫 v1.66）· 单实例 · 外部 HTTP/HTTPS 代理 · 新窗口拦截 | Windows |
-| 多页签 `TABS_ENABLED`（默认关；首页页签固定第一位、不可关闭） | Windows（Android 为底栏页签记录形态） |
+| 多页签 `TABS_ENABLED`（默认关；首页页签固定第一位、不可关闭；下载页签自动关闭） | Windows（Android 为底栏页签记录形态） |
 | 移动端底栏 `MOBILE_BAR`（默认关，仅移动端；含「更多」面板） | Android |
 | 桌面悬浮图标 `float_enabled`（56×56 透明置顶小球；单击切换主窗显隐、右键关闭并唤回） | Windows |
 | 启动过渡（启动页 + 加载层 + 失败卡） | Windows / Android |

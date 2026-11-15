@@ -349,6 +349,43 @@ export function attachContextMenu(wc: WebContents, onSettings: () => void): void
 }
 
 /**
+ * 下载接管的可选注入点：多页签模式用 `onSaveChoice` 自动关空页签，
+ * 探针用 `pickSavePath` 免弹模态对话框。单窗口生产路径一个都不传。
+ */
+export interface DownloadHooks {
+  /**
+   * 提交弹框前的判重：返回 true 表示这次下载是**重复的**，调用方直接 `item.cancel()`，
+   * 不弹「另存为」、不落盘。
+   *
+   * 两类来源：① 「隐藏弹窗窗口」抢在新页签之前发起的那条（它只是为了给页面一个非 null
+   * 的 `window.open()` 返回值，真正的下载由新页签做）；② 站点 `location.href` 同地址兜底
+   * （`window.open()` 被判「拦截」时才会走，Electron 侧已从根上避免，留作纵深防御）。
+   */
+  shouldDropDownload?: (webContentsId: number, url: string) => boolean
+  /**
+   * 用户对「另存为」做完选择（或取消）后回调，入参是**发起下载**的 webContents id。
+   *
+   * 多页签模式用它自动关掉「只为下载而打开、从未提交过文档」的空页签
+   * （见 `tabs.ts::closeTabAfterDownload`）。⚠️ 放在选择之后而不是 `will-download`
+   * 同步段里：下载项此时已 `setSavePath` + `resume`（或已取消），关掉发起页签不会
+   * 打断下载本身；且「另存为」是模态框，期间用户也点不到那个空页签。
+   */
+  onSaveChoice?: (webContentsId: number, saved: boolean) => void
+  /**
+   * 选落盘路径。默认弹系统「另存为」；探针注入固定临时路径，避免模态对话框把断言挂住。
+   * 返回 null 表示取消（对齐用户点「取消」）。
+   */
+  pickSavePath?: (filename: string, downloadDir: string) => Promise<string | null>
+  /**
+   * 每次下载刚建立时回调（早于判重 / 弹框），入参是**发起下载**的 webContents id。
+   *
+   * 多页签模式用它标记「隐藏弹窗窗口」这次是真的在下载 ⇒ 该窗口要一直活到下载结束
+   * （站点常见判据 `if (!w || w.closed)`，过早关掉它会触发 `location.href` 兜底二次下载）。
+   */
+  onDownloadStart?: (webContentsId: number) => void
+}
+
+/**
  * 接管下载：弹「另存为」让用户定落盘位置，然后才真正开始写文件。
  *
  * ⚠️⚠️ `item.pause()` 不可省：`dialog.showSaveDialog` 是**异步**的，事件处理器一返回，
@@ -359,37 +396,69 @@ export function attachContextMenu(wc: WebContents, onSettings: () => void): void
  *   「点取消却悄悄下载到下载目录」是最招骂的那类自作主张（`save_dialog.rs` 里
  *   `SaveChoice::Cancelled` 的注释同理）。
  */
-export function attachDownload(session: Session, getWindow: () => BrowserWindow | null): void {
-  session.on('will-download', (_e, item) => {
+export function attachDownload(
+  session: Session,
+  getWindow: () => BrowserWindow | null,
+  hooks: DownloadHooks = {},
+): void {
+  session.on('will-download', (_e, item, webContents) => {
     const name = item.getFilename() || 'download'
+    // ⚠️ 排障必需：同一次点击出现两个「另存为」时，唯一能区分来源的就是 wc（发起下载的
+    //    webContents id）+ url（站点究竟请求了哪两个地址）。这两项不要删。
+    console.log(
+      `[web2app] 下载请求：${name} wc=${webContents?.id ?? 'none'} url=${item.getURL()}`
+    )
+    // ⚠️ 顺序：先报告「下载已建立」（隐藏弹窗要靠它延命），再判重、再 pause/弹框。
+    if (webContents) hooks.onDownloadStart?.(webContents.id)
+    // ⚠️ 判重必须早于 pause / 弹框：重复下载要在出现「第二个另存为」之前就掐掉。
+    if (webContents && hooks.shouldDropDownload?.(webContents.id, item.getURL())) {
+      console.log(
+        `[web2app] 忽略重复下载（隐藏弹窗 / 弹窗兜底）：${name} wc=${webContents.id} url=${item.getURL()}`
+      )
+      item.cancel()
+      return
+    }
     let dir = ''
     try {
       dir = app.getPath('downloads')
     } catch {
       /* 取不到就用空串：saveDialogOptions 会退化成「只有文件名」，对话框仍可用 */
     }
-    const opts = saveDialogOptions(name, dir)
     item.pause()
-    const win = getWindow()
-    const asked = win ? dialog.showSaveDialog(win, opts) : dialog.showSaveDialog(opts)
-    void asked
-      .then(({ canceled, filePath }) => {
-        if (canceled || !filePath) {
+    // ⚠️ 先取 id：下载完成前发起页签可能已被自动关闭（多页签下载场景），
+    //    届时 webContents.id 会抛「Object has been destroyed」。
+    const sourceId: number | undefined = webContents?.id
+    const pick =
+      hooks.pickSavePath ??
+      ((filename: string, downloadDir: string) => {
+        const opts = saveDialogOptions(filename, downloadDir)
+        const win = getWindow()
+        const asked = win ? dialog.showSaveDialog(win, opts) : dialog.showSaveDialog(opts)
+        return asked.then(({ canceled, filePath }) =>
+          canceled || !filePath ? null : filePath
+        )
+      })
+    void pick(name, dir)
+      .then((filePath) => {
+        if (!filePath) {
           console.log(`[web2app] 下载已取消：${name}`)
           item.cancel()
+          if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, false)
           return
         }
-        console.log(`[web2app] 下载：${name} → ${filePath}`)
+        console.log(`[web2app] 下载：${name} → ${filePath} wc=${sourceId}`)
         item.setSavePath(filePath)
         item.resume()
+        if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, true)
       })
       .catch((e: unknown) => {
         // 对话框自己异常了也不能让下载悬着：取消掉，宁可让用户再点一次
         console.error(`[web2app] 「另存为」对话框异常，已取消本次下载：${(e as Error).message}`)
         item.cancel()
+        if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, false)
       })
     item.once('done', (_e, state) => {
-      console.log(`[web2app] 下载结束（${state}）：${name}`)
+      console.log(`[web2app] 下载结束（${state}）：${name} wc=${sourceId}`)
     })
   })
 }

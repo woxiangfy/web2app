@@ -37,6 +37,16 @@ const TABS_RS: &str = concat!(
 /// 注入到每个 tab 远程页面的标题回传脚本。
 #[cfg(windows)]
 const TAB_TITLE_JS: &str = include_str!("../tab_title.js");
+/// 注入到每个 tab 远程页面的「真实文档已提交」标记脚本（下载后自动关页签的判据来源）。
+#[cfg(windows)]
+const TAB_DOC_READY_JS: &str = include_str!("../tab_doc_ready.js");
+/// WebView2 钩子：下载落盘 / 取消后调用 `close_tab_after_download` 的地方。
+#[cfg(windows)]
+const WEBVIEW_HOOKS_RS: &str = include_str!("../webview_hooks.rs");
+/// tabs 建窗 / 生命周期模块（「规则确实被用上」的断言只认这里 —— TABS_RS 还拼接了
+/// `tabs/tests.rs`，单测里对同名函数的调用会把断言自我满足）。
+#[cfg(windows)]
+const TABS_WINDOW_RS: &str = include_str!("../tabs/window.rs");
 /// 注入到每次导航的加载层脚本（tab 首屏重试事件也由它发出）。
 #[cfg(windows)]
 const LOADING_JS: &str = include_str!("../loading.js");
@@ -434,4 +444,101 @@ fn tab_close_shortcut_wired_on_both_focus_paths() {
              会把 Ctrl+Z 撤销变成关页签；Electron 侧同样只看 key，双壳必须一致"
         );
     }
+}
+
+// ===========================================================================
+// 下载页签自动关闭（多页签，双壳）
+// ===========================================================================
+
+/// ⑨ 下载后自动关页签的判据链路逐环钉死。
+///
+/// 用户场景：站点点击 → `window.open` 新页签指向附件，浏览器下载开始后自动关掉这个空页签
+/// 并回到点击时的页面。整条链路每一环漏掉都是**静默失效**：
+///   · `tabs/state.rs` 常量 ↔ `lib.rs` 监听 ↔ `tab_doc_ready.js` 字面量（差一个字符 = 永不触发）；
+///   · 脚本必须排除本地占位页 —— 否则每个 tab 一建出来就算「已提交」，自动关页签永远不发生；
+///   · 脚本必须带令牌 + 只在主框架（否则任意外部页面能标记别的页签 / iframe 也算数）；
+///   · 建窗 builder 必须注入脚本，`DownloadStarting` 处理必须真的调用规则落地函数。
+#[cfg(windows)]
+#[test]
+fn tab_doc_ready_and_download_close_contract() {
+    const READY_IN_RUST: &str = concat!("\"", "web2app:tab-doc-ready", "\"");
+    assert!(
+        TABS_RS.contains(READY_IN_RUST),
+        "tabs 必须定义 TAB_DOC_READY_EVENT 字面量 {READY_IN_RUST}"
+    );
+    assert!(
+        LIB_RS.contains("app.listen(tabs::TAB_DOC_READY_EVENT"),
+        "lib.rs 必须监听 TAB_DOC_READY_EVENT（否则 committed 永远为 false，所有下载页签都会被关）"
+    );
+    const READY_IN_JS: &str = concat!("'", "web2app:tab-doc-ready", "'");
+    assert!(
+        TAB_DOC_READY_JS.contains(READY_IN_JS),
+        "tab_doc_ready.js 必须包含事件名 {READY_IN_JS}"
+    );
+    assert!(
+        TAB_DOC_READY_JS.contains("__web2appTabToken")
+            && TAB_DOC_READY_JS.contains("__web2appTabLabel"),
+        "tab_doc_ready.js 必须携带建窗时注入的 label + 一次性令牌（伪造防护靠它）"
+    );
+    assert!(
+        TAB_DOC_READY_JS.contains("window.self !== window.top"),
+        "tab_doc_ready.js 必须在子框架早退（初始化脚本无 frame 过滤，iframe 不算文档提交）"
+    );
+    assert!(
+        TAB_DOC_READY_JS.contains("location.hostname === 'tauri.localhost'")
+            && TAB_DOC_READY_JS.contains("location.protocol === 'tauri:'"),
+        "tab_doc_ready.js 必须排除本地占位页：否则每个 tab 一建出来就被标成「已提交」，\
+         下载页签永远不会自动关闭（静默回归）"
+    );
+    assert!(
+        TAB_DOC_READY_JS.contains("plugin:event|emit"),
+        "tab_doc_ready.js 必须走核心事件通路（远程 origin 的应用命令必被 ACL 拒）"
+    );
+    assert!(
+        TABS_RS.contains(r#"include_str!("../tab_doc_ready.js")"#),
+        "tabs/window.rs 的建窗 builder 必须注入 tab_doc_ready.js（判据来源）"
+    );
+    assert!(
+        WEBVIEW_HOOKS_RS
+            .contains("crate::tabs::close_tab_after_download(&app_for_dl, &label_for_dl)"),
+        "DownloadStarting 处理器必须（取消分支）调用 close_tab_after_download（否则页签一直留着）"
+    );
+    assert!(
+        WEBVIEW_HOOKS_RS.contains("close_tab_when_download_settles")
+            && WEBVIEW_HOOKS_RS.contains("add_StateChanged"),
+        "下载完成分支必须等 WebView2 下载到终态再关页签（提前销毁发起它的 webview 会以 \
+         UserShutdown 中断下载，无法续传）"
+    );
+    // 规则本体（未提交才关）由 tabs/tests.rs 的单测覆盖；这里只钉「这条规则确实被用上」。
+    // ⚠️ 只认 window.rs：TABS_RS 拼了 tabs/tests.rs，单测里的同名调用会让断言自我满足。
+    assert!(
+        TABS_WINDOW_RS.contains("should_close_tab_after_download"),
+        "close_tab_after_download 必须使用纯规则 should_close_tab_after_download（双壳同一判据）"
+    );
+    // 弹窗被拒 ⇒ 站点 location.href 兜底 ⇒ 一次点击两次下载：两步都必须接上，且顺序不能反。
+    assert!(
+        WEBVIEW_HOOKS_RS.contains("crate::tabs::note_expected_popup_download(&app_for_nw")
+            && WEBVIEW_HOOKS_RS.contains("crate::tabs::should_drop_popup_fallback(&app_for_dl"),
+        "NewWindowRequested 必须同步登记 window.open 目标、DownloadStarting 必须判重（否则双下载 / 双「另存为」）"
+    );
+    let note_at = WEBVIEW_HOOKS_RS
+        .find("crate::tabs::note_expected_popup_download(&app_for_nw")
+        .expect("note 调用");
+    let spawn_at = WEBVIEW_HOOKS_RS
+        .find("crate::tabs::open_new_tab_from_request(")
+        .expect("建窗调用");
+    assert!(
+        note_at < spawn_at,
+        "登记必须早于建窗排队：window.open 返回 null 后站点会立刻兜底，登记晚一拍就认不出"
+    );
+    let drop_at = WEBVIEW_HOOKS_RS
+        .find("crate::tabs::should_drop_popup_fallback(&app_for_dl")
+        .expect("判重调用");
+    let ask_at = WEBVIEW_HOOKS_RS
+        .find("crate::save_dialog::ask_save_path(")
+        .expect("另存为调用");
+    assert!(
+        drop_at < ask_at,
+        "判重必须早于弹「另存为」：否则两个对话框都已弹出"
+    );
 }

@@ -91,7 +91,7 @@ export interface AppConfig {
    * `true` ：落盘 `<data_dir>\logs\startup.log`，并把同一批诊断打到 stdout/stderr。
    *
    * ⚠️ 它是**开关**不是「日志级别」：关掉时没有任何第一现场，排障要么重新打包，
-   *    要么用命令行临时打开（`--debug` / 环境变量 `WEB2APP_DEBUG=1`，无需重打包）。
+   *    要么用命令行临时打开（`--w2a-debug` / 环境变量 `WEB2APP_DEBUG=1`，无需重打包）。
    */
   debug: boolean
   /**

@@ -148,7 +148,7 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | `window.__web2appChromeH` | titlebar.js 置 38 | 内容视图不注入 ⇒ `undefined` ⇒ 加载层满铺 |
 | 滚动根 / 滚动条侵入 | 需 `ensureScrollRoot` 等一整套机制 | **不存在**（滚动条在视图内；壳页面 `overflow:hidden`） |
 | 窗口标题 | `page-title-updated` 被 `preventDefault()`，固定 `cfg.title` | 壳行为不变；内容视图标题事件只用于刷新标签栏文本 |
-| 新窗口请求 | `deny` + 当前窗口原地导航 | 壳页面仍 `deny`；内容视图 → 新建页签并落到目标 path |
+| 新窗口请求 | `deny` + 当前窗口原地导航 | 壳页面仍 `deny`；内容视图 → **`allow` 建一个只当「句柄」的隐藏窗口**（不导航 / 不下载 / 不显示，见 §8.1 P15）再新建页签承接导航与下载 |
 | 窗口按钮 IPC | `BrowserWindow.fromWebContents(sender)` | 内容视图也会命中（§3-2）⇒ 必须加 `sender.id` 校验 |
 | 页签标题 | — | 直接监听事件，**无需注入脚本** |
 | 进程模型 | 1 渲染进程 | N 渲染进程（内存随页签数线性增长） |
@@ -177,7 +177,7 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 
 | # | 位置 | 改动 |
 | :-- | :--- | :--- |
-| 9 | 各内容视图 | `page-title-updated` / `setWindowOpenHandler` / `did-fail-load` 逐视图挂载；`will-download` 挂在共享 `defaultSession`（主窗口与内容视图都没设 `partition` ⇒ 挂一次全局生效；若未来设独立 partition 必须改回逐视图）；`setWindowOpenHandler` 页签模式返回 `deny` + `spawnTab(url)`；`did-fail-load` 记日志 + 页签标题置「加载失败」 |
+| 9 | 各内容视图 | `page-title-updated` / `setWindowOpenHandler` / `did-fail-load` 逐视图挂载；`will-download` 挂在共享 `defaultSession`（主窗口与内容视图都没设 `partition` ⇒ 挂一次全局生效；若未来设独立 partition 必须改回逐视图）；`setWindowOpenHandler` 页签模式返回 `deny` + `spawnTab(url)`；`did-fail-load` 记日志 + 页签标题置「加载失败」；`did-navigate` 标记「已提交文档」——下载落盘/取消后据此自动关掉「只为下载而开」的空页签并回到打开者（2026-11-15，P14） |
 | 10 | `tabs.ts` | 页签上限 32 熔断 + 超限拒绝（对齐 `MAX_TABS`，含一条可排查日志） |
 | 11 | `tabs.ts` | 关闭最后一个页签 → 关闭宿主窗口（复用既有托盘/退出语义）；激活态落到相邻页签（优先右侧）。⚠️ 2026-10-13 起**首页（位次 0）不可关** ⇒ 该分支在正常路径下不可达，仅作异常态兜底（见 §8.1 P1h/P7h） |
 | 12 | `tabs.ts` | `destroyAllTabs()`：宿主确定退出时显式 `close()` 所有视图 webContents（官方明示视图不随窗口销毁自动回收）+ 清 Map 引用；探针加「引用归零」断言 |
@@ -219,13 +219,15 @@ BrowserWindow  (frame:false, 同现有无边框外观)
 | P11 | **特权命令 sender 校验**：从内容视图发 `close_host` 类消息必须被拒绝，且日志有拒绝记录 | §3-2 安全硬化；只断言「壳能关窗」会被「谁都能关窗」满足 |
 | P12 | 重复 `addChildView(view)` 后 children **不增**且该视图在数组末尾；`setVisible(false)` 后重复 add 仍为 `false` | §3-4 实测语义，防后续 Electron 升级改变行为后无人察觉 |
 | P13 | 单窗口模式跑全量断言：**条数不变、退出码 0**（设计基线 138 条 @ 2026-09-27；v1.76 起 150 条，**判据是「不减少」而不是某个固定数字**） | 零回归闸门 |
+| P14 | **下载页签自动关闭**：① `window.open('/dl.txt')`（附件）→ 新页签在下完/落盘后**自动关闭**，激活回到打开者，且附件完整落盘；② 已加载过页面的页签 `loadURL` 同一附件 → **不关** | 2026-11-15 新增（浏览器 `target="_blank"` 下载语义）。判据只有「是否提交过文档」（`did-navigate`）；②不可省，否则「凡是下载就关页签」也会让①通过 |
+| P15 | **`window.open()` 返回非 null、隐藏窗口活到下载结算、且它自己绝不导航**：页面 `window.open('/dl.txt')` 后自己记录「是否走了兜底」与「300ms 时 `w.closed`」，断言返回值 `!== 'null'`、兜底未执行、**下载进行中 `w.closed === false`**、**除主窗外的窗口停在 `about:blank` 且不可见**、页签数回落、附件完整落盘 | 2026-11-15 新增（含当晚加固）。站点的拦截判据是 `if (!w \|\| w.closed)`：`deny` ⇒ `w` 为 null；建了立刻销毁 ⇒ `w.closed` 为 true —— 两条都会走 `location.href` 兜底 ⇒ 一次点击两条下载、两个保存框。**只按 URL 判重不可靠**（兜底地址常带新签名），故隐藏窗口必须活到这次下载结算；同时它**只当句柄**（`stop()` + `about:blank` + `will-navigate` 全拦 + `hide()`），否则它自己也会下一次、并在 Windows 上冒出以下载地址为标题的窗口弹自己的「另存为」 |
 
 ### 8.2 工具与命令
 
 ```bash
 # 无 GPU 沙箱必须带这两个参数（历史教训：只靠 disableHardwareAcceleration 不够）
 pnpm run probe --no-sandbox --in-process-gpu                 # 单窗口断言（v1.76 起 150 条；设计时 138 条）
-pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 33 条（2026-09-27 实测）
+pnpm run probe --tabs --no-sandbox --in-process-gpu          # 页签断言组 59 条（2026-11-15 实测）
 pnpm run tabs-v4 / tabs-v4-negative                          # V4 绘制顺序 正/负向对照（退出码即结论）
 
 # 打包产物自证（必须 Start-Process -Wait 取 ExitCode；直接 & 调用 GUI exe 是假绿）

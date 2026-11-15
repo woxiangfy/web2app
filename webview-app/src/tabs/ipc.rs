@@ -133,6 +133,26 @@ pub(crate) fn retry_tab_bootstrap(app: &tauri::AppHandle, label: String, token: 
     crate::nav::bootstrap_for_label(app.clone(), label);
 }
 
+/// tab 页面「真实网页文档已提交」事件（`src/tab_doc_ready.js`）的落地：校验令牌后把该 tab
+/// 标记为 [`TabInfo::committed`]。只改状态、不动界面（标签栏无需重画）。
+///
+/// 为什么需要它：下载响应**不产生文档**，所以「只为下载而开的 tab」永远收不到本事件。
+/// 下载落盘 / 取消后 `window.rs::close_tab_after_download` 就靠这个状态区分「页面」与
+/// 「空页签」。首文档是本地占位页（`tauri.localhost`），脚本对它有早退守卫，不算提交。
+///
+/// token 校验与 [`report_tab_title`] 同理由（app.listen 的 Event 不带发送窗口标识）。
+pub(crate) fn mark_tab_doc_ready(app: &tauri::AppHandle, label: String, token: String) {
+    if !tab_token_matches(app, &label, &token) {
+        dlog!("[tabs] 拒绝文档就绪回传：label/token 与在册 tab 不匹配（label={label}）");
+        return;
+    }
+    let state = app.state::<TabManager>();
+    let mut tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(t) = tabs.iter_mut().find(|t| t.label == label) {
+        t.committed = true;
+    }
+}
+
 /// tab 页面里 Ctrl+W（`src/tab_keys.js`）经核心事件到达后的落地：校验 label/token 后关闭该 tab。
 ///
 /// ⚠️ 关闭统一走 [`close_tab_inner`]：首页那一签由它第 ① 步拒绝（固定第一位、不可关），
@@ -214,9 +234,14 @@ pub(super) fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> O
 ///
 /// 仅多页签模式下有意义：不拦截到当前窗，而是新建一个 tab，并导航到弹窗请求的目标地址
 /// （落点由 [`resolve_popup_url`] 计算；算不出来时回落到入口地址）。
-pub(crate) fn open_new_tab_from_request(app: &tauri::AppHandle, target_url: Option<String>) {
+/// `opener` = 发起这次打开的 tab label：记到新 tab 上，下载后自动关页签时回到它。
+pub(crate) fn open_new_tab_from_request(
+    app: &tauri::AppHandle,
+    target_url: Option<String>,
+    opener: Option<String>,
+) {
     let start = resolve_popup_url(app, target_url.as_deref());
     // 建 tab 时直接带上目标地址做**一次**导航（历史实现是先建窗导航主地址、再二次导航改地址，
     // 既多一次请求，也与首次导航存在竞态）。
-    let _ = spawn_tab_with_target(app, start);
+    let _ = spawn_tab_with_target(app, start, opener);
 }

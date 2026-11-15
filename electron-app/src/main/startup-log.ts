@@ -29,7 +29,7 @@
  *    也一并静默**（见 `silenceConsole()`）——因为「每次启动都在用户数据目录里留一份日志」
  *    不是期望行为，而终端启动时的满屏输出对最终用户同样是噪声。
  *    代价必须写清楚：上面那两大段论证的「用户侧第一现场」在默认配置下**不存在**。
- *    所以留了运行时逃生口 —— `--debug` / 环境变量 `WEB2APP_DEBUG=1`（见 index.ts 的 DEBUG），
+ *    所以留了运行时逃生口 —— `--w2a-debug` / 环境变量 `WEB2APP_DEBUG=1`（见 index.ts 的 DEBUG），
  *    不必为了排障重新打包；探针与冒烟模式则内部强制打开（它们的存在意义就是取证）。
  */
 import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs'
@@ -260,7 +260,7 @@ export function printStartupSummary(info: StartupSummaryInfo): void {
   // 诊断开关本身必须写进日志：否则「日志文件里怎么只有一行 header / 怎么压根没有日志文件」
   // 这类追问会反复出现 —— 用户看不出是「开关没开」还是「写盘失败」。
   console.log(
-    `  诊断日志      : ${info.debugOn ? '已开启' : '未开启（config.json 的 debug 或命令行 --debug）'}`,
+    `  诊断日志      : ${info.debugOn ? '已开启' : '未开启（config.json 的 debug 或命令行 --w2a-debug）'}`,
   )
   // 文件日志是用户侧唯一能提供证据的东西，路径必须打在**第一行区域**（用户直接截图给我们）
   console.log(`  日志文件      : ${describeFileLog(info.fileLog)}`)

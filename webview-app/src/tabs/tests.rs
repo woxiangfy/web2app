@@ -185,6 +185,41 @@ fn popup_missing_or_unsupported_target_returns_none() {
     assert_eq!(resolve_popup_url_for(&nav, Some("not a url")), None);
 }
 
+/// 下载落盘 / 取消后自动关页签的纯规则 —— 与 Electron
+/// `tab-order.ts::shouldCloseTabAfterDownload` 同一条（双壳判据必须一致）：
+/// 只有「从未提交过真实文档」的 tab 才关；已加载过页面的 tab 保留（页面里点下载时
+/// 浏览器同样保留当前页签，关掉会弄丢用户正在看的页面）。
+#[test]
+fn download_tab_close_rule_matches_browser_semantics() {
+    assert!(
+        should_close_tab_after_download(false),
+        "只为下载而开（从未提交文档）的页签必须自动关闭"
+    );
+    assert!(
+        !should_close_tab_after_download(true),
+        "已提交过文档的页签不能关（会弄丢用户正在看的页面）"
+    );
+}
+
+/// 「弹窗兜底重复下载」纯判据（与 Electron `tabs.ts::shouldDropPopupFallback` 同一口径）：
+/// 只有「打开者一致 + 在 3s 窗口内」才丢，避免误杀用户真的又点一次同地址下载。
+#[test]
+fn popup_fallback_duplicate_rule() {
+    assert!(popup_fallback_is_duplicate(Some("tab-2"), "tab-2", 100));
+    assert!(
+        !popup_fallback_is_duplicate(Some("tab-2"), "tab-3", 100),
+        "发起下载的不是打开者 ⇒ 不能丢"
+    );
+    assert!(
+        !popup_fallback_is_duplicate(Some("tab-2"), "tab-2", POPUP_FALLBACK_WINDOW_MS),
+        "超出识别窗口 ⇒ 不能丢"
+    );
+    assert!(
+        !popup_fallback_is_duplicate(None, "tab-2", 100),
+        "没有登记过这个地址 ⇒ 不能丢"
+    );
+}
+
 #[test]
 fn close_adjacency_plan_matches_tab_order_rule() {
     // 4 个页签 [0,1,2,3]，删除后幸存 3 个。

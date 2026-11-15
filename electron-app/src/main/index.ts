@@ -111,7 +111,8 @@ import {
  *  false」，与既有开关语义容易撞车。一律用正向的 `--flag`。
  *
  *  已定义的开关：`--probe`（兼容契约探针）、`--tabs`（配合 probe 走页签断言组）、
- *  `--smoke`（启动自检后退出）、`--debug`（打开诊断日志，见下方 DEBUG）。
+ *  `--smoke`（启动自检后退出）、`--w2a-debug`（打开诊断日志，见下方 DEBUG）。
+ *  ⚠️ 刻意不叫 `--debug`：那个名字会被 Electron 转给 Node，Node 22 起直接报错退出。
  */
 const argFlags = new Set(process.argv.slice(1))
 const hasFlag = (f: string): boolean => argFlags.has(f)
@@ -173,13 +174,15 @@ const cfg: AppConfig = loaded.config
  *
  * 判据（任一成立即开启）：
  *   · `config.json` 的 `debug` —— 打包期定下来，改它必须重新打包；
- *   · `--debug` / 环境变量 `WEB2APP_DEBUG=1`（真值集合 1/true/yes，与 Tauri 壳逐字一致，
+ *   · `--w2a-debug` / 环境变量 `WEB2APP_DEBUG=1`（真值集合 1/true/yes，与 Tauri 壳逐字一致，
  *     见 config.debugFlagTruthy）—— 运行时逃生口，交付出去的包也能临时取证，不必重新打包；
+ *     ⚠️ **不能叫 `--debug`**：Electron 会把它当 Node 的选项转给 Node，Node 22 起已移除该选项
+ *     （打印 `DEP0062` 后进程直接退出，日志一行都不会写 —— 2026-11-15 实测踩到）。
  *   · 探针 / 冒烟模式**强制打开** —— 它们存在的意义就是取证，探针的「退出码即结论」与冒烟
  *     的路径断言全都靠这些输出，静默会让自检退化成「永远绿」。
  */
 const DEBUG =
-  cfg.debug || debugFlagTruthy(process.env.WEB2APP_DEBUG) || hasFlag('--debug') || PROBE || SMOKE
+  cfg.debug || debugFlagTruthy(process.env.WEB2APP_DEBUG) || hasFlag('--w2a-debug') || PROBE || SMOKE
 
 // ⚠️ 静默要**尽可能早**：晚一步就会漏掉 setupPortablePaths 那类启动早期输出。
 //    此后 `console.*` 全是空操作，只有 rawConsole 还能出声（见 startup-log.ts）。
@@ -225,8 +228,8 @@ if (PROBE) {
 //    没有那份文件，「双击没反应 / 打开的是 example.com / 标题不对」在用户侧零证据。
 // ⚠️⚠️ 但「每次启动都往用户数据目录里留一份日志」本身不是期望行为（2026-09-22 改为可选）：
 //    debug=false（默认）时**连 logs 目录都不建**、不落文件、也不输出任何诊断。
-//    代价是上面那条「用户侧第一现场」在默认配置下不存在 —— 排障时用 `--debug`（或环境
-//    变量 WEB2APP_DEBUG=1）临时打开，不必重新打包。
+//    代价是上面那条「用户侧第一现场」在默认配置下不存在 —— 排障时用 `--w2a-debug`
+//    （或环境变量 WEB2APP_DEBUG=1）临时打开，不必重新打包。
 // ⚠️ 探针**不得**往真实目录写：与上面两个 JSON 同理，在打包产物上跑一次 `--probe`
 //    就会在用户 exe 旁边留下 `data\logs\`，污染交付物（`data\session` 已经踩过一次）。
 const logDir = PROBE
@@ -433,7 +436,52 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   //   defaultSession 上，所以这里挂一次 `will-download` 即覆盖**所有**视图的下载（§7-9 的
   //   「逐视图挂载」在共享 session 前提下等价于「挂一次全局生效」）。若未来给内容视图设
   //   独立 partition，这条必须改成逐视图挂载。
-  attachDownload(win.webContents.session, () => win)
+  attachDownload(
+    win.webContents.session,
+    () => win,
+    {
+      // 多页签：同一次点击产生两条下载（两个「另存为」）有两个来源 —— ① 隐藏弹窗抢先
+      // 发起的那条（它只为让 window.open() 返回非 null 而存在，真正的下载由新页签做）；
+      // ② 站点判定「弹窗被拦截」后走的 `location.href` 同地址兜底（纵深防御，见下）。
+      shouldDropDownload: (webContentsId, url) => {
+        if (!TABS_MODE) return false
+        // ① 隐藏弹窗自己发起的下载一律丢弃 —— 否则它会和新页签各弹一个「另存为」。
+        if (tabManager?.isHiddenPopup(webContentsId)) return true
+        // ② 纵深防御：站点仍走了同地址兜底（URL + 打开者 + 3s 命中）→ 丢弃。
+        return tabManager?.shouldDropPopupFallback(webContentsId, url) ?? false
+      },
+      // 隐藏弹窗一旦真的开始下载，就取消它的兜底超时 —— 它要活到下载结束
+      // （过早销毁会让页面里的 `w.closed` 变 true，站点据此兜底再下一次）。
+      onDownloadStart: (webContentsId) => {
+        if (!TABS_MODE) return
+        tabManager?.noteHiddenPopupDownloadStarted(webContentsId)
+      },
+      // 多页签：下载落盘 / 取消后，自动关掉「只为下载而开着、从未提交过文档」的页签，
+      // 并把激活态拉回打开它的那个页签（浏览器行为：点附件链接 → 新页签下载 → 自动关闭）。
+      // 单窗口模式没有页签，天然不处理；已加载过页面的页签也不会被关（判据见
+      // tab-order.ts::shouldCloseTabAfterDownload）。
+      onSaveChoice: (webContentsId) => {
+        if (!TABS_MODE) return
+        // 隐藏弹窗的下载没有对应页签（也不该在此时销毁它：下载还在进行）
+        if (tabManager?.isHiddenPopup(webContentsId)) return
+        const close = (): void => {
+          tabManager?.closeTabAfterDownload(webContentsId)
+        }
+        // 探针：延后 600ms 关页签，模拟「用户还停在『另存为』对话框前」。
+        // P15 要在**下载进行中**观察页面里的 `w.closed` 是否仍为 false —— 那正是站点
+        // 判断「弹窗被拦截」的判据，也是「一次点击两个另存为」的真正根因。
+        if (PROBE) setTimeout(close, 600)
+        else close()
+      },
+      // 探针：不弹模态「另存为」（会把断言永久挂住），固定落到 %TEMP% 下。
+      ...(PROBE
+        ? {
+            pickSavePath: async (name: string) =>
+              join(app.getPath('temp'), `w2a-probe-${name.replace(/[^\w.-]/g, '_')}`),
+          }
+        : {}),
+    }
+  )
 
   // 启动页加载完成 → 解析目标地址并导航过去（Tauri 侧同样是「启动页先出，后台准备完再跳」）
   win.webContents.on('did-finish-load', () => {

@@ -18,14 +18,15 @@
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2ContextMenuItem, ICoreWebView2ContextMenuItemCollection,
-    ICoreWebView2Deferral, ICoreWebView2Environment9, ICoreWebView2Settings4, ICoreWebView2_11,
-    ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2_4,
-    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+    ICoreWebView2Deferral, ICoreWebView2DownloadOperation, ICoreWebView2Environment9,
+    ICoreWebView2Settings4, ICoreWebView2_11, ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2_4,
+    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND, COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
 };
 use webview2_com::{
     BasicAuthenticationRequestedEventHandler, ContextMenuRequestedEventHandler,
     CustomItemSelectedEventHandler, DownloadStartingEventHandler, NewWindowRequestedEventHandler,
-    WebResourceRequestedEventHandler,
+    StateChangedEventHandler, WebResourceRequestedEventHandler,
 };
 // base64 0.23 的 `.encode()` 是 Engine trait 上的方法，必须显式引入该 trait 才能调用
 // （proxy.rs 顶部已 `use base64::Engine;`，这里的 WebView2 钩子里同样需要）。
@@ -136,6 +137,46 @@ fn content_disposition_filename(cd: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 下载到达终态（Completed / Interrupted）后，关掉「只为下载而开」的页签。
+///
+/// ⚠️ 为什么不能「另存为选完就关」：WebView2 的下载依附于发起它的 webview，窗口销毁会让
+/// 进行中的下载以 `UserShutdown` 中断（MSDN：此类中断的下载不支持续传）—— 早关等于把
+/// 用户正在写盘的文件截断。所以先查一次当前状态（小文件可能在 `SetResultFilePath` 之后
+/// 瞬间完成），仍在进行就挂 `StateChanged` 等终态。
+///
+/// 关页签本身仍走 `tabs::close_tab_after_download`：判据（是否提交过文档 / 首页）与
+/// 打开者回跳逻辑都在那边，双壳一致。
+fn close_tab_when_download_settles(
+    op: ICoreWebView2DownloadOperation,
+    app: tauri::AppHandle,
+    label: String,
+) {
+    let mut state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+    let read = unsafe { op.State(&mut state) }.is_ok();
+    if !read || state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+        crate::tabs::close_tab_after_download(&app, &label);
+        return;
+    }
+    // 终态只处理一次：StateChanged 在进度更新时也可能派发。
+    let fired = Arc::new(AtomicBool::new(false));
+    let watcher = StateChangedEventHandler::create(Box::new(move |op, _args| {
+        let Some(op) = op else { return Ok(()) };
+        let mut st = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+        if unsafe { op.State(&mut st) }.is_ok()
+            && st != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS
+            && !fired.swap(true, Ordering::SeqCst)
+        {
+            dlog!("[webview_hooks] 下载到达终态，检查是否关闭「只为下载而开」的页签：{label}");
+            crate::tabs::close_tab_after_download(&app, &label);
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe {
+        let _ = op.add_StateChanged(&watcher, &mut token);
+    }
 }
 
 /// 从下载 URL 的路径末段提取文件名（percent-decode 后返回）；路径无文件名时返回 None。
@@ -396,11 +437,24 @@ fn register_webview_hooks(
                         "[webview_hooks] 窗口 {label_for_nw} 拦截到新窗口请求：{}",
                         uri.as_deref().unwrap_or("<无法读取>")
                     );
+                    // ⚠️ 登记必须**同步**在这里做（不能塞进下面的建窗线程）：SetHandled(true)
+                    // 后页面里的 window.open() 立即返回 null，站点常据此立刻 location.href 兜底；
+                    // 登记晚一拍就认不出那条兜底重复下载（见 tabs::should_drop_popup_fallback）。
+                    if let Some(u) = uri.as_deref() {
+                        crate::tabs::note_expected_popup_download(&app_for_nw, &label_for_nw, u);
+                    }
                     let app_spawn = app_for_nw.clone();
+                    // opener = 本 webview 所属的 tab label：下载后自动关页签时用它回到
+                    // 「点击时的页面」（见 tabs::close_tab_after_download）。
+                    let opener_for_new = label_for_nw.clone();
                     let _ = std::thread::spawn(move || {
                         let app_main = app_spawn.clone();
                         let _ = app_spawn.run_on_main_thread(move || {
-                            crate::tabs::open_new_tab_from_request(&app_main, uri);
+                            crate::tabs::open_new_tab_from_request(
+                                &app_main,
+                                uri,
+                                Some(opener_for_new),
+                            );
                         });
                     });
                     let _ = args.SetHandled(true);
@@ -564,6 +618,9 @@ fn register_webview_hooks(
     //   · 取消 → `SetCancel(true)`（MSDN：Cancel 为真时无论如何都不显示默认保存 UI）
     //   · 对话框建不出来 → 什么都不设，保持 WebView2 原生行为，绝不静默改动用户的数据
     let app_for_dl = app.clone();
+    // 本 webview 的窗口 label：下载有结果后交给 tabs 判断「是不是只为下载而开的空页签」。
+    // （宿主窗口 / 单窗口模式不在册 ⇒ close_tab_after_download 直接返回，天然不影响它们。）
+    let label_for_dl = window_label.to_string();
     // owner 窗口句柄在主线程这里取一次：对话框要按「真模态」禁用宿主窗口，而在 COM 回调里
     // 再取窗口需要过 Tauri 的 WindowManager 锁 —— 不在回调执行期间持任何锁更安全。
     let owner_hwnd = app
@@ -591,13 +648,27 @@ fn register_webview_hooks(
                         CoTaskMemFree(Some(cd_pw.0 as *const core::ffi::c_void));
                     }
                     let name = suggested_filename(uri.as_deref(), cd.as_deref());
+                    // 判重必须早于弹框：页签模式 `window.open()` 对页面返回 null，站点常据此
+                    // 走「弹窗被拦截」的 location.href 兜底，同一地址一次点击会来两次下载 ——
+                    // 不掐掉就会弹两个「另存为」，用户点完第一个第二个还在（判定见
+                    // tabs::should_drop_popup_fallback）。
+                    if let Some(u) = uri.as_deref() {
+                        if crate::tabs::should_drop_popup_fallback(&app_for_dl, &label_for_dl, u) {
+                            dlog!("[webview_hooks] 忽略重复下载（站点「弹窗被拦截」兜底）：{name}");
+                            let _ = args.SetCancel(true);
+                            let _ = args.SetHandled(true);
+                            return Ok(());
+                        }
+                    }
                     let dir = app_for_dl.path().download_dir().ok();
                     // 这行日志是「下载到底有没有走到钩子」的唯一判据：先打日志再弹框，
                     // 用户报「点了没反应」时据此区分「钩子没触发」与「对话框没弹出来」。
                     dlog!("[webview_hooks] 下载：正在询问保存位置（建议文件名 {name}）");
                     // ⚠️ 这里**同步**跑模态对话框（含它自己的消息循环），全程在主线程。
                     // 理由见 `crate::save_dialog` 顶部注释：换线程会同时丢掉模态语义与 Send 保证。
-                    match crate::save_dialog::ask_save_path(owner_hwnd, &name, dir.as_deref()) {
+                    let choice =
+                        crate::save_dialog::ask_save_path(owner_hwnd, &name, dir.as_deref());
+                    match &choice {
                         SaveChoice::Save(path) => {
                             dlog!(
                                 "[webview_hooks] 下载：{name} → 用户选择保存到 {}",
@@ -615,6 +686,24 @@ fn register_webview_hooks(
                             dlog!(
                                 "[webview_hooks] 下载：系统「另存为」对话框不可用，本次维持 \
                                  WebView2 默认下载行为（{name}）"
+                            );
+                        }
+                    }
+                    // 关页签的时机（⚠️ 不能一律「选完就关」）：WebView2 的下载**依附于发起它
+                    // 的 webview**，窗口一销毁，进行中的下载会以 `UserShutdown` 中断，而 MSDN
+                    // 明确「shutdown 中断的下载不支持续传」—— 早关页签 = 把用户的文件截断。
+                    //   · 用户取消 → 下载根本没开始，可以立刻关；
+                    //   · 确认保存 / 对话框不可用 → 等下载到终态（Completed / Interrupted）再关。
+                    // 只有「从未提交过真实文档」的页签会被关（首页 / 已加载页签不关）。
+                    match choice {
+                        SaveChoice::Cancelled => {
+                            crate::tabs::close_tab_after_download(&app_for_dl, &label_for_dl);
+                        }
+                        SaveChoice::Save(_) | SaveChoice::Unavailable => {
+                            close_tab_when_download_settles(
+                                op.clone(),
+                                app_for_dl.clone(),
+                                label_for_dl.clone(),
                             );
                         }
                     }

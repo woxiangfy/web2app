@@ -7,6 +7,8 @@
 
 use super::*;
 
+use std::time::Instant;
+
 /// 判断多页签能力是否启用。纯计算，供 lib.rs / webview_hooks 在编译期分支复用。
 pub(crate) fn tabs_enabled() -> bool {
     TABS_ENABLED
@@ -252,16 +254,19 @@ pub(super) fn navigate_tab(app: &tauri::AppHandle, label: &str, start: Option<St
 ///
 /// 返回新 tab 的 label，供前端标签栏渲染。
 pub(crate) fn spawn_tab(app: &tauri::AppHandle) -> Result<String, String> {
-    spawn_tab_with_target(app, None)
+    spawn_tab_with_target(app, None, None)
 }
 
-/// 创建新 tab 并指定其初始导航地址。
+/// 创建新 tab 并指定其初始导航地址 / 打开者。
 ///
 /// `start = Some(url)` 时用该地址替换入口地址做一次导航（`target="_blank"` 弹窗的落点），
 /// 见 [`navigate_tab`]；`None` 时导航到缓存的入口地址。
+/// `opener = Some(label)` 表示这是某个 tab 经 `window.open` 打开的（下载后自动关页签时
+/// 需要回到它，见 `close_tab_after_download`）；首个 tab 与 `+` 新建传 None。
 pub(crate) fn spawn_tab_with_target(
     app: &tauri::AppHandle,
     start: Option<String>,
+    opener: Option<String>,
 ) -> Result<String, String> {
     // 熔断：已达上限直接拒绝建窗（详见 MAX_TABS）。必须在 next_tab_label 之前返回，
     // 否则会白白消耗一个 label（label 只用于日志/前端展示，但保持单调更干净）。
@@ -292,6 +297,9 @@ pub(crate) fn spawn_tab_with_target(
             label: label.clone(),
             title: TITLE.to_string(),
             token: token.clone(),
+            // 真实文档提交前一律未提交（占位页不算；见 TabInfo::committed）。
+            committed: false,
+            opener,
         });
     }
     // tab 窗口：去边框 + 不占任务栏按钮，尺寸/位置按宿主客户区一次到位。
@@ -344,7 +352,11 @@ pub(crate) fn spawn_tab_with_target(
         // Ctrl+W 关闭当前页签：键位 → 核心事件 web2app:close-tab（含 label/token）→
         // Rust `request_close_tab` 校验后走 close_tab_inner（首页那一签在那里被拒绝）。
         // 与 tab_title.js 同一套「远程页面只能用核心事件」的通路，理由见该文件头注释。
-        .initialization_script(include_str!("../tab_keys.js"));
+        .initialization_script(include_str!("../tab_keys.js"))
+        // 文档就绪标记：真实网页文档创建时回传（本地占位页早退；下载响应不产生文档 ⇒
+        // 什么都不发）。Rust 侧据此区分「页面」与「只为下载而开的空页签」，下载落盘 /
+        // 取消后自动关掉后者（见 close_tab_after_download）。
+        .initialization_script(include_str!("../tab_doc_ready.js"));
 
     // 建窗即给出与宿主内容区一致的初始**客户区**尺寸（逻辑像素；外框偏移由 tao 的
     // set_inner_size 自行补偿，位置由 relayout 负责），避免首帧尺寸错误。
@@ -564,6 +576,98 @@ pub(crate) fn close_tab_inner(app: &tauri::AppHandle, label: &str) {
         purge_orphan_tabs(app);
         push_tabs_to_shell(app);
     }
+}
+
+/// 在 `NewWindowRequested` 里**同步**登记「即将交给新 tab 承接的 window.open 目标地址」。
+///
+/// ⚠️ 必须同步（不能塞进建窗的后台线程）：`SetHandled(true)` 后页面里的 `window.open()`
+/// 立刻返回 null，站点常据此判定「弹窗被拦截」并对同一地址做 `location.href` 兜底；
+/// 登记晚一拍就认不出那条重复下载（见 [`should_drop_popup_fallback`]）。
+pub(crate) fn note_expected_popup_download(app: &tauri::AppHandle, opener_label: &str, url: &str) {
+    let state = app.state::<TabManager>();
+    let mut map = state
+        .expected_popup_downloads
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    map.insert(url.to_string(), (opener_label.to_string(), Instant::now()));
+}
+
+/// 判重：这次下载是不是站点「弹窗被拦截」的兜底重复下载（命中则调用方 `SetCancel(true)`）。
+///
+/// 判据三条同时成立才丢：地址与刚才登记的 `window.open` 目标**逐字相同**、发起下载的就是
+/// 登记时的**打开者 tab**、且在 [`POPUP_FALLBACK_WINDOW_MS`] 内。命中即消费记录。
+/// 与 Electron 侧 `tabs.ts::shouldDropPopupFallback` 同一口径（双壳行为一致）。
+pub(crate) fn should_drop_popup_fallback(app: &tauri::AppHandle, label: &str, url: &str) -> bool {
+    let state = app.state::<TabManager>();
+    let mut map = state
+        .expected_popup_downloads
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let Some((opener, at)) = map.get(url).map(|(o, t)| (o.clone(), *t)) else {
+        return false;
+    };
+    let age_ms = at.elapsed().as_millis() as u64;
+    if age_ms >= POPUP_FALLBACK_WINDOW_MS {
+        map.remove(url);
+        return false;
+    }
+    if !popup_fallback_is_duplicate(Some(opener.as_str()), label, age_ms) {
+        return false;
+    }
+    map.remove(url);
+    true
+}
+
+/// 下载落盘 / 取消后调用：若发起下载的 tab **从未提交过真实文档**（只为这次下载而开），
+/// 自动关掉它并把激活态拉回打开它的 tab —— 对齐浏览器对 `target="_blank"` 指向附件的处理
+/// （Electron 侧同一策略见 `tabs.ts::closeTabAfterDownload`，判据同为「是否提交过文档」）。
+///
+/// **调用时机**：`webview_hooks` 的 `DownloadStarting` 处理器在「另存为」有结果之后调用，
+/// 此时下载已 `SetResultFilePath`/被取消，关掉发起页签不会打断下载本身。
+///
+/// ⚠️ 本函数正运行在该 tab 自己的 COM 回调栈里，**绝不能就地 `destroy()`**（在自己的回调里
+/// 销毁自己）：统一先切后台线程，再 `run_on_main_thread` 排队到下一轮事件循环。排队后前置
+/// 条件要**重新校验**一次 —— 期间用户可能已手动关掉它、或它已提交文档。
+pub(crate) fn close_tab_after_download(app: &tauri::AppHandle, label: &str) {
+    let (idx, committed, opener) = {
+        let state = app.state::<TabManager>();
+        let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(idx) = tabs.iter().position(|t| t.label == label) else {
+            return;
+        };
+        (idx, tabs[idx].committed, tabs[idx].opener.clone())
+    };
+    // 不在册 / 首页 / 已提交过文档 → 保留（首页永久保留，这里短路是为了不误激活 opener）。
+    if is_home_index(idx) || !should_close_tab_after_download(committed) {
+        dlog!("[tabs] 下载结束，保留页签 {label}（首页或已提交过文档）");
+        return;
+    }
+    dlog!("[tabs] 下载结束，自动关闭「只为下载而开」的页签：{label}");
+    let app_bg = app.clone();
+    let label_bg = label.to_string();
+    let _ = std::thread::spawn(move || {
+        let app_main = app_bg.clone();
+        let _ = app_bg.run_on_main_thread(move || {
+            let still_download_only = {
+                let state = app_main.state::<TabManager>();
+                let tabs = state.tabs.lock().unwrap_or_else(|p| p.into_inner());
+                tabs.iter()
+                    .find(|t| t.label == label_bg)
+                    .is_some_and(|t| !should_close_tab_after_download(t.committed))
+            };
+            if !still_download_only {
+                return;
+            }
+            close_tab_inner(&app_main, &label_bg);
+            // close_tab_inner 选的是**相邻**页签；浏览器语义是回到「点击时的页面」（打开者），
+            // 页签栈里打开者未必紧挨着，补一次激活。
+            if let Some(op) = opener {
+                if app_main.get_webview_window(&op).is_some() {
+                    activate_tab(&app_main, &op);
+                }
+            }
+        });
+    });
 }
 
 /// 关闭一个 tab 后的激活态计划（**纯顺序规则**，不依赖任何 Tauri 对象，可直接单测）。

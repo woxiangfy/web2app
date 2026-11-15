@@ -78,7 +78,8 @@ export type OverlayCommand =
 //
 // 2026-11-07 架构审查 M-9：主体按「桥 / 注入 / overlay 指令」拆成三个函数 ——
 // ⚠️ 只能在**本文件内**分块，不能拆成独立模块：本 preload 跑在 `sandbox: true` 的渲染进程里，
-//    `require` 只放行 electron / events / timers / url，相对 require 会在运行期失败。
+//    Electron 45 起 `require` 只放行 electron（events / timers / url shim 与 Buffer /
+//    setImmediate / clearImmediate 全局均已移除），相对 require 会在运行期失败。
 if (window.self === window.top) {
   const boot = ipcRenderer.sendSync('web2app:bootstrap') as Bootstrap
   installBridge(boot)

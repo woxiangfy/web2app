@@ -203,7 +203,8 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
   ⚠️ 两壳都曾踩过这个坑：Electron 侧此前**无条件**落盘（2026-09-18 引入），Tauri 侧则根本
   没有出口（GUI 子系统下 `eprintln!` 等于没有输出）。现在统一到同一个开关。
 - **运行时逃生口**（不改配置、不重新打包，用于现场排障）：
-  - 命令行加 `--debug`；
+  - 命令行加 `--debug`（**仅 Tauri 壳**；Electron 壳必须用 `--w2a-debug` —— `--debug` 会被
+    Electron 转给 Node，Node 22 起直接报 `DEP0062` 并退出）；
   - 或设环境变量 `WEB2APP_DEBUG=1`（真值白名单与 `env_bool!` 逐字一致：`1` / `true` / `yes`）。
 - ⚠️ **两个环境变量名不是一回事，别混**：
 

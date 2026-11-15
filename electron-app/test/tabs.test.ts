@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { isPinnedHome, nextActiveLabelAfterClose } from '../src/main/tab-order.ts'
+import { isPinnedHome, nextActiveLabelAfterClose, shouldCloseTabAfterDownload } from '../src/main/tab-order.ts'
 
 test('首页 = 列表第一项：只有首位是首页', () => {
   // 首页固定第一位（tab-order.ts::isPinnedHome）—— 与 Tauri tabs.rs::is_home_index 同口径。
@@ -62,4 +62,11 @@ test('空列表 / 非法下标 → null，绝不抛错', () => {
   assert.equal(nextActiveLabelAfterClose([], -1), null)
   assert.equal(nextActiveLabelAfterClose(['a', 'b'], -1), null)
   assert.equal(nextActiveLabelAfterClose(['a', 'b'], 9), null)
+})
+
+test('下载后自动关页签：只有「从未提交文档」的页签才关（浏览器 target=_blank 下载语义）', () => {
+  // 只为下载而开的新页签：下载响应不提交文档 ⇒ 关（浏览器下载完也关掉这个空页签）。
+  assert.equal(shouldCloseTabAfterDownload(false), true)
+  // 已加载页面的页签：页面里点下载时浏览器保留该页签 —— 关掉会把用户正在看的页面弄丢。
+  assert.equal(shouldCloseTabAfterDownload(true), false)
 })

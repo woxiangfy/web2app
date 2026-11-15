@@ -396,6 +396,24 @@ pub fn run() {
                     Err(e) => dlog!("[tabs] Ctrl+W 关页签事件 payload 无法解析：{e}"),
                 }
             });
+
+            // tab 页面「真实网页文档已提交」（tab_doc_ready.js）→ 标记该 tab committed。
+            // 附件下载不产生文档 ⇒「只为下载而开的页签」永远收不到本事件；下载落盘 / 取消后
+            // 据此自动关页签（见 webview_hooks 的 DownloadStarting 与 close_tab_after_download）。
+            // 事件名与脚本字面量逐字一致（capability_contract 静态守卫）。
+            let doc_handle = handle.clone();
+            app.listen(tabs::TAB_DOC_READY_EVENT, move |event| {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct TabDocReadyPayload {
+                    label: String,
+                    token: String,
+                }
+                match serde_json::from_str::<TabDocReadyPayload>(event.payload()) {
+                    Ok(p) => tabs::mark_tab_doc_ready(&doc_handle, p.label, p.token),
+                    Err(e) => dlog!("[tabs] 文档就绪事件 payload 无法解析：{e}"),
+                }
+            });
         }
 
         // ---------- 移动端底栏（仅移动端）：注册首页导航缓存 + 三个核心事件监听 ----------

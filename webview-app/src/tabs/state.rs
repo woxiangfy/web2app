@@ -5,6 +5,8 @@
 
 use super::*;
 
+use std::time::Instant;
+
 pub(crate) const TAB_PREFIX: &str = "tab-";
 
 /// tab 窗口当前是否「因宿主最小化 / 隐藏而被收起」。
@@ -61,6 +63,16 @@ pub(crate) struct TabInfo {
     /// 标题回传事件的一次性防伪令牌（见 [`report_tab_title`]）。建窗时生成并注入该 tab
     /// 的初始化脚本；远程页面回传标题时必须原样带回，否则拒绝。
     pub token: String,
+    /// 是否已提交过**真实网页文档**（tab 首文档是本地占位页，不算）。
+    ///
+    /// 由 `src/tab_doc_ready.js` 在真实文档创建时经核心事件回传（占位页早退），落地见
+    /// [`mark_tab_doc_ready`]。**附件下载不产生文档** ⇒「只为下载而开的 tab」永远是 `false`，
+    /// 下载落盘 / 取消后据此自动关页签（见 `window.rs::close_tab_after_download`，与
+    /// Electron 侧 `tab-order.ts::shouldCloseTabAfterDownload` 同一判据）。
+    pub committed: bool,
+    /// 打开本 tab 的那个 tab label（只有 `target="_blank"` / `window.open()` 建的 tab 才有；
+    /// 首个 tab 与 `+` 新建为 None）。下载后自动关页签时据此把激活态拉回「点击时的页面」。
+    pub opener: Option<String>,
 }
 
 /// 标题回传事件名（tab 远程页面 → Rust）。与 `src/tab_title.js` 里的字面量逐字一致，
@@ -75,6 +87,44 @@ pub(crate) const TAB_RETRY_EVENT: &str = "web2app:retry-bootstrap";
 /// 与 `src/tab_keys.js` 里的字面量逐字一致（静态守卫 `tab_close_shortcut_contract`）。
 /// payload 同样带一次性 token 防伪（app.listen 的 Event 不带发送窗口标识）。
 pub(crate) const TAB_CLOSE_EVENT: &str = "web2app:close-tab";
+
+/// tab 页面「真实网页文档已提交」事件名（`src/tab_doc_ready.js` → Rust）。
+/// 与脚本里的字面量逐字一致（静态守卫在 `contract_tests/capability_contract.rs`）。
+pub(crate) const TAB_DOC_READY_EVENT: &str = "web2app:tab-doc-ready";
+
+/// 下载落盘 / 取消后，是否应自动关闭**发起下载的 tab**（纯规则，可单测）。
+///
+/// 对齐浏览器对 `target="_blank"` 指向附件地址的行为：新页签只为承接这次下载而开，
+/// 下载响应不提交文档（没有可显示的页面）⇒ 下载开始后浏览器把它关掉、回到点击时的页面。
+///
+/// 判据只有「是否提交过真实文档」：未提交 → 关；已提交 → **不关**（页面里点下载时浏览器
+/// 同样保留当前页签，关掉会弄丢用户正在看的页面）。首页那一签由 `close_tab_inner` 拒绝，
+/// 本函数不重复判定（「首页判定」全项目只有 [`is_home_index`] 一份实现）。
+///
+/// ⚠️ 双壳单一判据：Electron 侧同一条规则在 `tab-order.ts::shouldCloseTabAfterDownload`，
+/// 改这里必须同步改那边（探针 `probe --tabs` 的 P14 双向断言守着）。
+pub(super) fn should_close_tab_after_download(committed: bool) -> bool {
+    !committed
+}
+
+/// 「弹窗兜底重复下载」的识别窗口（毫秒）。
+///
+/// 站点兜底是近同步发生的（`window.open()` 返回 null 后立即 `location.href = 同一地址`），
+/// 3s 足够宽；窗口越短越不容易误伤「用户真的又点了一次同一个下载链接」。与 Electron 侧
+/// `tabs.ts::POPUP_FALLBACK_WINDOW_MS` 同一数值。
+pub(super) const POPUP_FALLBACK_WINDOW_MS: u64 = 3000;
+
+/// 「弹窗兜底重复下载」纯判据（可单测）：登记时的打开者就是本次下载的发起来源，且未超窗口。
+///
+/// ⚠️ 不能只按「打开者 + 时间窗」丢：页面在弹框遮挡前仍可能程序化批量下载多个文件，
+///   那些地址不同，必须放行（地址逐字相同这条由调用方判定）。
+pub(super) fn popup_fallback_is_duplicate(
+    opener_in_record: Option<&str>,
+    label: &str,
+    age_ms: u64,
+) -> bool {
+    opener_in_record == Some(label) && age_ms < POPUP_FALLBACK_WINDOW_MS
+}
 
 /// 多页签的托管状态。
 ///
@@ -93,6 +143,13 @@ pub(crate) struct TabManager {
     /// 每 tab 的实际网页标题缓存：label -> title（由 tab 页面的 `web2app:tab-title`
     /// 核心事件回传，落地见 [`report_tab_title`]）。
     pub titles: Mutex<HashMap<String, String>>,
+    /// `window.open` 目标 URL → (打开者 tab label, 登记时刻)。
+    ///
+    /// WebView2 的 `NewWindowRequested` 被 `SetHandled(true)` 收走后（未 `SetNewWindow`），
+    /// 页面里的 `window.open()` 返回 null；站点常据此判定「弹窗被拦截」并立刻对同一地址做
+    /// `location.href` 兜底 —— 同一次点击两次下载、两个「另存为」，点掉第一个后第二个还在。
+    /// 登记用于在那条兜底下载到达时识别并取消（见 `window.rs::should_drop_popup_fallback`）。
+    pub expected_popup_downloads: Mutex<HashMap<String, (String, Instant)>>,
     /// 首屏 bootstrap 是否**已由多页签路径启动**。
     ///
     /// 用途（见 [`navigate_tab`]）：导航缓存 `navigation` 为空有两种截然不同的含义，

@@ -12,8 +12,9 @@
  *   P4 的「仅激活页签可见」若只写「激活可见」会被「全都可见靠 z-order 盖」蒙混；
  *   若只写「只有一个可见」会被「干脆全删」满足 —— 所以两者都写。
  */
+import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { WebContentsView, type BrowserWindow } from 'electron'
+import { app, BrowserWindow, WebContentsView } from 'electron'
 
 import { MAX_TABS, TAB_BAR_HEIGHT, type TabManager } from './tabs'
 import { Probe, sleep, waitUntil } from './probe-infra'
@@ -421,6 +422,125 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P13 壳页面 keydown（Ctrl+W）经 invoke("close_tab") 关闭当前页签',
     closedByShellHandler && tabs.active?.label === opener,
     `count=${tabs.count} active=${tabs.active?.label}`)
+  tabs.activate(opener)
+  await sleep(100)
+
+  // ---------- P14：下载页签自动关闭（对齐浏览器 target="_blank" 下载行为） ----------
+  // 用户场景：站点里点一下 → 自动开新页签去下载；浏览器在下载开始后把那个空页签关掉、
+  // 回到点击时的页面。判据成对：
+  //   ① 只为下载而开的页签（从未提交文档）→ 自动关闭，且激活回到**打开者**；
+  //   ② 已经加载过页面的页签跳转到同一附件 → **不关**（浏览器同样保留该页签）。
+  // 探针模式下 index.ts 注入了固定落盘路径（不弹模态「另存为」），见 attachDownload 的 hooks。
+  // ⚠️ 路径必须与 index.ts 的 `w2a-probe-${name}` 公式一致；先删掉上一轮的残留文件，
+  //    否则「下载其实没跑」也会被旧文件满足（假绿）。
+  const dlPath = join(app.getPath('temp'), 'w2a-probe-probe-dl.txt')
+  try {
+    rmSync(dlPath, { force: true })
+  } catch {
+    /* 删不掉就按「旧文件存在」处理：下面的内容断言仍以本次写入为准 */
+  }
+  const countBeforeDl = tabs.count
+  await tabs.active!.view.webContents.executeJavaScript(
+    `window.open('/dl.txt', '_blank'); true`,
+    true
+  )
+  const dlTabClosed = await waitUntil(async () => tabs.count === countBeforeDl, 8000)
+  p.check('P14 ① 只为下载而开的新页签下载后自动关闭，激活回到打开者',
+    dlTabClosed && tabs.active?.label === opener,
+    `count=${tabs.count}（期望 ${countBeforeDl}）active=${tabs.active?.label}（期望 ${opener}）`)
+  const dlFileOk = await waitUntil(async () => {
+    try {
+      return readFileSync(dlPath, 'utf8').includes('probe-download')
+    } catch {
+      return false
+    }
+  }, 8000)
+  p.check('P14 ① 关闭发起页签不影响下载本身（附件已完整落盘）', dlFileOk, `路径=${dlPath}`)
+
+  // ② 反面对照：已提交过文档的页签跳转到附件，必须保留（不能把用户正在看的页签关掉）。
+  const keep = await tabs.spawnTab(`${base}/tabs-a.html`)
+  await sleep(400) // 等 did-navigate 把 committed 标记置上
+  const countBeforeNav = tabs.count
+  await tabs.active!.view.webContents.loadURL(`${base}/dl.txt`).catch(() => {
+    /* 附件导航会被 Chromium 转成下载，loadURL 以 ERR_ABORTED 收尾，属预期 */
+  })
+  await sleep(1500)
+  p.check('P14 ② 已加载页面的页签跳转到附件 → 不自动关闭',
+    tabs.count === countBeforeNav &&
+      !!keep &&
+      tabs.listForIpc().some(([l]) => l === keep),
+    `count=${tabs.count}（期望 ${countBeforeNav}）keep=${keep}`)
+  if (keep) tabs.closeTab(keep)
+  tabs.activate(opener)
+  await sleep(100)
+
+  // ---------- P15：window.open() 必须返回非 null，且隐藏窗口要活到下载结束 ----------
+  // 站点常见写法：`var w = window.open(url); if (!w || w.closed) location.href = url`。
+  //   · `deny` ⇒ `w` 为 null ⇒ 兜底；
+  //   · 「建了就立刻销毁」⇒ `w.closed` 变 true ⇒ 同样兜底。
+  // 两条都会造成同一次点击两次下载、两个「另存为」（用户报障）。故这里成对断言：
+  //   ① 返回值非 null，且页面自己记录的兜底**未执行**；
+  //   ② 下载进行中（探针 pickSavePath 刻意停 600ms）页面里 `w.closed === false`；
+  //   ③ 下载仍只落盘一次、页签数回落（没有多出来的页签）。
+  // ⚠️ 判据不依赖下载次数 / 取消计数这类间接信号 —— 那正是第一版「按 URL 判重」失败的原因。
+  const fbPath = join(app.getPath('temp'), 'w2a-probe-probe-dl.txt')
+  try {
+    rmSync(fbPath, { force: true })
+  } catch {
+    /* 同 P14：删不掉就靠内容断言 */
+  }
+  const countBeforeFb = tabs.count
+  const openRet2 = await tabs.active!.view.webContents.executeJavaScript(
+    `(function () {
+       window.__w2aProbeFallback = false;
+       window.__w2aProbeClosed = 'pending';
+       var w = window.open('/dl.txt', '_blank');
+       if (!w) { window.__w2aProbeFallback = true; location.href = '/dl.txt'; }
+       setTimeout(function () {
+         window.__w2aProbeClosed = (w && w.closed === false) ? 'open' : 'closed';
+       }, 300);
+       return String(w);
+     })()`,
+    true
+  )
+  // 在「隐藏弹窗还活着」的时刻抓快照：它绑在新页签上，下载结算后页签一关它就被销毁，
+  // 事后再查只能得到空数组（空集会让 every 假绿）。
+  let popupSnap: { url: string; visible: boolean }[] = []
+  const fbSettled = await waitUntil(async () => {
+    const s = BrowserWindow.getAllWindows()
+      .filter((w) => w !== win)
+      .map((w) => ({ url: w.webContents.getURL(), visible: w.isVisible() }))
+    if (s.length > 0) popupSnap = s
+    if (tabs.count !== countBeforeFb) return false
+    return (
+      (await tabs.active!.view.webContents.executeJavaScript(
+        'String(window.__w2aProbeClosed)',
+        true
+      )) === 'open'
+    )
+  }, 8000)
+  const fallbackRan = await tabs.active!.view.webContents.executeJavaScript(
+    'String(window.__w2aProbeFallback)',
+    true
+  )
+  p.check('P15 window.open() 返回非 null，且下载进行中 w.closed 仍为 false（站点不走兜底 ⇒ 只弹一次另存为）',
+    openRet2 !== 'null' && fbSettled && fallbackRan === 'false',
+    `window.open=${openRet2}（期望非 null）兜底执行=${fallbackRan}（期望 false）` +
+      `count=${tabs.count}（期望 ${countBeforeFb}）`)
+  // 直接判根因（2026-11-15 真机「第二个另存为」）：那个隐藏弹窗**只当句柄**，不许导航、不许显示。
+  // 一旦它真的打开了下载地址，就会自己发起一条下载，并在 Windows 上冒出一个以下载地址为标题的
+  // 窗口、弹自己的「另存为」—— 那正是用户看到的第二个框。快照取自上面「它还活着」的时刻。
+  p.check('P15 隐藏弹窗只当句柄：不导航（about:blank）、不显示（没有第二个窗口冒头）',
+    popupSnap.length >= 1 && popupSnap.every((s) => s.url === 'about:blank' && !s.visible),
+    JSON.stringify(popupSnap))
+  const fbFileOk = await waitUntil(async () => {
+    try {
+      return readFileSync(fbPath, 'utf8').includes('probe-download')
+    } catch {
+      return false
+    }
+  }, 8000)
+  p.check('P15 兜底未执行时下载仍完整落盘（一次点击 = 一次下载）', fbFileOk, `路径=${fbPath}`)
   tabs.activate(opener)
   await sleep(100)
 

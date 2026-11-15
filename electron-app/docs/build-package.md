@@ -129,5 +129,5 @@ zip / portable 覆盖旧产物。
 * 想根治只有两条路——买代码签名证书并配 `win.certificateFile`，或用组织内的白名单 / 域策略放行。
   ⛔ **不要**教用户关掉 SmartScreen（那是全局降安全，代价远大于收益）。
 * 交付话术建议照抄上一段，并附上日志的位置（⚠️ `data\logs\startup.log` **只在 `debug` 打开时才有**；
-  默认关闭时让用户临时用 `--debug` 复现一次再收日志 —— 见 [runtime-data.md](runtime-data.md)）：
+  默认关闭时让用户临时用 `--w2a-debug`（或 `WEB2APP_DEBUG=1`）复现一次再收日志 —— 见 [runtime-data.md](runtime-data.md)）：
   「点了没反应」十有八九是被 SmartScreen 拦在门外，而不是程序本身有问题。

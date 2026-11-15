@@ -89,7 +89,8 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    再写 `app.isPackaged ? … : …` 三元；判据用 `app.isPackaged`，**不是**「文件是否存在」（`stage`
    会在开发目录生成 `out/inject/`）。导航失败文案 / 内部页判定同理：`nav-text.ts` 单一真源。
 17. **preload 不得相对 require**：`preload.ts` / `shell-preload.ts` / `settings-preload.ts` 都跑在
-   `sandbox: true` 渲染进程里（`require` 只放行 electron / events / timers / url）。需要共享的桥逻辑
+   `sandbox: true` 渲染进程里（Electron 45 起 `require` **只放行 `electron`**，`events` / `timers` / `url`
+   三个 shim 与 `Buffer` / `setImmediate` / `clearImmediate` 全局一并移除）。需要共享的桥逻辑
    只能在**文件内**分块，跨文件的形状一致性由 `test/preload-contract.test.ts` 锁（不抽共享模块）。
 
 ## 刻意不动（已定，勿再提拆分）
@@ -125,9 +126,10 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 
 | 日期 | 摘要 |
 |---|---|
+| 2026-11-15 | **Electron 44.4.1 → 45.3.2**：45 唯一的硬破坏面（sandbox preload 移除 `events/timers/url` shim 与 `Buffer/setImmediate/clearImmediate` 全局）本壳不受影响 —— preload 只 `require('electron')`；`setShape` / `WebContentsView` / `setWindowOpenHandler` 在 45 typings 中均在（unit 188/188、probe 156/158 既有 F12 项、tabs 58/58、smoke ✅、asar 护栏 52 项通过） |
+| 2026-11-15 | 多页签下载页签自动关闭：`window.open` 附件（未提交文档）在落盘/取消后自动关页签并回到打开者，已加载页签不关；`DownloadHooks`（`onSaveChoice` / `pickSavePath`）+ 页签探针 P14 两条成对断言。**另修「一次点击两次下载 / 两个另存为」（unit 188/188、tabs 59/59）**：根因是站点用 `if (!w || w.closed)` 判断「弹窗被拦截」—— `deny` 让 `window.open()` 拿到 null，而「建了立刻销毁」让 `w.closed` 变 true，两条都会触发 `location.href` 兜底。改 `allow` + `overrideBrowserWindowOptions{show:false,skipTaskbar:true}` 建隐藏窗口，并让它**活到这次下载结算**（`registerHiddenPopup` / `attachHiddenPopupToTab`：绑到承载它的新页签，页签关闭才销毁；`onDownloadStart` 取消兜底超时），新页签承接导航与下载；隐藏弹窗自己抢跑的那条下载由 `isHiddenPopup` 丢弃，URL 判重（`shouldDropPopupFallback`）降为纵深防御。P15 断言 `window.open()` 非 null、兜底未执行、**下载中 `w.closed === false`**、附件完整落盘。**同日发现 `--debug` 不可用**：Electron 44→45 升 Node 后该参数被 Node 直接拒绝（`DEP0062`），进程秒退、日志一行不写 ⇒ 诊断开关改名 **`--w2a-debug`**（环境变量 `WEB2APP_DEBUG=1` 不变） |
 | 2026-10-24 | 架构审查优化批次①–⑤：`updateDocument` 读-改-写统一入口 / index.ts 装配化 / `probe-single` 19 段函数化 / 设置页命令名三方守卫 / `util.ts` + `protocols.ts` 依赖收口 + 悬浮球 `planDrop` / `planPeekCollapse` 纯函数化（unit 115/115、probe 149/150 预存环境项、tabs 47/47） |
 | 2026-10-11 | v1.75 修「只启用悬浮球时关窗 → 点球不回窗口」：驻留判据纳入 `float_enabled` + 入口统一 `requestQuit` + 设置页新增「退出程序」 |
-| 2026-10-11 | v1.72 悬浮球四角穿透（`circleShapeRects` + `win.setShape` 包 try/catch）+ 250ms 双击去抖；真机 harness 17 项 |
 
 ## 专项文档
 

@@ -138,6 +138,19 @@ const FIXTURES: Record<string, Fixture> = {
   },
 
   /**
+   * 附件下载夹具：`Content-Disposition: attachment` ⇒ Chromium 不提交文档、直接走下载。
+   * 用途：验证「只为下载而开的页签在下完后自动关闭」与「已加载页面的页签跳转到附件不关」
+   * （见 probe-tabs.ts 的 P14）。
+   */
+  '/dl.txt': {
+    headers: {
+      'content-type': 'application/octet-stream',
+      'content-disposition': 'attachment; filename="probe-dl.txt"',
+    },
+    body: 'probe-download\n',
+  },
+
+  /**
    * 要求 Basic 鉴权的页面（见 `AUTH_PATHS`）。
    * 用途：验证本地反向代理**确实**给每个请求注入了 Authorization —— 而且要先证明
    * 「不带凭据真的会被拒」（见 `直连上游必须 401` 那条），否则这条断言是假通过。
