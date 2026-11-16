@@ -81,6 +81,7 @@ import {
   attachContextMenu,
   attachDevtools,
   attachDownload,
+  cleanPendingDownloads,
   devtoolsEnabled,
 } from './page-behavior'
 import { clearWebData } from './web-data'
@@ -183,6 +184,16 @@ const cfg: AppConfig = loaded.config
  */
 const DEBUG =
   cfg.debug || debugFlagTruthy(process.env.WEB2APP_DEBUG) || hasFlag('--w2a-debug') || PROBE || SMOKE
+
+// 排障：DEBUG 时把「每一次新建窗口」都记一行。用户看到「屏幕上多出来的窗口」时，这行是判断
+// 它到底是不是我们造出来的唯一凭据（2026-11-15 真机「第二个另存为」就卡在这上面）。
+if (DEBUG) {
+  app.on('browser-window-created', (_e, w) => {
+    console.error(
+      `[web2app] 新建窗口 wc=${w.webContents.id} show=${w.isVisible()} title=${w.getTitle()}`
+    )
+  })
+}
 
 // ⚠️ 静默要**尽可能早**：晚一步就会漏掉 setupPortablePaths 那类启动早期输出。
 //    此后 `console.*` 全是空操作，只有 rawConsole 还能出声（见 startup-log.ts）。
@@ -436,6 +447,8 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   //   defaultSession 上，所以这里挂一次 `will-download` 即覆盖**所有**视图的下载（§7-9 的
   //   「逐视图挂载」在共享 session 前提下等价于「挂一次全局生效」）。若未来给内容视图设
   //   独立 partition，这条必须改成逐视图挂载。
+  // 占位文件只在崩溃/强杀时才会遗留：启动时清一次（启动阶段没有进行中的下载，安全）
+  cleanPendingDownloads()
   attachDownload(
     win.webContents.session,
     () => win,

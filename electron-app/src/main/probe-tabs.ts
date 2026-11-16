@@ -496,6 +496,10 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
        window.__w2aProbeClosed = 'pending';
        var w = window.open('/dl.txt', '_blank');
        if (!w) { window.__w2aProbeFallback = true; location.href = '/dl.txt'; }
+       // 立刻取一次样本（此时 w.closed 必须是 false），再在 300ms 复采一次。
+       // ⚠️ 不能只靠定时器：一旦下载结算后页签被关，定时器回调所在的上下文就没了，
+       //    标志会永远停在 'pending' ⇒ 断言假红（本探针曾因此偶发 59/60）。
+       window.__w2aProbeClosed = (w && w.closed === false) ? 'open' : 'closed';
        setTimeout(function () {
          window.__w2aProbeClosed = (w && w.closed === false) ? 'open' : 'closed';
        }, 300);

@@ -34,6 +34,15 @@
 import electron from 'electron'
 import type { SaveDialogOptions } from 'electron'
 import { extname, join } from 'node:path'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+} from 'node:fs'
 import type { BrowserWindow, Session, WebContents } from 'electron'
 import { isSplashUrl } from './nav-text'
 
@@ -390,12 +399,38 @@ export interface DownloadHooks {
  *
  * ⚠️⚠️ `item.pause()` 不可省：`dialog.showSaveDialog` 是**异步**的，事件处理器一返回，
  *   Electron 就会弹**它自己**的保存对话框 —— 用户看到的是两个对话框抢注意力。
- *   先 pause 再（用户选完）`setSavePath` + `resume`，才是「一次下载、一个对话框」。
+ *   先 pause、**紧跟着给占位 `savePath`**（两者都做才挡得住：pause 防提前下载、savePath 防
+ *   Electron 自带的框），用户选完再 `setSavePath` + `resume`。
  *
  * ⚠️ 用户取消走 `item.cancel()`，**不要**存到别处：
  *   「点取消却悄悄下载到下载目录」是最招骂的那类自作主张（`save_dialog.rs` 里
  *   `SaveChoice::Cancelled` 的注释同理）。
  */
+/** 「另存为」编号（仅排障用：日志里区分「第几个框」）。 */
+let saveDialogSeq = 0
+
+/**
+ * 清掉上次运行遗留的占位文件（`%TEMP%/w2a-pending`）。
+ *
+ * 占位文件在正常路径下都会被搬走或删除，只有**进程被强杀 / 崩溃**时才会留下；启动时清一次，
+ * 免得临时目录里越堆越多（用户看到一堆无扩展名的怪文件）。启动阶段没有进行中的下载，安全。
+ */
+export function cleanPendingDownloads(): void {
+  try {
+    const pendingDir = join(app.getPath('temp'), 'w2a-pending')
+    if (!existsSync(pendingDir)) return
+    for (const f of readdirSync(pendingDir)) {
+      try {
+        rmSync(join(pendingDir, f), { force: true })
+      } catch {
+        /* 单个文件删不掉（占用中）：跳过 */
+      }
+    }
+  } catch {
+    /* 清理失败不影响下载 */
+  }
+}
+
 export function attachDownload(
   session: Session,
   getWindow: () => BrowserWindow | null,
@@ -424,7 +459,83 @@ export function attachDownload(
     } catch {
       /* 取不到就用空串：saveDialogOptions 会退化成「只有文件名」，对话框仍可用 */
     }
+    // ⚠️⚠️ 必须**先给一个占位落点**再弹我们自己的对话框，否则会出现两个「另存为」：
+    //   本处理器是异步的（要等用户选文件名），Electron 在本事件返回后若发现 item 还没有
+    //   savePath，会自己再弹一个保存框（标题是**下载地址**、按住下载的窗口、保存类型随扩展名），
+    //   用户看到的就是「点一次下载、两个框」。`item.pause()` 挡不住它 —— 挡它的是 savePath。
+    //   ⚠️ 顺序必须是 **先 pause 再 setSavePath**：反过来的话 item 已经「有落点」，小文件会在
+    //      用户选完之前就下完（done 早于选择），文件留在占位点、目标位置什么都没有。
+    //   ⚠️ 占位点必须是**用户看不见、也不会撞名**的位置（临时子目录 + 时间戳前缀）：
+    //     一旦落在下载目录，用户选同名文件时 Windows 会问「已存在，要替换吗」；而占位写入与
+    //     用户的选择无关，于是出现「点了取消，文件却也已经下好了」的错觉。
     item.pause()
+    const placeholder = (() => {
+      try {
+        const pendingDir = join(app.getPath('temp'), 'w2a-pending')
+        mkdirSync(pendingDir, { recursive: true })
+        return join(pendingDir, `${Date.now()}-${name}`)
+      } catch {
+        return ''
+      }
+    })()
+    if (placeholder) {
+      try {
+        item.setSavePath(placeholder)
+      } catch {
+        /* 设不上就退化成「Electron 自己也会弹一个框」 */
+      }
+    }
+    // 收尾统一走它：`done` 与「用户选完」谁先到都行 —— 下载先结束（小文件 / 极快完成）时
+    // chosenPath 还是 null，等用户选完再补搬一次；用户先选完则等 done 再搬。
+    let chosenPath: string | null = null
+    let doneState: string | null = null
+    let moved = false
+    /** 清掉占位残骸（取消 / 中断 / 用户取消时用）：文件没落过盘就忽略。 */
+    const cleanupPending = (): void => {
+      if (!placeholder) return
+      try {
+        unlinkSync(placeholder)
+      } catch {
+        /* 没落过盘：忽略 */
+      }
+    }
+    const finalize = (): void => {
+      if (!doneState) return
+      if (doneState !== 'completed') {
+        cleanupPending()
+        return
+      }
+      if (!chosenPath || moved) return
+      // ⚠️ 不能只信 `item.getSavePath()`：下载结束后它可能为空 / 仍指占位点，实测两者的组合会
+      //    让「搬移」整段被跳过，文件永远留在 `%TEMP%\w2a-pending\`（用户看到「没有下载」）。
+      //    以**文件真实存在**为准：占位点有就搬占位点，否则搬 getSavePath() 指向的那个。
+      const from = [placeholder, item.getSavePath()].find(
+        (p): p is string => !!p && p !== chosenPath && existsSync(p)
+      )
+      if (!from) return
+      // ⚠️ `moved` 防重入：`done` 与「用户选完」两端都会调 finalize，搬完之后占位文件已不在，
+      //    不设标志会对同一文件再搬一次并打红日志。
+      moved = true
+      try {
+        renameSync(from, chosenPath)
+        console.log(`[web2app] 已按所选路径落盘：${from} → ${chosenPath}`)
+      } catch {
+        try {
+          copyFileSync(from, chosenPath)
+          unlinkSync(from)
+          console.log(`[web2app] 已复制到所选路径：${from} → ${chosenPath}`)
+        } catch (e) {
+          moved = false
+          console.error(`[web2app] 落到所选路径失败：${(e as Error).message}`)
+        }
+      }
+    }
+    // 排障：给每次「另存为」编号。用户报「弹出两个框」时，日志里出现 #1/#2 就说明两个框都是
+    // 本进程弹的（并能看出各自是哪个 wc、哪个 URL）；只出现一个则另一个来自外部程序。
+    const seq = ++saveDialogSeq
+    console.log(
+      `[web2app] 弹出另存为 #${seq}：${name} wc=${webContents?.id} url=${item.getURL()}`
+    )
     // ⚠️ 先取 id：下载完成前发起页签可能已被自动关闭（多页签下载场景），
     //    届时 webContents.id 会抛「Object has been destroyed」。
     const sourceId: number | undefined = webContents?.id
@@ -441,24 +552,38 @@ export function attachDownload(
     void pick(name, dir)
       .then((filePath) => {
         if (!filePath) {
-          console.log(`[web2app] 下载已取消：${name}`)
+          console.log(`[web2app] 下载已取消（另存为 #${seq}）：${name}`)
           item.cancel()
-          if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, false)
+          // 极快完成的下载可能在用户点取消前就写完了占位点：一并清掉，别在临时目录留数据
+          cleanupPending()
           return
         }
-        console.log(`[web2app] 下载：${name} → ${filePath} wc=${sourceId}`)
-        item.setSavePath(filePath)
+        console.log(`[web2app] 下载（另存为 #${seq}）：${name} → ${filePath} wc=${sourceId}`)
+        chosenPath = filePath
+        try {
+          item.setSavePath(filePath)
+        } catch {
+          /* 晚到的 setSavePath 可能不被采纳：文件留在占位点，由 finalize 搬过去 */
+        }
         item.resume()
-        if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, true)
+        finalize()
+        // ⚠️ 页签**不能**在这里关：多页签模式下关掉承载下载的 tab 会连下载一起掐掉
+        //    （真机日志：`下载（另存为 #2）` 之后 19s 出现 `下载结束（cancelled）`）。
+        //    收尾统一放到 `done` 里，下载结算后再关。
       })
       .catch((e: unknown) => {
         // 对话框自己异常了也不能让下载悬着：取消掉，宁可让用户再点一次
         console.error(`[web2app] 「另存为」对话框异常，已取消本次下载：${(e as Error).message}`)
         item.cancel()
-        if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, false)
+        cleanupPending()
       })
     item.once('done', (_e, state) => {
+      doneState = state
+      finalize()
       console.log(`[web2app] 下载结束（${state}）：${name} wc=${sourceId}`)
+      // 页签收尾放在这里（下载结算之后）：提前关会把下载一起掐掉。
+      // 取消 / 中断也要关 —— 那个页签本来就是为了这次下载而开的。
+      if (sourceId !== undefined) hooks.onSaveChoice?.(sourceId, state === 'completed')
     })
   })
 }
