@@ -98,11 +98,22 @@ export interface TabsOptions {
    * 抛异常表示 spawn 失败（如 target 尚未解析），此时本方法会回收刚建的视图并回滚激活态。
    */
   onSpawn: (view: WebContentsView, label: string, url?: string) => Promise<void> | void
+  /**
+   * 内容页 preload 的绝对路径（`out/renderer/tab-preload.js`，由 index.ts 经 `paths.ts`
+   * 的 `preloadPath()` 解析）。
+   *
+   * 只注入 `window.web2appExtra` —— 页签内容页**不挂**主 preload（那套会把自绘标题栏 /
+   * 加载层塞进页面，而页签模式的标题栏属于壳页面）。缺省不传 = 不注入（单测 / 探针桩可用），
+   * 生产路径必须传，否则 `window.web2appExtra` 在页签模式下恒为 undefined（2026-11-16 实测）。
+   */
+  tabPreload?: string
 }
 
 export class TabManager {
   private readonly host: BrowserWindow
   private readonly onSpawn: TabsOptions['onSpawn']
+  /** 内容页最小 preload（注入 `window.web2appExtra`）；undefined = 不注入。 */
+  private readonly tabPreload: string | undefined
   /** 页签按创建顺序保存；`active` 用 Map 值而非数组下标，避免「删中间页签」时全体错位。 */
   private readonly tabs = new Map<string, Tab>()
   private activeLabel: string | null = null
@@ -148,6 +159,7 @@ export class TabManager {
   constructor(opts: TabsOptions) {
     this.host = opts.host
     this.onSpawn = opts.onSpawn
+    this.tabPreload = opts.tabPreload
   }
 
   get count(): number {
@@ -198,6 +210,10 @@ export class TabManager {
         // 用 Chromium 默认（后台标签降速省电）；2026-09 订正：旧注释声称「index.ts 挂完
         // 钩子后会自行调整 backgroundThrottling」，该机制不存在（index.ts 从不改它）。
         backgroundThrottling: true,
+        // 只注入 `window.web2appExtra` 的最小 preload（见 tab-preload.ts 顶部注释）。
+        // ⚠️ 不能挂 `preload.js`：那套会往页面塞自绘标题栏 / 加载层，页签模式的标题栏
+        //    属于壳页面 shell.html，塞进去就是两条标题栏。
+        ...(this.tabPreload ? { preload: this.tabPreload } : {}),
       },
     })
     // 顶住首帧白闪（WebContentsView 默认白底；#f7f8fa 与启动页 / 加载层底色一致）

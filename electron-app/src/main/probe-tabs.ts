@@ -89,6 +89,28 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
   p.check('P2 视图存在性（children 数 = 页签数）', children().length === tabs.count,
     `children=${children().length} count=${tabs.count}`)
 
+  // ---------- P2b：内容页的最小 preload 就位（2026-11-16 补的回归断言） ----------
+  // 背景：页签内容页是独立 WebContentsView，此前**没挂任何 preload** ⇒ `window.web2appExtra`
+  // 在 tabs_enabled=true 的产物里恒为 undefined（单窗口模式正常），与配置契约不符。
+  // 成对判据（项目铁律）：既要读得到 extra，又要确认**没有**顺手把整个窗口桥挂上来
+  // —— 后者是安全基线的倒退，正是「直接在内容页挂 preload.js」会踩的坑。
+  const probeGlobals = (): Promise<{ extra: Record<string, unknown> | null; bridge: string }> =>
+    tabs.active!.view.webContents
+      .executeJavaScript(
+        `JSON.stringify({ extra: window.web2appExtra || null, bridge: typeof window.web2app })`,
+        true
+      )
+      .then((s) => JSON.parse(s as string))
+  const extraReady = await waitUntil(async () => {
+    const g = await probeGlobals()
+    return g.extra?.build === 'probe' && g.extra?.env === 'test'
+  }, 4000)
+  const pg = await probeGlobals()
+  p.check('P2b 内容页读到 window.web2appExtra（页签模式不丢 extra）', extraReady,
+    `实际 ${JSON.stringify(pg.extra)}`)
+  p.check('P2b 内容页没有 web2app 窗口桥（挂着最小 preload，安全基线未放宽）',
+    pg.bridge === 'undefined', `typeof window.web2app = ${pg.bridge}`)
+
   // ---------- P1h：首页页签（首签 = app_url 那一签，固定第一位、不可关） ----------
   // 三件套成对断言：主进程侧 home 标记 + 壳标签栏的「有房子图标」+「没有 ×」。
   const home = label1!

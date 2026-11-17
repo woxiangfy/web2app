@@ -48,7 +48,7 @@
 | `app_name` | string | `"Web2App"` | 全平台 | **安装名**：安装包名 / 快捷方式 / 安装目录 / "程序和功能"显示名；**同时是数据目录名**，并派生出 **Android 包名**（见 §4.2） |
 | `title` | string | `""` → 回落 `app_name` | 全平台 | **显示名**：窗口标题 / 托盘悬停 / 设置窗标题（Win）；Android 应用名（桌面图标下） |
 | `version` | string | `"0.0.1"` | 全平台（**构建期消费**） | **打包产物版本号**：三段数字 `"主.次.补丁"`，主次 ≤ 255、补丁 ≤ 65535。写入 Tauri 的 `tauri.conf.json.version`（MSI ProductVersion / exe 版本资源 / Android versionName）与 Electron 的 `extraMetadata.version`（产物文件名 / exe 版本资源）。规则与边界见 §3.6 |
-| `extra` | 任意 JSON | `{}` | 全平台 | 注入被包裹网页的附加参数，前端读 `window.web2appExtra` |
+| `extra` | 任意 JSON | `{}` | 全平台 | 注入被包裹网页的附加参数，前端读 `window.web2appExtra`。**窗模式与页签模式（`tabs_enabled`）都生效**；`{}` 时该全局在 Electron 侧不定义（Tauri 侧为 `{}`），前端一律写 `window.web2appExtra \|\| {}`。见 §3.10 |
 | `icon_url` | string | `""` | 全平台（**构建期消费**） | 应用图标 PNG 的 URL；空 = 沿用仓库默认图标 |
 | `proxy_enabled` | **`bool`** | `false` | 全平台（`proxy_http` / `proxy_https` / `proxy_bypass` 三个外部代理字段仅 Windows） | 启用本地反向代理（统一注入 Basic 鉴权，覆盖 WebSocket）。移动端没有 `--proxy-server`，开它就是本地反向代理 |
 | `proxy_http` | string | `""` | 仅 Windows | 外部 HTTP 代理地址 |
@@ -336,6 +336,40 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
   与下载接管的权限块各用各的 marker，可共存；详见
   `docs/android-improvements.md` #5。
 
+### 3.10 `extra` —— 注入给网页的公开配置（`window.web2appExtra`）
+
+同一份网页被多个 app 复用时，用 `extra` 区分部署环境 / 渠道 / 皮肤：
+
+```json
+{ "extra": { "deploy_env": "prod", "tenant": { "id": 1001 }, "features": ["export"] } }
+```
+
+网页里读：
+
+```js
+const extra = window.web2appExtra || {}   // ⚠️ 必须带兜底，见下
+if (extra.deploy_env === 'prod') { /* … */ }
+```
+
+**注入点（两壳都在 document-start，页面自身脚本之前）**：
+
+| 壳 | 实现 |
+| --- | --- |
+| Tauri 窗 / 页签 | `window.web2appExtra = <JSON>;`（`lib.rs` 与 `tabs/window.rs` 各一处 `initialization_script`） |
+| Electron 窗模式 | `renderer/preload.ts` → `contextBridge.exposeInMainWorld('web2appExtra', …)` |
+| Electron 页签模式 | `renderer/tab-preload.ts`（2026-11-16 补：此前页签内容页无 preload ⇒ 恒为 `undefined`） |
+
+**三条边界**：
+
+1. **`{}` 的行为两壳不同**：Tauri 定义 `window.web2appExtra = {}`；Electron **不定义**该全局
+   （`preload.ts` / `tab-preload.ts` 都以「非空对象」为暴露条件）。⇒ 前端一律 `|| {}`。
+2. **必须是对象**：Electron 侧非对象（数组 / 字符串）告警并回落 `{}`；非法 JSON 同样静默回落。
+   Tauri 侧只校验「是合法 JSON」。为双壳一致，请始终写对象。
+3. **编译期内联**：Tauri 编进 exe 常量（明文）、Electron 进 `app.asar` 内 `out/config.json`。
+   运行期不可改，改值必须重新打包；**不要放密钥**（两边都能被解出来）。
+
+序列化走 `json.dumps(ensure_ascii=False)`（CI）与 `JSON.stringify`（本地打包），中文不转义。
+
 ---
 
 ## 4. 多端行为对照
@@ -349,6 +383,7 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
 | `app_name` | 安装包名 / 数据目录名 / **Android 包名**（派生） | 同左 | `productName` / `%APPDATA%` 子目录名 |
 | `title` | 窗口标题 + 托盘提示 + 「设置」窗标题 | **应用名称**（桌面 label） | 窗口标题 + 托盘提示 |
 | `tabs_enabled` | ✅ 有效（多 WebView 标签栏） | ✅ 有效（底栏内单 webview 页签记录；需同时开 `mobile_bar`） | ✅ 有效（多 WebContentsView） |
+| `extra` | ✅ `window.web2appExtra`（窗模式 + 页签，`lib.rs` / `tabs/window.rs`） | ✅ 同左 | ✅ 同左（页签模式经 `tab-preload.ts`，2026-11-16 补；此前该模式恒为 `undefined`） |
 | `mobile_bar` | ❌ 忽略（常量为 `#[cfg(mobile)]`，桌面目标无此代码路径） | ✅ 有效（底栏模式） | ❌ 忽略 |
 | `debug` | ✅ 写 `<数据目录>\logs\startup.log` | ✅ 写应用私有目录下的 `logs\startup.log` | ✅ 写 `<数据目录>\logs\startup.log`；探针 / 冒烟**强制开** |
 | `proxy_*` | ✅ 有效 | ⚠️ 仅 `proxy_enabled`（`nav::local_proxy_enabled` 的非 Windows 分支 = `PROXY_ENABLED`，恒走本地反向代理）；`proxy_http/https/bypass` 无消费方 | ✅ 有效 |

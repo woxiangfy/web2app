@@ -88,10 +88,15 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    `configRoot` / `preloadPath`。新增「打包态读 asar、开发态读仓库」的资源时加在这里，不得在入口
    再写 `app.isPackaged ? … : …` 三元；判据用 `app.isPackaged`，**不是**「文件是否存在」（`stage`
    会在开发目录生成 `out/inject/`）。导航失败文案 / 内部页判定同理：`nav-text.ts` 单一真源。
-17. **preload 不得相对 require**：`preload.ts` / `shell-preload.ts` / `settings-preload.ts` 都跑在
+17. **preload 不得相对 require**：`preload.ts` / `shell-preload.ts` / `settings-preload.ts` /
+   `tab-preload.ts`（页签内容页最小 preload，只注入 `window.web2appExtra`）都跑在
    `sandbox: true` 渲染进程里（Electron 45 起 `require` **只放行 `electron`**，`events` / `timers` / `url`
    三个 shim 与 `Buffer` / `setImmediate` / `clearImmediate` 全局一并移除）。需要共享的桥逻辑
-   只能在**文件内**分块，跨文件的形状一致性由 `test/preload-contract.test.ts` 锁（不抽共享模块）。
+   只能在**文件内**分块，跨文件的形状一致性由 `test/preload-contract.test.ts` 锁（不抽共享模块）；
+   `tab-preload` 的装配（tabs.ts 真传 / index.ts 真装配 / 通道真注册）由 `test/tab-preload.test.ts` 锁，
+   运行期由 `probe --tabs` 的 P2b 两条成对断言负责。
+   ⚠️ **页签内容页不得挂 `preload.js`**：它会把自绘标题栏 / 加载层注入内容页，而页签模式的标题栏
+   属于壳页面 `shell.html` —— 挂上去就是两条标题栏。内容页需要新数据时，往 `tab-preload.ts` 加。
 
 ## 刻意不动（已定，勿再提拆分）
 

@@ -529,3 +529,5 @@ body{box-sizing:border-box;margin-top:38px;min-height:0;
      Electron 侧对应 `tabs:open_settings` + `shell-preload` 的 `ALLOWED` 白名单（页面字面量 / 白名单 / IPC 名三处同改）。
    - ⚠️ 断言要「等设置页真的渲染出 `.panel`」而不是「窗口对象存在」—— 加载失败时窗口对象照样存在（假绿），
      且抢在加载完成前 `close()` 会中止导航、在日志里留下 `ERR_FAILED(-2)` 噪声（第一版就踩了）。
+
+16. ⚠️⚠️ **页签内容页只能挂 `tab-preload.ts`（只注入 `window.web2appExtra`），绝不能再挂 `preload.js`**（2026-11-16 修）：`tabs.ts::spawnTab` 的 `new WebContentsView` 此前**完全没有 `preload` 字段** ⇒ `tabs_enabled: true` 的包里 `window.web2appExtra` 恒 `undefined`（单窗口模式正常；Tauri 页签 `tabs/window.rs` 一直有注入），而配置与文档都承诺前端可读。挂 `preload.js` 是错法 —— 它会往内容页塞自绘标题栏 + 加载层，与壳页面 `shell.html` 的标签栏叠成**两条标题栏**。取值走同步通道 `w2a:tab-extra`（`app-ipc.ts::registerTabExtraIpc`，闸门只到顶层框架：页签内容页的 webContents 不是主窗，`expectedSenderId` 不适用；extra 本身就是要注入远程页面的公开数据）。守卫：`test/tab-preload.test.ts`（装配 6 条）+ `probe --tabs` P2b 两条**成对**断言（读得到 extra ‖ 内容页仍无 `web2app` 桥）。

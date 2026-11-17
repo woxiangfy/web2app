@@ -47,6 +47,7 @@ export function registerAppIpc(deps: AppIpcDeps): void {
   registerWindowIpc(deps)
   registerTabsIpc(deps)
   registerBootstrapIpc(deps)
+  registerTabExtraIpc(deps)
   registerAuthHandler(deps)
 }
 
@@ -212,6 +213,27 @@ function registerBootstrapIpc(deps: AppIpcDeps): void {
       titlebarJs: deps.bootstrap.readInject('titlebar.js') ?? '',
       loadingJs: deps.bootstrap.readInject('loading.js') ?? '',
     }
+  })
+}
+
+/**
+ * 页签内容页取 `window.web2appExtra`（消费方 `renderer/tab-preload.ts`）。
+ *
+ * 为什么另起一条通道：页签模式下内容页是独立 `WebContentsView`，其 webContents **不是**
+ * 主窗（`expectedSenderId`），不能复用 `web2app:bootstrap` 的 sender 闸；而它又只需要 extra
+ * 这一份数据，不该为它同步拉约 81KB 的注入脚本。
+ *
+ * 闸门只到「顶层框架」：本通道返回的 `extra` 本来就是**要注入远程页面**的公开配置，不涉及
+ * 任何窗口能力（关闭 / 设置 / 页签命令仍在 `assertTrustedSender` 之后），因此没有越权面。
+ */
+function registerTabExtraIpc(deps: AppIpcDeps): void {
+  ipcMain.on('w2a:tab-extra', (e) => {
+    if (e.senderFrame !== e.sender.mainFrame) {
+      console.warn('[web2app] 拒绝子框架读取 web2appExtra')
+      e.returnValue = null
+      return
+    }
+    e.returnValue = deps.bootstrap.extra
   })
 }
 

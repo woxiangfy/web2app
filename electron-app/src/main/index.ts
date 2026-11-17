@@ -520,6 +520,9 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   if (TABS_MODE) {
     tabManager = new TabManager({
       host: win,
+      // 内容页最小 preload（只注入 window.web2appExtra）。不传 ⇒ 页签模式下该全局恒为
+      // undefined，而单窗口模式正常 —— 同一份配置两种表现（2026-11-16 实测发现）。
+      tabPreload: preloadPath('tab-preload.js'),
       onSpawn: makeTabSpawn({
         // ⚠️ 只解析、不导航壳页面：新页签**不得**走 bootstrap()（会掐掉在服页签的代理）。
         resolveInitialTarget: () => nav.resolveInitialTarget(),
