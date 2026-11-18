@@ -170,6 +170,21 @@ export class TabManager {
     return this.activeLabel ? (this.tabs.get(this.activeLabel) ?? null) : null
   }
 
+  /**
+   * 该 webContents 是否属于某个页签的内容视图。
+   *
+   * 用途：内容页专用 IPC（账号密码查询 / 保存）的 sender 闸门 —— 页签模式下内容页是
+   * 独立 `WebContentsView`，其 id 既不等于宿主壳，也不是 `BrowserWindow.fromWebContents`
+   * 能区分出来的（见 `ipc-guard.ts` 的说明）。
+   */
+  ownsWebContents(id: number): boolean {
+    for (const tab of this.tabs.values()) {
+      if (tab.view.webContents.id === id) return true
+    }
+    return false
+  }
+
+
   /** 内容视图的可绘制区域（物理上从 y=38 起，高度扣掉标签栏）。 */
   private contentBounds(): { x: number; y: number; width: number; height: number } {
     const cb = this.host.getContentBounds()

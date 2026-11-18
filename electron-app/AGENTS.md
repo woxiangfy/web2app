@@ -89,7 +89,7 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    再写 `app.isPackaged ? … : …` 三元；判据用 `app.isPackaged`，**不是**「文件是否存在」（`stage`
    会在开发目录生成 `out/inject/`）。导航失败文案 / 内部页判定同理：`nav-text.ts` 单一真源。
 17. **preload 不得相对 require**：`preload.ts` / `shell-preload.ts` / `settings-preload.ts` /
-   `tab-preload.ts`（页签内容页最小 preload，只注入 `window.web2appExtra`）都跑在
+   `tab-preload.ts`（页签内容页最小 preload，注入 `window.web2appExtra` + 网页登录账号密码管理）都跑在
    `sandbox: true` 渲染进程里（Electron 45 起 `require` **只放行 `electron`**，`events` / `timers` / `url`
    三个 shim 与 `Buffer` / `setImmediate` / `clearImmediate` 全局一并移除）。需要共享的桥逻辑
    只能在**文件内**分块，跨文件的形状一致性由 `test/preload-contract.test.ts` 锁（不抽共享模块）；
@@ -97,6 +97,14 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    运行期由 `probe --tabs` 的 P2b 两条成对断言负责。
    ⚠️ **页签内容页不得挂 `preload.js`**：它会把自绘标题栏 / 加载层注入内容页，而页签模式的标题栏
    属于壳页面 `shell.html` —— 挂上去就是两条标题栏。内容页需要新数据时，往 `tab-preload.ts` 加。
+18. **网页登录账号密码保存是 Electron 自研**（Tauri 走 WebView2 原生 `IsPasswordAutosaveEnabled`）：
+   Electron 只含 Chromium content 层，**没有** Chrome 的密码管理器 / 自动填充 UI，也没有任何开关能打开。
+   实现约定：`preload.ts` 与 `tab-preload.ts` 各有一段**逐字一致**的 `installPasswordManager()`（沙箱不能
+   共享模块，由 `test/password-contract.test.ts` 直接比对两段源码；运行期 `probe` 第 18 节 / `P13` 各自
+   覆盖单窗口与页签）；只认 `isTrusted` + `navigator.userActivation.isActive` 的 submit，**不得**
+   `preventDefault`（DOM 气泡活不过导航，阻止提交会改站点行为）；不向页面主世界暴露任何桥；
+   存储只放 `credentials.json` 的 `safeStorage` 密文，加密不可用时拒绝保存；`clearWebData` 必须一并
+   清理；**不得在 Tauri 侧也注入这段**（WebView2 已原生弹一次，会双弹窗）。
 
 ## 刻意不动（已定，勿再提拆分）
 
@@ -116,6 +124,7 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 | 资源路径（`paths.ts`）、导航失败文案 / 内部页判定（`nav-text.ts`） | `unit` + `smoke` + `probe` |
 | 自定义协议（`protocols.ts`，含 `/retry` 闸门） | `unit` + `probe` + `真机点启动页重试` |
 | 任何 preload（`src/renderer/*preload.ts`） | `unit`（`preload-contract`）+ `probe` |
+| 账号密码保存（`credentials*.ts`、`w2a:pwd-*`、两 preload 密码段） | `unit`（`credentials` + `password-contract`）+ `probe`（第 18 节）+ `probe --tabs`（P13）+ 真机登录一次 |
 | sidecar 参数拼装 / 可执行文件定位（`sidecar.ts`） | `unit` + `probe` |
 | 导航状态机（`navigation.ts`：target 缓存 / 自动 bootstrap 名额 / 重试重置） | `unit` + `probe` |
 | 启动日志（`startup-log.ts`）、`debug` 开关与 `silenceConsole()` | `smoke` |

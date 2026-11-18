@@ -63,6 +63,10 @@
 | 启动过渡（启动页 + 加载层 + 失败卡） | Windows / Android |
 | Android 原生补丁：返回键 · 下载接管 · 外部 scheme 外跳 · 更多面板 Kotlin 桥 · H5 视频全屏 · 运行时权限 · `target=_blank` 进移动页签 | Android |
 
+> 「登录密码保存」两壳**机制不同**：本壳走 WebView2 原生（`ICoreWebView2Settings4::IsPasswordAutosaveEnabled`，`src/webview_hooks.rs`），
+> Electron 壳为自研（preload 采集 / 填充 + `safeStorage`，见 `../electron-app/AGENTS.md` 硬约束 18）。
+> **不得在 Tauri 侧再注入 Electron 那段** —— WebView2 已原生弹一次，会双弹窗。
+
 - 鉴权链路原理与凭据主机白名单：[docs/proxy-auth.md](docs/proxy-auth.md)
 - 设置窗口版式、6 个配置项与 `settings.json` 落点/原子写：[docs/settings-ui.md](docs/settings-ui.md)
 - 悬浮球（形态 / 单击 toggle / 拖动吸附 / 圆形命中 / 逐轮演进 / `--float-probe`）：[docs/float-ball.md](docs/float-ball.md)

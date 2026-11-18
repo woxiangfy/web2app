@@ -1,11 +1,12 @@
 /**
  * 主进程 IPC / 鉴权事件注册（2026-10-01 从 index.ts 抽出）。
  *
- * 这里集中四组注册：
+ * 这里集中五组注册：
  *   1. win:*     标题栏窗口按钮（单窗口 / 页签壳共用，特权命令带 sender 校验）
  *   2. tabs:*    壳页面页签操作（命令名与 Tauri 侧逐字一致）
  *   3. web2app:bootstrap  同步给 preload 下发注入脚本源码
  *   4. app 'login'        Basic 凭据回填（仅入口主机 / 代理）
+ *   5. w2a:pwd-*          网页登录账号密码的查询 / 保存 / 撤销（Electron 自研，见 credentials.ts）
  *
  * 边界：本模块**不持有状态**。主窗口、页签管理器、入口目标在 index.ts 里都是「先声明、
  * ready 后才有值」的可变状态，这里一律以 getter 注入；注册动作发生在 whenReady 之后。
@@ -13,6 +14,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 
 import type { AppConfig } from './config'
+import type { CredentialStore, SaveResult } from './credentials'
 import type { ResolvedTarget } from './navigate'
 import type { TabManager } from './tabs'
 import { assertTrustedSender } from './ipc-guard'
@@ -41,6 +43,13 @@ export interface AppIpcDeps {
   /** 外部代理地址（代理返回 401 时从中取 userinfo 凭据），缺省为 '' */
   proxyHttp: string
   proxyHttps: string
+  /**
+   * 内容页 sender 判据：单窗口模式 = 主窗 webContents；页签模式 = 任一页签内容视图。
+   * ⚠️ 不要用 `BrowserWindow.fromWebContents()` 代替：页签视图也会解析到宿主窗口。
+   */
+  isContentSender: (webContentsId: number) => boolean
+  /** 账号密码存储（Electron 自研，见 credentials.ts） */
+  credentials: CredentialStore
 }
 
 export function registerAppIpc(deps: AppIpcDeps): void {
@@ -48,6 +57,7 @@ export function registerAppIpc(deps: AppIpcDeps): void {
   registerTabsIpc(deps)
   registerBootstrapIpc(deps)
   registerTabExtraIpc(deps)
+  registerCredentialIpc(deps)
   registerAuthHandler(deps)
 }
 
@@ -234,6 +244,53 @@ function registerTabExtraIpc(deps: AppIpcDeps): void {
       return
     }
     e.returnValue = deps.bootstrap.extra
+  })
+}
+
+/**
+ * 网页登录账号密码：查询 / 保存 / 撤销（Electron 自研，preload 消费）。
+ *
+ * 为什么不用 `assertTrustedSender`（只认宿主 webContents）：页签模式下内容页是独立
+ * `WebContentsView`，它本来就不是宿主；但本组命令只回传**该页面自己 origin** 的凭据，
+ * 不接受渲染进程指定 origin，所以闸门改用「顶层框架 + 内容页 sender」。
+ *
+ * ⚠️ origin 一律由主进程从 `e.senderFrame.url` 推导，页面无法伪造；
+ *    子框架（跨源 iframe）直接拒绝 —— preload 默认也不进子框架，这里是第二道闸。
+ */
+function registerCredentialIpc(deps: AppIpcDeps): void {
+  const assertContentSender = (e: Electron.IpcMainInvokeEvent): string => {
+    if (e.senderFrame !== e.sender.mainFrame) {
+      console.warn('[web2app] 拒绝子框架的账号密码命令')
+      throw new Error('拒绝：账号密码命令只能由顶层框架发起')
+    }
+    if (!deps.isContentSender(e.sender.id)) {
+      console.warn(`[web2app] 拒绝账号密码命令（sender.id=${e.sender.id}）`)
+      throw new Error('拒绝：账号密码命令只能由内容页发起')
+    }
+    return e.senderFrame.url
+  }
+
+  ipcMain.handle('w2a:pwd-lookup', (e) => {
+    const url = assertContentSender(e)
+    return deps.credentials.lookup(url)
+  })
+
+  ipcMain.handle('w2a:pwd-save', (e, args: unknown) => {
+    const url = assertContentSender(e)
+    const o = (args ?? {}) as { username?: unknown; password?: unknown }
+    const username = typeof o.username === 'string' ? o.username.slice(0, 256) : ''
+    const password = typeof o.password === 'string' ? o.password : ''
+    // 长度上限是防御性的（不是业务校验）：别让一个恶意页面把整个文件写爆。
+    if (password === '' || password.length > 1024) {
+      return { ok: false, reason: 'invalid' } satisfies SaveResult
+    }
+    return deps.credentials.save(url, { username, password })
+  })
+
+  ipcMain.handle('w2a:pwd-forget', (e) => {
+    const url = assertContentSender(e)
+    deps.credentials.forget(url)
+    return null
   })
 }
 

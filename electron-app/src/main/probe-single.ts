@@ -7,9 +7,10 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { screen } from 'electron'
+import { screen, app } from 'electron'
 
 import { AUTH_HEADER } from './probe-server'
+import { CREDENTIALS_FILE, normalizeOrigin } from './credentials-logic'
 import {
   BAR_BG,
   isAlive,
@@ -100,6 +101,7 @@ export async function runProbe(ctx: ProbeContext): Promise<boolean> {
   await probeSec14CloseToTray(ctx, p, HK)
   await probeSec15PageBehavior(p, wc)
   await probeSec16FrameIsolation(p, nav, wc)
+  await probeSec18PasswordManager(ctx, p, nav, wc)
   await probeSec17CloseButton(ctx, p, clickBtn)
 
   // ---------- 汇总 ----------
@@ -1313,6 +1315,178 @@ async function probeSec16FrameIsolation(p: Probe, nav: NavFn, wc: MainWebContent
     frameInfo.child?.bridge === 'undefined', frameJson)
   p.check('子框架不暴露 web2appExtra',
     frameInfo.child?.extra === 'undefined', frameJson)
+}
+
+/**
+ * ---------- 18. 网页登录账号密码：保存 / 自动填充 / 撤销（Electron 自研） ----------
+ *
+ * 为什么必须有这一节：Electron 不含 Chrome 的密码管理器（见 credentials-logic.ts 文件头），
+ * 功能整条链路（preload 采集 → IPC → safeStorage → 回读填充）全是「错了也静默」——
+ * 单测只能锁装配，真实键入 / 自动填充只能在运行期验。
+ *
+ * ⚠️ 必须用 `sendInputEvent` 逐字键入：Chromium 对「可信提交」有门槛，`executeJavaScript`
+ *    造出来的 submit 是 untrusted（本节的 18 反向断言正是钉这一点）。
+ */
+async function probeSec18PasswordManager(
+  ctx: ProbeContext,
+  p: Probe,
+  nav: NavFn,
+  wc: MainWebContents
+): Promise<void> {
+  const file = join(app.getPath('temp'), 'w2a-probe-store', CREDENTIALS_FILE)
+  rmSync(file, { force: true })
+
+  const readEntries = (): { origin: string; username: string }[] => {
+    try {
+      const doc = JSON.parse(readFileSync(file, 'utf8')) as {
+        entries?: { origin: string; username: string }[]
+      }
+      return Array.isArray(doc.entries) ? doc.entries : []
+    } catch {
+      return []
+    }
+  }
+  const readRaw = (): string => {
+    try {
+      return readFileSync(file, 'utf8')
+    } catch {
+      return ''
+    }
+  }
+  const readBubble = async (): Promise<string> =>
+    (await wc.executeJavaScript(
+      `(() => { const el = document.getElementById('__web2app_pwd_bubble__');
+         return el ? el.textContent : ''; })()`,
+      true
+    )) as string
+
+  const typeText = (text: string): void => {
+    for (const ch of text) {
+      wc.sendInputEvent({ type: 'keyDown', keyCode: ch })
+      wc.sendInputEvent({ type: 'char', keyCode: ch })
+      wc.sendInputEvent({ type: 'keyUp', keyCode: ch })
+    }
+  }
+
+  const clickSubmit = async (): Promise<void> => {
+    // 用真实鼠标事件点提交按钮：比 `Enter` 更接近用户操作，且一定带 user activation。
+    const pos = JSON.parse(
+      (await wc.executeJavaScript(
+        `(() => { const r = document.getElementById('go').getBoundingClientRect();
+           return JSON.stringify({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }); })()`,
+        true
+      )) as string
+    ) as { x: number; y: number }
+    wc.sendInputEvent({ type: 'mouseMove', x: pos.x, y: pos.y })
+    wc.sendInputEvent({ type: 'mouseDown', x: pos.x, y: pos.y, button: 'left', clickCount: 1 })
+    wc.sendInputEvent({ type: 'mouseUp', x: pos.x, y: pos.y, button: 'left', clickCount: 1 })
+  }
+
+  const typeAndSubmit = async (): Promise<void> => {
+    await wc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         u.value = ''; pw.value = ''; u.focus(); return true; })()`,
+      true
+    )
+    wc.focus()
+    typeText('probeuser')
+    await wc.executeJavaScript(`document.getElementById('p').focus(); true`, true)
+    typeText('probepass123')
+    await clickSubmit()
+  }
+
+  // 18 反向：脚本合成的 submit 事件不得保存（isTrusted 过滤）。
+  // ⚠️ 不要用 `requestSubmit()` 当反向用例：它是浏览器派发的，`isTrusted` 仍为 true
+  //    （2026-11-18 首跑实测），代表「用户点击」而不是「站点脚本伪造」。
+  await nav('/login.html')
+  await wc.executeJavaScript(
+    `(() => { const f = document.getElementById('form');
+       document.getElementById('u').value = 'evil';
+       document.getElementById('p').value = 'evilpass';
+       f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+       return true; })()`,
+    false
+  )
+  await sleep(500)
+  p.check(
+    '18 反向：脚本合成 submit 事件不保存（isTrusted 过滤）',
+    readEntries().length === 0,
+    `entries=${readEntries().length}`
+  )
+
+  // 18a 正向：真实键入 + 回车 ⇒ 保存
+  await nav('/login.html')
+  await typeAndSubmit()
+  const typed = (await wc.executeJavaScript(
+    `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+       return JSON.stringify({ u: u.value, p: pw.value }); })()`,
+    true
+  )) as string
+  p.check(
+    '18 前提：真实键入已进入两个输入框',
+    typed.includes('"u":"probeuser"') && typed.includes('"p":"probepass123"'),
+    typed
+  )
+  const submitted = await waitUntil(async () => {
+    return (await wc.executeJavaScript(`document.body.dataset.submitted === '1'`, true)) === true
+  }, 5000)
+  p.check('18 前提：真实键入 + 点击提交触发了表单提交', submitted, '5s 内未观测到 submit')
+
+  const saved = await waitUntil(
+    async () => readEntries().length === 1 && readEntries()[0].username === 'probeuser',
+    3000
+  )
+  p.check(
+    '18a 保存：可信提交后写入 1 条凭据（用户名为真实键入值）',
+    saved,
+    `entries=${JSON.stringify(readEntries())}`
+  )
+
+  const raw = readRaw()
+  p.check(
+    '18b 安全：凭据文件只含密文，不含明文密码',
+    raw !== '' && raw.includes('"secret"') && !raw.includes('probepass123'),
+    raw === '' ? '文件未生成' : '文件内容未包含明文密码'
+  )
+  p.check(
+    '18c 归属：凭据 origin = 夹具站点（回环地址丢端口）',
+    readEntries()[0]?.origin === normalizeOrigin(ctx.base),
+    `origin=${readEntries()[0]?.origin ?? '(无)'}`
+  )
+
+  let bubbleText = ''
+  const bubbleSeen = await waitUntil(async () => {
+    bubbleText = await readBubble()
+    return bubbleText.includes('probeuser')
+  }, 3000)
+  p.check('18d 气泡：保存成功后出现「已保存 <用户名>」提示', bubbleSeen, `bubble=${bubbleText}`)
+
+  // 18e 自动填充：重新打开登录页，用户名 / 密码应已填入
+  await nav('/login.html')
+  const filled = await waitUntil(async () => {
+    const v = (await wc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return JSON.stringify({ u: u.value, p: pw.value }); })()`,
+      true
+    )) as string
+    const o = JSON.parse(v) as { u: string; p: string }
+    return o.u === 'probeuser' && o.p === 'probepass123'
+  }, 4000)
+  p.check('18e 自动填充：重新打开页面后用户名 / 密码已填入', filled, '4s 内未填充')
+
+  // 18f 撤销：再次提交 → 点气泡「撤销」⇒ 记录清空
+  await typeAndSubmit()
+  const bubbleAgain = await waitUntil(async () => (await readBubble()).includes('撤销'), 3000)
+  if (bubbleAgain) {
+    await wc.executeJavaScript(
+      `document.querySelector('#__web2app_pwd_bubble__ button').click(); true`,
+      true
+    )
+  }
+  const undone = await waitUntil(async () => readEntries().length === 0, 3000)
+  p.check('18f 撤销：气泡按钮清掉该站点凭据', bubbleAgain && undone, `entries=${readEntries().length}`)
+
+  rmSync(file, { force: true })
 }
 
 async function probeSec17CloseButton(ctx: ProbeContext, p: Probe, clickBtn: ClickFn): Promise<void> {

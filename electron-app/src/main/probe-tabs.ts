@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, WebContentsView } from 'electron'
 
 import { MAX_TABS, TAB_BAR_HEIGHT, type TabManager } from './tabs'
+import { CREDENTIALS_FILE, normalizeOrigin } from './credentials-logic'
 import { Probe, sleep, waitUntil } from './probe-infra'
 
 export interface TabsProbeContext {
@@ -687,6 +688,63 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
       tabs.closeTab(home) === false && !win.isDestroyed(),
     `count=${tabs.count} active=${tabs.active?.label} 窗口存活=${!win.isDestroyed()}`)
   p.check('清理：关闭到只剩一个页签（首页）', tabs.count === 1, `count=${tabs.count}`)
+
+  // ---------- P13：账号密码保存 / 自动填充（页签模式，内容页走 tab-preload） ----------
+  // 与单窗口第 18 节同一套真机手法（真实键入 + 真实点击）；这里只补「页签内容视图的
+  // sender 闸门与 tab-preload 装配真的生效」这条模式差异 —— 单窗口全绿不代表页签全绿
+  //（2026-11-16 的 extra 回归就是同一类漏挂）。
+  const pwdFile = join(app.getPath('temp'), 'w2a-probe-store', CREDENTIALS_FILE)
+  rmSync(pwdFile, { force: true })
+  const readPwd = (): { origin: string; username: string }[] => {
+    try {
+      const doc = JSON.parse(readFileSync(pwdFile, 'utf8')) as {
+        entries?: { origin: string; username: string }[]
+      }
+      return Array.isArray(doc.entries) ? doc.entries : []
+    } catch {
+      return []
+    }
+  }
+  const pwc = tabs.active!.view.webContents
+  await pwc.loadURL(`${base}/login.html`)
+  await sleep(450)
+  // ⚠️ 不在这里用 sendInputEvent 模拟键鼠：探针窗口是隐藏的，子 `WebContentsView` 收不到
+  //    面向 DOM 的键盘 / 鼠标输入（Ctrl+W 能过是因为它在主进程 before-input-event 处理）。
+  //    单窗口第 18 节已用「真实键入 + 真实点击」覆盖输入管线；这里要验的是**页签侧装配**
+  //    （tab-preload 是否装上、sender 闸门是否认页签视图），用
+  //    `executeJavaScript(code, userGesture=true)` + `requestSubmit()` 拿到的 submit
+  //    同样满足 `isTrusted` + 用户激活（首节反向用例已实测这一行为）。
+  await pwc.executeJavaScript(
+    `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+       u.value = 'probeuser'; pw.value = 'probepass123';
+       document.getElementById('form').requestSubmit(); return true; })()`,
+    true
+  )
+  const tabSubmitted = await waitUntil(async () => {
+    return (await pwc.executeJavaScript(`document.body.dataset.submitted === '1'`, true)) === true
+  }, 3000)
+  p.check('P13 前提：页签内触发了表单提交', tabSubmitted, '3s 内未观测到 submit')
+  const pwdSaved = await waitUntil(
+    async () => readPwd().length === 1 && readPwd()[0].username === 'probeuser',
+    3000
+  )
+  p.check('P13 页签模式：可信提交后保存 1 条凭据', pwdSaved, JSON.stringify(readPwd()))
+  p.check(
+    'P13 页签模式：凭据 origin = 夹具站点',
+    readPwd()[0]?.origin === normalizeOrigin(base),
+    `origin=${readPwd()[0]?.origin ?? '(无)'}`
+  )
+  await pwc.loadURL(`${base}/login.html`)
+  const pwdFilled = await waitUntil(async () => {
+    const v = (await pwc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return JSON.stringify({ u: u.value, p: pw.value }); })()`,
+      true
+    )) as string
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 4000)
+  p.check('P13 页签模式：重新打开页面自动填充', pwdFilled, '4s 内未填充')
+  rmSync(pwdFile, { force: true })
 
   // ---------- 汇总 ----------
   const failed = p.results.filter((r) => !r.ok)

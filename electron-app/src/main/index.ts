@@ -85,6 +85,8 @@ import {
   devtoolsEnabled,
 } from './page-behavior'
 import { clearWebData } from './web-data'
+import { createCredentialStore } from './credentials'
+import { CREDENTIALS_FILE } from './credentials-logic'
 import {
   destroyFloatWindow,
   isFloatAlive,
@@ -233,6 +235,13 @@ if (PROBE) {
   storeLoc = { read: [join(tmpStore, SETTINGS_FILE)], write: join(tmpStore, SETTINGS_FILE) }
 }
 
+// ---------- 1.1b 账号密码存储（Electron 自研：Chromium content 层不含 Chrome 的密码管理器） ----------
+// 落点与 settings.json 同目录（跟着绿色版走）；探针同样隔离到 %TEMP%，绝不碰用户真实凭据。
+const credentialsFile = PROBE
+  ? join(app.getPath('temp'), 'w2a-probe-store', CREDENTIALS_FILE)
+  : join(paths.dataDir, CREDENTIALS_FILE)
+const credentials = createCredentialStore(credentialsFile)
+
 // ---------- 1.2 文件日志（M6）：**只在 debug 打开时才有** ----------
 // ⚠️ 为什么它存在：Windows 上 electron.exe 是 GUI 子系统程序，用户双击运行时
 //    `console.log` 没有任何去处；portable 更是被自解压包装器吞掉内层 stdout。
@@ -292,6 +301,19 @@ let mainWindow: BrowserWindow | null = null
 
 /** 多页签管理器（仅 tabs_enabled=true 时非空）。 */
 let tabManager: TabManager | null = null
+
+/**
+ * 内容页 sender 判据（账号密码 IPC 用）：单窗口模式 = 主窗 webContents；
+ * 页签模式 = 任一页签内容视图。子框架 / 壳 / 设置窗 / 悬浮球一律不认。
+ *
+ * ⚠️ 刻意不复用 `ipc-guard.ts::assertTrustedSender`：那条只认宿主 webContents，
+ *    而页签内容页在设计上就不是宿主（见 tabs.ts::ownsWebContents 的注释）。
+ */
+function isContentSender(id: number): boolean {
+  const w = mainWindow
+  if (w && !w.isDestroyed() && w.webContents.id === id) return true
+  return tabManager?.ownsWebContents(id) ?? false
+}
 
 /**
  * 是否多页签模式（只在最外层读一次，禁止在既有函数里散落 if）。
@@ -767,6 +789,8 @@ if (!gotLock) {
       getTarget: () => nav.getTarget(),
       proxyHttp: cfg.proxy_http,
       proxyHttps: cfg.proxy_https,
+      isContentSender,
+      credentials,
     })
     registerSettingsIpc({
       getSettings: () => runtimeSettings,
@@ -779,6 +803,8 @@ if (!gotLock) {
       clearWebData: () =>
         clearWebData({
           probe: PROBE,
+          // 已保存的登录账号密码也要一起清（Tauri 壳由 ClearBrowsingDataAll 覆盖 Login Data）。
+          clearCredentials: () => credentials.clear(),
           reloadContentPages: () => {
             if (TABS_MODE) return tabManager?.reloadAll() ?? 0
             const w = mainWindow

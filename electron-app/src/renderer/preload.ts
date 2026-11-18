@@ -85,6 +85,7 @@ if (window.self === window.top) {
   installBridge(boot)
   installOverlayChannel()
   installInjectScripts(boot)
+  installPasswordManager()
 }
 
 /** ① 桥：`window.web2app` 白名单方法 + `window.web2appExtra`。 */
@@ -167,6 +168,186 @@ function installInjectScripts(boot: Bootstrap): void {
   runInject('titlebar.js', boot.titlebarJs)
   runInject('loading.js', boot.loadingJs)
 }
+
+// ---- password-manager:begin（本段在 preload.ts / tab-preload.ts 中逐字一致，由 test/password-preload-contract.test.ts 锁）----
+/**
+ * 网页登录账号密码：提交时保存、进页面自动填充（Electron 自研）。
+ *
+ * 为什么不是原生能力：Electron 只含 Chromium content 层，**没有** Chrome 的密码管理器 /
+ * 自动填充 UI（详见 src/main/credentials-logic.ts 文件头）。Tauri 壳走 WebView2 原生气泡。
+ *
+ * ⚠️ 全部逻辑跑在 preload 的**隔离世界**：只读 DOM + `ipcRenderer.invoke`，不向页面主世界
+ *    暴露任何桥 —— 页面脚本无法主动读出已保存的密码。
+ * ⚠️ 只在**可信 submit**（`isTrusted`）时保存：程序化 `form.submit()` 不写入，避免站点刷库。
+ *    这里**不阻止提交**：DOM 气泡活不过一次导航，阻止提交再恢复会改站点行为；故采用
+ *    「先保存、后提示」——提交瞬间写入，气泡只作结果反馈（可撤销）。
+ */
+function installPasswordManager(): void {
+  const proto = location.protocol
+  if (proto !== 'http:' && proto !== 'https:') return
+
+  const isInput = (el: Element | null): el is HTMLInputElement =>
+    !!el && el.tagName === 'INPUT'
+
+  const visible = (el: HTMLElement): boolean => {
+    const r = el.getBoundingClientRect()
+    if (r.width <= 0 || r.height <= 0) return false
+    const s = getComputedStyle(el)
+    return s.visibility !== 'hidden' && s.display !== 'none'
+  }
+
+  const usableUser = (el: HTMLInputElement, pass: HTMLInputElement): boolean =>
+    el !== pass &&
+    !el.disabled &&
+    !el.readOnly &&
+    el.type !== 'password' &&
+    (el.type === 'text' || el.type === 'email' || el.type === 'tel' || el.type === 'number')
+
+  /** 找页面里第一个可见的密码框，并按 autocomplete / 相邻顺序 / name 猜用户名框。 */
+  function findLogin(): { user: HTMLInputElement | null; pass: HTMLInputElement } | null {
+    const passes = Array.from(document.querySelectorAll('input[type="password"]')) as HTMLInputElement[]
+    for (const pass of passes) {
+      if (pass.disabled || pass.readOnly || !visible(pass)) continue
+      const scope: ParentNode = pass.form ?? document
+      const inputs = Array.from(scope.querySelectorAll('input')) as HTMLInputElement[]
+      const byAuto = inputs.find(
+        (el) => usableUser(el, pass) && /username|email/i.test(el.getAttribute('autocomplete') ?? '')
+      )
+      let before: HTMLInputElement | null = null
+      for (const el of inputs) {
+        if (el === pass) break
+        if (usableUser(el, pass) && visible(el)) before = el
+      }
+      const byName = inputs.find(
+        (el) =>
+          usableUser(el, pass) &&
+          /user|email|account|phone|mobile|login/i.test(`${el.name} ${el.id}`)
+      )
+      return { user: byAuto ?? before ?? byName ?? null, pass }
+    }
+    return null
+  }
+
+  function setValue(el: HTMLInputElement, value: string): void {
+    // 走原型上的 setter：React 等受控组件才会感知到变化（直接 el.value 会被忽略）。
+    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+    if (desc && desc.set) desc.set.call(el, value)
+    else el.value = value
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  let fillTried = false
+  async function tryFill(): Promise<void> {
+    if (fillTried) return
+    const f = findLogin()
+    if (!f) return
+    // 用户已经输入过（或浏览器自己填了）：不覆盖。
+    if (f.pass.value !== '' || (f.user && f.user.value !== '')) {
+      fillTried = true
+      return
+    }
+    let got: unknown = null
+    try {
+      got = await ipcRenderer.invoke('w2a:pwd-lookup')
+    } catch {
+      return
+    }
+    const cred = got as { username?: unknown; password?: unknown } | null
+    if (!cred || typeof cred.password !== 'string' || cred.password === '') return
+    fillTried = true
+    // 异步期间 DOM 可能重建 / 用户可能已开始输入：写之前再确认一次。
+    const again = findLogin()
+    if (!again || again.pass.value !== '' || (again.user && again.user.value !== '')) return
+    if (again.user && typeof cred.username === 'string' && cred.username !== '') {
+      setValue(again.user, cred.username)
+    }
+    setValue(again.pass, cred.password)
+  }
+
+  function showSavedBubble(username: string): void {
+    if (!document.body) return
+    const old = document.getElementById('__web2app_pwd_bubble__')
+    if (old) old.remove()
+    const host = document.createElement('div')
+    host.id = '__web2app_pwd_bubble__'
+    // 样式一律走 CSSOM（逐项赋值）：页面 CSP 的 style-src 不会拦 JS 赋值，
+    // 而内联 <style> / cssText 在严格 CSP 下可能被丢弃。
+    const s = host.style
+    s.position = 'fixed'
+    s.top = '14px'
+    s.right = '14px'
+    s.zIndex = '2147483647'
+    s.display = 'flex'
+    s.alignItems = 'center'
+    s.gap = '10px'
+    s.maxWidth = '340px'
+    s.padding = '10px 12px'
+    s.borderRadius = '8px'
+    s.background = '#1f2329'
+    s.color = '#fff'
+    s.font = '13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif'
+    s.boxShadow = '0 6px 24px rgba(0,0,0,.35)'
+    const text = document.createElement('span')
+    text.textContent = username ? `已保存 ${username} 的账号密码` : '已保存这个网站的账号密码'
+    const undo = document.createElement('button')
+    undo.type = 'button'
+    undo.textContent = '撤销'
+    const b = undo.style
+    b.all = 'unset'
+    b.cursor = 'pointer'
+    b.padding = '2px 8px'
+    b.borderRadius = '6px'
+    b.background = '#3a4149'
+    b.color = '#9ecbff'
+    b.font = 'inherit'
+    undo.addEventListener('click', () => {
+      void ipcRenderer.invoke('w2a:pwd-forget').finally(() => host.remove())
+    })
+    host.append(text, undo)
+    document.body.appendChild(host)
+    setTimeout(() => host.remove(), 8000)
+  }
+
+  document.addEventListener(
+    'submit',
+    (ev) => {
+      // 只认真实用户提交（回车 / 点按钮）：`requestSubmit()` 由浏览器派发，isTrusted 仍为
+      // true，故必须再要一次「当前有用户激活」。程序化提交 / 站点脚本刷库都会被挡下。
+      if (!ev.isTrusted || !navigator.userActivation?.isActive) return
+      const f = findLogin()
+      if (!f || f.pass.value === '') return
+      const username = f.user ? f.user.value : ''
+      void ipcRenderer
+        .invoke('w2a:pwd-save', { username, password: f.pass.value })
+        .then((res: unknown) => {
+          const r = res as { ok?: unknown } | null
+          if (r && r.ok === true) showSavedBubble(username)
+          else console.warn('[web2app] 账号密码未保存（系统加密不可用或写盘失败）')
+        })
+        .catch((e: unknown) => {
+          console.warn('[web2app] 保存账号密码失败：', e)
+        })
+    },
+    true
+  )
+
+  const kick = (): void => {
+    void tryFill()
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', kick)
+  else kick()
+  window.addEventListener('load', kick)
+  // 登录框常在首屏后才渲染（SPA）：聚焦输入框时再试一次；fillTried 会拦住重复查询。
+  document.addEventListener(
+    'focusin',
+    (ev) => {
+      if (isInput(ev.target as Element | null)) kick()
+    },
+    true
+  )
+}
+// ---- password-manager:end ----
 
 /**
  * 在主世界执行一段代码。

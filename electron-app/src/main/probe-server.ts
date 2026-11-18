@@ -138,6 +138,29 @@ const FIXTURES: Record<string, Fixture> = {
   },
 
   /**
+   * 登录表单夹具（账号密码保存 / 自动填充，探针第 18 节）。
+   *
+   * `onsubmit` 里 preventDefault：让页面停在原地，探针才能读到「已保存」气泡；
+   * 保存动作发生在 submit 事件本身，与是否导航无关（真实站点上 IPC 已交给主进程，
+   * 导航销毁渲染进程也不影响落盘）。
+   */
+  '/login.html': {
+    body: PAGE(
+      '',
+      `<form id="form" method="post" action="/login-ok.html"
+              onsubmit="event.preventDefault(); document.body.dataset.submitted='1'">
+         <input id="u" name="username" type="text" autocomplete="username">
+         <input id="p" name="password" type="password" autocomplete="current-password">
+         <button id="go" type="submit">登录</button>
+       </form>`,
+      'form{display:flex;flex-direction:column;gap:8px;width:240px;padding:24px}'
+    ),
+  },
+  '/login-ok.html': {
+    body: PAGE('', '<div id="content"><h1>login ok</h1></div>', ''),
+  },
+
+  /**
    * 附件下载夹具：`Content-Disposition: attachment` ⇒ Chromium 不提交文档、直接走下载。
    * 用途：验证「只为下载而开的页签在下完后自动关闭」与「已加载页面的页签跳转到附件不关」
    * （见 probe-tabs.ts 的 P14）。

@@ -20,6 +20,8 @@ import { session } from 'electron'
 export interface ClearWebDataDeps {
   /** 是否探针模式（true 时只验证链路连通，不动真实数据） */
   probe: boolean
+  /** 清掉自研保存的登录账号密码（Electron 没有 Chromium 密码管理器，见 credentials.ts） */
+  clearCredentials: () => void
   /** 重新加载全部内容页，返回重载的页面数 */
   reloadContentPages: () => number
 }
@@ -38,7 +40,9 @@ export async function clearWebData(deps: ClearWebDataDeps): Promise<string> {
   await ses.clearData()
   await ses.clearAuthCache()
   await ses.clearHostResolverCache()
+  // 自研的登录账号密码不归 Chromium 管（Electron 不含密码管理器），必须显式清。
+  deps.clearCredentials()
 
   const reloaded = deps.reloadContentPages()
-  return `已清除缓存、Cookie 等全部浏览数据；已重新加载 ${reloaded} 个页面`
+  return `已清除缓存、Cookie、已保存的账号密码等全部浏览数据；已重新加载 ${reloaded} 个页面`
 }
