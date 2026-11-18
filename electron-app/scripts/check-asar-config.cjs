@@ -21,7 +21,7 @@
  * 默认路径：release/win-unpacked/resources/app.asar（未给参数时会在 release/ 下自动找）
  */
 const { existsSync, readdirSync, statSync } = require('node:fs')
-const { join, resolve } = require('node:path')
+const { dirname, join, resolve } = require('node:path')
 
 const appDir = resolve(__dirname, '..')
 const releaseDir = join(appDir, 'release')
@@ -127,5 +127,41 @@ if (leakedProbe.length > 0) {
   process.exit(1)
 }
 console.log('开发期产物: 未混入 ✓')
+
+// sidecar 护栏（**双向**）：`resources/sidecar/w2a-proxy.exe` 的存在性必须与运行期判据一致。
+//   该有却没有 ⇒ 需要代理 / 域名解析的产物启动即失败（「缺少本地代理组件」）；
+//   不该有却还在 ⇒ `afterPack`（scripts/after-pack.cjs）没跑或判据分叉，用户会看到一个
+//   永不执行、却可能触发「这个程序要联网」提示的二进制。
+// 判据直接复用编译产物：`out/main/sidecar-ship.js`（内部调 `navigate.ts::needsSidecar`），
+// 配置取 `out/config.json` —— 它正是上面断言已进 asar 的那一份。
+let ship
+try {
+  ship = {
+    loadConfig: require(join(appDir, 'out', 'main', 'config.js')).loadConfig,
+    ...require(join(appDir, 'out', 'main', 'sidecar-ship.js')),
+  }
+} catch (e) {
+  console.error(`::error::无法加载 out/main 编译产物，无法校验 sidecar（先跑 pnpm run build）：${e.message}`)
+  process.exit(1)
+}
+const needSidecar = ship.shouldShipSidecar(ship.loadConfig(join(appDir, 'out')).config)
+const sidecarExe = ship.packagedSidecarPath(dirname(asarPath))
+const sidecarPresent = existsSync(sidecarExe)
+if (needSidecar && !sidecarPresent) {
+  console.error(
+    `::error::配置需要 sidecar，但包里没有 ${sidecarExe}\n` +
+      '  排查：① 打包前是否跑过 `pnpm run sidecar`；② electron-builder.yml 的 extraResources 是否仍拷它；\n' +
+      '        ③ 判据见 src/main/navigate.ts::needsSidecar。',
+  )
+  process.exit(1)
+}
+if (!needSidecar && sidecarPresent) {
+  console.error(
+    `::error::配置不需要 sidecar，但包里仍有 ${sidecarExe}\n` +
+      '  排查：electron-builder.yml 的 `afterPack` 是否仍指向 scripts/after-pack.cjs（它负责删除）。',
+  )
+  process.exit(1)
+}
+console.log(`sidecar: ${needSidecar ? '需要且已随包' : '不需要且未随包'} ✓`)
 
 console.log('asar 配置护栏通过 ✓')

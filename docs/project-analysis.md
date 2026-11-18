@@ -35,7 +35,7 @@
 | `config.rs` | 编译期 env 注入常量 + 目录名清洗 | 全平台 | `env_bool!`/`env_str!`/`str_eq` 绕 const 上下文限制；`sanitize_windows_name` 为目录名/文件名共用的清洗基元 |
 | `bootstrap.rs` | 后台解析真实地址 → 就绪后导航 | 全平台 | 耗时操作挪后台线程，先建窗显示启动页；`Navigation` 缓存供多页签复用 |
 | `proxy.rs` | 本地反向代理（HTTP + WS 统一注入 Basic 鉴权） | 全平台 | 流式转发、透传 Host/Content-Length、Set-Cookie Domain 重写、WS Origin 重写 |
-| `resolve.rs` | DNS TXT 查询 + 验签解密层 | 全平台 | 单 Resolver 复用；多域名 failover；re-export resolve-core |
+| `resolve.rs` | DNS TXT 查询 + 验签解密层 | 全平台 | 单 Resolver 复用；多域名**并发竞速** failover（第一个成功即用）；re-export resolve-core |
 | `loading.rs` + `loading.js` | 启动过渡（splash + overlay 加载层） | 全平台 | 两段接力同一状态机；`whenHostReady` 等 DOM 宿主，失败轮询重试 |
 | `titlebar.js` | 自绘窗口标题栏（前进/后退/最小化/**设置**/最大化/关闭） | Windows 单窗 | 首个文档拿不到 initialization_script → 内联进 splash.html |
 | `webview_hooks.rs` | WebView2 原生事件：鉴权/新窗口/右键/下载 | Windows | `HOOKS_REGISTERED` 去重闸门；后台线程轮询 with_webview |

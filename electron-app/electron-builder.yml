@@ -37,6 +37,14 @@ files:
 
 asar: true
 
+# 出包钩子：app 目录铺好（extraResources 已拷完）、zip / portable / NSIS 归档**之前**执行。
+# 按 `out/config.json` 的运行期判据（src/main/navigate.ts::needsSidecar）决定是否保留
+# `resources/sidecar/w2a-proxy.exe` —— proxy_enabled=false 且 app_url 是字符串时运行期
+# 恒不 spawn，包内不该留一个永不执行、会触发「要联网」提示的二进制。
+# ⚠️ 写成 electron-builder 钩子（三个出包入口共享本文件）而不是各入口加一步：避免 2026-11-14
+#    `prune` 那种「三处漏两处」的漏配。钩子路径相对 process.cwd()（三个入口都在 electron-app/ 下跑）。
+afterPack: ./scripts/after-pack.cjs
+
 win:
   icon: build/icon.ico
   target:

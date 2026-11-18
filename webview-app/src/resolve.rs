@@ -1,7 +1,7 @@
 //! 动态解析真实 URL 的【DNS 查询层】。
 //!
 //! 加解密 / 签名验签 / 密钥对生成等纯 Rust 逻辑已下沉到 `resolve-core` crate；
-//! 本模块只保留依赖 hickory-resolver 的 DNS TXT 查询与域名遍历逻辑，
+//! 本模块只保留依赖 hickory-resolver 的 DNS TXT 查询与「多域名并发竞速」逻辑，
 //! 并 re-export `resolve-core` 的 API 供 lib.rs / resolve-tool 使用。
 //!
 //! ⚠️⚠️ 本模块**刻意不依赖 Tauri**，且对外接口一律是 `async`。
@@ -13,6 +13,9 @@
 //!   · sidecar（纯 tokio）: 自己建 runtime 驱动。
 //! 往本文件里加 `use tauri::...` 会立刻编译不过 —— 这是有意的护栏。
 
+use std::future::Future;
+
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::Name;
 use hickory_resolver::system_conf::read_system_conf;
@@ -127,10 +130,29 @@ fn decrypt_first_valid_txt(
     Err("所有 TXT 记录均无法解出有效 URL".to_string())
 }
 
-/// 依次尝试一组域名：查询 TXT → 解密 + 验签 → 得到真实 URL。
+/// 并发竞速一组「解析单个域名」的 future：**第一个成功**的立即返回，其余 future 随函数返回被
+/// 丢弃（底层查询随之中止，不会在后台空转）。
 ///
-/// 对每个域名：读取其【全部】 TXT 记录，逐条尝试解密 + 验签，任一成功即返回；
-/// 该域名所有 TXT 都失败则尝试下一个域名；全部失败返回 `RESOLVE_FAILED`。
+/// 纯调度逻辑（不碰 DNS），便于用假 future 单测。
+async fn race_first_ok<Fut>(futures: impl IntoIterator<Item = Fut>) -> Option<String>
+where
+    Fut: Future<Output = Result<String, ()>>,
+{
+    let mut pending: FuturesUnordered<Fut> = futures.into_iter().collect();
+    while let Some(result) = pending.next().await {
+        if let Ok(url) = result {
+            return Some(url);
+        }
+    }
+    None
+}
+
+/// 并发解析一组域名：**所有域名同时**发起 TXT 查询，哪一条先「查询成功 + 解密验签成功」就用哪条，
+/// **不等待其余域名**；全部失败才返回 `RESOLVE_FAILED`。
+///
+/// 对每个域名：读取其【全部】 TXT 记录，逐条尝试解密 + 验签，任一成功即算该域名成功。
+/// 相比串行 failover，最坏耗时从「各域名超时之和」降到「最慢的一条」；正常网络下总耗时约等于
+/// 最快的那条 DNS 查询（3 个域名并发，不叠加）。
 ///
 /// 调用方负责驱动这个 future（见文件头注释）。
 pub async fn resolve_url_from_domains(
@@ -139,34 +161,57 @@ pub async fn resolve_url_from_domains(
 ) -> Result<String, String> {
     let public_key = parse_public_key(public_key_pem)?;
 
-    // Resolver 只构建一次，多个域名复用（原实现每域重建，浪费系统配置读取与 reactor 初始化）。
+    // Resolver 只构建一次；Clone 内部共享连接池 / 缓存，不会重复读系统 DNS 配置。
     let resolver = build_resolver()?;
 
-    for domain in domains {
-        let domain = domain.trim();
-        if domain.is_empty() {
-            continue;
-        }
-        let txts = match query_txt_all(&resolver, domain).await {
-            Ok(t) => t,
-            Err(e) => {
-                // 单个域名查询失败：记录**具体原因**后尝试下一个域名。
-                // ⚠️ 必须带上 `{e}`：这里曾写成 `Err(_)`，把「查询失败 / 无 TXT 记录」的唯一线索
-                //    吞掉，用户只能看到「服务器连接失败」而无法判断是 DNS 配置、查询超时还是真的没记录
-                //    （与 `startup_visibility_contract` 对主 crate 的要求同一条纪律）。
-                //    `dlog!` 走 stderr，不会污染 sidecar 的 stdout 单行 JSON 协议。
-                dlog!("[resolve] 域名 {domain} 解析失败：{e}，尝试下一个");
-                continue;
+    let domains: Vec<&str> = domains
+        .iter()
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+        .collect();
+    if domains.is_empty() {
+        return Err(RESOLVE_FAILED.to_string());
+    }
+
+    let tasks: Vec<_> = domains
+        .iter()
+        .map(|domain| {
+            let resolver = resolver.clone();
+            let public_key = &public_key;
+            async move {
+                let txts = match query_txt_all(&resolver, domain).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // 单域名失败：记录**具体原因**后让出，其余域名继续竞速。
+                        // ⚠️ 必须带 `{e}`：这里曾写成 `Err(_)`，把「查询失败 / 无 TXT 记录」的唯一线索
+                        //    吞掉，用户只能看到「服务器连接失败」而无法判断是 DNS 配置、查询超时还是真的没记录
+                        //    （与 `startup_visibility_contract` 对主 crate 的要求同一条纪律）。
+                        //    `dlog!` 走 stderr，不会污染 sidecar 的 stdout 单行 JSON 协议。
+                        dlog!("[resolve] 域名 {domain} 解析失败：{e}");
+                        return Err(());
+                    }
+                };
+                match decrypt_first_valid_txt(public_key, &txts) {
+                    Ok(url) => {
+                        dlog!("[resolve] 域名 {domain} 解析成功（并发竞速胜出）");
+                        Ok(url)
+                    }
+                    Err(_) => {
+                        dlog!("[resolve] 域名 {domain} 的所有 TXT 均无法解出有效 URL");
+                        Err(())
+                    }
+                }
             }
-        };
-        match decrypt_first_valid_txt(&public_key, &txts) {
-            Ok(url) => return Ok(url),
-            Err(_) => {
-                dlog!("[resolve] 域名 {domain} 的所有 TXT 均无法解出有效 URL，尝试下一个");
-            }
+        })
+        .collect();
+
+    match race_first_ok(tasks).await {
+        Some(url) => Ok(url),
+        None => {
+            dlog!("[resolve] 全部 {} 个域名均解析失败", domains.len());
+            Err(RESOLVE_FAILED.to_string())
         }
     }
-    Err(RESOLVE_FAILED.to_string())
 }
 
 #[cfg(test)]
@@ -210,7 +255,7 @@ mod tests {
     #[ignore = "需要联网查询真实 DNS TXT 记录"]
     async fn e2e_real_dns_failover_to_next() {
         // txttest3 是旧 RSA 密文（新方案解不开），txttest1 是新密文。
-        // 应自动跳过 txttest3 失败，命中 txttest1 成功。
+        // 并发竞速：txttest3 失败不应拖住 txttest1，成功那条先到即返回。
         let domains = vec![
             "txttest3.lcjm.cloudns.biz".to_string(), // 旧密文，解密失败
             "txttest1.lcjm.cc".to_string(),          // 新密文，成功
@@ -222,6 +267,49 @@ mod tests {
     }
 
     // ---- 纯逻辑单测（不依赖 DNS）----
+
+    /// 竞速任务类型：不同 async 块要放进同一个集合，统一装箱成同一种 future。
+    type BoxedTask =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, ()>> + Send + 'static>>;
+
+    /// 并发竞速：已就绪的成功立刻胜出，**不等待**更慢的成功（这是本次优化的核心语义）。
+    #[tokio::test]
+    async fn race_first_ok_returns_fastest_success() {
+        let tasks: Vec<BoxedTask> = vec![
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok("slow".to_string())
+            }),
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Err(())
+            }),
+            Box::pin(async { Ok("fast".to_string()) }),
+        ];
+        assert_eq!(race_first_ok(tasks).await.as_deref(), Some("fast"));
+    }
+
+    /// 先失败的域名不影响后面的成功：错误被跳过，成功照常返回。
+    #[tokio::test]
+    async fn race_first_ok_skips_failures() {
+        let tasks: Vec<BoxedTask> = vec![
+            Box::pin(async { Err(()) }),
+            Box::pin(async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Ok("ok".to_string())
+            }),
+        ];
+        assert_eq!(race_first_ok(tasks).await.as_deref(), Some("ok"));
+    }
+
+    /// 全部失败 / 空输入都返回 None（调用方据此给出 `RESOLVE_FAILED`）。
+    #[tokio::test]
+    async fn race_first_ok_all_fail_or_empty_returns_none() {
+        let tasks: Vec<BoxedTask> = vec![Box::pin(async { Err(()) }), Box::pin(async { Err(()) })];
+        assert_eq!(race_first_ok(tasks).await, None);
+        let empty: Vec<BoxedTask> = Vec::new();
+        assert_eq!(race_first_ok(empty).await, None);
+    }
 
     /// 同一 URL 多份密文：第 1 条是垃圾、第 2 条有效、第 3 条是别的公钥签的，
     /// `decrypt_first_valid_txt` 应跳过无效项、命中第 2 条有效密文。

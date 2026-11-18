@@ -20,7 +20,7 @@
 | └ `d3dcompiler_47.dll` | 4.52 MB | 1% | ⚠️ ANGLE D3D11 依赖，删前须实测 |
 | └ `ffmpeg.dll` / `chrome_200_percent.pak` | 2.97 / 1.21 MB | 1% | 前者不可裁；后者可裁 |
 | 自有载荷 `app.asar` | **0.20 MB** | ≈0 | 已无可压 |
-| 自有载荷 `resources/sidecar/w2a-proxy.exe` | 3.58 MB | 1% | 已 `lto+strip`（见 §5.3） |
+| 自有载荷 `resources/sidecar/w2a-proxy.exe` | 3.58 MB | 1% | 已 `lto+strip`（见 §5.3）；**按配置条件随包** —— `proxy_enabled=false` 且字符串 `app_url` 时 `afterPack` 会从产物里删掉（见 `docs/changes/2026-11-18.md`） |
 
 **结论：本项目的应用代码只有 0.20MB，体积 99% 是 Chromium 运行时。** 因此：
 - 对 `app.asar` 做任何压缩/minify/摇树，收益是「0.2MB 的百分之几」= 噪声；

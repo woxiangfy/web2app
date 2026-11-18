@@ -126,6 +126,15 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    为假（不在等待落盘）时早退；**新文档 1.2s 确认探针必须在触发时重新判 `stagedHere`**，否则
    用户在本页刚提交、表单还没消失时会被探针按 `still-login` 丢掉暂存（同日两个真 bug，探针 18i/18j）；
    **不得在 Tauri 侧也注入这段**（WebView2 已原生弹一次，会双弹窗）。
+19. **包内 sidecar 的存在性由配置决定，不是「永远随包」**：`electron-builder.yml` 的 `afterPack`
+    （`scripts/after-pack.cjs`）读 `out/config.json` 调 `src/main/sidecar-ship.ts`，内部复用运行期
+    `navigate.ts::needsSidecar` —— `proxy_enabled=false` 且 `app_url` 是**字符串**时删掉
+    `resources/sidecar/w2a-proxy.exe`（该进程在这种配置下一次都不会被 spawn；留着只是多一个永不执行、
+    被杀软/防火墙首次扫到就可能提示「这个程序要联网」的 console 子系统 exe）；**`app_url` 是域名数组时
+    无论 `proxy_enabled` 如何都必须保留**（DNS TXT + Ed25519 验签 + AES-GCM 解密只有 Rust 侧实现）。
+    判据**只能有一份**：钩子与 asar 护栏都 `require('out/main/sidecar-ship.js')`，不得在三个出包入口
+    各写一份规则（2026-11-14 `prune` 三漏二的教训）；`check-asar-config.cjs` 做**双向**断言
+    （该有却没有 / 不该有却还在都红灯）。
 
 ## 刻意不动（已定，勿再提拆分）
 
@@ -149,7 +158,7 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 | sidecar 参数拼装 / 可执行文件定位（`sidecar.ts`） | `unit` + `probe` |
 | 导航状态机（`navigation.ts`：target 缓存 / 自动 bootstrap 名额 / 重试重置） | `unit` + `probe` |
 | 启动日志（`startup-log.ts`）、`debug` 开关与 `silenceConsole()` | `smoke` |
-| 打包配置 / 出包前后 | `probe` + `真机双击产物` + 核对包内无 `out/main/probe*`（`prune` 与 asar 反向断言） |
+| 打包配置 / 出包前后 | `probe` + `真机双击产物` + 核对包内无 `out/main/probe*`（`prune` 与 asar 反向断言）+ 核对 `resources/sidecar/w2a-proxy.exe` 与 `needsSidecar` 一致（`afterPack` + asar **双向**断言） |
 | 任何提交前 | `typecheck` |
 
 > 逐条原因见各专项文档。产物侧的 `--probe` 必须用 `Start-Process -Wait -PassThru` 取 `$p.ExitCode`
@@ -161,10 +170,9 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 
 | 日期 | 摘要 |
 |---|---|
+| 2026-11-18 | **包内 sidecar 按配置裁剪**：`proxy_enabled=false` + 字符串 `app_url` 时运行期 `needsSidecar` 恒假，`w2a-proxy.exe` 一次都不会被 spawn，但 `extraResources` 仍把它拷进 `resources/sidecar/`（3.58MB + 一个永不执行、被杀软/防火墙首次扫到就可能提示「这个程序要联网」的 console 子系统 exe）。新增 `src/main/sidecar-ship.ts`（判定复用 `needsSidecar`，落盘四态 kept / removed / absent / 需要却缺失即抛错）+ `scripts/after-pack.cjs`（electron-builder 钩子，yml 单点接线 ⇒ 三个出包入口共享）+ `check-asar-config.cjs` **双向**护栏；`test/sidecar-ship.test.ts` 9 条。⚠️ 域名数组模式无论 `proxy_enabled` 如何都必须保留（DNS TXT + Ed25519 验签 + AES-GCM 解密只有 Rust 侧实现）。unit **224/224**、typecheck / build ✅；钩子实跑：字符串配置 ⇒ `removed`、域名数组 ⇒ `kept` |
 | 2026-11-15 | **Electron 44.4.1 → 45.3.2**：45 唯一的硬破坏面（sandbox preload 移除 `events/timers/url` shim 与 `Buffer/setImmediate/clearImmediate` 全局）本壳不受影响 —— preload 只 `require('electron')`；`setShape` / `WebContentsView` / `setWindowOpenHandler` 在 45 typings 中均在（unit 188/188、probe 156/158 既有 F12 项、tabs 58/58、smoke ✅、asar 护栏 52 项通过） |
 | 2026-11-15 | 多页签下载页签自动关闭：`window.open` 附件（未提交文档）在落盘/取消后自动关页签并回到打开者，已加载页签不关；`DownloadHooks`（`onSaveChoice` / `pickSavePath`）+ 页签探针 P14 两条成对断言。**另修「一次点击两次下载 / 两个另存为」（unit 188/188、tabs 59/59）**：根因是站点用 `if (!w || w.closed)` 判断「弹窗被拦截」—— `deny` 让 `window.open()` 拿到 null，而「建了立刻销毁」让 `w.closed` 变 true，两条都会触发 `location.href` 兜底。改 `allow` + `overrideBrowserWindowOptions{show:false,skipTaskbar:true}` 建隐藏窗口，并让它**活到这次下载结算**（`registerHiddenPopup` / `attachHiddenPopupToTab`：绑到承载它的新页签，页签关闭才销毁；`onDownloadStart` 取消兜底超时），新页签承接导航与下载；隐藏弹窗自己抢跑的那条下载由 `isHiddenPopup` 丢弃，URL 判重（`shouldDropPopupFallback`）降为纵深防御。P15 断言 `window.open()` 非 null、兜底未执行、**下载中 `w.closed === false`**、附件完整落盘。**同日发现 `--debug` 不可用**：Electron 44→45 升 Node 后该参数被 Node 直接拒绝（`DEP0062`），进程秒退、日志一行不写 ⇒ 诊断开关改名 **`--w2a-debug`**（环境变量 `WEB2APP_DEBUG=1` 不变） |
-| 2026-10-24 | 架构审查优化批次①–⑤：`updateDocument` 读-改-写统一入口 / index.ts 装配化 / `probe-single` 19 段函数化 / 设置页命令名三方守卫 / `util.ts` + `protocols.ts` 依赖收口 + 悬浮球 `planDrop` / `planPeekCollapse` 纯函数化（unit 115/115、probe 149/150 预存环境项、tabs 47/47） |
-| 2026-10-11 | v1.75 修「只启用悬浮球时关窗 → 点球不回窗口」：驻留判据纳入 `float_enabled` + 入口统一 `requestQuit` + 设置页新增「退出程序」 |
 
 ## 专项文档
 

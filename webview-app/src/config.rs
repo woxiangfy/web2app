@@ -323,11 +323,11 @@ fn candidate_data_dir(configured: &str, program_dir: Option<&std::path::Path>) -
 //      不会自动发送。程序会把账号密码解析出来，通过本地反向代理给所有 HTTP/WebSocket 请求统一
 //      注入 `Authorization: Basic ...` 头，再转发到真实服务器。
 //   ② 域名数组（JSON 数组文本，如 `["a.com","b.com"]`）：
-//      运行时依次对这些域名做 DNS TXT 查询，用 PUBLIC_KEY 验签 + AES-GCM 解密 TXT 值得到真实 URL。
+//      运行时并发对这些域名做 DNS TXT 查询（第一个成功即用），用 PUBLIC_KEY 验签 + AES-GCM 解密 TXT 值得到真实 URL。
 pub(crate) const APP_URL: &str = env_str!("APP_URL", "https://用户名:密码@www.example.com");
 
 // Ed25519 公钥（PEM/SPKI 或裸 base64，32 字节原始公钥）。当 APP_URL 是【域名数组】时
-// （如 `["a.com","b.com"]`），运行时依次对这些域名做 DNS TXT 查询，用本公钥验签 +
+// （如 `["a.com","b.com"]`），运行时并发对这些域名做 DNS TXT 查询（第一个成功即用），用本公钥验签 +
 // AES-GCM 解密 TXT 值得到真实 URL。普通字符串 URL 模式下忽略本字段。
 pub(crate) const PUBLIC_KEY: &str = env_str!("PUBLIC_KEY", "");
 

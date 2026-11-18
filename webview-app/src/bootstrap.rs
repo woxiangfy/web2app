@@ -274,10 +274,11 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
 /// 启动期「解析目标地址」阶段的**总预算**（秒）。
 ///
 /// 背景（2026-10-09 真机取证）：启动页的兜底卡是 40s（`loading.js` 的 `FAIL_MS`）。域名数组
-/// 配置下解析是**串行**遍历域名的，每个域名的 hickory 默认 `attempts=2 × timeout=5s ×
-/// 每个 nameserver` ⇒ 3 个域名最坏可到 30s+；一旦某个 nameserver 不可达，启动就会长时间停在
+/// 配置下解析是**并发竞速**的（所有域名同时查，第一个「查询 + 解密验签」成功即返回，不等待其余），
+/// 最坏耗时不再随域名个数线性叠加；但单个域名的 hickory 默认 `attempts=2 × timeout=5s ×
+/// 每个 nameserver`，某个 nameserver 不可达时单条仍可能拖到 10s+，启动会长时间停在
 /// "卡住"状态（既无进度也无报错）。取值需**明显小于** 40s（给渲染与推送留时间），同时给弱网
-/// 留足余量：整个解析阶段（含多域名 failover）超过它即判定失败，把「静默卡住」变成明确报错。
+/// 留足余量：整个解析阶段（含单域名内的重试）超过它即判定失败，把「静默卡住」变成明确报错。
 const RESOLVE_BUDGET_SECS: u64 = 25;
 
 /// 从启动期后台线程往加载层推一行进度。
@@ -300,8 +301,8 @@ fn prepare_navigation(
     label: &str,
     use_local_proxy: bool,
 ) -> Result<Navigation, String> {
-    // 若 APP_URL 是【域名数组】，则依次对这些域名做 DNS TXT 查询 + Ed25519 验签
-    // + AES-GCM 解密得到真实 URL；全部失败时返回可展示的错误文案。
+    // 若 APP_URL 是【域名数组】，则并发对这些域名做 DNS TXT 查询 + Ed25519 验签
+    // + AES-GCM 解密得到真实 URL（第一个成功即用，不等待其余；全部失败时返回可展示的错误文案）。
     // ⚠️ `resolve_url_from_domains` 是 async（该模块刻意不依赖 Tauri，见 resolve.rs 头注释），
     // 由这里用 Tauri 的异步运行时阻塞驱动 —— 本函数跑在后台线程，不在 async 上下文内。
     let resolved_url: String = if let Some(domains) = crate::resolve::parse_domains(APP_URL) {
@@ -314,9 +315,8 @@ fn prepare_navigation(
             label,
             &format!("正在解析目标地址（{} 个域名）…", domains.len()),
         );
-        // ⚠️⚠️ 必须设**总预算**：解析是**串行**遍历域名的，每个域名 hickory 默认
-        // `attempts=2 × timeout=5s × 每个 nameserver`，3 个域名最坏可达 30s+ ——
-        // 一旦某个 nameserver 不可达，启动就会长时间"卡住"（既无进度也无报错），
+        // ⚠️⚠️ 必须设**总预算**：解析是**并发竞速**的（不再随域名个数叠加），但单条 hickory 查询
+        // 默认 `attempts=2 × timeout=5s × 每个 nameserver`，某个 nameserver 不可达时仍可能拖到 10s+；
         // 用户只看到启动页那张 40s 兜底卡。超时即给出可看懂的失败，而不是一直挂着。
         tauri::async_runtime::block_on(async {
             match tokio::time::timeout(

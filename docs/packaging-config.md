@@ -110,9 +110,7 @@ URL 里的 `user:pass@`（userinfo）由**本地代理**转换成 `Authorization
 }
 ```
 
-运行时**按序**对每个域名做 DNS TXT 查询，TXT 值是一段 base64 密文，用 `public_key` 验签 +
-AES-GCM 解密得到真实 URL。任一域名解析 / 解密 / 验签失败自动尝试下一个，全部失败则报
-"服务器连接失败"。
+运行时**并发**对每个域名做 DNS TXT 查询（3 个域名同时发起，**第一个「查询成功 + 解密验签成功」的立即使用，不等待其余**；其余查询随之中止）。TXT 值是一段 base64 密文，用 `public_key` 验签 + AES-GCM 解密得到真实 URL。某个域名解析 / 解密 / 验签失败不影响其他域名；全部失败才报 "服务器连接失败"。
 
 > ⚠️⚠️ **记录名（域名）里的下划线只能当 label 的「首字符」**，`txt_w2a_abc.example.com` 这种
 > 「下划线夹在中间」的名字在 2026-11-14 之前会**一条都查不出去**（hickory 走 IDNA/STD3 校验，
@@ -578,6 +576,13 @@ python3 .github/scripts/check-workflows.py                                # work
 > ⚠️ **护栏**：`electron-build-custom.yml` 出包后跑 `scripts/check-asar-config.cjs`，
 > 断言 `out/config.json` **确实在 `app.asar` 内**。这条防的是**静默失败**——配置没进包时
 > electron-builder 照样出包、双击照样打开，只是静默退回内置默认地址，构建日志全绿。
+>
+> **sidecar 是否随包也由同一份配置决定**：`electron-builder.yml` 的 `afterPack`
+> （`scripts/after-pack.cjs`）按运行期同一判据 `navigate.ts::needsSidecar` 决定保留 / 删除
+> `resources/sidecar/w2a-proxy.exe` —— `proxy_enabled=false` 且 `app_url` 是**字符串**时删掉
+> （该进程在这种配置下一次都不会被启动）；**`app_url` 是域名数组时必须保留**（DNS TXT +
+> Ed25519 验签 + AES-GCM 解密只有 Rust 侧实现）。出包后 `check-asar-config.cjs` 做**双向**断言：
+> 该有却没有、不该有却还在都红灯。
 
 ---
 

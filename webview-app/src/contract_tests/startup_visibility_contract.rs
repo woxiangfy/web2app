@@ -67,7 +67,21 @@ fn resolve_failure_keeps_reason() {
     );
     assert!(
         BOOTSTRAP_RS.contains("RESOLVE_BUDGET_SECS"),
-        "解析阶段必须设总预算：域名是串行查的，最坏可超过启动页 40s 的兜底卡"
+        "解析阶段必须设总预算：单个域名的 hickory 重试仍可能超过启动页 40s 的兜底卡"
+    );
+}
+
+/// 域名数组解析必须**并发竞速**：第一个「查询 + 验签解密」成功即用，不得退回逐个 `await` 的串行实现。
+#[test]
+fn resolve_domains_are_raced_not_serial() {
+    let resolve_rs = include_str!("../resolve.rs");
+    assert!(
+        resolve_rs.contains("FuturesUnordered"),
+        "域名解析必须并发（FuturesUnordered）：串行 failover 会让总耗时随域名个数线性叠加"
+    );
+    assert!(
+        resolve_rs.contains("race_first_ok"),
+        "必须用「第一个成功即返回」的竞速调度（race_first_ok），不能等所有域名都结束"
     );
 }
 
