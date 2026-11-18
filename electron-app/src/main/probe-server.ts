@@ -156,8 +156,115 @@ const FIXTURES: Record<string, Fixture> = {
       'form{display:flex;flex-direction:column;gap:8px;width:240px;padding:24px}'
     ),
   },
+  /**
+   * 登录成功夹具：真实提交后 80ms 跳到 `/login-ok.html`（无密码框）⇒ 暂存凭据应落盘。
+   */
+  '/login-success.html': {
+    body: PAGE(
+      '',
+      `<form id="form" method="post" action="/login-ok.html">
+         <input id="u" name="username" type="text" autocomplete="username">
+         <input id="p" name="password" type="password" autocomplete="current-password">
+         <button id="go" type="submit">登录</button>
+       </form>
+       <script>
+         document.getElementById('form').addEventListener('submit', function (e) {
+           e.preventDefault();
+           setTimeout(function () { location.href = '/login-ok.html'; }, 80);
+         });
+       </script>`,
+      'form{display:flex;flex-direction:column;gap:8px;width:240px;padding:24px}'
+    ),
+  },
+
   '/login-ok.html': {
     body: PAGE('', '<div id="content"><h1>login ok</h1></div>', ''),
+  },
+
+  /**
+   * 登录表单「后插入」夹具：首屏只有空容器，800ms 后才挂表单（模拟 SPA 水合 / 路由渲染）。
+   * 探针用它验证「不点击输入框、URL 不变」也能自动填充。
+   */
+  '/login-late.html': {
+    body: PAGE(
+      '',
+      `<div id="mount"></div>
+       <script>
+         setTimeout(function () {
+           document.getElementById('mount').innerHTML =
+             '<form id="form"><input id="u" name="username" type="text">' +
+             '<input id="p" name="password" type="password"></form>';
+         }, 800);
+       </script>`,
+      ''
+    ),
+  },
+
+  /**
+   * 用户名已被站点预填为**同一个**账号：应只补密码，不因用户名非空而整表单跳过。
+   */
+  '/login-prefilled.html': {
+    body: PAGE(
+      '',
+      `<form id="form">
+         <input id="u" name="username" type="text" value="probeuser">
+         <input id="p" name="password" type="password">
+       </form>`,
+      ''
+    ),
+  },
+
+  /**
+   * 用户名被预填为**另一个**账号：绝不能把保存的密码灌进去（否则登错账号）。
+   */
+  '/login-other-user.html': {
+    body: PAGE(
+      '',
+      `<form id="form">
+         <input id="u" name="username" type="text" value="someoneelse">
+         <input id="p" name="password" type="password">
+       </form>`,
+      ''
+    ),
+  },
+
+  /**
+   * 登录表单被整块重新渲染（同一 URL，旧 input 断开、新 input 出现）：应允许再填一次。
+   */
+  '/login-rerender.html': {
+    body: PAGE(
+      '',
+      `<div id="mount"><form id="form">
+         <input id="u" name="username" type="text">
+         <input id="p" name="password" type="password">
+       </form></div>
+       <script>
+         setTimeout(function () {
+           document.getElementById('mount').innerHTML =
+             '<form id="form" data-round="2"><input id="u" name="username" type="text">' +
+             '<input id="p" name="password" type="password"></form>';
+         }, 1500);
+       </script>`,
+      ''
+    ),
+  },
+
+  /**
+   * 登录表单「先隐藏后显示」夹具：表单在首屏 DOM 里但 `display:none`，800ms 后改 style。
+   * 这类站点只有 attributes 变动（没有 childList），用来验证观察器覆盖可见性切换。
+   */
+  '/login-hidden.html': {
+    body: PAGE(
+      '',
+      `<form id="form" style="display:none">
+         <input id="u" name="username" type="text">
+         <input id="p" name="password" type="password">
+       </form>
+       <script>
+         setTimeout(function () { document.getElementById('form').style.display = 'block'; }, 800);
+       </script>`,
+      ''
+    ),
   },
 
   /**

@@ -103,8 +103,23 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    共享模块，由 `test/password-contract.test.ts` 直接比对两段源码；运行期 `probe` 第 18 节 / `P13` 各自
    覆盖单窗口与页签）；只认 `isTrusted` + `navigator.userActivation.isActive` 的 submit，**不得**
    `preventDefault`（DOM 气泡活不过导航，阻止提交会改站点行为）；不向页面主世界暴露任何桥；
-   存储只放 `credentials.json` 的 `safeStorage` 密文，加密不可用时拒绝保存；`clearWebData` 必须一并
-   清理；**不得在 Tauri 侧也注入这段**（WebView2 已原生弹一次，会双弹窗）。
+   存储只放 `credentials.json` 的 `safeStorage` 密文，加密不可用时拒绝保存，且**只用异步 API**
+   （`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`；同步版在 Electron 45
+   已废弃）；`clearWebData` 必须一并清理；**提交只调 `w2a:pwd-stage` 放进主进程内存（60s TTL、
+   绝不写盘），确认登录成功才 `w2a:pwd-commit` 落盘 —— 信号 = 新文档 `complete` 后无可见密码框 /
+   本页登录表单消失；仍有可见密码框（失败重载 / 多步登录）必须丢弃且不覆盖旧密码**；提交后气泡是
+   「登录成功后自动保存账号密码」；自动填充成功后右上角提示「密码已自动填充」（纯提示、无按钮），
+   保存成功气泡的按钮是**「删除」**（语义 = 直接删掉该站点凭据，不用「撤销」）；**自动填充的触发时机 = 首屏 / DOM 变动（MutationObserver，防抖）/ URL 变化（在主世界打
+   极小的 history 钩子，覆盖 pushState / replaceState —— 它们与 Navigation API 的 `navigate` 都不
+   派发事件；另有 popstate / hashchange / pageshow）/ focusin** —— 全程事件驱动，**禁止常驻轮询
+   定时器**（500ms 轮询曾短暂上线，因无谓唤醒被撤掉）；观察器**必须观察 `document` 而不是
+   `document.documentElement`**（preload 阶段后者可能为 null，`observe(null)` 抛错会让整个观察器
+   失效，只剩 focusin —— 2026-11-18 真机复现），且必须覆盖 `class` / `style` / `hidden` 属性
+   （显隐切换不产生 childList）；允许每文档 4 个一次性补试定时器（≤3s），**禁止增加常驻轮询**；
+   **用户名被站点预填同一账号 ⇒ 只补密码；预填另一个账号 ⇒ 绝不灌密码**（防止登错账号）；
+   **填过的密码框被整块替换（`!isConnected`）⇒ 允许对新表单再填一次，同元素被清空则不重填**；页面上出现空密码框就填，
+   **不得要求用户先点输入框**（URL 变化还要重置 `fillTried` 与查询缓存，否则 SPA 退出登录后不重填）；
+   **不得在 Tauri 侧也注入这段**（WebView2 已原生弹一次，会双弹窗）。
 
 ## 刻意不动（已定，勿再提拆分）
 

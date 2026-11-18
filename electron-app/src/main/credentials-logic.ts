@@ -120,7 +120,7 @@ export function findCredential(doc: CredentialsDoc, origin: string): CredentialE
   return hit
 }
 
-/** 删除该 origin 的全部记录（气泡上的「撤销」与清除浏览数据共用）。 */
+/** 删除该 origin 的全部记录（气泡上的「删除」与清除浏览数据共用）。 */
 export function removeCredentials(doc: CredentialsDoc, origin: string): CredentialsDoc {
   return { version: 1, entries: doc.entries.filter((e) => e.origin !== origin) }
 }

@@ -706,7 +706,7 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
     }
   }
   const pwc = tabs.active!.view.webContents
-  await pwc.loadURL(`${base}/login.html`)
+  await pwc.loadURL(`${base}/login-success.html`)
   await sleep(450)
   // ⚠️ 不在这里用 sendInputEvent 模拟键鼠：探针窗口是隐藏的，子 `WebContentsView` 收不到
   //    面向 DOM 的键盘 / 鼠标输入（Ctrl+W 能过是因为它在主进程 before-input-event 处理）。
@@ -720,15 +720,17 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
        document.getElementById('form').requestSubmit(); return true; })()`,
     true
   )
-  const tabSubmitted = await waitUntil(async () => {
-    return (await pwc.executeJavaScript(`document.body.dataset.submitted === '1'`, true)) === true
-  }, 3000)
-  p.check('P13 前提：页签内触发了表单提交', tabSubmitted, '3s 内未观测到 submit')
+  const tabNavigated = await waitUntil(async () => {
+    const href = (await pwc.executeJavaScript('location.href', true)) as string
+    return href.includes('/login-ok.html')
+  }, 4000)
+  p.check('P13 前提：页签内提交后跳到成功页', tabNavigated, '4s 内未跳转')
+  // 暂存 → 成功页确认（complete + 1.2s 检测）后才落盘。
   const pwdSaved = await waitUntil(
     async () => readPwd().length === 1 && readPwd()[0].username === 'probeuser',
-    3000
+    6000
   )
-  p.check('P13 页签模式：可信提交后保存 1 条凭据', pwdSaved, JSON.stringify(readPwd()))
+  p.check('P13 页签模式：确认登录成功后才保存 1 条凭据', pwdSaved, JSON.stringify(readPwd()))
   p.check(
     'P13 页签模式：凭据 origin = 夹具站点',
     readPwd()[0]?.origin === normalizeOrigin(base),
@@ -744,6 +746,42 @@ export async function runTabsProbe(ctx: TabsProbeContext): Promise<boolean> {
     return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
   }, 4000)
   p.check('P13 页签模式：重新打开页面自动填充', pwdFilled, '4s 内未填充')
+  const pwdBubble = await waitUntil(async () => {
+    const t = (await pwc.executeJavaScript(
+      `(() => { const el = document.getElementById('__web2app_pwd_bubble__');
+         return el ? el.textContent : ''; })()`,
+      true
+    )) as string
+    return t.includes('密码已自动填充')
+  }, 3000)
+  p.check('P13 页签模式：自动填充后提示「密码已自动填充」', pwdBubble, '3s 内未见提示气泡')
+  // URL 变化即时填充（pushState 不派发事件）：清空后换路由，3s 内应自动重填。
+  await pwc.executeJavaScript(
+    `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+       u.value = ''; pw.value = '';
+       history.pushState({}, '', '/login.html?after-logout=1'); return true; })()`,
+    false
+  )
+  const pwdRefilled = await waitUntil(async () => {
+    const v = (await pwc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return JSON.stringify({ u: u.value, p: pw.value }); })()`,
+      true
+    )) as string
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 3000)
+  p.check('P13 页签模式：URL 变化后直接自动填充', pwdRefilled, '3s 内未重填')
+  // 表单后插入（不点击、URL 不变）—— 锁住 tab-preload 的 DOM 观察器同样有效。
+  await pwc.loadURL(`${base}/login-late.html`)
+  const pwdLate = await waitUntil(async () => {
+    const v = (await pwc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return (u && pw) ? JSON.stringify({ u: u.value, p: pw.value }) : ''; })()`,
+      true
+    )) as string
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 4000)
+  p.check('P13 页签模式：表单后插入不点击也自动填充', pwdLate, '4s 内未填充')
   rmSync(pwdFile, { force: true })
 
   // ---------- 汇总 ----------

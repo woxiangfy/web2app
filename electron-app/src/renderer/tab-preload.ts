@@ -17,7 +17,7 @@
  * ⚠️ 硬约束（electron-app/AGENTS.md #17）：**不得相对 require**。本文件只 `import 'electron'`。
  *    Electron 45 起 sandbox preload 的 `require` 只放行 `electron`。
  */
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
 
 // ⚠️ 子框架：preload 默认不作用于子框架（需 nodeIntegrationInSubFrames=true），这里只做纵深防御，
 //    与 `preload.ts` 顶部注释第 2 条同一道闸 —— 一旦将来打开该开关，跨源 iframe 也拿不到配置。
@@ -41,14 +41,20 @@ if (window.self === window.top) {
 /**
  * 网页登录账号密码：提交时保存、进页面自动填充（Electron 自研）。
  *
+ * 填充触发时机：首屏（DOMContentLoaded / load）、**URL 变化**（主世界 history 钩子覆盖
+ * pushState / replaceState，另有 popstate / hashchange / pageshow）、**DOM 变动**
+ * （MutationObserver 防抖）与 focusin。只要当前页面出现空着的密码框就填，不需要用户先点
+ * 输入框；全程事件驱动，**没有常驻轮询定时器**。
+ *
  * 为什么不是原生能力：Electron 只含 Chromium content 层，**没有** Chrome 的密码管理器 /
  * 自动填充 UI（详见 src/main/credentials-logic.ts 文件头）。Tauri 壳走 WebView2 原生气泡。
  *
  * ⚠️ 全部逻辑跑在 preload 的**隔离世界**：只读 DOM + `ipcRenderer.invoke`，不向页面主世界
  *    暴露任何桥 —— 页面脚本无法主动读出已保存的密码。
- * ⚠️ 只在**可信 submit**（`isTrusted`）时保存：程序化 `form.submit()` 不写入，避免站点刷库。
+ * ⚠️ 只在**可信 submit**（`isTrusted`）时**暂存**：程序化 `form.submit()` / 站点脚本刷库都会被挡下。
  *    这里**不阻止提交**：DOM 气泡活不过一次导航，阻止提交再恢复会改站点行为；故采用
- *    「先保存、后提示」——提交瞬间写入，气泡只作结果反馈（可撤销）。
+ *    「提交只暂存（主进程内存 60s，不落盘）→ 确认登录成功（新文档没有可见密码框 / 本页表单消失）
+ *    才真正保存」——输错密码不会覆盖已存的好密码。
  */
 function installPasswordManager(): void {
   const proto = location.protocol
@@ -106,34 +112,91 @@ function installPasswordManager(): void {
   }
 
   let fillTried = false
+  let filling = false
+  let lookupUrl = ''
+  let lookupDone = false
+  let cached: { username: string; password: string } | null = null
+  /** 上一次填充的密码框：被整块替换（SPA 重新渲染登录表单）时允许对新表单再填一次。 */
+  let filledPass: HTMLInputElement | null = null
+
+  /** URL 变了就重置填充状态：SPA 退出登录后同一文档换路由，必须重新自动填。 */
+  function syncUrl(): void {
+    if (location.href === lookupUrl) return
+    lookupUrl = location.href
+    fillTried = false
+    lookupDone = false
+    cached = null
+    filledPass = null
+  }
+
   async function tryFill(): Promise<void> {
-    if (fillTried) return
+    syncUrl()
+    if (fillTried || filling) return
     const f = findLogin()
     if (!f) return
-    // 用户已经输入过（或浏览器自己填了）：不覆盖。
-    if (f.pass.value !== '' || (f.user && f.user.value !== '')) {
+    // 密码框已有内容：用户（或站点）已经处理过，不覆盖；用户名预填不影响补密码。
+    if (f.pass.value !== '') {
       fillTried = true
       return
     }
-    let got: unknown = null
+    filling = true
     try {
-      got = await ipcRenderer.invoke('w2a:pwd-lookup')
-    } catch {
-      return
+      if (!lookupDone) {
+        lookupDone = true
+        try {
+          const got = (await ipcRenderer.invoke('w2a:pwd-lookup')) as
+            | { username?: unknown; password?: unknown }
+            | null
+          cached =
+            got && typeof got.password === 'string' && got.password !== ''
+              ? {
+                  username: typeof got.username === 'string' ? got.username : '',
+                  password: got.password,
+                }
+              : null
+        } catch {
+          // 主进程暂时不可用：别把这个 URL 永久判成「没存过」，留给下次触发重试。
+          lookupDone = false
+          cached = null
+        }
+      }
+      if (!cached) {
+        // 当前站点没存过：本 URL 下不再反复查（URL 变化会重置，登录后再退出仍能重填）。
+        fillTried = true
+        return
+      }
+      // 异步期间 DOM 可能重建 / URL 可能已变：写之前再确认一次。
+      if (location.href !== lookupUrl) return
+      const again = findLogin()
+      if (!again || again.pass.value !== '') return
+      const typedUser = again.user ? again.user.value.trim() : ''
+      // 站点预填了**另一个**账号时不能把保存的密码灌进去，否则会登错账号。
+      if (
+        typedUser !== '' &&
+        cached.username !== '' &&
+        typedUser.toLowerCase() !== cached.username.toLowerCase()
+      ) {
+        fillTried = true
+        return
+      }
+      // 用户名空缺才写；站点已填同一个账号时只补密码。
+      if (again.user && again.user.value === '' && cached.username !== '') {
+        setValue(again.user, cached.username)
+      }
+      setValue(again.pass, cached.password)
+      fillTried = true
+      filledPass = again.pass
+      showBubble('密码已自动填充')
+    } finally {
+      filling = false
     }
-    const cred = got as { username?: unknown; password?: unknown } | null
-    if (!cred || typeof cred.password !== 'string' || cred.password === '') return
-    fillTried = true
-    // 异步期间 DOM 可能重建 / 用户可能已开始输入：写之前再确认一次。
-    const again = findLogin()
-    if (!again || again.pass.value !== '' || (again.user && again.user.value !== '')) return
-    if (again.user && typeof cred.username === 'string' && cred.username !== '') {
-      setValue(again.user, cred.username)
-    }
-    setValue(again.pass, cred.password)
   }
 
-  function showSavedBubble(username: string): void {
+  /**
+   * 右上角状态气泡：保存成功带「删除」按钮（直接删除该站点凭据），自动填充只做提示、无操作。
+   * 按钮文案用「删除」而不是「撤销」—— 语义是删掉已存凭据，不是撤回一次操作。
+   */
+  function showBubble(text: string, action?: { label: string; onClick: () => void }): void {
     if (!document.body) return
     const old = document.getElementById('__web2app_pwd_bubble__')
     if (old) old.remove()
@@ -156,25 +219,65 @@ function installPasswordManager(): void {
     s.color = '#fff'
     s.font = '13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif'
     s.boxShadow = '0 6px 24px rgba(0,0,0,.35)'
-    const text = document.createElement('span')
-    text.textContent = username ? `已保存 ${username} 的账号密码` : '已保存这个网站的账号密码'
-    const undo = document.createElement('button')
-    undo.type = 'button'
-    undo.textContent = '撤销'
-    const b = undo.style
-    b.all = 'unset'
-    b.cursor = 'pointer'
-    b.padding = '2px 8px'
-    b.borderRadius = '6px'
-    b.background = '#3a4149'
-    b.color = '#9ecbff'
-    b.font = 'inherit'
-    undo.addEventListener('click', () => {
-      void ipcRenderer.invoke('w2a:pwd-forget').finally(() => host.remove())
-    })
-    host.append(text, undo)
+    const span = document.createElement('span')
+    span.textContent = text
+    host.append(span)
+    if (action) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.textContent = action.label
+      const b = btn.style
+      b.all = 'unset'
+      b.cursor = 'pointer'
+      b.padding = '2px 8px'
+      b.borderRadius = '6px'
+      b.background = '#3a4149'
+      b.color = '#9ecbff'
+      b.font = 'inherit'
+      btn.addEventListener('click', action.onClick)
+      host.append(btn)
+    }
     document.body.appendChild(host)
-    setTimeout(() => host.remove(), 8000)
+    // 纯提示短一些，带操作的留足点击时间。
+    setTimeout(() => host.remove(), action ? 8000 : 4000)
+  }
+
+  let stagedHere = false
+  let commitProbed = false
+  let committing = false
+
+  /**
+   * 提交后**先暂存、不落盘**：只有确认登录成功（离开登录页 / 登录表单消失）才真正保存，
+   * 避免输错一次密码就覆盖掉已存的好密码。主进程只在内存里暂存，60s 过期、不写盘。
+   */
+  async function maybeCommit(): Promise<void> {
+    if (committing) return
+    committing = true
+    try {
+      const res = (await ipcRenderer.invoke('w2a:pwd-commit', {
+        hasPasswordField: findLogin() !== null,
+      })) as { ok?: unknown; reason?: unknown; username?: unknown } | null
+      if (res && res.ok === true) {
+        stagedHere = false
+        const username = typeof res.username === 'string' ? res.username : ''
+        showBubble(username ? `已保存 ${username} 的账号密码` : '已保存这个网站的账号密码', {
+          label: '删除',
+          onClick: () => {
+            void ipcRenderer.invoke('w2a:pwd-forget').finally(() => {
+              const el = document.getElementById('__web2app_pwd_bubble__')
+              if (el) el.remove()
+            })
+          },
+        })
+      } else if (res && res.reason === 'still-login') {
+        // 登录失败 / 多步登录：主进程已丢弃暂存，本页不再重试。
+        stagedHere = false
+      }
+    } catch {
+      // 主进程暂不可用：保留暂存，等下一次页面事件再试。
+    } finally {
+      committing = false
+    }
   }
 
   document.addEventListener(
@@ -187,26 +290,35 @@ function installPasswordManager(): void {
       if (!f || f.pass.value === '') return
       const username = f.user ? f.user.value : ''
       void ipcRenderer
-        .invoke('w2a:pwd-save', { username, password: f.pass.value })
+        .invoke('w2a:pwd-stage', { username, password: f.pass.value })
         .then((res: unknown) => {
           const r = res as { ok?: unknown } | null
-          if (r && r.ok === true) showSavedBubble(username)
-          else console.warn('[web2app] 账号密码未保存（系统加密不可用或写盘失败）')
+          if (r && r.ok === true) {
+            stagedHere = true
+            showBubble('登录成功后自动保存账号密码')
+          } else console.warn('[web2app] 账号密码未暂存（输入不合法）')
         })
         .catch((e: unknown) => {
-          console.warn('[web2app] 保存账号密码失败：', e)
+          console.warn('[web2app] 暂存账号密码失败：', e)
         })
     },
     true
   )
 
   const kick = (): void => {
+    // 新文档（跨页导航）：等页面稳定后再问一次，让主进程判断暂存凭据是否已登录成功。
+    if (!commitProbed && document.readyState === 'complete') {
+      commitProbed = true
+      setTimeout(() => void maybeCommit(), 1200)
+    }
+    // 本页提交后登录表单消失（SPA 登录成功）：立即提交暂存凭据。
+    if (stagedHere && findLogin() === null) void maybeCommit()
     void tryFill()
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', kick)
   else kick()
   window.addEventListener('load', kick)
-  // 登录框常在首屏后才渲染（SPA）：聚焦输入框时再试一次；fillTried 会拦住重复查询。
+  // 登录框常在首屏后才渲染（SPA）：聚焦输入框时补一次。
   document.addEventListener(
     'focusin',
     (ev) => {
@@ -214,5 +326,72 @@ function installPasswordManager(): void {
     },
     true
   )
+  // URL 变化：pushState / replaceState 不派发任何事件，Navigation API 的 `navigate` 也不会
+  // 为它们触发（2026-11-18 探针实测）。因此在主世界打一个极小的 history 钩子，变化时用 DOM
+  // 事件通知隔离世界；配合 popstate / hashchange / pageshow / DOM 变动，全程**事件驱动，
+  // 没有任何常驻轮询定时器**。
+  const URL_HOOK = `(() => {
+    if (Object.prototype.hasOwnProperty.call(window, '__web2appUrlHook')) return;
+    Object.defineProperty(window, '__web2appUrlHook', { value: 1 });
+    const notify = () => document.dispatchEvent(new CustomEvent('__web2app:url-change'));
+    for (const k of ['pushState', 'replaceState']) {
+      const orig = history[k];
+      history[k] = function (...args) { const r = orig.apply(this, args); notify(); return r; };
+    }
+  })()`
+  document.addEventListener('__web2app:url-change', kick)
+  window.addEventListener('popstate', kick)
+  window.addEventListener('hashchange', kick)
+  // bfcache 恢复时不会重跑 preload，补一次。
+  window.addEventListener('pageshow', kick)
+  void webFrame.executeJavaScript(URL_HOOK).catch(() => {
+    console.warn('[web2app] URL 变化钩子注入失败（自动填充将只依赖 DOM 变动 / 聚焦）')
+  })
+  // 表单可能在任意时刻被插入 / 重建，也可能先 `display:none` 再切可见：
+  // ⚠️ 必须观察 **document**，不能观察 `document.documentElement` —— preload 执行时文档树
+  //    还没建好，`documentElement` 可能为 null，`observer.observe(null, …)` 会直接抛错，
+  //    导致观察器整个失效，只剩 focusin 能触发（2026-11-18 真机复现并加了 18g 探针）。
+  //    同时要观察属性变化（class / style / hidden）：显隐切换不产生 childList。
+  let mutationTimer: ReturnType<typeof setTimeout> | undefined
+  const observer = new MutationObserver(() => {
+    syncUrl()
+    if (fillTried) {
+      // 填过的密码框被整块替换（SPA 重新渲染登录表单）：对新表单再填一次；
+      // 同一元素只是被清空则不重填，避免和站点互相打架。
+      if (!filledPass || filledPass.isConnected) return
+      fillTried = false
+      filledPass = null
+    }
+    if (mutationTimer !== undefined) clearTimeout(mutationTimer)
+    mutationTimer = setTimeout(kick, 300)
+  })
+  const observeOpts: MutationObserverInit = {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'style', 'hidden'],
+  }
+  try {
+    observer.observe(document, observeOpts)
+  } catch {
+    document.addEventListener('DOMContentLoaded', () => {
+      try {
+        observer.observe(document, observeOpts)
+      } catch {
+        console.warn('[web2app] DOM 观察器挂载失败，自动填充将只依赖 URL 变化 / 聚焦')
+      }
+    })
+  }
+  // 有限次补试（**不是轮询**）：覆盖 CSS / 布局 / 可见性晚于 DOMContentLoaded 的站点。
+  // 每文档最多 4 个一次性定时器、3s 内结束，之后不再有任何定时器。
+  for (const delay of [300, 800, 1600, 3000]) {
+    setTimeout(() => {
+      if (!fillTried) kick()
+    }, delay)
+  }
+  // 窗口从后台回到前台（内容在隐藏期间才渲染完）时补一次。
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') kick()
+  })
 }
 // ---- password-manager:end ----

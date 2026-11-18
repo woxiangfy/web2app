@@ -6,7 +6,7 @@
  *   2. tabs:*    壳页面页签操作（命令名与 Tauri 侧逐字一致）
  *   3. web2app:bootstrap  同步给 preload 下发注入脚本源码
  *   4. app 'login'        Basic 凭据回填（仅入口主机 / 代理）
- *   5. w2a:pwd-*          网页登录账号密码的查询 / 保存 / 撤销（Electron 自研，见 credentials.ts）
+ *   5. w2a:pwd-*          网页登录账号密码的查询 / 暂存 / 确认落盘 / 删除（Electron 自研，见 credentials.ts）
  *
  * 边界：本模块**不持有状态**。主窗口、页签管理器、入口目标在 index.ts 里都是「先声明、
  * ready 后才有值」的可变状态，这里一律以 getter 注入；注册动作发生在 whenReady 之后。
@@ -248,7 +248,25 @@ function registerTabExtraIpc(deps: AppIpcDeps): void {
 }
 
 /**
- * 网页登录账号密码：查询 / 保存 / 撤销（Electron 自研，preload 消费）。
+ * 账号密码暂存：提交只进内存，确认登录成功后才写盘。
+ *
+ * 为什么要暂存：提交瞬间就写盘会把「输错的密码」覆盖掉已存的好密码（没有成功判定）。
+ * 现在提交只把凭据放进**主进程内存**（60s 过期、绝不写盘），等页面确认登录成功
+ * （新文档没有可见密码框 / 本页登录表单消失）再调用 `credentials.save` 落盘。
+ */
+interface StagedCredential {
+  /** 登录页的 origin（成功后仍按它归属，页面跳去别的域名也不改） */
+  origin: string
+  username: string
+  password: string
+  /** 暂存时间（毫秒），用于过期清理 */
+  at: number
+}
+
+const STAGE_TTL_MS = 60_000
+
+/**
+ * 网页登录账号密码：查询 / 暂存 / 确认落盘 / 删除（Electron 自研，preload 消费）。
  *
  * 为什么不用 `assertTrustedSender`（只认宿主 webContents）：页签模式下内容页是独立
  * `WebContentsView`，它本来就不是宿主；但本组命令只回传**该页面自己 origin** 的凭据，
@@ -258,6 +276,14 @@ function registerTabExtraIpc(deps: AppIpcDeps): void {
  *    子框架（跨源 iframe）直接拒绝 —— preload 默认也不进子框架，这里是第二道闸。
  */
 function registerCredentialIpc(deps: AppIpcDeps): void {
+  /** webContentsId → 暂存凭据（多页签互不影响；进程退出即消失） */
+  const staged = new Map<number, StagedCredential>()
+  const pruneStaged = (now: number): void => {
+    for (const [id, s] of staged) {
+      if (now - s.at > STAGE_TTL_MS) staged.delete(id)
+    }
+  }
+
   const assertContentSender = (e: Electron.IpcMainInvokeEvent): string => {
     if (e.senderFrame !== e.sender.mainFrame) {
       console.warn('[web2app] 拒绝子框架的账号密码命令')
@@ -275,21 +301,41 @@ function registerCredentialIpc(deps: AppIpcDeps): void {
     return deps.credentials.lookup(url)
   })
 
-  ipcMain.handle('w2a:pwd-save', (e, args: unknown) => {
+  ipcMain.handle('w2a:pwd-stage', (e, args: unknown) => {
     const url = assertContentSender(e)
     const o = (args ?? {}) as { username?: unknown; password?: unknown }
     const username = typeof o.username === 'string' ? o.username.slice(0, 256) : ''
     const password = typeof o.password === 'string' ? o.password : ''
-    // 长度上限是防御性的（不是业务校验）：别让一个恶意页面把整个文件写爆。
+    // 长度上限是防御性的（不是业务校验）：别让一个恶意页面把内存 / 文件写爆。
     if (password === '' || password.length > 1024) {
       return { ok: false, reason: 'invalid' } satisfies SaveResult
     }
-    return deps.credentials.save(url, { username, password })
+    const now = Date.now()
+    pruneStaged(now)
+    staged.set(e.sender.id, { origin: url, username, password, at: now })
+    return { ok: true }
   })
 
-  ipcMain.handle('w2a:pwd-forget', (e) => {
+  ipcMain.handle('w2a:pwd-commit', async (e, args: unknown) => {
+    assertContentSender(e)
+    const hasPasswordField =
+      (args as { hasPasswordField?: unknown } | null)?.hasPasswordField === true
+    pruneStaged(Date.now())
+    const s = staged.get(e.sender.id)
+    if (!s) return { ok: false, reason: 'none' }
+    staged.delete(e.sender.id)
+    // 新页面仍有可见密码框（登录失败重载 / 多步登录）：丢弃暂存，绝不覆盖已存密码。
+    if (hasPasswordField) return { ok: false, reason: 'still-login' }
+    const r = await deps.credentials.save(s.origin, {
+      username: s.username,
+      password: s.password,
+    })
+    return { ...r, username: s.username }
+  })
+
+  ipcMain.handle('w2a:pwd-forget', async (e) => {
     const url = assertContentSender(e)
-    deps.credentials.forget(url)
+    await deps.credentials.forget(url)
     return null
   })
 }

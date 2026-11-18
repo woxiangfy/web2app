@@ -56,9 +56,9 @@ test('两个 preload 都真正调用 installPasswordManager()', () => {
   )
 })
 
-test('密码管理段：只用三条白名单通道，且不向页面暴露任何桥', () => {
+test('密码管理段：只用四条白名单通道，且不向页面暴露任何桥', () => {
   const block = passwordBlock(mainPreload, 'preload.ts')
-  for (const ch of ['w2a:pwd-lookup', 'w2a:pwd-save', 'w2a:pwd-forget']) {
+  for (const ch of ['w2a:pwd-lookup', 'w2a:pwd-stage', 'w2a:pwd-commit', 'w2a:pwd-forget']) {
     assert.ok(block.includes(`'${ch}'`), `缺少通道 ${ch}`)
   }
   assert.ok(
@@ -81,17 +81,87 @@ test('密码管理段：只认可信 submit，且不阻止站点提交', () => {
   )
 })
 
-test('主进程：三条通道都在 registerCredentialIpc 内，且有顶层框架 + 内容页 sender 闸门', () => {
+test('自动填充：URL 变化 / DOM 变动都立即触发，全程事件驱动不常驻轮询', () => {
+  const block = passwordBlock(mainPreload, 'preload.ts')
+  assert.ok(
+    block.includes("['pushState', 'replaceState']"),
+    'pushState / replaceState 不派发事件，必须在主世界打 history 钩子'
+  )
+  assert.ok(
+    block.includes("'__web2app:url-change'"),
+    '主世界钩子必须通过 DOM 事件通知隔离世界'
+  )
+  assert.ok(block.includes('__web2appUrlHook'), '钩子必须幂等（同一文档只装一次）')
+  assert.ok(block.includes("addEventListener('popstate'"), '必须监听 popstate')
+  assert.ok(block.includes("addEventListener('hashchange'"), '必须监听 hashchange')
+  assert.ok(
+    !block.includes('setInterval('),
+    '不得常驻轮询：URL 变化必须靠事件驱动（性能取舍，2026-11-18 二次调整）'
+  )
+  assert.ok(block.includes('MutationObserver'), '必须观察 DOM 变动（登录框常在后渲染）')
+  assert.ok(
+    block.includes('observer.observe(document,'),
+    '必须观察 document：preload 阶段 documentElement 可能为 null，observe(null) 会抛错导致观察器失效'
+  )
+  assert.ok(
+    !block.includes('observer.observe(document.documentElement'),
+    '不得观察 documentElement（2026-11-18 真机复现：整个观察器失效，只剩 focusin）'
+  )
+  assert.ok(
+    block.includes("attributeFilter: ['class', 'style', 'hidden']"),
+    '必须观察显隐相关属性：display:none → block 不产生 childList'
+  )
+  assert.ok(
+    block.includes('filledPass.isConnected'),
+    '填过的密码框被整块替换后必须允许对新表单再填一次'
+  )
+  assert.ok(
+    block.includes('typedUser.toLowerCase()'),
+    '站点预填其他账号时不得把保存的密码灌进去'
+  )
+  assert.ok(
+    block.includes('syncUrl()'),
+    'URL 变化必须重置 fillTried / 缓存，否则同一文档换路由后不会重新填充'
+  )
+})
+
+test('气泡文案：填充有提示、保存的按钮是「删除」而不是「撤销」', () => {
+  const block = passwordBlock(mainPreload, 'preload.ts')
+  assert.ok(block.includes('密码已自动填充'), '自动填充后必须有提示气泡')
+  assert.ok(block.includes("label: '删除'"), '保存气泡的按钮文案必须是「删除」')
+  assert.ok(
+    !block.includes("textContent = '撤销'"),
+    '「撤销」语义不清，已统一改为「删除」'
+  )
+})
+
+test('主进程：四条通道都在 registerCredentialIpc 内，且有顶层框架 + 内容页 sender 闸门', () => {
   assert.ok(appIpc.includes('registerCredentialIpc(deps)'), '注册函数必须被 registerAppIpc 调用')
-  for (const ch of ['w2a:pwd-lookup', 'w2a:pwd-save', 'w2a:pwd-forget']) {
+  for (const ch of ['w2a:pwd-lookup', 'w2a:pwd-stage', 'w2a:pwd-commit', 'w2a:pwd-forget']) {
     assert.ok(appIpc.includes(`'${ch}'`), `app-ipc.ts 缺少通道 ${ch}`)
   }
+  assert.ok(!appIpc.includes("'w2a:pwd-save'"), '提交即落盘的旧通道必须删除')
   assert.ok(appIpc.includes('e.senderFrame !== e.sender.mainFrame'), '必须拒绝子框架')
   assert.ok(appIpc.includes('deps.isContentSender(e.sender.id)'), '必须校验内容页 sender')
   assert.ok(
     appIpc.includes('deps.credentials.lookup(url)'),
     'origin 必须由主进程从 senderFrame.url 推导（渲染进程不得指定）'
   )
+})
+
+test('提交只暂存：登录成功确认后才落盘，失败不覆盖旧密码', () => {
+  assert.ok(appIpc.includes('new Map<number, StagedCredential>()'), '暂存必须只存在主进程内存')
+  assert.ok(appIpc.includes('STAGE_TTL_MS'), '暂存必须有 TTL，不能无限期留内存')
+  assert.ok(
+    appIpc.indexOf('if (hasPasswordField)') > 0 &&
+      appIpc.indexOf('if (hasPasswordField)') < appIpc.indexOf('deps.credentials.save(s.origin'),
+    '必须先在「仍有密码框」时丢弃暂存，再谈落盘'
+  )
+  const block = passwordBlock(mainPreload, 'preload.ts')
+  assert.ok(block.includes("invoke('w2a:pwd-stage'"), '提交只能暂存')
+  assert.ok(block.includes("invoke('w2a:pwd-commit'"), '必须在页面稳定后确认落盘')
+  assert.ok(!block.includes("invoke('w2a:pwd-save'"), 'preload 不得再直连写盘通道')
+  assert.ok(block.includes('登录成功后自动保存账号密码'), '提交后必须提示「登录成功后自动保存」')
 })
 
 test('index.ts：装配凭据存储与内容页判据', () => {
@@ -111,9 +181,14 @@ test('清除浏览数据必须一并清掉已保存的账号密码', () => {
   )
 })
 
-test('凭据存储：只存 safeStorage 密文，拒绝在加密不可用时保存', () => {
-  assert.ok(credentialsTs.includes('safeStorage.encryptString(password)'), '必须加密后再落盘')
-  assert.ok(credentialsTs.includes('isEncryptionAvailable()'), '加密不可用时必须拒绝保存')
+test('凭据存储：只用异步 safeStorage 密文，拒绝在加密不可用时保存', () => {
+  assert.ok(credentialsTs.includes('encryptStringAsync(password)'), '必须异步加密后再落盘')
+  assert.ok(
+    credentialsTs.includes('isAsyncEncryptionAvailable()'),
+    '加密不可用时必须拒绝保存（Electron 45 起同步版已废弃）'
+  )
+  assert.ok(!credentialsTs.includes('safeStorage.encryptString('), '不得再用废弃的同步加密 API')
+  assert.ok(!credentialsTs.includes('safeStorage.decryptString('), '不得再用废弃的同步解密 API')
   assert.ok(
     !/writeFileSync\([^)]*password/.test(credentialsTs),
     '不得把明文密码直接写盘'

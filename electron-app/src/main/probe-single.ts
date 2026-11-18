@@ -1382,17 +1382,29 @@ async function probeSec18PasswordManager(
     wc.sendInputEvent({ type: 'mouseUp', x: pos.x, y: pos.y, button: 'left', clickCount: 1 })
   }
 
-  const typeAndSubmit = async (): Promise<void> => {
+  const typeAndSubmit = async (): Promise<{ u: string; p: string }> => {
     await wc.executeJavaScript(
       `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
-         u.value = ''; pw.value = ''; u.focus(); return true; })()`,
+         u.value = ''; pw.value = '';
+         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+         u.focus(); return true; })()`,
       true
     )
     wc.focus()
+    // 窗口聚焦后再点一次用户名框：跨页导航后 Chromium 可能把焦点恢复到上一个密码框。
+    await wc.executeJavaScript(`document.getElementById('u').focus(); true`, true)
     typeText('probeuser')
     await wc.executeJavaScript(`document.getElementById('p').focus(); true`, true)
     typeText('probepass123')
+    // sendInputEvent 是异步投递的：等按键真正进入渲染进程再读值（否则读到空串）。
+    await sleep(120)
+    const typed = (await wc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return { u: u.value, p: pw.value }; })()`,
+      true
+    )) as { u: string; p: string }
     await clickSubmit()
+    return typed
   }
 
   // 18 反向：脚本合成的 submit 事件不得保存（isTrusted 过滤）。
@@ -1414,30 +1426,41 @@ async function probeSec18PasswordManager(
     `entries=${readEntries().length}`
   )
 
-  // 18a 正向：真实键入 + 回车 ⇒ 保存
+  // 18a0 失败分支：真实提交但停在登录页（密码框还在）⇒ 只暂存、不落盘，绝不覆盖旧密码
   await nav('/login.html')
   await typeAndSubmit()
-  const typed = (await wc.executeJavaScript(
-    `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
-       return JSON.stringify({ u: u.value, p: pw.value }); })()`,
-    true
-  )) as string
+  await sleep(2500)
+  p.check(
+    '18a0 登录失败不落盘（仍停在登录页 ⇒ 丢弃暂存）',
+    readEntries().length === 0,
+    `entries=${JSON.stringify(readEntries())}`
+  )
+  p.check(
+    '18a1 提交后先提示「登录成功后自动保存」',
+    (await readBubble()).includes('自动保存'),
+    `bubble=${await readBubble()}`
+  )
+
+  // 18a 正向：真实提交 + 成功跳转（新页面无密码框）⇒ 确认后才落盘
+  await nav('/login-success.html')
+  const typed = await typeAndSubmit()
   p.check(
     '18 前提：真实键入已进入两个输入框',
-    typed.includes('"u":"probeuser"') && typed.includes('"p":"probepass123"'),
-    typed
+    typed.u === 'probeuser' && typed.p === 'probepass123',
+    JSON.stringify(typed)
   )
-  const submitted = await waitUntil(async () => {
-    return (await wc.executeJavaScript(`document.body.dataset.submitted === '1'`, true)) === true
+  const navigated = await waitUntil(async () => {
+    const href = (await wc.executeJavaScript('location.href', true)) as string
+    return href.includes('/login-ok.html')
   }, 5000)
-  p.check('18 前提：真实键入 + 点击提交触发了表单提交', submitted, '5s 内未观测到 submit')
+  p.check('18 前提：真实提交后跳到成功页', navigated, '5s 内未跳转')
 
   const saved = await waitUntil(
     async () => readEntries().length === 1 && readEntries()[0].username === 'probeuser',
-    3000
+    6000
   )
   p.check(
-    '18a 保存：可信提交后写入 1 条凭据（用户名为真实键入值）',
+    '18a 保存：确认登录成功后才写入 1 条凭据',
     saved,
     `entries=${JSON.stringify(readEntries())}`
   )
@@ -1473,10 +1496,90 @@ async function probeSec18PasswordManager(
     return o.u === 'probeuser' && o.p === 'probepass123'
   }, 4000)
   p.check('18e 自动填充：重新打开页面后用户名 / 密码已填入', filled, '4s 内未填充')
+  const fillBubble = await waitUntil(async () => (await readBubble()).includes('密码已自动填充'), 3000)
+  p.check('18e1 自动填充后提示「密码已自动填充」', fillBubble, `bubble=${await readBubble()}`)
 
-  // 18f 撤销：再次提交 → 点气泡「撤销」⇒ 记录清空
+  // 18e2 URL 变化即时填充：清空输入框 + pushState 换路由（不刷新、不点击）⇒ 应自动重填。
+  // 这是真机反馈的主场景：SPA 退出登录回到登录路由时，不刷新页面也必须直接填。
+  await wc.executeJavaScript(
+    `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+       u.value = ''; pw.value = '';
+       history.pushState({}, '', '/login.html?after-logout=1'); return true; })()`,
+    false
+  )
+  const refilled = await waitUntil(async () => {
+    const v = (await wc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return JSON.stringify({ u: u.value, p: pw.value }); })()`,
+      true
+    )) as string
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 3000)
+  p.check(
+    '18e2 URL 变化后直接自动填充（无需刷新 / 点击输入框）',
+    refilled,
+    '3s 内未重填（URL 轮询 / syncUrl 失效）'
+  )
+
+  // 18g 无点击、无 URL 变化，仅表单晚出现 / 由隐藏变可见 —— 必须自动填充。
+  // 这是真机反馈的第二个场景：登录框由前端水合渲染，或先 display:none 再显示。
+  const readValues = async (): Promise<string> =>
+    (await wc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return (u && pw) ? JSON.stringify({ u: u.value, p: pw.value }) : ''; })()`,
+      true
+    )) as string
+  await nav('/login-late.html')
+  const lateFilled = await waitUntil(async () => {
+    const v = await readValues()
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 4000)
+  p.check('18g 表单后插入：不点击也自动填充', lateFilled, '4s 内未填充（DOM 观察失效）')
+
+  await nav('/login-hidden.html')
+  const hiddenFilled = await waitUntil(async () => {
+    const v = await readValues()
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 4000)
+  p.check(
+    '18g 表单由隐藏变可见：不点击也自动填充',
+    hiddenFilled,
+    '4s 内未填充（只观察 childList、漏了 attributes）'
+  )
+
+  // 18h 用户名预填 / 表单整块重渲染。
+  await nav('/login-prefilled.html')
+  const prefilledSame = await waitUntil(async () => {
+    const v = await readValues()
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 4000)
+  p.check('18h 站点预填同一账号：只补密码（不整表单跳过）', prefilledSame, `values=${await readValues()}`)
+
+  await nav('/login-other-user.html')
+  await new Promise((r) => setTimeout(r, 2000))
+  const otherValues = await readValues()
+  p.check(
+    '18h 站点预填其他账号：绝不灌入保存的密码',
+    otherValues.includes('"u":"someoneelse"') && otherValues.includes('"p":""'),
+    `values=${otherValues}`
+  )
+
+  await nav('/login-rerender.html')
+  const rerendered = await waitUntil(async () => {
+    const v = (await wc.executeJavaScript(
+      `(() => { const u = document.querySelector('[data-round="2"] #u');
+         const p = document.querySelector('[data-round="2"] #p');
+         return (u && p) ? JSON.stringify({ u: u.value, p: p.value }) : ''; })()`,
+      true
+    )) as string
+    return v.includes('"u":"probeuser"') && v.includes('"p":"probepass123"')
+  }, 5000)
+  p.check('18h 表单整块重渲染：对新表单再填一次', rerendered, '5s 内新表单未填充')
+
+  // 18f 删除：再次登录成功 → 点气泡「删除」⇒ 记录清空
+  await nav('/login-success.html')
   await typeAndSubmit()
-  const bubbleAgain = await waitUntil(async () => (await readBubble()).includes('撤销'), 3000)
+  const bubbleAgain = await waitUntil(async () => (await readBubble()).includes('删除'), 8000)
   if (bubbleAgain) {
     await wc.executeJavaScript(
       `document.querySelector('#__web2app_pwd_bubble__ button').click(); true`,
@@ -1484,7 +1587,7 @@ async function probeSec18PasswordManager(
     )
   }
   const undone = await waitUntil(async () => readEntries().length === 0, 3000)
-  p.check('18f 撤销：气泡按钮清掉该站点凭据', bubbleAgain && undone, `entries=${readEntries().length}`)
+  p.check('18f 删除：气泡「删除」按钮清掉该站点凭据', bubbleAgain && undone, `entries=${readEntries().length}`)
 
   rmSync(file, { force: true })
 }
