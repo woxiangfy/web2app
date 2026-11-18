@@ -81,9 +81,18 @@ export function createCredentialStore(file: string): CredentialStore {
         const dec = await safeStorage.decryptStringAsync(Buffer.from(entry.secret, 'base64'))
         if (dec.shouldReEncrypt) {
           // 系统密钥轮换：顺手把新密文写回，失败不影响本次填充。
+          // ⚠️ 必须**重新读盘**再写：解密是 await，期间别的页签可能已经保存了新的凭据；
+          //    拿开头那份 doc 去 upsert 会把它覆盖掉（还会把已删除的条目「复活」）。
+          //    只在「该条目仍在、密文仍是本次解出来的那份」时才回写。
           try {
             const secret = (await safeStorage.encryptStringAsync(dec.result)).toString('base64')
-            write(upsertCredential(doc, { ...entry, secret, updatedAt: entry.updatedAt }))
+            const fresh = read()
+            const cur = fresh.entries.find(
+              (e) => e.origin === entry.origin && e.username === entry.username
+            )
+            if (cur && cur.secret === entry.secret) {
+              write(upsertCredential(fresh, { ...cur, secret }))
+            }
           } catch {
             console.warn('[web2app] 账号密码重加密失败（本次仍使用已解出的值）')
           }

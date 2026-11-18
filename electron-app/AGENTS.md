@@ -105,7 +105,8 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    `preventDefault`（DOM 气泡活不过导航，阻止提交会改站点行为）；不向页面主世界暴露任何桥；
    存储只放 `credentials.json` 的 `safeStorage` 密文，加密不可用时拒绝保存，且**只用异步 API**
    （`isAsyncEncryptionAvailable` / `encryptStringAsync` / `decryptStringAsync`；同步版在 Electron 45
-   已废弃）；`clearWebData` 必须一并清理；**提交只调 `w2a:pwd-stage` 放进主进程内存（60s TTL、
+   已废弃）；`clearWebData` 必须一并清理，**且必须先清待落盘暂存再删文件**（`registerAppIpc` 的返回值就是
+   清暂存钩子）—— 否则 60s TTL 内的暂存会在下次页面事件把刚删掉的 `credentials.json` 写回来；**提交只调 `w2a:pwd-stage` 放进主进程内存（60s TTL、
    绝不写盘），确认登录成功才 `w2a:pwd-commit` 落盘 —— 信号 = 新文档 `complete` 后无可见密码框 /
    本页登录表单消失；仍有可见密码框（失败重载 / 多步登录）必须丢弃且不覆盖旧密码**；提交后气泡是
    「登录成功后自动保存账号密码」；自动填充成功后右上角提示「密码已自动填充」（纯提示、无按钮），
@@ -119,6 +120,11 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
    **用户名被站点预填同一账号 ⇒ 只补密码；预填另一个账号 ⇒ 绝不灌密码**（防止登错账号）；
    **填过的密码框被整块替换（`!isConnected`）⇒ 允许对新表单再填一次，同元素被清空则不重填**；页面上出现空密码框就填，
    **不得要求用户先点输入框**（URL 变化还要重置 `fillTried` 与查询缓存，否则 SPA 退出登录后不重填）；
+   **观察器回调不得无条件提前 `return`**：SPA 登录成功后表单常是被隐藏 / 移除而密码框节点仍在 DOM 里
+   （`filledPass` 非空），或本页压根没存过凭据（`filledPass` 为 null）—— 这两种情况提前 return 会让
+   `kick` 不再调度 ⇒ 确认落盘永不触发，**只有跨文档跳转那条路能存进密码**；只允许在 `stagedHere`
+   为假（不在等待落盘）时早退；**新文档 1.2s 确认探针必须在触发时重新判 `stagedHere`**，否则
+   用户在本页刚提交、表单还没消失时会被探针按 `still-login` 丢掉暂存（同日两个真 bug，探针 18i/18j）；
    **不得在 Tauri 侧也注入这段**（WebView2 已原生弹一次，会双弹窗）。
 
 ## 刻意不动（已定，勿再提拆分）

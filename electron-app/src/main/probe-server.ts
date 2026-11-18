@@ -250,6 +250,44 @@ const FIXTURES: Record<string, Fixture> = {
   },
 
   /**
+   * SPA 登录成功夹具（**同一文档、不导航**）：submit 里 preventDefault 后把登录表单
+   * **延迟 600ms 隐藏**（默认，模拟等登录接口返回）或**同步移除**（`?remove=1`），再插入成功提示
+   * —— 这是真实 SPA 最常见的两种收尾方式，也是「确认登录成功才落盘」在同一文档内仅有的两个触发点。
+   *
+   * 为什么必须有：第 18 节原先只有 `/login-success.html`（跨文档跳转）那条路，于是
+   * 「观察器提前 return 导致 SPA 同文档登录永不落盘」这个真 bug 全绿漏过（2026-11-18 复审）。
+   */
+  '/login-spa.html': {
+    body: PAGE(
+      '',
+      `<form id="form">
+         <input id="u" name="username" type="text" autocomplete="username">
+         <input id="p" name="password" type="password" autocomplete="current-password">
+         <button id="go" type="submit">登录</button>
+       </form>
+       <script>
+         document.getElementById('form').addEventListener('submit', function (e) {
+           e.preventDefault();
+           var f = document.getElementById('form');
+           var remove = location.search.indexOf('remove=1') >= 0;
+           var finish = function () {
+             if (remove) f.parentNode.removeChild(f);
+             else f.style.display = 'none';
+             var ok = document.createElement('div');
+             ok.id = 'ok';
+             ok.textContent = '登录成功';
+             document.body.appendChild(ok);
+           };
+           // 默认延迟 600ms：模拟「等登录接口返回再收起表单」的常见 SPA 写法
+           // —— 这个时间差让暂存已经回到渲染进程，从而真正压到观察器那条路。
+           if (remove) finish(); else setTimeout(finish, 600);
+         });
+       </script>`,
+      'form{display:flex;flex-direction:column;gap:8px;width:240px;padding:24px}'
+    ),
+  },
+
+  /**
    * 登录表单「先隐藏后显示」夹具：表单在首屏 DOM 里但 `display:none`，800ms 后改 style。
    * 这类站点只有 attributes 变动（没有 childList），用来验证观察器覆盖可见性切换。
    */

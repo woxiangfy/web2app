@@ -37,7 +37,7 @@ if (window.self === window.top) {
   installPasswordManager()
 }
 
-// ---- password-manager:begin（本段在 preload.ts / tab-preload.ts 中逐字一致，由 test/password-preload-contract.test.ts 锁）----
+// ---- password-manager:begin（本段在 preload.ts / tab-preload.ts 中逐字一致，由 test/password-contract.test.ts 锁）----
 /**
  * 网页登录账号密码：提交时保存、进页面自动填充（Electron 自研）。
  *
@@ -269,12 +269,15 @@ function installPasswordManager(): void {
             })
           },
         })
-      } else if (res && res.reason === 'still-login') {
-        // 登录失败 / 多步登录：主进程已丢弃暂存，本页不再重试。
+      } else if (res) {
+        // 只要能拿到明确答复就**停止等待**：`still-login`（失败重载 / 多步登录，主进程已丢弃）、
+        // `none`（暂存已过期或被消费）、写盘失败 / 加密不可用 —— 本页都不再重试。
+        // ⚠️ 不要只处理 still-login：其余分支留着 stagedHere = true 会让每次 DOM 变动都再问一次
+        //    主进程（重负载站点上是持续的 IPC），而且永远不会得到不同结果。
         stagedHere = false
       }
     } catch {
-      // 主进程暂不可用：保留暂存，等下一次页面事件再试。
+      // 主进程暂不可用（异常）：保留暂存，等下一次页面事件再试。
     } finally {
       committing = false
     }
@@ -296,6 +299,9 @@ function installPasswordManager(): void {
           if (r && r.ok === true) {
             stagedHere = true
             showBubble('登录成功后自动保存账号密码')
+            // ⚠️ 竞态：SPA 常在 submit 的**同步阶段**就把登录表单隐藏 / 移除，那时暂存还没
+            //    回到本进程（stagedHere 仍为 false），观察到的那次变动不会调度确认。这里补一次。
+            if (findLogin() === null) void maybeCommit()
           } else console.warn('[web2app] 账号密码未暂存（输入不合法）')
         })
         .catch((e: unknown) => {
@@ -307,9 +313,14 @@ function installPasswordManager(): void {
 
   const kick = (): void => {
     // 新文档（跨页导航）：等页面稳定后再问一次，让主进程判断暂存凭据是否已登录成功。
+    // ⚠️ 触发时**必须重新判 stagedHere**：本页自己刚提交过（还在等站点响应、表单尚未消失）时
+    //    这次探针会带着 `hasPasswordField: true` 过去，主进程按「登录失败」丢弃暂存 ⇒ 这一次
+    //    登录永远存不进去。跨文档那条路只对「本页没有自己的暂存」有意义。
     if (!commitProbed && document.readyState === 'complete') {
       commitProbed = true
-      setTimeout(() => void maybeCommit(), 1200)
+      setTimeout(() => {
+        if (!stagedHere) void maybeCommit()
+      }, 1200)
     }
     // 本页提交后登录表单消失（SPA 登录成功）：立即提交暂存凭据。
     if (stagedHere && findLogin() === null) void maybeCommit()
@@ -357,10 +368,18 @@ function installPasswordManager(): void {
     syncUrl()
     if (fillTried) {
       // 填过的密码框被整块替换（SPA 重新渲染登录表单）：对新表单再填一次；
-      // 同一元素只是被清空则不重填，避免和站点互相打架。
-      if (!filledPass || filledPass.isConnected) return
-      fillTried = false
-      filledPass = null
+      // 同一元素只是被清空 / 隐藏则不重填，避免和站点互相打架。
+      if (filledPass && !filledPass.isConnected) {
+        fillTried = false
+        filledPass = null
+      } else if (!stagedHere) {
+        // ⚠️ 这里**只能在不等待落盘时提前返回**。首版是无条件提前返回（filledPass 为空、
+        //    或填过的密码框仍连着 DOM，都直接 return）—— 于是 SPA 登录成功后「表单只是被隐藏
+        //    （密码框还在 DOM 里）」和「本页没存过凭据（filledPass 为 null）」两种情况下回调
+        //    都直接返回，kick 永远不被调度 ⇒ `maybeCommit`（确认成功才落盘）等不到触发点，
+        //    结果只有跨文档跳转那条路能存进密码。2026-11-18 复审修掉。
+        return
+      }
     }
     if (mutationTimer !== undefined) clearTimeout(mutationTimer)
     mutationTimer = setTimeout(kick, 300)

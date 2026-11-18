@@ -125,6 +125,41 @@ test('自动填充：URL 变化 / DOM 变动都立即触发，全程事件驱动
   )
 })
 
+/**
+ * 2026-11-18 复审补的回归锁：SPA（同一文档）登录成功后必须能落盘。
+ *
+ * 首版真 bug：观察器回调在 `fillTried` 时**无条件提前 return**，于是
+ *   ① 本页没存过凭据（`filledPass` 为 null）；
+ *   ② SPA 把登录表单隐藏 / 移除但密码框节点仍连着 DOM；
+ * 两种情况下 kick 都不再被调度 ⇒ `maybeCommit`（确认成功才落盘）永远等不到触发点。
+ * 探针第 18 节原先只覆盖「跨文档跳转」那条路，所以全绿；`/login-spa.html` 夹具补上。
+ */
+test('SPA 登录成功（表单被隐藏而不是移除）也必须能落盘', () => {
+  const block = passwordBlock(mainPreload, 'preload.ts')
+  assert.ok(
+    !block.includes('if (!filledPass || filledPass.isConnected) return'),
+    '观察器回调不得无条件提前返回：会把「表单被隐藏」与「本页没存过凭据」两类落盘一起挡掉'
+  )
+  assert.ok(
+    block.includes('else if (!stagedHere) {'),
+    '只有「不在等待落盘」时才可以提前返回（stagedHere 为假）'
+  )
+  assert.ok(
+    block.includes('if (findLogin() === null) void maybeCommit()'),
+    '暂存刚成功时必须补一次确认：SPA 可能在 submit 的同步阶段就把表单隐藏 / 移除'
+  )
+  // 第二个真 bug（同一轮复审发现）：新文档的 1.2s 确认探针若在「本页刚提交、表单还没消失」
+  // 时发出，主进程会按 still-login 丢弃暂存 ⇒ 这次登录永远存不进。
+  assert.ok(
+    block.includes('if (!stagedHere) void maybeCommit()'),
+    '新文档确认探针必须在**触发时**重新判 stagedHere，不能无条件 maybeCommit'
+  )
+  assert.ok(
+    !block.includes('setTimeout(() => void maybeCommit(), 1200)'),
+    '不得无条件调度新文档确认：本页自己的暂存在表单消失前会被判成登录失败并丢弃'
+  )
+})
+
 test('气泡文案：填充有提示、保存的按钮是「删除」而不是「撤销」', () => {
   const block = passwordBlock(mainPreload, 'preload.ts')
   assert.ok(block.includes('密码已自动填充'), '自动填充后必须有提示气泡')
@@ -173,12 +208,18 @@ test('index.ts：装配凭据存储与内容页判据', () => {
   assert.ok(tabsTs.includes('ownsWebContents(id: number): boolean'), 'TabManager 必须提供 ownsWebContents')
 })
 
-test('清除浏览数据必须一并清掉已保存的账号密码', () => {
+test('清除浏览数据必须一并清掉已保存的账号密码（含待落盘暂存）', () => {
   assert.ok(webData.includes('deps.clearCredentials()'), 'web-data.ts 必须调用 clearCredentials')
   assert.ok(
-    indexTs.includes('clearCredentials: () => credentials.clear()'),
-    'index.ts 必须把凭据清理接进 clearWebData'
+    indexTs.includes('clearStagedCredentials()'),
+    '必须清掉待落盘暂存：否则 TTL 内的暂存会在下次页面事件把刚删掉的文件写回来'
   )
+  assert.ok(indexTs.includes('credentials.clear()'), 'index.ts 必须把凭据清理接进 clearWebData')
+  const i = indexTs.indexOf('clearStagedCredentials()')
+  const j = indexTs.indexOf('credentials.clear()')
+  assert.ok(i > 0 && j > i, '必须先清暂存、再删文件（顺序反了会把文件写回来）')
+  assert.ok(appIpc.includes('staged.clear()'), 'app-ipc.ts 必须真的清空暂存表')
+  assert.ok(appIpc.includes('return clearStaged'), 'registerAppIpc 必须把清暂存钩子交出去')
 })
 
 test('凭据存储：只用异步 safeStorage 密文，拒绝在加密不可用时保存', () => {
@@ -192,5 +233,16 @@ test('凭据存储：只用异步 safeStorage 密文，拒绝在加密不可用�
   assert.ok(
     !/writeFileSync\([^)]*password/.test(credentialsTs),
     '不得把明文密码直接写盘'
+  )
+})
+
+test('重加密回写：先重新读盘，且只在该条目密文未变时写（否则会覆盖并发保存）', () => {
+  // 解密是 await：期间另一个页签可能已保存新凭据 / 删掉该条目。拿开头那份文档 upsert
+  // 会覆盖掉新值、并把已删除的条目「复活」（2026-11-18 复审修）。
+  assert.ok(credentialsTs.includes('const fresh = read()'), '回写前必须重新读盘')
+  assert.ok(credentialsTs.includes('cur.secret === entry.secret'), '只在密文未变时回写')
+  assert.ok(
+    !credentialsTs.includes('upsertCredential(doc,'),
+    '不得用开头读到的旧文档 upsert（lookup 里的 doc 只用于本次查找）'
   )
 })

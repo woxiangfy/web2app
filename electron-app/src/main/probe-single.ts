@@ -1589,6 +1589,40 @@ async function probeSec18PasswordManager(
   const undone = await waitUntil(async () => readEntries().length === 0, 3000)
   p.check('18f 删除：气泡「删除」按钮清掉该站点凭据', bubbleAgain && undone, `entries=${readEntries().length}`)
 
+  // 18i / 18j SPA 登录成功（**同一文档、不导航**）也必须落盘。
+  // 这是 2026-11-18 复审补的：原先只覆盖跨文档跳转，而观察器回调在 `fillTried` 时
+  // 无条件提前返回，导致「表单被隐藏 / 本页没存过凭据」两种情形下确认动作永不触发。
+  // 18i = 本页没存过凭据（filledPass 为 null）+ 表单被**隐藏**；18j = 已存过（自动填充过）
+  // + 表单被**移除**（站点在 submit 的同步阶段就动手，覆盖「暂存尚未回本进程」的竞态）。
+  await nav('/login-spa.html')
+  await typeAndSubmit()
+  const spaSaved = await waitUntil(
+    async () => readEntries().length === 1 && readEntries()[0].username === 'probeuser',
+    6000
+  )
+  p.check(
+    '18i SPA 登录成功（表单被隐藏、不导航）：确认后落盘',
+    spaSaved,
+    `entries=${JSON.stringify(readEntries())} bubble=${await readBubble()}`
+  )
+
+  await nav('/login-spa.html?remove=1')
+  const spaFilled = await waitUntil(async () => {
+    const v = (await wc.executeJavaScript(
+      `(() => { const u = document.getElementById('u'), pw = document.getElementById('p');
+         return (u && pw) ? JSON.stringify({ u: u.value, p: pw.value }) : ''; })()`,
+      true
+    )) as string
+    return v.includes('"p":"probepass123"')
+  }, 4000)
+  await clickSubmit()
+  const spaResaved = await waitUntil(async () => (await readBubble()).includes('已保存'), 6000)
+  p.check(
+    '18j SPA 登录成功（表单被移除、自动填充过）：同样落盘',
+    spaFilled && spaResaved,
+    `filled=${spaFilled} bubble=${await readBubble()} entries=${JSON.stringify(readEntries())}`
+  )
+
   rmSync(file, { force: true })
 }
 

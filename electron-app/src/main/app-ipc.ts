@@ -8,8 +8,11 @@
  *   4. app 'login'        Basic 凭据回填（仅入口主机 / 代理）
  *   5. w2a:pwd-*          网页登录账号密码的查询 / 暂存 / 确认落盘 / 删除（Electron 自研，见 credentials.ts）
  *
- * 边界：本模块**不持有状态**。主窗口、页签管理器、入口目标在 index.ts 里都是「先声明、
+ * 边界：本模块**不持有跨模块状态**。主窗口、页签管理器、入口目标在 index.ts 里都是「先声明、
  * ready 后才有值」的可变状态，这里一律以 getter 注入；注册动作发生在 whenReady 之后。
+ * 唯一的内部状态是账号密码的「待落盘暂存」（webContentsId → 凭据，进程内存、60s TTL），
+ * 它随 `registerCredentialIpc` 的闭包存在，并由 `registerAppIpc` 的返回值把「清空」交出去
+ * （设置页「清除全部浏览数据」必须一起清，见 index.ts）。
  */
 import { app, BrowserWindow, ipcMain } from 'electron'
 
@@ -52,13 +55,16 @@ export interface AppIpcDeps {
   credentials: CredentialStore
 }
 
-export function registerAppIpc(deps: AppIpcDeps): void {
+export function registerAppIpc(deps: AppIpcDeps): () => void {
   registerWindowIpc(deps)
   registerTabsIpc(deps)
   registerBootstrapIpc(deps)
   registerTabExtraIpc(deps)
-  registerCredentialIpc(deps)
+  const clearStaged = registerCredentialIpc(deps)
   registerAuthHandler(deps)
+  // 返回「清掉待落盘暂存」的钩子：设置页「清除全部浏览数据」必须一起用 —— 否则一份仍在
+  // 60s TTL 内的暂存会在下一次页面事件把刚删掉的 credentials.json 又写回来（见 index.ts）。
+  return clearStaged
 }
 
 /** 可信宿主（主窗）的 webContents.id；窗口未就绪 / 已销毁时为 null（闸门一律拒绝）。 */
@@ -275,7 +281,7 @@ const STAGE_TTL_MS = 60_000
  * ⚠️ origin 一律由主进程从 `e.senderFrame.url` 推导，页面无法伪造；
  *    子框架（跨源 iframe）直接拒绝 —— preload 默认也不进子框架，这里是第二道闸。
  */
-function registerCredentialIpc(deps: AppIpcDeps): void {
+function registerCredentialIpc(deps: AppIpcDeps): () => void {
   /** webContentsId → 暂存凭据（多页签互不影响；进程退出即消失） */
   const staged = new Map<number, StagedCredential>()
   const pruneStaged = (now: number): void => {
@@ -283,6 +289,8 @@ function registerCredentialIpc(deps: AppIpcDeps): void {
       if (now - s.at > STAGE_TTL_MS) staged.delete(id)
     }
   }
+  /** 清掉所有待落盘暂存（清除全部浏览数据时调用，返回给 registerAppIpc）。 */
+  const clearStaged = (): void => staged.clear()
 
   const assertContentSender = (e: Electron.IpcMainInvokeEvent): string => {
     if (e.senderFrame !== e.sender.mainFrame) {
@@ -338,6 +346,8 @@ function registerCredentialIpc(deps: AppIpcDeps): void {
     await deps.credentials.forget(url)
     return null
   })
+
+  return clearStaged
 }
 
 /**

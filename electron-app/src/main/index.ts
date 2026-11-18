@@ -779,7 +779,9 @@ if (!gotLock) {
       console.log(`[web2app] 探针模式：夹具站点 ${probeBase}`)
     }
 
-    registerAppIpc({
+    // 返回值 = 「清掉账号密码待落盘暂存」的钩子（清除全部浏览数据时与 credentials.clear()
+    // 一起调，否则 60s TTL 内的暂存会在下次页面事件把刚删掉的文件写回来）。
+    const clearStagedCredentials = registerAppIpc({
       getMainWindow: () => mainWindow,
       openSettings,
       getTabManager: () => tabManager,
@@ -804,7 +806,11 @@ if (!gotLock) {
         clearWebData({
           probe: PROBE,
           // 已保存的登录账号密码也要一起清（Tauri 壳由 ClearBrowsingDataAll 覆盖 Login Data）。
-          clearCredentials: () => credentials.clear(),
+          // ⚠️ 先清暂存再删文件：交换顺序会让一个仍在 TTL 内的暂存把文件写回来。
+          clearCredentials: () => {
+            clearStagedCredentials()
+            credentials.clear()
+          },
           reloadContentPages: () => {
             if (TABS_MODE) return tabManager?.reloadAll() ?? 0
             const w = mainWindow

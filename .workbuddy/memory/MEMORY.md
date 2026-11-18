@@ -29,3 +29,4 @@
 - 未决：Tauri 本地打包未实跑（无 tauri-cli）、M4「另存为」无人验、两壳 `0.1.0` 无 tag、`core.autocrlf` 与 LF 约定冲突、本机 Electron 探针间歇死机（重试即可）。
 - ⚠️ 动态解析两类失败别混：**解析失败**（「服务器连接失败」⇒ 查 sidecar stderr）vs **导航失败**（`chrome-error://` ⇒ 密文 URL 不可用，重签 TXT 不必重打包）。`Name::from_str_relaxed` 等细节见归档。
 - 2026-11-14：Android 清单 #9–#18 已落地，`#14/#17/#19` 与「切换快照」定为不做 → `docs/android-improvements.md` §5。
+- 2026-11-18：Electron 自研「网页账号密码保存」已交付，**同日复审又修 4 处**（观察器提前 return ⇒ SPA 同文档登录永不落盘、新文档 1.2s 确认探针误丢暂存、重加密回写用旧快照、清浏览数据清不掉暂存）→ `docs/changes/2026-11-18.md`；Electron unit **215**、单窗口探针 **178**、页签 **69**。
