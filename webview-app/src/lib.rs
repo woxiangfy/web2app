@@ -142,6 +142,11 @@ use settings::SettingsState;
 fn show_float_window(app: tauri::AppHandle) {
     #[cfg(windows)]
     floatwin::show_float_window(&app);
+    // 非 Windows：本命令刻意跨平台注册（理由见上），实际无事可做。显式消费掉句柄，
+    // 否则 Android 目标会报 `unused variable: app` —— 而这条警告只在非 Windows 出现，
+    // 桌面端 `cargo clippy -D warnings` 看不见它（同 `probe_mode` 注释里的 cfg-only 陷阱）。
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 /// 设置页「退出程序」按钮调用的命令（v1.75）。

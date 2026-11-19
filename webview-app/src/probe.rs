@@ -158,8 +158,14 @@ fn probe_auth_message(host: &str, status: u16) -> String {
 ///
 /// 上游 origin 缺失（理论上不该发生：`prepare_navigation` 一定会填）时退回探
 /// `nav.url`，退化成旧行为但绝不 panic。
+///
+/// ⚠️ `pub(crate)` 不是多余的：本模块由 `bootstrap` 跨模块调用，而调用点与其 cfg 都是
+/// `not(windows)` ⇒ **Windows 宿主编译时两侧一起消失，私有也能过**；只有 Android 目标
+/// 才会同时看到「调用在」和「定义私有」→ `error[E0603]`。历史上正是这样漏到 CI 的
+/// （2026-11-19 Android 打包失败）。契约测试
+/// `cross_module_items_are_visible` 现在会在 Windows 上就拦下这类问题。
 #[cfg(any(not(windows), test))]
-fn probe_target(nav: &Navigation) -> (String, bool) {
+pub(crate) fn probe_target(nav: &Navigation) -> (String, bool) {
     if nav.use_local_proxy {
         if let Some(origin) = nav
             .upstream_origin
@@ -183,7 +189,12 @@ fn probe_target(nav: &Navigation) -> (String, bool) {
 /// `127.0.0.1:<port>`（清单 #15 修的就是这一点）；`via_proxy` 决定成功 / 401 文案的措辞。
 /// `AppHandle` 按值传入：探测跑在 `'static` 的 Tokio 任务里，不能借用调用方的引用。
 #[cfg(not(windows))]
-fn spawn_reachability_probe(app: tauri::AppHandle, label: &str, url: String, via_proxy: bool) {
+pub(crate) fn spawn_reachability_probe(
+    app: tauri::AppHandle,
+    label: &str,
+    url: String,
+    via_proxy: bool,
+) {
     let host = Url::parse(&url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))

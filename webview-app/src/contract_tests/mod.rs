@@ -15,7 +15,10 @@
 //!   · `packaging_field_contract` —— 打包配置 21 字段的**数据驱动**存在性守卫（字段表
 //!     `scripts/packaging-fields.json` 驱动，2026-10-25 P1-b 取代逐字段手写存在性断言）；
 //!   · `settings_hotkey_contract` —— 设置页「唤醒快捷键」= 组合键（修饰键 + 主键），
-//!     单键/系统键保存前拦截、当前生效与待保存分离、读失败禁止保存（跨壳共用页面，跨平台）。
+//!     单键/系统键保存前拦截、当前生效与待保存分离、读失败禁止保存（跨壳共用页面，跨平台）；
+//!   · `module_visibility_contract` —— 跨模块引用（`crate::a::b`）的目标必须是 pub：
+//!     平台专属模块（`probe` 等）的私有 fn 在 Windows 上「定义与调用一起被 cfg 摘掉」，
+//!     只有 Android 目标才会 `error[E0603]`（2026-11-19 打包 red 的回归守卫）。
 //!
 //! 2026-10-03 从 lib.rs 整体迁出：入口文件不该混装数百行测试（既有架构评审 P1-1）。
 //! ⚠️ 子模块位于 `src/contract_tests/`，比被测文件低一级目录 ⇒ 各子模块内 `include_str!`
@@ -100,3 +103,6 @@ mod packaging_field_contract;
 
 #[cfg(test)]
 mod settings_hotkey_contract;
+
+#[cfg(test)]
+mod module_visibility_contract;

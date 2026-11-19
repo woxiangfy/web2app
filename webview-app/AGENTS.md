@@ -15,8 +15,13 @@
    **单壳专属**：`tab_title.js` / `tab_keys.js` / `tab_doc_ready.js` / `dnd_polyfill.js`（WebView2/Tauri 注入，Electron 不消费）、
    `mobilebar/*.js`（仅 Tauri 移动端；5 个分片由 `lib.rs` 按序拼成同一个 IIFE）、`floaticon.html`（仅 Electron）。
    `src/{proxy.rs,resolve.rs}` 经 sidecar `#[path]` 同源复用 —— 改一必双壳验证。
-2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 324 通过 / 6 ignored）；`src/contract_tests/`（按领域 14 个子模块）
+2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 338 通过 / 6 ignored）；`src/contract_tests/`（按领域 15 个子模块）
    是静态契约守卫 —— 改 `capabilities/*.json` 或注入脚本的事件名会被它拦下。
+   ⚠️ **平台专属代码在桌面 CI 上有盲区**：`#[cfg(not(windows))]` 的调用点与定义在 Windows 上**一起消失**，
+   于是「跨模块引用私有 fn」能一路绿到 Android 打包才 `error[E0603]`（2026-11-19 真实事故）。
+   `contract_tests/module_visibility_contract.rs` 在 Windows 上按源码文本拦住这类问题；
+   但仍要以 `ci.yml` 的 `check-android`（`cargo ndk … build` + `clippy -D warnings`，Android 目标）为准 ——
+   **手工 `workflow_dispatch` 出包不会自动等它绿**，出包前先确认该作业通过。
 3. **配置是编译期常量**：所有运行期参数在 `src/config.rs` 由 `option_env!` 注入，**改完必须重新编译**；
    打包 workflow 通过环境变量注入。全文见 [docs/tauri-config.md](docs/tauri-config.md)。
    ⚠️ 例：`const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.0.1;<-loopback>")`
