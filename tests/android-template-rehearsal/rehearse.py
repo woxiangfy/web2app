@@ -263,5 +263,205 @@ def main() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 升级演练（--drill）：证明「上游升级不需要改这些脚本」
+# ---------------------------------------------------------------------------
+# 做法 = 对**真 wry 模板生成出来的 Kotlin** 施加 4 类「升级时真会发生的变化」，
+# 再看补丁链的结局是否符合预期：
+#
+#   1. reformat             缩进/注释被上游格式化改掉         → 三个补丁照样打上
+#   2. param_rename         override 的参数名被改名           → 照样打上（锚点只认类型）
+#   3. upstream_fullscreen  上游自己把全屏实现了              → 补丁自动退场（不报错、不覆盖）
+#   4. anchor_gone          上游把 shouldOverrideUrlLoading 删了 → 默认降级跳过；严格模式才红
+#   5. wry_file_renamed     wry 把 RustWebViewClient.kt 改名/挪位置 → 改它的两个补丁降级，
+#                          其余照打，且半成品方向安全（MainActivity 的 JS 桥仍完整）
+#
+# 为什么这比「等升级了再试」强：它把「升级免疫」变成每次 CI 都能复跑的断言。
+GLUE_STEPS = (
+    "patch-android-extras.py",
+    "patch-android-schemes.py",
+    "patch-android-fullscreen.py",
+)
+_ALL_STEPS = [s for s, _ in STEPS]
+_GLUE_AT = _ALL_STEPS.index(GLUE_STEPS[0])
+PRE_STEPS = _ALL_STEPS[:_GLUE_AT]
+POST_STEPS = _ALL_STEPS[_GLUE_AT + len(GLUE_STEPS):]
+
+
+def gen_dir(gen: pathlib.Path) -> pathlib.Path:
+    return gen / "app/src/main/java" / IDENT.replace(".", "/") / "generated"
+
+
+def method_span(src: str, name: str):
+    """按 `override fun <name>(` 定位并做花括号配对，返回 (start, end)。"""
+    m = re.search(rf"override\s+fun\s+{re.escape(name)}\s*\(", src)
+    if not m:
+        return None
+    brace = src.find("{", m.end())
+    if brace < 0:
+        return None
+    depth = 0
+    for j in range(brace, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return m.start(), j + 1
+    return None
+
+
+def _edit(path: pathlib.Path, fn) -> None:
+    src = path.read_text(encoding="utf-8")
+    path.write_text(fn(src), encoding="utf-8", newline="\n")
+
+
+def mutate_reformat(gen: pathlib.Path) -> None:
+    d = gen_dir(gen)
+    for f in ("RustWebViewClient.kt", "RustWebChromeClient.kt"):
+        def fn(src: str) -> str:
+            src = re.sub(r"(?m)^( +)", r"  \1", src)  # 缩进整体 +2（模拟上游重新格式化）
+            return re.sub(
+                r"(?m)^( *)override fun onShowCustomView",
+                r"\1// upstream refactor: 缩进与注释都可能变，锚点不能依赖它们\n\1override fun onShowCustomView",
+                src,
+                count=1,
+            )
+        _edit(d / f, fn)
+
+
+def mutate_param_rename(gen: pathlib.Path) -> None:
+    def fn(src: str) -> str:
+        span = method_span(src, "shouldOverrideUrlLoading")
+        assert span, "真模板里找不到 shouldOverrideUrlLoading"
+        a, b = span
+        body = re.sub(r"\bview\b", "w", src[a:b])
+        body = re.sub(r"\brequest\b", "req", body)
+        return src[:a] + body + src[b:]
+    _edit(gen_dir(gen) / "RustWebViewClient.kt", fn)
+
+
+def mutate_upstream_fullscreen(gen: pathlib.Path) -> None:
+    def fn(src: str) -> str:
+        span = method_span(src, "onShowCustomView")
+        assert span, "真模板里找不到 onShowCustomView"
+        a, b = span
+        head = src[a: src.index("{", a)]
+        body = (
+            "{\n"
+            "    val content = activity.findViewById<android.view.ViewGroup>(android.R.id.content)\n"
+            "    content.addView(view)\n"
+            "  }"
+        )
+        return src[:a] + head + body + src[b:]
+    _edit(gen_dir(gen) / "RustWebChromeClient.kt", fn)
+
+
+def mutate_wry_file_renamed(gen: pathlib.Path) -> None:
+    """模拟 wry 升级把胶水文件改名 / 挪位置（`find_kotlin_file` 找不到）。"""
+    d = gen_dir(gen)
+    (d / "RustWebViewClient.kt").rename(d / "RustWebViewClientImpl.kt")
+
+
+def mutate_anchor_gone(gen: pathlib.Path) -> None:
+    def fn(src: str) -> str:
+        span = method_span(src, "shouldOverrideUrlLoading")
+        assert span, "真模板里找不到 shouldOverrideUrlLoading"
+        return src[: span[0]] + src[span[1]:]
+    _edit(gen_dir(gen) / "RustWebViewClient.kt", fn)
+
+
+def glue_state(gen: pathlib.Path) -> dict:
+    """三个胶水补丁的落盘情况 + 两条「没把上游搞坏」的证据。
+
+    文件可能被上游改名（演练 `wry_file_renamed`）⇒ 读不到就当空串。
+    """
+    d = gen_dir(gen)
+
+    def read(p: pathlib.Path) -> str:
+        return p.read_text(encoding="utf-8") if p.is_file() else ""
+
+    client = read(d / "RustWebViewClient.kt")
+    chrome = read(d / "RustWebChromeClient.kt")
+    activity = read(gen / "app/src/main/java" / IDENT.replace(".", "/") / "MainActivity.kt")
+    return {
+        "extras": "web2app-android-bridge-key" in client,
+        "schemes": "web2app-android-external-scheme" in client,
+        "fullscreen": "web2app-android-fullscreen" in chrome,
+        # 上游实现必须原样留着（自动退场 ≠ 覆盖）
+        "upstream_kept": "content.addView(view)" in chrome,
+        "our_fullscreen": "web2appCustomView" in chrome,
+        # 半成品方向检查：client 降级时 MainActivity 的 JS 桥仍应完整（桥不反向依赖 client）
+        "activity_bridge": "__web2appAndroid" in activity,
+    }
+
+
+def drill() -> int:
+    cases = [
+        # name, 变异, 期望的补丁落盘状态（部分键）, 输出里必须出现的话
+        ("reformat", mutate_reformat,
+         {"extras": True, "schemes": True, "fullscreen": True}, None),
+        ("param_rename", mutate_param_rename,
+         {"extras": True, "schemes": True, "fullscreen": True}, None),
+        ("upstream_fullscreen", mutate_upstream_fullscreen,
+         {"fullscreen": False, "schemes": True,
+          "upstream_kept": True, "our_fullscreen": False}, "自动退场"),
+        ("anchor_gone", mutate_anchor_gone,
+         {"schemes": False, "extras": True, "fullscreen": True}, "降级跳过"),
+        # 上游改名/挪文件：两个改 client 的补丁降级，fullscreen 照打；
+        # 且已写盘的 MainActivity JS 桥保持完整（半成品方向必须是安全的）
+        ("wry_file_renamed", mutate_wry_file_renamed,
+         {"schemes": False, "extras": False, "fullscreen": True,
+          "activity_bridge": True}, "降级跳过"),
+    ]
+    bad = []
+    for name, mutate, expect, needle in cases:
+        gen = build_skeleton()
+        outputs = {}
+
+        def run(script_list, env_extra=None):
+            for script in script_list:
+                rc, out = run_step(script, env_extra or {})
+                outputs[script] = out
+                if rc != 0:
+                    bad.append(f"{name}: {script} rc={rc}")
+                    return False
+            return True
+
+        ok = run(PRE_STEPS)
+        mutate(gen)
+        ok = run(GLUE_STEPS) and ok
+        ok = run(POST_STEPS) and ok
+
+        state = glue_state(gen)
+        for key, want in expect.items():
+            if state[key] != want:
+                bad.append(f"{name}: {key} 期望 {want}，实际 {state[key]}")
+                ok = False
+        if needle:
+            blob = "\n".join(outputs.values())
+            if needle not in blob:
+                bad.append(f"{name}: 输出里没有「{needle}」")
+                ok = False
+
+        # anchor_gone 额外证明「严格模式才红」：门禁可以自己开，但默认不打断下游。
+        if name == "anchor_gone":
+            rc, _ = run_step("patch-android-schemes.py",
+                             {"W2A_ANDROID_PATCH_STRICT": "1"})
+            if rc == 0:
+                bad.append("anchor_gone: 严格模式必须让构建红")
+                ok = False
+
+        print(f"[{'OK ' if ok else 'FAIL'}] {name:<20} 落盘={state}")
+
+    if bad:
+        print("\n::error::升级演练失败：\n  " + "\n  ".join(bad))
+        return 1
+    print(f"\n升级演练通过 ✓（{len(cases)} 类上游变化下，补丁链无需改动脚本）")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--drill" in sys.argv[1:]:
+        sys.exit(drill())
     sys.exit(main())

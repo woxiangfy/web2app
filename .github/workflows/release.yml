@@ -417,9 +417,10 @@ jobs:
         # onHideCustomView，实现 custom view 铺满 + 锁横屏 + 沉浸式，退出逐项还原。
         run: python3 ../.github/scripts/patch-android-fullscreen.py
 
-      - name: 按需声明运行时权限（camera / microphone / location）
-        # 与 build-custom.yml 调用同一个脚本（含自测）：读 job 环境变量 ANDROID_PERMISSIONS
-        #（本 workflow 取自仓库变量，默认 []），按需向 AndroidManifest.xml 注入权限；空则跳过。
+      - name: 声明权限（恒需 INTERNET / ACCESS_NETWORK_STATE + 按需 camera/microphone/location）
+        # 与 build-custom.yml 调用同一个脚本（含自测）：恒需权限缺失才补（ACCESS_NETWORK_STATE
+        # 是 hickory 读系统 DNS 的前置条件，缺它启动期解析必失败）；可选权限读 job 环境变量
+        # ANDROID_PERMISSIONS（本 workflow 取自仓库变量，默认 []）按需注入。
         run: python3 ../.github/scripts/patch-android-permissions.py
 
       - name: Allow cleartext HTTP (local proxy + http sites)

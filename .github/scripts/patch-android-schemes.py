@@ -41,9 +41,11 @@ import re
 import sys
 
 from android_gen import (  # noqa: E402
+    AnchorDrift,
     find_kotlin_file,
     gen_root_candidates_str,
     resolve_gen_root,
+    run_guarded,
 )
 
 MARKER = "web2app-android-external-scheme"
@@ -148,7 +150,7 @@ def patch_src(src: str) -> str:
 
     m = OVERRIDE_FUN.search(src)
     if not m:
-        raise ValueError(
+        raise AnchorDrift(
             "未找到 wry 的 `override fun shouldOverrideUrlLoading(view: WebView, "
             "request: WebResourceRequest): Boolean`，模板可能已升级，请人工确认补丁注入点"
         )
@@ -355,4 +357,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-schemes.py", main))

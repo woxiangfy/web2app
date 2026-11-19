@@ -53,9 +53,18 @@ workflow 只调用它们，不各自内联（避免漂移）：
 | `patch-android-download.py` | 下载接管 + Manifest 权限 |
 | `patch-android-extras.py` | 更多面板 JS 原生桥 + 主框架密钥轮换 |
 | `patch-android-schemes.py` | 外部 scheme 外跳 |
-| `patch-android-fullscreen.py` | H5 视频全屏：整体替换 wry 0.57 空实现的 onShow/onHide |
-| `patch-android-permissions.py` | 按打包字段 `android_permissions` 按需声明相机/麦克风/定位权限 |
+| `patch-android-fullscreen.py` | H5 视频全屏：整体替换 wry 0.57 空实现的 onShow/onHide（上游实现后**自动退场**，不再报错） |
+| `patch-android-permissions.py` | 恒需权限（`INTERNET` / `ACCESS_NETWORK_STATE`，缺失才补、与打包配置无关）+ 按打包字段 `android_permissions` 按需声明相机/麦克风/定位 |
 | `install-android-ndk.sh` | NDK 版本单一真源 |
+
+> **改动边界**：哪些能改、哪些只能改一次、哪些该用自身代码实现 —— 见
+> [`docs/android-packaging-freeze.md`](../../docs/android-packaging-freeze.md)（三层模型 +
+> 产品输入面白名单 + 升级免疫机制 + L2 迁移路线）。本表只回答"哪个脚本干什么"。
+>
+> **升级时默认不用改脚本**：补丁锚点只认平台 override 签名（不认方法体原文）；锚点真没了
+> 就降级跳过（`::warning::` + exit 0，见 `android_gen.py` 的 `GUARDED_SCRIPTS`），
+> 上游自己实现了就自动退场（如 fullscreen）。想让漂移变门禁：`W2A_ANDROID_PATCH_STRICT=1`。
+> 证据：`python3 tests/android-template-rehearsal/rehearse.py --drill`。
 
 ⚠️ **补丁执行顺序以两份打包 workflow 的步骤为准**（workflow 是唯一权威，本文不再复述顺序，
 避免第二个真源）：`build-custom.yml` 与 `release.yml` 必须**同序**，顺序错位会让 Kotlin 模板 /
@@ -66,7 +75,9 @@ insets → back → download → extras → schemes → fullscreen → permissio
 根因与排障见 `docs/changes/2026-10-15.md`）。
 download 复用 back 新建的 `onWebViewCreate` override 只插一行；extras 排在 download
 调用之后，改 client 的 onPageFinished，与改 shouldOverride 的 schemes 互不耦合；
-fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6。
+fullscreen/permissions 详见 `docs/android-improvements.md` #5/#6/#21。
+⚠️ permissions 脚本**不是「空数组就整步跳过」**：`ACCESS_NETWORK_STATE` 是 hickory 经 JNI 读
+系统 DNS 的前置权限，恒声明（2026-11-19 缺它 ⇒ 启动期「解析目标地址失败」整页失败）。
 工程根解析走 `android_gen.py`（CI 的 cwd 是 `webview-app/`，故首选 `gen/android`）。
 
 ⚠️ **「脚本有没有被接线」由目录派生，不靠名单**（`contract_tests/android_pipeline_contract.rs` ⑧）：
@@ -219,6 +230,31 @@ v1.63 把现场**拼进**了卡片，但「拼进去」≠「看得见」——�
 6. **仍复现时怎么取证**：`adb logcat -b crash -d`（进程死亡原因）+ 
    `adb logcat -d | grep -iE "panic|AndroidRuntime|libweb2app"`；「白屏但不退出」= 只剩 UI 冻结，
    继续找别处同一形态。
+
+### 2026-11-19 域名数组包启动即「解析目标地址失败」（缺 `ACCESS_NETWORK_STATE`）
+
+1. **现象**：`app_url` 为域名数组的包，打开就停在失败卡，正文是
+   `解析目标地址失败：读取系统 DNS 配置失败：JNI call error: Caught Java exception:
+   ConnectivityService: Neither user 10358 nor current process has
+   android.permission.ACCESS_NETWORK_STATE`。字符串 `app_url` 的包完全正常。
+2. **机制**：`resolve.rs` 走 `hickory_resolver::system_conf::read_system_conf()`；该 crate 在
+   Android 的实现是 JNI 调 `ConnectivityManager.getActiveNetwork()` / `getLinkProperties()` /
+   `LinkProperties.getDnsServers()` 取 DNS 服务器（`hickory-resolver-0.26.1/src/system_conf/android.rs`），
+   这三个接口受 `ACCESS_NETWORK_STATE` 保护 ⇒ 未声明时抛 `SecurityException`，整轮解析直接失败。
+   `patch-android-permissions.py` 当时是「`android_permissions` 为空就整步跳过」，默认空数组 ⇒
+   Manifest 里从来没有这条权限。
+3. **修法（两处，已落地）**：
+   - 打包侧：`patch-android-permissions.py` 增加**恒需权限块**（`INTERNET` + `ACCESS_NETWORK_STATE`，
+     缺失才补、与打包配置无关，独立 marker `web2app-android-required`）；
+   - 运行期：`resolve.rs::build_resolver()` 读系统配置失败**不再判死**，改用 `fallback_config()`
+     （阿里 223.5.5.5 / DNSPod 119.29.29.29）继续查，日志留一行
+     `读取系统 DNS 配置失败（…），改用内置公共 DNS 兜底`。
+4. **判读要点**：正文出现 `JNI call error` + `permission.` ⇒ 一定是 Manifest 缺权限，不是网络问题；
+   此时连「域名不存在 / TXT 不对」都还没轮到。先看 `adb shell dumpsys package <pkg> | grep -i permission`
+   确认 `ACCESS_NETWORK_STATE` 是否在清单里。
+5. **通用纪律**：**谁在 Rust 侧读系统资源，谁就要核对 Android Manifest 权限**（hickory →
+   `ACCESS_NETWORK_STATE`；未来换解析库同理）。`android_permissions` 只表达「可选能力」，
+   恒需权限一律进恒需块，不借道打包配置。
 
 ## 数据存在哪 / 包名 / tauri.conf 字段
 

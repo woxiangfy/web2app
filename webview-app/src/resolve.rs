@@ -14,12 +14,17 @@
 //! 往本文件里加 `use tauri::...` 会立刻编译不过 —— 这是有意的护栏。
 
 use std::future::Future;
+use std::net::IpAddr;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::proto::rr::Name;
 use hickory_resolver::system_conf::read_system_conf;
 use hickory_resolver::Resolver;
+
+/// 内置兜底 DNS（系统配置读不到时使用）。序号即优先顺序，两个都查不出才算失败。
+const FALLBACK_DNS: [&str; 2] = ["223.5.5.5", "119.29.29.29"];
 
 // 从 resolve-core 复用纯加密核心，并向上层 re-export 关键 API。
 pub use resolve_core::{
@@ -64,11 +69,39 @@ fn lookup_name(domain: &str) -> Result<Name, String> {
 /// 原来的实现每查一个域名都重建 Resolver（重新读系统配置、重建内部 reactor），
 /// 既浪费又无法共享连接池；这里改为只建一次，多个域名共享同一个实例。
 fn build_resolver() -> Result<Resolver<TokioRuntimeProvider>, String> {
-    // 读取系统 DNS 配置（/etc/resolv.conf 或 Windows 注册表）。
-    let (config, _opts) = read_system_conf().map_err(|e| format!("读取系统 DNS 配置失败：{e}"))?;
+    // 读取系统 DNS 配置（/etc/resolv.conf、Windows 注册表、Android 的 ConnectivityManager）。
+    //
+    // ⚠️ 读不到**不再直接判死**：Android 侧 hickory 的 `read_system_conf()` 是 JNI 调
+    // `ConnectivityManager.getActiveNetwork()`（受 ACCESS_NETWORK_STATE 保护），Manifest 少一条
+    // 声明、或飞行模式 / 某些 VPN 下拿不到 LinkProperties，都会抛异常 ⇒ 整轮解析失败、启动页
+    // 直接「加载失败」（2026-11-19 真机复现，日志形如
+    // `JNI call error: Caught Java exception: ConnectivityService: Neither user N nor current
+    // process has android.permission.ACCESS_NETWORK_STATE`）。权限已由
+    // `.github/scripts/patch-android-permissions.py` 恒注入；这里是第二道保险 ——
+    // 「读不到系统 DNS 配置」不等于「网络不通」，换内置公共 DNS 继续查比原地报错合理。
+    let (config, _opts) = match read_system_conf() {
+        Ok(pair) => pair,
+        Err(e) => {
+            dlog!("[resolve] 读取系统 DNS 配置失败（{e}），改用内置公共 DNS 兜底");
+            (fallback_config(), Default::default())
+        }
+    };
     Resolver::builder_with_config(config, TokioRuntimeProvider::default())
         .build()
         .map_err(|e| format!("初始化 DNS 解析器失败：{e}"))
+}
+
+/// 系统 DNS 配置读取失败时的兜底解析器配置：阿里 DNS + DNSPod（两家不同厂商互为备份）。
+///
+/// 只用 UDP+TCP 明文查询：TXT 记录本身不含敏感信息（密文 + 签名），真正的内容保护在
+/// Ed25519 验签 + AES-256-GCM 解密的 `resolve-core` 里，不依赖传输层加密。
+fn fallback_config() -> ResolverConfig {
+    let name_servers = FALLBACK_DNS
+        .iter()
+        .filter_map(|ip| ip.parse::<IpAddr>().ok())
+        .map(NameServerConfig::udp_and_tcp)
+        .collect();
+    ResolverConfig::from_parts(None, Vec::new(), name_servers)
 }
 
 /// 用给定的 Resolver 查询一个域名的【所有】 TXT 记录。
@@ -264,6 +297,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(url, "https://www.baidu.com/");
+    }
+
+    /// 兜底 DNS 配置可用：内置地址都能解析成 IP，且全部登记为 name server。
+    ///
+    /// 这条断言钉的是「读取系统 DNS 配置失败仍能继续查」的失败链 —— 若把
+    /// `FALLBACK_DNS` 写成非法 IP 或 `filter_map` 静默吞掉，兜底就成了空配置
+    /// （hickory 会在建 Resolver 时才报错，用户侧又是一个无解的「加载失败」）。
+    #[test]
+    fn fallback_config_registers_all_builtin_dns() {
+        let config = fallback_config();
+        let servers = config.name_servers();
+        assert_eq!(servers.len(), FALLBACK_DNS.len(), "兜底 DNS 条数不符");
+        for (server, expected) in servers.iter().zip(FALLBACK_DNS) {
+            assert_eq!(server.ip.to_string(), expected, "兜底 DNS 地址被改写");
+        }
+        assert!(config.domain().is_none(), "兜底配置不应带默认搜索域");
     }
 
     // ---- 纯逻辑单测（不依赖 DNS）----

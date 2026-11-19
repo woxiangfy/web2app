@@ -35,10 +35,12 @@ import tempfile
 # 工程根解析走 android_gen（单一真源）；见该模块头部关于 2026-10-13
 # 「android job 静默中断」缺陷的完整说明。此处 re-export 供自测/调用点直接引用。
 from android_gen import (  # noqa: E402
+    AnchorDrift,
     GEN_ROOT_CANDIDATES,
     find_main_activity,
     gen_root_candidates_str,
     resolve_gen_root,
+    run_guarded,
 )
 
 # 幂等标记：已打过补丁的文件不再重复注入。
@@ -129,7 +131,7 @@ def patch_src(src: str) -> str:
 
     m = CLASS_LINE.search(src)
     if not m:
-        raise ValueError("未找到 `class MainActivity ... {{` 声明行，模板可能已变化，请人工确认")
+        raise AnchorDrift("未找到 `class MainActivity ... {{` 声明行，模板可能已变化，请人工确认")
 
     # 1) 补 import：插到最后一条 import 之后；没有 import 就插在 package 行之后。
     missing = [imp for imp in NEEDED_IMPORTS if imp not in src]
@@ -326,4 +328,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-back.py", main))

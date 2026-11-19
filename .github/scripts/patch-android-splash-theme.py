@@ -49,10 +49,12 @@ import sys
 import tempfile
 
 from android_gen import (  # noqa: E402
+    AnchorDrift,
     android_manifest,
     gen_root_candidates_str,
     res_dir,
     resolve_gen_root,
+    run_guarded,
 )
 
 # 幂等标记（写在两个颜色资源文件头部；主题 item 靠「值相等」天然幂等）。
@@ -91,16 +93,16 @@ def pick_theme(manifest_src: str) -> str:
     """从 Manifest 取应用主题的 **style 名**；框架主题改不了，显式报错。"""
     m = MANIFEST_THEME.search(manifest_src)
     if not m:
-        raise ValueError("AndroidManifest.xml 没有 android:theme —— 模板可能已变化")
+        raise AnchorDrift("AndroidManifest.xml 没有 android:theme —— 模板可能已变化")
     value = m.group(1).strip()
     if STYLE_REF_FRAMEWORK.match(value):
-        raise ValueError(
+        raise AnchorDrift(
             f"Manifest 用的是框架主题 {value}，无法在其上追加 item；"
             "需要模板改成自定义 @style/..."
         )
     ref = STYLE_REF.match(value)
     if not ref:
-        raise ValueError(f"无法识别的主题引用：{value}（期望 @style/名字）")
+        raise AnchorDrift(f"无法识别的主题引用：{value}（期望 @style/名字）")
     return ref.group(1)
 
 
@@ -135,8 +137,8 @@ def patch_style_src(src: str, style_name: str) -> str:
 
     # 自闭合 `<style name="X" />`：没有可插 item 的位置。
     if re.search(r'<style\s+name\s*=\s*"' + re.escape(style_name) + r'"[^>]*/>', src):
-        raise ValueError(f"{style_name} 是自闭合 <style/>，无法追加 item")
-    raise ValueError(f"在资源文件里找不到 <style name=\"{style_name}\">")
+        raise AnchorDrift(f"{style_name} 是自闭合 <style/>，无法追加 item")
+    raise AnchorDrift(f"在资源文件里找不到 <style name=\"{style_name}\">")
 
 
 def find_style_file(values_dir: pathlib.Path, style_name: str) -> pathlib.Path:
@@ -148,9 +150,9 @@ def find_style_file(values_dir: pathlib.Path, style_name: str) -> pathlib.Path:
         text = p.read_text(encoding="utf-8", errors="replace")
         if re.search(r'<style\s+name\s*=\s*"' + re.escape(style_name) + r'"', text):
             return p
-    raise FileNotFoundError(
+    raise AnchorDrift(
         f"{values_dir}/*.xml 里没有 <style name=\"{style_name}\"> —— "
-        "若 tauri 模板改了主题组织方式，需要更新本脚本"
+        "tauri 模板可能改了主题组织方式（只影响启动首帧底色，故降级而非中断）"
     )
 
 
@@ -362,4 +364,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-splash-theme.py", main))

@@ -537,12 +537,14 @@ jobs:
         # 低版本 systemUiVisibility），退出时逐项还原。
         run: python3 ../.github/scripts/patch-android-fullscreen.py
 
-      - name: 按需声明运行时权限（camera / microphone / location）
-        # 逻辑（含自测）见 .github/scripts/patch-android-permissions.py：打包配置的
-        # android_permissions 白名单数组经解析器落 GITHUB_ENV（ANDROID_PERMISSIONS，
-        # 默认 []），本步据此向 AndroidManifest.xml 注入 <uses-permission>；空数组直接跳过。
-        # 未声明时 wry 对 getUserMedia（摄像头/麦克风）/ geolocation 一律 deny
-        #（连运行时授权弹窗都不会弹）；运行时申请弹窗本身 wry 已实现，这里只补 Manifest。
+      - name: 声明权限（恒需 INTERNET / ACCESS_NETWORK_STATE + 按需 camera/microphone/location）
+        # 逻辑（含自测）见 .github/scripts/patch-android-permissions.py。两段语义：
+        # ① 恒需权限（与打包配置无关，缺失才补）：INTERNET 模板自带；ACCESS_NETWORK_STATE
+        #    是 hickory 读取系统 DNS 的前置条件 —— 缺它 JNI 抛 SecurityException，
+        #    启动期「解析目标地址」整页失败（2026-11-19 安卓真机复现）。
+        # ② 可选权限：打包配置的 android_permissions 白名单数组经解析器落 GITHUB_ENV
+        #    （ANDROID_PERMISSIONS，默认 []），据此注入 camera/microphone/location。
+        #    未声明时 wry 对 getUserMedia / geolocation 一律 deny（连弹窗都不会弹）。
         run: python3 ../.github/scripts/patch-android-permissions.py
 
       - name: Allow cleartext HTTP (local proxy + http sites)

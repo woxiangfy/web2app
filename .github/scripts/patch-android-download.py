@@ -51,10 +51,12 @@ import re
 import sys
 
 from android_gen import (  # noqa: E402
+    AnchorDrift,
     android_manifest,
     find_main_activity,
     gen_root_candidates_str,
     resolve_gen_root,
+    run_guarded,
 )
 
 # 幂等标记：已打过补丁的文件不再重复注入。
@@ -149,7 +151,7 @@ def _class_closing_brace(src: str, class_match: re.Match[str]) -> int:
             if depth == 0:
                 return i
         i += 1
-    raise ValueError("MainActivity 类体花括号不配对，模板可能已变化，请人工确认")
+    raise AnchorDrift("MainActivity 类体花括号不配对，模板可能已变化，请人工确认")
 
 
 # 监听挂接（方法体里唯一的一行调用；单独成行，便于「已存在 override」场景注入）。
@@ -237,7 +239,7 @@ def patch_activity_src(src: str) -> str:
 
     class_m = CLASS_LINE.search(src)
     if not class_m:
-        raise ValueError("未找到 `class MainActivity ... {` 声明行，模板可能已变化，请人工确认")
+        raise AnchorDrift("未找到 `class MainActivity ... {` 声明行，模板可能已变化，请人工确认")
 
     existing = ON_WEBVIEW_CREATE.search(src)
     if existing:
@@ -271,7 +273,7 @@ def patch_manifest_src(src: str) -> str:
         return src
     idx = src.rfind("</manifest>")
     if idx < 0:
-        raise ValueError("AndroidManifest.xml 中未找到 </manifest>，模板可能已变化")
+        raise AnchorDrift("AndroidManifest.xml 中未找到 </manifest>，模板可能已变化")
     return src[:idx] + PERMISSION_BLOCK + src[idx:]
 
 
@@ -445,4 +447,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-download.py", main))

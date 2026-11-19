@@ -18,7 +18,7 @@ webview-app/
 │   ├── lib.rs              # Tauri 应用装配：建窗 / 托盘 / 快捷键 / 命令注册（按平台 cfg 隔离）
 │   ├── contract_tests/     # 静态契约测试（2026-10-25 按领域拆为 14 个子模块：IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 页签首页 / 加载层模式标记 / 启动可见性 / 后退守卫 / Android 管线（**目录派生**：脚本发现 + 双 workflow 真实调用与同序 + ci 循环非空）/ 悬浮球 / 启动日志归属 / 移动端底栏与打包字段 / 设置页快捷键；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
-│   ├── nav.rs              # 导航 / 窗口会话登记数据枢纽（Navigation / BootReady / label 登记 / 导航原语；功能模块一律 → nav）
+│   ├── nav.rs              # 导航 / 窗口会话登记数据枢纽（Navigation / BootReady / label 登记 / 导航原语含弹窗落点改写 resolve_popup_target —— 桌面 tabs 与 Android mobilebar 共用；功能模块一律 → nav）
 │   ├── bootstrap.rs        # 启动编排（后台解析真实地址 → 就绪后导航；对外入口经 nav 的 boot 回调转发；Android 可达性探测已拆到 probe.rs）
 │   ├── probe.rs            # 非 Windows 导航后可达性探测（reqwest 探上游 → 失败分类/成功结论推给加载层；`any(not(windows), test)` 编译）
 │   ├── proxy.rs            # 本地反向代理根（ProxyState / start_proxy / proxy_handler）；子模块 proxy/{auth,ws,headers,tests}.rs（声明带显式 #[path]，sidecar 同源复用）
@@ -40,7 +40,8 @@ webview-app/
 │   ├── shell.html          # 多页签外壳（标签栏）
 │   ├── floaticon.html      # 悬浮球页面（⚠️ v1.81 起 **Electron 专属**：Tauri 球已原生化不加载页面，见 ../AGENTS.md §3.4.1）
 │   ├── titlebar.js         # 自绘标题栏注入脚本（Windows）
-│   ├── mobilebar/          # 移动端底栏注入脚本（5 个分片由 lib.rs 按序拼成同一 IIFE；仅移动端）
+│   ├── mobilebar.rs        # 移动多页签 + 底栏装配（纯状态机 / 事件入口 / 导航判定；`#[cfg(any(mobile, test))]`）；单测外置到 mobilebar/tests.rs（`#[path]` 挂载，2026-11-19 P-R5）
+│   ├── mobilebar/          # 移动端底栏注入脚本（5 个 js 分片由 lib.rs 按序拼成同一 IIFE；仅移动端）+ tests.rs（mobilebar.rs 的单测）
 │   │   ├── core.js         # 底座：配置/常量/样式/共享状态/底栏本体/面板宿主
 │   │   ├── bottom_space.js # 底部空间契约（让位/贴底元素上移/100vh 缩高）
 │   │   ├── tabs.js         # 页签能力（面板/文档 url·标题上报/_blank 拦截）
@@ -143,6 +144,9 @@ Windows 侧另有代理与钩子的专属测试，`ci.yml` 的 Windows 作业也
 - **全局快捷键没反应**：先在设置页（Shift+F1）确认唤醒快捷键**已配置**（默认不启用）；若已配置，
   再排查是否与其他软件冲突（代码只在「按下」那一刻触发）。
 - **Android 上访问 http 本地代理被拦**：移动端已配置 `INTERNET` 权限并允许 localhost 明文，正常可用。
+- **Android 失败卡正文含 `JNI call error` / `android.permission.`**：Manifest 缺恒需权限（历史包缺
+  `ACCESS_NETWORK_STATE` ⇒ hickory 读不到系统 DNS），**不是网络问题**，重建包即可；判读与修法见
+  [android.md](android.md)「2026-11-19 域名数组包启动即『解析目标地址失败』」。
 - **Android 打开后转圈十几秒 → 白屏 / 失败卡**：**不能直接断定是设备网络不通**。失败卡自带「现场诊断」，分层定位、
   v1.62–v1.65 的启动期排障史与全部判读表见 [android.md](android.md)「启动问题排障史」。
 - **Android 端应用的数据存在哪 / 包名规则 / `tauri.conf.json` 字段限制**：见 [android.md](android.md)。

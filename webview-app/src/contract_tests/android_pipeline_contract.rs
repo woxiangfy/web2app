@@ -450,3 +450,99 @@ fn splash_theme_colors_match_splash_html() {
         );
     }
 }
+
+/// 抽样一行里所有「大写常量形态」的字符串字面量（`"ANDROID_PERMISSIONS"` → 该键）。
+///
+/// 只认 `"` 包裹、全部由 `A-Z0-9_` 组成、首字符是字母、长度 ≥ 3 的片段：补丁脚本读环境变量
+/// 一律是 `os.environ.get("X")` / `os.environ["X"]`，这样扫足够；换个写法导致扫不到时，
+/// 下面的「产品输入必须都被用到」断言会亮红灯，不会静默放过。
+fn upper_quoted_keys(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for seg in line.split('"').skip(1).step_by(2) {
+        let ok = seg.len() >= 3
+            && seg
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if ok {
+            out.push(seg.to_string());
+        }
+    }
+    out
+}
+
+/// ⑨ **Android 打包脚本的「产品输入面」冻结**（2026-11-19，见 `docs/android-packaging-freeze.md`）。
+///
+/// 为什么钉这个：这套打包链是下游项目的参照实现，**每多一个随打包配置变化的输入，下游就多
+/// 一处必须跟着改**。所以输入面只允许四个产品字段：`app_name` / `title` / `version` /
+/// `android_permissions`；其余只允许基础设施变量。
+///
+/// 反例（本条要拦的）：为某个功能往补丁脚本里加 `os.environ.get("THEME_COLOR")` ——
+/// 那一刻打包逻辑就开始按「业务」演化了，下游也得跟着加。碰到这种情况先回到
+/// 冻结文档 §5 的四种情形里对号；不是 L0/L1/L2 的，一律走自身代码。
+#[test]
+fn android_packaging_product_inputs_are_frozen() {
+    const PRODUCT: &[&str] = &["APP_NAME", "TITLE", "VERSION", "ANDROID_PERMISSIONS"];
+    const INFRA: &[&str] = &[
+        "CONFIG_JSON",
+        "CONFIG_URL",
+        "GITHUB_ENV",
+        "GITHUB_WORKSPACE",
+        "RUNNER_TEMP",
+        "WRY_SRC_DIR",
+        "W2A_SKIP_GRADLE_PATCH",
+        // 漂移策略开关（默认关 = 降级跳过；开 = 当门禁）。属于基础设施变量，
+        // 不是产品输入：它只决定「补丁打不上时怎么办」，不改任何打进包里的内容。
+        "W2A_ANDROID_PATCH_STRICT",
+        "USERPROFILE",
+        "PATH",
+    ];
+    // 配置解析器是输入面本身的入口（读 CONFIG_JSON / CONFIG_URL 是它的职责）；
+    // check-workflows.py 是 CI 自身的控制流检查，不改生成工程。
+    const EXEMPT: &[&str] = &["parse-packaging-config.py", "check-workflows.py"];
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut seen_product: Vec<&str> = Vec::new();
+
+    for (name, src) in python_scripts() {
+        if EXEMPT.contains(&name.as_str()) {
+            continue;
+        }
+        for (idx, line) in src.lines().enumerate() {
+            // Python 的行注释是 `#`（`mod.rs::strip_line_comments` 切的是 JS 的 `//`，不能复用）。
+            // 先剥注释再看是否读环境变量：注释里写 `os.environ.get("XXX")` 不该触发守卫。
+            let code = line.split('#').next().unwrap_or("");
+            if !code.contains("environ") {
+                continue;
+            }
+            for key in upper_quoted_keys(code) {
+                if let Some(p) = PRODUCT.iter().find(|p| **p == key) {
+                    if !seen_product.contains(p) {
+                        seen_product.push(p);
+                    }
+                } else if !INFRA.contains(&key.as_str()) {
+                    violations.push(format!("{name}:{} 读取了未登记的环境变量 {key}", idx + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Android 打包脚本出现未登记的输入（先读 docs/android-packaging-freeze.md §5，\
+         再决定它是不是产品输入）：\n{}",
+        violations.join("\n")
+    );
+
+    // 自校验：四个产品输入必须真的被扫到，否则说明扫描方式已与脚本写法脱节（假绿）。
+    for key in PRODUCT {
+        assert!(
+            seen_product.contains(key),
+            "白名单里的 {key} 一个都没扫到 —— 环境变量读取方式变了，本条守卫已失效"
+        );
+    }
+}

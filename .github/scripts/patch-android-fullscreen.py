@@ -30,6 +30,11 @@ onCustomViewHidden() 仍会立刻取消）：
 insets → back → download → extras → schemes → fullscreen → permissions → cleartext → splash-theme。
 fullscreen 只改 RustWebChromeClient.kt，与只改 Manifest 的 permissions 补丁互不冲突。
 
+**升级免疫**（见 docs/android-packaging-freeze.md §6）：锚点只认平台签名
+（`override fun onShowCustomView(` + 花括号配对），不看方法体原文；万一上游自己实现了全屏
+（体内已无 `onCustomViewHidden()`），本脚本**自动退场**（原样返回 + 提示可删），不报错、不覆盖。
+锚点真的消失时走 `run_guarded()`：默认 `::warning::` + exit 0，`W2A_ANDROID_PATCH_STRICT=1` 才红。
+
 gen/android 每次构建现生成，两个 workflow（build-custom.yml / release.yml）
 都必须在 init 之后调用本脚本。
 
@@ -46,9 +51,11 @@ import re
 import sys
 
 from android_gen import (  # noqa: E402
+    AnchorDrift,
     find_kotlin_file,
     gen_root_candidates_str,
     resolve_gen_root,
+    run_guarded,
 )
 
 # 幂等标记：已打过补丁的文件不再重复注入。
@@ -213,7 +220,7 @@ def _block_end(src: str, open_brace: int) -> int:
             if depth == 0:
                 return i
         i += 1
-    raise ValueError("方法体花括号不配对，模板可能已变化，请人工确认")
+    raise AnchorDrift("方法体花括号不配对，模板可能已变化，请人工确认")
 
 
 def patch_chrome_client_src(src: str) -> str:
@@ -223,24 +230,24 @@ def patch_chrome_client_src(src: str) -> str:
 
     show = ON_SHOW.search(src)
     if not show:
-        raise ValueError(
+        raise AnchorDrift(
             "未找到 onShowCustomView(view: View, callback: CustomViewCallback) 签名，"
             "wry 模板可能已升级，请人工确认全屏回调形态后更新本补丁"
         )
     show_brace = src.index("{", show.end() - 1)
     show_end = _block_end(src, show_brace)
     show_body = src[show_brace + 1 : show_end]
-    # 漂移保险：只有 wry 的「立即取消」桩实现才允许整段替换。上游若哪天实现了真全屏，
-    # 这里直接报错让人重新评估，而不是静默把上游实现换成我们的。
+    # 上游已实现 ⇒ 本补丁**自动退场**（不是报错、也不是把上游实现换掉）：
+    # 只有 wry 的「立即取消」桩实现才需要替换。这条让「wry 修好全屏」这件事
+    # 变成升级后无需改脚本 —— 脚本自己发现无事可做。
     if "onCustomViewHidden()" not in show_body:
-        raise ValueError(
-            "onShowCustomView 已不是 wry 0.57 的「立即取消」空实现（体内无 onCustomViewHidden），"
-            "模板可能已自带全屏逻辑，请人工确认后更新本补丁"
-        )
+        print("上游 RustWebChromeClient 已不是「立即取消」桩实现（体内无 onCustomViewHidden）"
+              "⇒ 视为上游已实现全屏，本补丁自动退场（可择机删除 patch-android-fullscreen.py）")
+        return src
 
     hide = ON_HIDE.search(src, show_end)
     if not hide:
-        raise ValueError(
+        raise AnchorDrift(
             "未找到 onHideCustomView() 签名，wry 模板可能已升级，请人工确认后更新本补丁"
         )
     hide_brace = src.index("{", hide.end() - 1)
@@ -367,18 +374,16 @@ def selftest() -> int:
     except ValueError:
         pass
 
-    # 5) 模板漂移：上游已实现真全屏（体内无 onCustomViewHidden）→ 报错，不静默替换
+    # 5) 上游已实现真全屏（体内无 onCustomViewHidden）→ **自动退场**：原样返回、不报错、
+    #    也不把上游实现换掉。这条让「wry 修好全屏」不再需要改脚本（升级免疫）。
     drifted = PRISTINE.replace(
         "    callback.onCustomViewHidden()\n"
         "    super.onShowCustomView(view, callback)\n",
         "    val content = activity.findViewById<ViewGroup>(android.R.id.content)\n"
         "    content.addView(view)\n",
     )
-    try:
-        patch_chrome_client_src(drifted)
-        raise AssertionError("非桩实现应触发漂移报错")
-    except ValueError as e:
-        assert "立即取消" in str(e)
+    assert patch_chrome_client_src(drifted) == drifted, "上游已实现时必须原样返回（自动退场）"
+    assert MARKER not in patch_chrome_client_src(drifted)
 
     # 6) 文件级集成：临时 gen/android 深包名目录，经 find_kotlin_file 走一遍
     import tempfile
@@ -418,7 +423,10 @@ def main() -> int:
     src = target.read_text(encoding="utf-8")
     patched = patch_chrome_client_src(src)
     if patched == src:
-        print(f"{target} 已包含全屏回调实现，跳过")
+        if MARKER in src:
+            print(f"{target} 已包含本补丁的全屏实现，跳过")
+        else:
+            print(f"{target} 未改写：上游已是真实现（本补丁自动退场）")
     else:
         target.write_text(patched, encoding="utf-8", newline="\n")
         print(f"已给 {target} 注入 H5 全屏实现（custom view 铺满 + 横屏 + 沉浸式）")
@@ -431,4 +439,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-fullscreen.py", main))

@@ -8,7 +8,7 @@
 //!   · `loading_mode_contract` —— 加载层模式标记必须在 OVERLAY_SCRIPT 之前注册（跨平台）；
 //!   · `startup_visibility_contract` —— 启动可见性 / Android 首屏等待与重试；
 //!   · `back_navigation_guard_contract` —— 标题栏后退落点守卫（含 Android 补丁链）；
-//!   · `android_pipeline_contract` —— CI workflow 与 Android 补丁脚本管线契约；
+//!   · `android_pipeline_contract` —— CI workflow 与 Android 补丁脚本管线契约（含打包输入面冻结）；
 //!   · `float_window_contract` —— 悬浮球全套行为与逐像素 alpha（Windows）；
 //!   · `startup_log_placement_contract` —— 启动信息实现只允许住在 debug_log.rs（架构审查 P1-1）；
 //!   · `mobile_bar_contract` —— 移动端底栏 + 打包配置字段语义（含 Android 补丁接线）；

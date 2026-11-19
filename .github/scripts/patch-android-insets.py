@@ -23,7 +23,14 @@ import argparse
 import re
 import sys
 
-from android_gen import app_gradle, find_main_activity, gen_root_candidates_str, resolve_gen_root
+from android_gen import (
+    AnchorDrift,
+    app_gradle,
+    find_main_activity,
+    gen_root_candidates_str,
+    resolve_gen_root,
+    run_guarded,
+)
 
 # 幂等标记：模板改过或已注入过时不再重复注入（模板自带时也会命中这个判据）。
 IDEMPOTENT_NEEDLE = "setOnApplyWindowInsetsListener"
@@ -83,7 +90,7 @@ def patch_src(src: str, is_kotlin: bool) -> str:
 
     # 2) 在 super.onCreate(...) 之后注入监听
     if not SUPER_ONCREATE.search(src):
-        raise ValueError("MainActivity 中未找到 super.onCreate 调用，模板可能已变化，请人工确认")
+        raise AnchorDrift("MainActivity 中未找到 super.onCreate 调用，模板可能已变化，请人工确认")
     return SUPER_ONCREATE.sub(lambda m: m.group(0) + "\n" + inset_listener(is_kotlin), src, count=1)
 
 
@@ -112,7 +119,7 @@ def main() -> int:
     if out == src:
         print("MainActivity 已包含系统栏适配，跳过改写")
     else:
-        f.write_text(out, encoding="utf-8")
+        f.write_text(out, encoding="utf-8", newline="\n")
         print(f"已改写 {f}（内容视图按系统栏 insets 内缩，避免顶部通栏遮挡）")
 
     g = app_gradle(gen_root)
@@ -120,7 +127,7 @@ def main() -> int:
         t = g.read_text(encoding="utf-8")
         t2 = ensure_androidx_core(t)
         if t2 != t:
-            g.write_text(t2, encoding="utf-8")
+            g.write_text(t2, encoding="utf-8", newline="\n")
             print(f"{g.name} 已补充 androidx.core 依赖")
         else:
             print(f"{g.name} 已含 androidx.core/appcompat 依赖")
@@ -199,4 +206,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-insets.py", main))

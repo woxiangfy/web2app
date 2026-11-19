@@ -47,6 +47,10 @@
 
 ## 1. 总映射矩阵
 
+> ⚠️ **改本文件任何一项之前先读 [`android-packaging-freeze.md`](android-packaging-freeze.md)**：
+> 打包链是下游项目的参照实现，只有 L0 恒需常量 / L1 可选能力 / L2 版本适配三类变化被允许；
+> 产品输入面（`APP_NAME` / `TITLE` / `VERSION` / `ANDROID_PERMISSIONS`）已被契约测试 ⑨ 冻结。
+
 | # | 优先级 | 事项 | 状态 | 落地位置 |
 | --- | --- | --- | --- | --- |
 | 1 | P0 | 文件下载接管（DownloadManager + 长按存图） | ✅ 已实施（2026-10-14） | `patch-android-download.py` |
@@ -69,6 +73,7 @@
 | 18 | 兼容 | 明文流量放行：本地代理与 http 站点直连均可用（networkSecurityConfig） | ✅ 已实施（2026-11-14；收紧后当日回退） | `patch-android-cleartext.py`（替代 workflow 内 sed） |
 | 19 | 分发 | 增加 x86_64 / universal APK；评估 AAB | ❌ 不做（2026-11-14 决策，理由见 §5） | — |
 | 20 | 流程 | 真机能力验收清单入回归（见 §4） | 进行中（本文件 §4 即清单） | 每次打包后人工执行 |
+| 21 | P0 | 恒需 `ACCESS_NETWORK_STATE`：hickory 读系统 DNS 走 JNI `getActiveNetwork()`，缺权限 ⇒ 启动期「解析目标地址失败」整页失败 | ✅ 已实施（2026-11-19） | `patch-android-permissions.py` 恒需块 + `src/resolve.rs::fallback_config` 兜底 |
 
 状态取值：待办 / 进行中 / ✅ 已实施（日期）/ ❌ 不做（日期 + 理由见 §5）。
 
@@ -362,7 +367,10 @@ wry 升级会改变下列行为（项目已有升级后行为漂移的先例）�
 13. 明文直连（#18）：直接打开 `http://` 目标站点能正常渲染，**不得**出现
     `ERR_CLEARTEXT_NOT_PERMITTED`；同一次运行里代理模式（`127.0.0.1`）仍可用；
 14. 启动底色（#13）：系统切深色后冷启动，**首帧就应是深色**（`#14181f`），不得先闪一下浅色；
-    切回浅色同样（`#f7f8fa`）；启动页自身颜色与之一致（无撕裂边界）。
+    切回浅色同样（`#f7f8fa`）；启动页自身颜色与之一致（无撕裂边界）；
+15. 动态解析包（`app_url` 为域名数组，#21）：冷启动能解析出目标地址；失败卡**不得**出现
+    `ACCESS_NETWORK_STATE` / `JNI call error` 字样；系统设置 → 应用 → 权限列表里**不应**
+    多出任何用户可见授权项（`ACCESS_NETWORK_STATE` 是安装期普通权限，无运行时弹窗）。
 
 ---
 

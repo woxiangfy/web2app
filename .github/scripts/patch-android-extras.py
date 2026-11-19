@@ -49,10 +49,12 @@ import re
 import sys
 
 from android_gen import (  # noqa: E402
+    AnchorDrift,
     find_kotlin_file,
     find_main_activity,
     gen_root_candidates_str,
     resolve_gen_root,
+    run_guarded,
 )
 
 # 幂等标记（MainActivity 侧）。
@@ -139,7 +141,7 @@ def _class_closing_brace(src: str, class_match: re.Match[str]) -> int:
             if depth == 0:
                 return i
         i += 1
-    raise ValueError("MainActivity 类体花括号不配对，模板可能已变化，请人工确认")
+    raise AnchorDrift("MainActivity 类体花括号不配对，模板可能已变化，请人工确认")
 
 
 def _call_line(param: str, indent: str) -> str:
@@ -282,7 +284,7 @@ def patch_activity_src(src: str) -> str:
 
     class_m = CLASS_LINE.search(src)
     if not class_m:
-        raise ValueError("未找到 `class MainActivity ... {` 声明行，模板可能已变化，请人工确认")
+        raise AnchorDrift("未找到 `class MainActivity ... {` 声明行，模板可能已变化，请人工确认")
 
     existing = ON_WEBVIEW_CREATE.search(src)
     if existing:
@@ -330,7 +332,7 @@ def patch_client_src(src: str) -> str:
 
     m = ON_PAGE_FINISHED.search(src)
     if not m:
-        raise ValueError(
+        raise AnchorDrift(
             "未找到 RustWebViewClient.onPageFinished(view: WebView, url: String)，"
             "wry 模板可能已变化，请人工确认"
         )
@@ -580,4 +582,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("patch-android-extras.py", main))

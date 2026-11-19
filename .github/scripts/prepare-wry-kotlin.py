@@ -44,7 +44,11 @@ import sys
 
 # 复用工程根探测逻辑（同目录下的 android_gen.py）。
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from android_gen import resolve_gen_root  # noqa: E402
+from android_gen import (  # noqa: E402
+    AnchorDrift,
+    resolve_gen_root,
+    run_guarded,
+)
 
 # wry android Kotlin 模板文件名（build.rs 逐个处理）。
 WRY_KOTLIN_TEMPLATES = (
@@ -137,9 +141,12 @@ def find_wry_kotlin_src() -> pathlib.Path:
         if best:
             return best
 
-    raise FileNotFoundError(
-        "无法定位 wry crate 的 src/android/kotlin/ 模板目录。"
-        "请设置环境变量 WRY_SRC_DIR 指向该路径，或确认已执行过 cargo fetch。"
+    # 找不到 wry 模板目录 = 上游改了 crate 布局（或本机没 fetch）。
+    # 两种情况下都不是"脚本写错了"，而且 wry 能被编译就说明 crate 在 ⇒ 降级即可：
+    # 后续 build.rs 自己会生成 Kotlin，三个胶水补丁各自降级跳过（见 android_gen）。
+    raise AnchorDrift(
+        "无法定位 wry crate 的 src/android/kotlin/ 模板目录（上游可能改了布局）。"
+        "如需显式指定：设 WRY_SRC_DIR。"
     )
 
 
@@ -309,6 +316,40 @@ def selftest() -> int:
         )
         assert result2.returncode == 0, f"第二次运行失败：{result2.stderr}"
 
+    # 6) 上游把模板文件全改名（清单失效）⇒ **降级**：exit 0 + 一行 warning；
+    #    开 W2A_ANDROID_PATCH_STRICT=1 才红。这条是「wry 升级不用改脚本」的入口保证。
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp6:
+        tmp6_path = pathlib.Path(tmp6)
+        empty_wry = tmp6_path / "wry_empty"
+        empty_wry.mkdir()
+        gen6 = tmp6_path / "gen" / "android"
+        (gen6 / "app" / "src" / "main" / "java").mkdir(parents=True)
+        (tmp6_path / "tauri.conf.json").write_text(
+            '{"identifier": "com.test.pkg", "productName": "Test"}\n', encoding="utf-8"
+        )
+        (tmp6_path / "Cargo.toml").write_text(
+            '[package]\nname = "test"\n\n[[lib]]\nname = "test_lib"\n', encoding="utf-8"
+        )
+        base = [
+            sys.executable,
+            str(pathlib.Path(__file__)),
+            "--gen-root",
+            str(gen6),
+            "--wry-src",
+            str(empty_wry),
+        ]
+        lenient = _sp.run(base, capture_output=True, text=True)
+        assert lenient.returncode == 0, (
+            "模板清单全不命中时必须降级（exit 0），否则 wry 一改名就逼下游改脚本："
+            + lenient.stderr
+        )
+        assert "降级跳过" in (lenient.stdout + lenient.stderr), "降级必须留可搜的痕迹"
+        strict = _sp.run(
+            base, capture_output=True, text=True,
+            env=dict(os.environ, W2A_ANDROID_PATCH_STRICT="1"),
+        )
+        assert strict.returncode != 0, "严格模式下漂移必须红"
+
     print("prepare-wry-kotlin.py 自测通过 ✓")
     return 0
 
@@ -403,7 +444,13 @@ def main() -> int:
         f"prepare-wry-kotlin: {written}/{len(WRY_KOTLIN_TEMPLATES)} 个文件 "
         f"→ {out_dir}"
     )
-    return 0 if written > 0 or (out_dir / "RustWebViewClient.kt").is_file() else 1
+    if written == 0 and not (out_dir / "RustWebViewClient.kt").is_file():
+        # 一个都没写出来 = wry 把模板文件全改名/挪走了（清单已失效）⇒ 漂移。
+        raise AnchorDrift(
+            f"wry 模板清单全部未命中（{out_dir} 下没有 RustWebViewClient.kt）；"
+            f"WRY_KOTLIN_TEMPLATES 可能已与上游文件名脱节"
+        )
+    return 0
 
 
 if __name__ == "__main__":
@@ -412,4 +459,4 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(run_guarded("prepare-wry-kotlin.py", main))

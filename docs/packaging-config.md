@@ -64,7 +64,7 @@
 | `android_key_alias` | string | `""` | 仅 Android | keystore 别名（给了 keystore 则必填） |
 | `android_keystore_password` | string | `""` | 仅 Android | keystore 密码（给了 keystore 则必填） |
 | `android_key_password` | string | `""` | 仅 Android | key 密码（可空 = 同 keystore 密码） |
-| `android_permissions` | **`string[]`** | `[]` | 仅 Android（桌面端接受但忽略） | 按需声明的运行时权限，白名单三值 `camera` / `microphone` / `location`（映射到 4 条 Manifest 权限）。空数组 = 零额外权限。见 §3.9 |
+| `android_permissions` | **`string[]`** | `[]` | 仅 Android（桌面端接受但忽略） | 按需声明的**可选**运行时权限，白名单三值 `camera` / `microphone` / `location`（映射到 4 条 Manifest 权限）。空数组 = 零额外可选项（恒需 `INTERNET` / `ACCESS_NETWORK_STATE` 由同一补丁脚本无条件保证）。见 §3.9 |
 
 ### 已移除的字段
 
@@ -326,8 +326,12 @@ wry 0.57 对 H5 权限请求（`getUserMedia` / `navigator.geolocation`）的策
 | `microphone` | `android.permission.RECORD_AUDIO` |
 | `location` | `android.permission.ACCESS_FINE_LOCATION` + `ACCESS_COARSE_LOCATION` |
 
-- 缺省 / `[]` = **零额外权限**（补丁步直接跳过）；运行时授权弹窗本身仍由系统在网页
-  首次调用时弹出，本字段只决定「有没有资格弹」。
+- 缺省 / `[]` = **零额外可选项**（补丁步仍会执行：恒需权限 `INTERNET` / `ACCESS_NETWORK_STATE`
+  恒声明、与打包配置无关，见下条）；运行时授权弹窗本身仍由系统在网页首次调用时弹出，
+  本字段只决定「有没有资格弹」。
+- ⚠️ **恒需权限不在本字段里**（2026-11-19 起）：`ACCESS_NETWORK_STATE` 是 hickory 经 JNI 读
+  系统 DNS 的前置权限（缺它 Android 启动期「解析目标地址」必失败），由同一个补丁脚本的
+  恒需块按「缺失才补」注入，独立 marker `web2app-android-required`；本字段只表达**可选能力**。
 - 非敏感字段：会写进 Electron 包内 `config.json`（桌面壳接受但忽略），
   与 4 个 `android_*` 签名字段（不进 config.json）不同。
 - 注入由 `.github/scripts/patch-android-permissions.py` 在 fullscreen 补丁之后执行，
