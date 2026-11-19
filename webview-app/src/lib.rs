@@ -56,6 +56,11 @@ macro_rules! dlog {
 // 诊断日志（默认关闭）：开启时 `dlog!` 同时写 stderr 与 `<数据目录>\logs\startup.log`。
 mod debug_log;
 
+// 跨壳数据契约（`settings.json` 的设置形状）：纯数据、零依赖，被 `store`（持久化）与
+// `settings`（业务 / 命令）共同引用 ⇒ 依赖方向单向 `store → model`、`settings → model`，
+// 不再有 `store ↔ settings` 的类型环（架构审查 2026-11-19 闭环 `docs/architecture-todo.md` P-R1）。
+mod model;
+
 pub mod config;
 mod proxy;
 pub mod resolve;
@@ -82,6 +87,13 @@ use nav::ProxyTask;
 // 启动编排（boot_entry / prepare_navigation / navigate_main）：唯一对外入口 boot_entry
 // 反向经 nav 的 boot 回调转发（接线见 setup 里的 register_boot_entry）。
 mod bootstrap;
+
+// Android（非 Windows）导航后的可达性探测（架构审查 2026-11-19：从 `bootstrap` 尾部抽出）。
+// ⚠️ cfg 取 `any(not(windows), test)`：Windows 发布构建不携带这组仅 Android 使用的诊断文案，
+//    Windows 宿主 `cargo test` 仍编译纯逻辑部分（目标选择 / 文案映射）——与 `bootstrap` 里
+//    `ProbeFailure` 系列原先的挂法同一条纪律，见本文件顶部「死代码豁免」注释。
+#[cfg(any(not(windows), test))]
+mod probe;
 
 // Windows 专属：WebView2 原生事件钩子。
 #[cfg(windows)]

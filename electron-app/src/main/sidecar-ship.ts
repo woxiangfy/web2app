@@ -22,11 +22,13 @@ import { dirname, join } from 'node:path'
 
 import type { AppConfig } from './config'
 import { needsSidecar } from './navigate'
+// 「平台 → 可执行文件名」的唯一实现在 sidecar.ts（运行期定位与打包期裁剪同名同规则，
+// 2026-11-18 架构复查：此前这里有一份逐字拷贝）。re-export 保持既有调用面不变。
+// ⚠️ sidecar.ts 零 Electron 依赖（只用 node:child_process），对 after-pack / check-asar
+//    的 require 链依然成立。
+import { sidecarExeName } from './sidecar'
 
-/** sidecar 可执行文件名（与 `sidecar.ts::exeName` 同一规则，平台差异显式传参便于单测）。 */
-export function sidecarExeName(platform: NodeJS.Platform = process.platform): string {
-  return platform === 'win32' ? 'w2a-proxy.exe' : 'w2a-proxy'
-}
+export { sidecarExeName }
 
 /** 包内 sidecar 路径：`<resources>/sidecar/<exe>`（与 electron-builder.yml 的 `to` 一致）。 */
 export function packagedSidecarPath(

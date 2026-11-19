@@ -46,7 +46,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 
-use crate::settings::Settings;
+// ⚠️ 取自 `model` 而不是 `settings`：设置模型是纯数据契约，持久化层只认识形状、不认识业务；
+// 走 `settings` 会与 `settings → store`（读写调用）构成依赖环（架构审查 2026-11-19 / P-R1）。
+use crate::model::Settings;
 
 /// 唯一的运行期配置文件（名字保留 `settings.json`：老设置文件路径不变，零迁移即可读）。
 pub const FILE: &str = "settings.json";
@@ -381,7 +383,7 @@ fn serialize_document(doc: &Document) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Hotkey;
+    use crate::model::Hotkey;
 
     fn settings_a() -> Settings {
         Settings {

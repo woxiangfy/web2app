@@ -53,6 +53,7 @@ import {
   type RestorePlan,
 } from './window-state'
 import {
+  createTray,
   destroyTray,
   hasTray,
   hideMainWindow,
@@ -726,6 +727,13 @@ const settingsCtl = createSettingsController({
   showFloatWindow,
   destroyFloatWindow,
   toggleFloatWindow,
+  // 进程级副作用的实现注入（2026-11-18 架构复查）：控制器零 Electron 依赖、
+  // 回滚矩阵可被 node:test 钉住，这里接真实现（shortcuts / tray / float-window）。
+  applyWakeHotkey: (h, handler) => applyWakeHotkey(h, handler),
+  createTray,
+  destroyTray,
+  hasTray,
+  isFloatAlive,
 })
 
 if (!gotLock) {

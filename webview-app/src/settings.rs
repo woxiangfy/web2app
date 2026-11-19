@@ -2,7 +2,7 @@
 use std::str::FromStr;
 use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 #[cfg(desktop)]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
@@ -17,58 +17,14 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 #[cfg(desktop)]
 use crate::config::TITLE;
 
-/// 应用设置（持久化到 JSON）。
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Settings {
-    /// 唤醒快捷键（显示 / 隐藏主窗口）。
-    pub wake_hotkey: Hotkey,
-    /// 是否启用系统托盘图标。
-    pub tray_enabled: bool,
-    /// 关闭窗口时是否最小化到托盘（需同时启用托盘图标，否则关闭即退出）。
-    pub minimize_on_close: bool,
-    /// 是否启用桌面悬浮小窗（仅 Windows 桌面端有实际行为；其他平台只持久化该开关）。
-    /// `#[serde(default)]`：旧版 settings.json 没有这一字段时按 false 解析，不至于整份失效。
-    #[serde(default)]
-    pub float_enabled: bool,
-    /// 启动时检测到「主进程判为不合法」的旧快捷键后留下的提示（给人看的原因）。
-    /// `#[serde(skip)]` ⇒ **不写进 settings.json**，也不从设置页的保存载荷里读；
-    /// 只经 `get_settings` 的 [`SettingsView`] 发给设置页一次，保存成功后自然归空。
-    #[serde(skip)]
-    pub(crate) hotkey_notice: String,
-}
-
-/// 唤醒快捷键结构。key 为 JS KeyboardEvent.code（如 "Digit4" / "F1" / "KeyA"），
-/// 可与 Code::from_str 互转；修饰键由三个布尔开关表示。
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Hotkey {
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-    pub key: String,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            // 默认【不设置】唤醒快捷键：key 为空字符串表示“未启用”。
-            // 用户可在设置页自行捕获一个组合键，保存后立即生效。
-            wake_hotkey: Hotkey {
-                ctrl: false,
-                alt: false,
-                shift: false,
-                key: String::new(),
-            },
-            // 默认【不启用】系统托盘。
-            tray_enabled: false,
-            // 默认【关闭窗口即退出程序】，而非最小化到托盘（无托盘时本也无从最小化）。
-            minimize_on_close: false,
-            // 默认【不启用】桌面悬浮小窗。
-            float_enabled: false,
-            // 进程内提示：默认没有。
-            hotkey_notice: String::new(),
-        }
-    }
-}
+/// 设置的数据模型已下沉到 [`crate::model`]（架构审查 2026-11-19，闭环 `docs/architecture-todo.md`
+/// P-R1 的「store ↔ settings 类型环」）：那里是纯数据、不引用任何模块，`store` 直接以它为字段
+/// 类型，方向变成单向 `settings → store`、`store → model`。
+///
+/// 这里用 `pub use` 保留原路径 `crate::settings::{Settings, Hotkey}`：调用点（`lib.rs` 的
+/// `SettingsState`、`debug_log` 的启动信息、契约测试）无需改动，且语义上仍是「设置业务
+/// 拥有这套模型」。
+pub use crate::model::{Hotkey, Settings};
 
 /// `get_settings` 的返回形态：设置本体 + 只给界面看的进程内提示（不落盘）。
 ///
@@ -493,7 +449,22 @@ pub(crate) fn save_settings(
     #[cfg(desktop)]
     let old = state.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
-    // 2) 桌面端：应用运行时的快捷键 / 托盘变更（锁外执行——全局快捷键注册、
+    // 2) 先落盘（磁盘优先），再动运行期。
+    //
+    //    顺序很关键：旧实现是「先应用副作用、再持久化」，一旦写盘失败（磁盘满 / 只读 /
+    //    文件被占）就出现一种极难自查的错位 —— 新快捷键已注册、旧快捷键已注销，而内存态
+    //    与文件仍是旧值；快捷键回调比对的是**内存**旧值 ⇒ 新键无反应、旧键失效。用户重试
+    //    保存时 diff 仍是「旧≠新」，`register(新)` 返回「已注册」⇒ 走回滚 ⇒ 该键从此再也
+    //    存不进去（直到重启）。
+    //
+    //    先落盘则相反：写失败时运行期一个副作用都没动。剩下的失败面只有「已落盘、但运行时
+    //    副作用失败」（键被别的程序占用 / 托盘创建失败），那条路径用 [`restore_persisted`]
+    //    把磁盘退回旧值。
+    //
+    //    锁外执行：磁盘 I/O 是耗时最长的一步，不应阻塞其它读设置的线程。
+    persist_settings(&app, &new_settings).map_err(|e| e.to_string())?;
+
+    // 3) 桌面端：应用运行时的快捷键 / 托盘变更（锁外执行——全局快捷键注册、
     //    托盘创建/销毁可能涉及系统调用，不应在持锁期间做）。
     #[cfg(desktop)]
     {
@@ -509,13 +480,17 @@ pub(crate) fn save_settings(
                     if let Some(os) = old_sc {
                         let _ = app.global_shortcut().register(os);
                     }
+                    restore_persisted(&app, &old);
                     return Err(format!("快捷键注册失败（可能已被其它程序占用）：{e}"));
                 }
             }
         }
         if new_settings.tray_enabled != old.tray_enabled {
             if new_settings.tray_enabled {
-                crate::tray::create_tray(&app).map_err(|e| e.to_string())?;
+                if let Err(e) = crate::tray::create_tray(&app) {
+                    restore_persisted(&app, &old);
+                    return Err(e.to_string());
+                }
             } else {
                 app.remove_tray_by_id("main-tray");
             }
@@ -532,14 +507,25 @@ pub(crate) fn save_settings(
         }
     }
 
-    // 3) 持久化（锁外执行：磁盘 I/O 是最耗时的一步，不应阻塞其它读设置的线程）。
-    persist_settings(&app, &new_settings).map_err(|e| e.to_string())?;
-
-    // 4) 重新加锁写入新设置（临界区极小）。副作用 / 持久化任一失败时走 `?` 提前返回，
-    //    与旧行为一致：不写内存态，下次 get_settings 仍是旧值。
+    // 4) 最后写内存态（临界区极小）。走到这里说明磁盘与运行期都已是新设置；
+    //    任一失败都在上面 `?` 提前返回，内存态仍是旧值。
     let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
     *guard = new_settings;
     Ok(())
+}
+
+/// 副作用应用失败后，把已落盘的新设置退回旧值（`save_settings` 的补偿步骤）。
+///
+/// 只在「已写盘、但运行时副作用失败」这一条路径上调用：内存态此时仍是旧值，不回写磁盘的话，
+/// 下次启动会载入一份从未生效过的设置（例如一个注册不上的快捷键）。
+///
+/// 双失败（写盘 + 回写都失败）只能留日志：内存态与运行期仍是一致的旧值，代价是磁盘上留着
+/// 未生效的新值，下次启动以它为准 —— 比「运行期与内存/磁盘三方各执一词」更容易解释。
+#[cfg(desktop)]
+fn restore_persisted(app: &tauri::AppHandle, old: &Settings) {
+    if let Err(e) = persist_settings(app, old) {
+        dlog!("[settings] 副作用失败后回写旧设置也失败：{e}");
+    }
 }
 
 /// 打开设置窗口（IPC 命令）。

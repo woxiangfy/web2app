@@ -26,6 +26,9 @@ use super::{count_code_lines, has_code_line, strip_line_comments};
 const SETTINGS_HTML: &str = include_str!("../../dist/settings.html");
 /// 本 crate 的设置实现（判据 `hotkey_problem` / 启动回退都在这里）。
 const SETTINGS_RS: &str = include_str!("../settings.rs");
+/// 设置的数据模型（`Settings` / `Hotkey` 的字段与 serde 属性；架构审查 2026-11-19 起从
+/// `settings.rs` 下沉到这里 —— 「提示不得落盘」这条判据跟着字段走，断言语义不变）。
+const MODEL_RS: &str = include_str!("../model.rs");
 /// 跨壳基准：Electron 主进程的判据与 accelerator 键表。**只读**它作为参照，
 /// 本仓库不改 electron-app（那边的未提交改动属于同事）。
 const ELECTRON_HOTKEY_TS: &str = include_str!("../../../electron-app/src/main/hotkey.ts");
@@ -225,8 +228,8 @@ fn invalid_old_hotkey_falls_back_with_visible_notice() {
         "load_settings 必须调用回退（只定义不调用 = 旧配置照旧注册）"
     );
     assert!(
-        has_code_line(SETTINGS_RS, "#[serde(skip)]"),
-        "提示必须 `#[serde(skip)]`：写进 settings.json 后重启会「复活」一条旧提示"
+        has_code_line(MODEL_RS, "#[serde(skip)]"),
+        "提示必须 `#[serde(skip)]`（字段在 model.rs）：写进 settings.json 后重启会「复活」一条旧提示"
     );
     assert!(
         has_code_line(SETTINGS_RS, "let hotkey_notice = s.hotkey_notice.clone();"),
@@ -390,5 +393,45 @@ fn hotkey_save_is_blocked_when_settings_failed_to_load() {
     assert!(
         has_code_line(SETTINGS_HTML, "当前快捷键未知"),
         "读失败时状态行必须说「未知」而不是「未设置」：后者会让用户以为自己的快捷键丢了"
+    );
+}
+
+/// ⑳ `save_settings` 必须先落盘、再应用运行时副作用（架构审查 2026-11-19 P-R4）。
+///
+/// 反例（旧实现）：先注册快捷键 / 建托盘，再 `persist_settings`。写盘失败（磁盘满 / 只读 /
+/// 文件被占）时运行期已经变了，而内存态与文件仍是旧值：
+///   · 快捷键回调比对的是**内存**旧值 ⇒ 新键按了没反应、旧键已被注销；
+///   · 用户重试保存，diff 仍是「旧≠新」⇒ `register(新)` 返回「已注册」⇒ 走回滚 ⇒
+///     **该键再也存不进去**（直到重启）。
+///
+/// 这条顺序只靠读代码看不出来，也没有可在本机驱动的副作用失败注入点 ⇒ 用函数体内两处调用
+/// 的先后钉住。改回「先副作用后落盘」时本测试应立刻 FAIL。
+#[test]
+fn save_settings_persists_before_applying_side_effects() {
+    let code = strip_line_comments(SETTINGS_RS);
+    let start = code
+        .find("pub(crate) fn save_settings(")
+        .expect("settings.rs 必须保留 save_settings 命令");
+    let body = &code[start..];
+
+    let persist_at = body
+        .find("persist_settings(&app, &new_settings)")
+        .expect("save_settings 必须调用 persist_settings 写新设置");
+    let hotkey_at = body
+        .find("hotkey_to_shortcut(&old.wake_hotkey)")
+        .expect("save_settings 必须 diff 旧快捷键（无条件应用会重复注册）");
+    let tray_at = body
+        .find("crate::tray::create_tray(&app)")
+        .expect("save_settings 必须应用托盘开关");
+
+    assert!(
+        persist_at < hotkey_at && persist_at < tray_at,
+        "save_settings 必须先落盘再应用副作用：写盘失败时副作用已生效，\
+         运行期与内存/文件三方不一致（重试时该快捷键会永久存不进去）"
+    );
+    // 落盘之后的失败必须补偿回滚磁盘，否则下次启动会载入一份从未生效的设置。
+    assert!(
+        body.contains("restore_persisted(&app, &old)"),
+        "副作用失败路径必须调用 restore_persisted 把磁盘退回旧值"
     );
 }

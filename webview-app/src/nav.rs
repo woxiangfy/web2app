@@ -218,6 +218,58 @@ pub(crate) fn is_upstream_request(upstream: Option<&str>, request_url: &str) -> 
     }
 }
 
+/// 计算 `target="_blank"` / `window.open()` 弹窗在**新页签**中应该落在哪里。
+///
+/// 为什么是导航原语而不是多页签的私事：桌面（`tabs/ipc.rs`）与 Android（`mobilebar.rs`）
+/// 都要遵守同一条规则，而 `tabs` 整体是 `#[cfg(windows)]` —— 规则住在那儿时，移动端
+/// 只能自己再写一份（或干脆不写，2026-11-19 审查发现的实际缺口）。
+///
+/// 背景（这是“弹窗打开的网址一直是 app_url”的根因）：启用本地反向代理时，WebView 实际访问的是
+/// `http://127.0.0.1:<port>`，页面里所有相对链接、`window.open(path)` 解析出来的 URL 主机都是
+/// `127.0.0.1`，而上游真实主机是另一回事。历史实现拿目标 URL 的主机去和**上游主机**
+/// （`upstream_origin`）比对，必然不相等 → 一律放弃目标路径，新页签就只剩 app_url。
+///
+/// 规则：
+/// 1. 目标与**入口主机**同源（代理模式下即 127.0.0.1:port）→ 取目标的 path/query/fragment
+///    拼到入口地址上（代理会把所有 path 转发到同一上游，Host 头由代理透传）。
+/// 2. 目标与**上游真实主机**同源（页面里写死的绝对链接）→ 同样映射到入口地址。
+/// 3. 其它跨域外部链接：**直接打开该外链**（与 Electron 壳 `setWindowOpenHandler` →
+///    `spawnTab(opened)` 的行为对齐）。凭据不会因此泄漏：直连模式下 Authorization 注入与
+///    401 自动应答都受 [`is_upstream_request`] 主机白名单约束，外域请求拿不到入口账号密码；
+///    本地反向代理也只对固定上游注入凭据。
+///
+/// `None` = 目标不是可导航的 http(s) 地址（`about:blank` / `javascript:` / 解析失败），调用方应忽略。
+pub(crate) fn resolve_popup_target(nav: &Navigation, target: Option<&str>) -> Option<String> {
+    let target = target?;
+    let tu = Url::parse(target).ok()?;
+    if !matches!(tu.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let base = Url::parse(&nav.url).ok()?;
+    let base_origin = origin_of(&base);
+
+    // 源（scheme://host[:默认端口归一化]）比对：旧实现只比 host_str，忽略 scheme 与端口，
+    // https://realhost:8443 会被误判成上游 https://realhost。
+    let target_origin = origin_of(&tu);
+    let same_as_entry = target_origin.is_some() && target_origin == base_origin;
+    let same_as_upstream = nav
+        .upstream_origin
+        .as_deref()
+        .is_some_and(|h| target_origin.as_deref() == Some(h));
+    if same_as_entry || same_as_upstream {
+        let mut joined = base.clone();
+        joined.set_path(tu.path());
+        joined.set_query(tu.query());
+        joined.set_fragment(tu.fragment());
+        return Some(joined.to_string());
+    }
+
+    // 跨域外部链接：直接打开目标地址（与 Electron 壳一致）。凭据注入受主机白名单约束，
+    // 外域请求拿不到入口账号密码，故不存在「把本应用凭据发给外部站点」的风险。
+    Some(target.to_string())
+}
+
 /// 启动编排入口的签名：`label = None` = 单窗口模式（目标窗 `"main"`）；
 /// `Some(label)` = 导航到指定窗口（多页签首 tab / splash `/retry` 传入）。
 pub(crate) type BootEntry = fn(tauri::AppHandle, Option<String>);
@@ -361,5 +413,105 @@ mod tests {
         // scheme 判定与 sidecar 同源（match http|https）——这里钉住 origin/白名单对
         // 非 http(s) 输入的行为，真正的端到端报错由 sidecar 的 --help 探针覆盖。
         assert_eq!(origin_of(&Url::parse("file:///c:/x").unwrap()), None);
+    }
+
+    /// 构造一个可单测的 Navigation（本地反向代理模式）。
+    /// `entry`：代理入口（形如 http://127.0.0.1:PORT/）；`upstream`：上游真实**源**
+    /// （scheme://host[:非默认端口]，与 [`origin_of`] 同形态）。
+    fn proxy_nav(entry: &str, upstream: Option<&str>) -> Navigation {
+        Navigation {
+            url: entry.to_string(),
+            user: String::new(),
+            pass: String::new(),
+            use_local_proxy: true,
+            proxy_abort: None,
+            upstream_origin: upstream.map(str::to_string),
+        }
+    }
+
+    // 以下 7 条原住 `tabs/tests.rs`，随规则上移到 nav（2026-11-19，P-R3）：
+    // 规则现在同时服务桌面多页签与 Android 单 webview 页签，测试跟着函数走 —— 顺带让
+    // Android 侧的这条逻辑在桌面 CI 上也有护栏（`tabs` 是 `#[cfg(windows)]`，搬走前
+    // 移动端实际上没有任何用例覆盖这段语义）。
+
+    #[test]
+    fn popup_same_as_entry_host_joins_path_query_fragment() {
+        let nav = proxy_nav("http://127.0.0.1:4567/", None);
+        let out =
+            resolve_popup_target(&nav, Some("http://127.0.0.1:4567/notes?from=popup#x")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/notes?from=popup#x");
+    }
+
+    #[test]
+    fn popup_same_as_entry_replaces_root_path() {
+        let nav = proxy_nav("http://127.0.0.1:4567/app", None);
+        let out = resolve_popup_target(&nav, Some("http://127.0.0.1:4567/other")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/other");
+    }
+
+    #[test]
+    fn popup_same_as_upstream_remaps_through_entry() {
+        // 页面里写死的绝对链接（指向上游真实主机）→ 映射到代理入口。
+        // 这正是 Android `open-tab` 曾经漏掉的场景：不改写就会直连上游、绕过鉴权注入。
+        let nav = proxy_nav("http://127.0.0.1:4567/", Some("https://real.example.com"));
+        let out = resolve_popup_target(&nav, Some("https://real.example.com/path/a")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/path/a");
+        // 显式默认端口与省略端口同源
+        let out = resolve_popup_target(&nav, Some("https://real.example.com:443/path/b")).unwrap();
+        assert_eq!(out, "http://127.0.0.1:4567/path/b");
+    }
+
+    #[test]
+    fn popup_non_default_port_is_not_same_origin() {
+        // 旧实现只比 host：同主机的非默认端口会被误判同源、抹掉端口映射到错误服务。
+        let nav = proxy_nav("http://127.0.0.1:4567/", Some("https://real.example.com"));
+        assert_eq!(
+            resolve_popup_target(&nav, Some("https://real.example.com:8443/path")),
+            Some("https://real.example.com:8443/path".into()),
+            "非默认端口不算上游源：代理模式下外链原样打开，不抹端口"
+        );
+        // scheme 不同也不同源（http 对 https）
+        assert_eq!(
+            resolve_popup_target(&nav, Some("http://real.example.com/path")),
+            Some("http://real.example.com/path".into())
+        );
+    }
+
+    #[test]
+    fn popup_cross_domain_proxy_mode_opens_external() {
+        // 代理只对固定上游注入凭据，跨域外链直接打开不会泄漏账号。
+        let nav = proxy_nav("http://127.0.0.1:4567/", None);
+        assert_eq!(
+            resolve_popup_target(&nav, Some("https://other.com/x")),
+            Some("https://other.com/x".into())
+        );
+    }
+
+    #[test]
+    fn popup_cross_domain_plain_mode_opens_external() {
+        // 非代理（直连）模式下，跨域外链同样直接打开目标地址（与 Electron 壳一致）：
+        // 凭据由 `is_upstream_request` 主机白名单把关，外域请求不会拿到入口账号密码。
+        // 历史实现在这里返回 None，导致书签管理器点开外站书签时新 tab 落到入口首页
+        // （用户反馈的「新标签页都是首页，不是指定的页面」）。
+        let mut nav = proxy_nav("https://entry.example.com", None);
+        nav.use_local_proxy = false;
+        assert_eq!(
+            resolve_popup_target(&nav, Some("https://other.com/x")),
+            Some("https://other.com/x".into())
+        );
+        // 同源路径照常拼回入口。
+        assert_eq!(
+            resolve_popup_target(&nav, Some("https://entry.example.com/notes")),
+            Some("https://entry.example.com/notes".into())
+        );
+    }
+
+    #[test]
+    fn popup_missing_or_unsupported_target_returns_none() {
+        let nav = proxy_nav("http://127.0.0.1:4567/", None);
+        assert_eq!(resolve_popup_target(&nav, None), None);
+        assert_eq!(resolve_popup_target(&nav, Some("about:blank")), None);
+        assert_eq!(resolve_popup_target(&nav, Some("javascript:void(0)")), None);
+        assert_eq!(resolve_popup_target(&nav, Some("not a url")), None);
     }
 }

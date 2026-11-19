@@ -281,6 +281,24 @@ test('v1.81 四缘吸附：setState 认四值边 + 四个 dock 状态类，主�
   )
 })
 
+test('导出面：仅单测直接消费的三个决策原语必须标 @internal', () => {
+  // decideEdge / clampFreeInside / rectAt 的直接消费方只有 float-layout.test.ts；
+  // float-window.ts 一律经 planDrop / planPeekCollapse 组合消费。@internal 明示
+  // 「不要在生产模块里直接 import」，防导出面悄悄回涨（2026-11-19 架构复查 D3）。
+  // ⚠️ 判定范围必须是**本函数的 JSDoc 块**（lastIndexOf('/**') 到 export 之间）——
+  // 第一版「export 前 500 字符含 @internal 即可」会被上一个函数的标注误满足（假绿）。
+  for (const fn of ['decideEdge', 'clampFreeInside', 'rectAt']) {
+    const idx = floatLayout.indexOf(`export function ${fn}(`)
+    assert.ok(idx > 0, `float-layout 缺少 ${fn}`)
+    const docStart = floatLayout.lastIndexOf('/**', idx)
+    assert.ok(docStart > 0, `${fn} 缺少前置 JSDoc 块`)
+    assert.ok(
+      floatLayout.slice(docStart, idx).includes('@internal'),
+      `${fn} 的 JSDoc 必须标 @internal（仅单测直接钉规则；生产经 planDrop / planPeekCollapse 组合消费）`
+    )
+  }
+})
+
 test('安全：七条特权 IPC 全部经 sender 校验，preload 有主框架门控，球窗透明隔离', () => {
   // 七个 handle（click/down/move/cancel/drag-end/peek/hide）各自必须调 assertFloatSender(e.sender.id)。
   assert.ok((floatWin.match(/assertFloatSender\(e\.sender\.id\)/g) ?? []).length >= 7)

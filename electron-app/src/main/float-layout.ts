@@ -10,6 +10,10 @@
  *
  * v1.69 纠正（v1.68 只修了旧「小窗」的三条静默失败）：窗口从「320×460 小窗」改为 56×56
  * 透明悬浮球（v1.71 起单击 = 切换主窗显隐），几何 / 吸附逻辑不变，只是尺寸 / 半隐藏留白改为「半球」。
+ *
+ * 导出面约定：`decideEdge` / `clampFreeInside` / `rectAt` 标 `@internal` —— 仅供单测
+ * 逐条钉规则，生产一律经 `planDrop` / `planPeekCollapse` 组合消费；其余导出即
+ * `float-window.ts` 的真实消费面（或其返回型别契约）。
  */
 
 /** 吸附边：无 / 左 / 右 / 上 / 下屏缘（落盘序列化为 'none' / 'left' / 'right' / 'top' / 'bottom'）。 */
@@ -119,6 +123,8 @@ export function clampVisible(v: number, winSize: number, lo: number, hi: number,
 /**
  * 松手后的自由态钳制（DIP）：把窗口完整放回显示器内（吸附态有自己的贴边算法，不走这里）。
  * 返回钳制后的左上角；旧实现松手不钳，球可停在屏外找不回来。
+ *
+ * @internal 仅供 `test/float-layout.test.ts` 直接钉规则；生产经 `planDrop` 组合消费。
  */
 export function clampFreeInside(pos: Rect, mon: Rect): { x: number; y: number } {
   return {
@@ -127,7 +133,7 @@ export function clampFreeInside(pos: Rect, mon: Rect): { x: number; y: number } 
   }
 }
 
-/** 按给定左上角与固定球尺寸构造 Rect（便于点 / 矩形判定）。 */
+/** @internal 按给定左上角与固定球尺寸构造 Rect（便于点 / 矩形判定）；仅供单测直接钉规则，生产经 `planPeekCollapse` 组合消费。 */
 export function rectAt(x: number, y: number, win: { width: number; height: number }): Rect {
   return { x, y, width: win.width, height: win.height }
 }
@@ -181,6 +187,8 @@ export function circleShapeRects(d: number): Rect[] {
  * 平局按 left → right → top → bottom 顺序取先者 —— 这条规则专治屏幕角上的歧义
  * （贴角的球同时离两条边都近，旧实现按 if 顺序固定偏爱左边，用户往角上拖时吸附边
  * 反直觉）。
+ *
+ * @internal 仅供 `test/float-layout.test.ts` 直接钉规则；生产经 `planDrop` 组合消费。
  */
 export function decideEdge(win: Rect, mon: Rect, snap: number = SNAP_LOGICAL): FloatEdge {
   if (win.width <= 0 || win.height <= 0) return 'none'

@@ -169,19 +169,9 @@ pub(crate) fn request_close_tab(app: &tauri::AppHandle, label: String, token: St
 
 /// 计算 `target="_blank"` / `window.open()` 弹窗在**新 tab** 中应该落在哪里。
 ///
-/// 背景（这是“弹窗打开的网址一直是 app_url”的根因）：启用本地反向代理时，WebView 实际访问的是
-/// `http://127.0.0.1:<port>`，页面里所有相对链接、`window.open(path)` 解析出来的 URL 主机都是
-/// `127.0.0.1`，而上游真实主机是另一回事。历史实现拿目标 URL 的主机去和**上游主机**
-/// （`upstream_origin`）比对，必然不相等 → 一律放弃目标路径，新 tab 就只剩 app_url。
-///
-/// 规则：
-/// 1. 目标与**入口主机**同源（代理模式下即 127.0.0.1:port）→ 取目标的 path/query/fragment
-///    拼到入口地址上（代理会把所有 path 转发到同一上游，Host 头由代理透传）。
-/// 2. 目标与**上游真实主机**同源（页面里写死的绝对链接）→ 同样映射到入口地址。
-/// 3. 其它跨域外部链接：**直接打开该外链**（与 Electron 壳 `setWindowOpenHandler` →
-///    `spawnTab(opened)` 的行为对齐）。凭据不会因此泄漏：直连模式下 Authorization 注入与
-///    401 自动应答都受 [`crate::nav::is_upstream_request`] 主机白名单约束，外域请求拿不到
-///    入口账号密码；本地反向代理也只对固定上游注入凭据。
+/// 规则本体在 [`crate::nav::resolve_popup_target`]（导航原语，跨平台 —— Android 的
+/// `mobilebar::create_tab_with_url` 复用同一份）。这里只负责从 `TabManager` 取本壳的
+/// `Navigation` 再转交。
 pub(super) fn resolve_popup_url(app: &tauri::AppHandle, target: Option<&str>) -> Option<String> {
     let nav = app
         .state::<TabManager>()
@@ -189,45 +179,7 @@ pub(super) fn resolve_popup_url(app: &tauri::AppHandle, target: Option<&str>) ->
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()?;
-    resolve_popup_url_for(&nav, target)
-}
-
-/// [`resolve_popup_url`] 的**纯逻辑**部分（不依赖 `AppHandle`，因此可单测）。
-///
-/// 规则见 [`resolve_popup_url`] 的文档注释，这里只做计算：
-///   1. 目标与入口主机同源 → 把 path/query/fragment 拼到入口地址上（代理会转发同上游）；
-///   2. 目标与上游真实主机同源 → 同样映射到入口地址；
-///   3. 其它跨域外链：直接打开目标地址（凭据由 [`crate::nav::is_upstream_request`]
-///      主机白名单把关，不会发给外域）。
-pub(super) fn resolve_popup_url_for(nav: &Navigation, target: Option<&str>) -> Option<String> {
-    let target = target?;
-    let tu = url::Url::parse(target).ok()?;
-    if !matches!(tu.scheme(), "http" | "https") {
-        return None;
-    }
-
-    let base = url::Url::parse(&nav.url).ok()?;
-    let base_origin = crate::nav::origin_of(&base);
-
-    // 源（scheme://host[:默认端口归一化]）比对：旧实现只比 host_str，忽略 scheme 与端口，
-    // https://realhost:8443 会被误判成上游 https://realhost。
-    let target_origin = crate::nav::origin_of(&tu);
-    let same_as_entry = target_origin.is_some() && target_origin == base_origin;
-    let same_as_upstream = nav
-        .upstream_origin
-        .as_deref()
-        .is_some_and(|h| target_origin.as_deref() == Some(h));
-    if same_as_entry || same_as_upstream {
-        let mut joined = base.clone();
-        joined.set_path(tu.path());
-        joined.set_query(tu.query());
-        joined.set_fragment(tu.fragment());
-        return Some(joined.to_string());
-    }
-
-    // 跨域外部链接：直接打开目标地址（与 Electron 壳一致）。凭据注入受主机白名单约束，
-    // 外域请求拿不到入口账号密码，故不存在「把本应用凭据发给外部站点」的风险。
-    Some(target.to_string())
+    crate::nav::resolve_popup_target(&nav, target)
 }
 
 /// 处理来自 WebView2 `NewWindowRequested` 的新窗口请求（target="_blank" / window.open()）。

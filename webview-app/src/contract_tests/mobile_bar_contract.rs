@@ -825,6 +825,15 @@ fn blank_targets_open_in_new_mobile_tab() {
         has_code_line(BAR_RS, "fn open_tab_url_of(payload: &str)"),
         "mobilebar.rs 必须从 open-tab payload 解析 url"
     );
+    // 地址改写：页面给的地址必须经 `nav::resolve_popup_target` 映射到本壳入口，
+    // 不能直接导航。Android 只要 proxy_enabled 就恒走本地代理，直接导航页面里写死的
+    // 上游绝对外链 ⇒ 无 Authorization 注入（401）/ 仅代理可达时白屏 / 后续链接一起脱管。
+    // 规则本体住 `nav`（跨平台，7 条纯逻辑单测在 nav::tests），这条只钉**移动端接线**：
+    // 规则被删掉接线也不会报错，只会在真机上表现为「弹窗页签打不开」。
+    assert!(
+        has_code_line(BAR_RS, "resolve_popup_target(&nav, Some(raw_url))"),
+        "create_tab_with_url 必须用 nav::resolve_popup_target 改写落点（与桌面多页签同一条规则）"
+    );
 }
 
 /// ⑭ 死代码豁免必须停在「移动端模块」这一层（架构审查 P2-2）。

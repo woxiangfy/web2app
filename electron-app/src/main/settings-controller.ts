@@ -6,15 +6,17 @@
  *      **进程级副作用**（快捷键 / 托盘 / 悬浮窗）的成组回滚；
  *   2. 托盘菜单动作 `trayActions()`（仅在创建托盘时内部使用）。
  *
- * 本模块**不直接触碰 Electron 运行时对象**（app / BrowserWindow）：窗口显隐、退出、图标定位
- * 全部经 deps 由入口注入，使这里的「成组回滚」编排是壳无关、可脱离窗口推理的纯逻辑。
+ * 本模块**零 Electron 运行期依赖**：唤醒快捷键、托盘、悬浮窗的进程级副作用一律经 deps
+ * 由入口注入真实现（`shortcuts.ts` / `tray.ts` / `float-window.ts` 都顶层 import electron，
+ * node:test 加载不了）；持久化走 `settings.ts`（纯 node:fs）。这样「成组回滚」编排可以被
+ * `pnpm run unit` 直接钉住 —— 回滚矩阵是「错了也不报错」、且真实踩过坑（曾经只回滚一半）
+ * 的逻辑（2026-11-18 架构复查：此前直接 import 那三个模块，声明与实现不符、回滚零单测）。
  * 与 Tauri 侧 `settings.rs::save_settings` / `tray.rs` 的职责切分对齐。
  */
-import { createTray, destroyTray, hasTray, type TrayActions } from './tray'
-import { isFloatAlive } from './float-window'
-import { applyWakeHotkey } from './shortcuts'
-import { hotkeyLabel, sameHotkey } from './hotkey'
+import { hotkeyLabel, sameHotkey, type Hotkey } from './hotkey'
 import { DEFAULT_SETTINGS, saveSettings, type Settings, type StoreLocation } from './settings'
+import type { TrayActions } from './tray'
+import type { RegisterResult } from './shortcuts'
 
 export interface SettingsControllerDeps {
   /** 窗口 / 托盘 tooltip 标题（config.json 的 title）。 */
@@ -43,6 +45,18 @@ export interface SettingsControllerDeps {
   destroyFloatWindow: () => void
   /** 托盘菜单「悬浮窗」项的显隐切换。 */
   toggleFloatWindow: () => void
+  /**
+   * 唤醒快捷键注册（进程级副作用；生产实现 = `shortcuts.ts::applyWakeHotkey`）。
+   * 注入而非直接 import：`shortcuts.ts` 顶层 import electron，node:test 加载不了；
+   * 回滚矩阵单测用假实现（2026-11-18 架构复查）。
+   */
+  applyWakeHotkey: (h: Hotkey, handler: () => void) => RegisterResult
+  /** 托盘生命周期（进程级副作用；生产实现 = `tray.ts` 的 createTray / destroyTray / hasTray）。 */
+  createTray: (opts: { title: string; iconPath: string | null; actions: TrayActions }) => boolean
+  destroyTray: () => void
+  hasTray: () => boolean
+  /** 悬浮球当前是否存活（回滚判定用；生产实现 = `float-window.ts::isFloatAlive`）。 */
+  isFloatAlive: () => boolean
 }
 
 export interface SettingsController {
@@ -97,7 +111,7 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
     const prev = prevOverride ?? deps.getSettings()
 
     // 1) 唤醒快捷键
-    const r = applyWakeHotkey(next.wake_hotkey, () => deps.toggleMainWindow())
+    const r = deps.applyWakeHotkey(next.wake_hotkey, () => deps.toggleMainWindow())
     if (!r.ok) throw new Error(r.error ?? '快捷键注册失败')
 
     // 记录本调用是否【新建】了托盘：持久化失败时要把它一起回滚，否则界面提示
@@ -118,7 +132,7 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
       //    不要再调 deps.getSettings() —— 那样冷启动的 prevOverride 会被绕过。
       if (next.tray_enabled !== prev.tray_enabled) {
         if (next.tray_enabled) {
-          const ok = createTray({
+          const ok = deps.createTray({
             title: deps.title,
             iconPath: deps.trayIconPath(),
             actions: trayActions(),
@@ -128,8 +142,8 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
         } else {
           // 实测而非无条件置 true：托盘可能从未建成（冷启动时 tray_enabled=false 且本机
           // 图标缺失等），回滚不该凭空造出一个「本来不存在」的托盘（2026-11-07 M-8）。
-          trayExistedBefore = hasTray()
-          destroyTray()
+          trayExistedBefore = deps.hasTray()
+          deps.destroyTray()
         }
       }
 
@@ -140,7 +154,7 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
           deps.showFloatWindow()
           floatCreatedThisCall = true
         } else {
-          floatExistedBefore = isFloatAlive()
+          floatExistedBefore = deps.isFloatAlive()
           deps.destroyFloatWindow()
         }
       }
@@ -157,7 +171,7 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
       //    但**本次会话里新键 / 新托盘已经生效**。承诺的「任一步失败都不写内存态」
       //    只有在把副作用也一并回滚之后才成立。
       if (trayCreatedThisCall) {
-        destroyTray()
+        deps.destroyTray()
         console.warn('[web2app] 保存失败，本次新建的托盘已回滚')
       }
       // 悬浮窗与托盘对称回滚：本次新建的销毁掉、本次销毁的重新显示出来（best-effort，
@@ -171,23 +185,32 @@ export function createSettingsController(deps: SettingsControllerDeps): Settings
         console.warn('[web2app] 保存失败，已尝试重新显示回滚前的悬浮窗')
       }
       // 对称回滚：本次销毁过托盘 → best-effort 按旧配置重建（图标文件恰好缺失时只告警，
-      // 不能再抛 —— 我们正在错误传播路径上）。
+      // 不能再抛 —— 我们正在错误传播路径上；连 try/catch 都加上是防止注入实现抛错
+      // 掩盖原始持久化错误，2026-11-18 架构复查）。
       if (trayExistedBefore) {
-        const restored = createTray({
-          title: deps.title,
-          iconPath: deps.trayIconPath(),
-          actions: trayActions(),
-        })
-        console.warn(
-          `[web2app] 保存失败，已尝试重建回滚前的托盘：${restored ? '成功' : '重建也失败（图标缺失？）'}`
-        )
+        try {
+          const restored = deps.createTray({
+            title: deps.title,
+            iconPath: deps.trayIconPath(),
+            actions: trayActions(),
+          })
+          console.warn(
+            `[web2app] 保存失败，已尝试重建回滚前的托盘：${restored ? '成功' : '重建也失败（图标缺失？）'}`
+          )
+        } catch (e2) {
+          console.warn(`[web2app] 保存失败，重建托盘时异常（保留原始错误）：${(e2 as Error).message}`)
+        }
       }
       if (!sameHotkey(prev.wake_hotkey, next.wake_hotkey)) {
-        const rb = applyWakeHotkey(prev.wake_hotkey, () => deps.toggleMainWindow())
-        console.warn(
-          `[web2app] 保存失败，唤醒快捷键已回滚到 ${hotkeyLabel(prev.wake_hotkey)}：` +
-            `${rb.ok ? '成功' : '回滚也失败（当前无唤醒快捷键）'}`
-        )
+        try {
+          const rb = deps.applyWakeHotkey(prev.wake_hotkey, () => deps.toggleMainWindow())
+          console.warn(
+            `[web2app] 保存失败，唤醒快捷键已回滚到 ${hotkeyLabel(prev.wake_hotkey)}：` +
+              `${rb.ok ? '成功' : '回滚也失败（当前无唤醒快捷键）'}`
+          )
+        } catch (e2) {
+          console.warn(`[web2app] 保存失败，回滚唤醒快捷键时异常（保留原始错误）：${(e2 as Error).message}`)
+        }
       }
       throw e
     }

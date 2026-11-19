@@ -20,7 +20,13 @@
 
 **影响**：`Settings` / `Hotkey` 路径从 `crate::settings::` 变为 `crate::store::`（或 `crate::models::`），涉及所有 `use crate::settings::Settings` 处（`store.rs`、`lib.rs` 的 `SettingsState` 等）及 `pub use` re-export 的可见性。属接口级改动，需同步契约测试。
 
-**状态**：☐ 待处理
+**状态**：✅ 已完成（2026-11-19，采用「独立 `model` 模块」方案而非并入 `store`）
+
+**处理结论**：`Settings` / `Hotkey` 下沉到 `webview-app/src/model.rs`（零 crate 内依赖，只依赖 serde），
+`store` 直接 `use crate::model::Settings`；`settings.rs` 用 `pub use crate::model::{Hotkey, Settings}`
+保留旧路径 ⇒ 全部调用点零改动。方向变为 `store → model`、`settings → model`，类型环消失。
+`settings_hotkey_contract` 的「提示必须 `#[serde(skip)]`」改扫 `model.rs`（断言语义不变），
+另补 2 条 model 单测。见 [architecture-review-2026-11-19.md](architecture-review-2026-11-19.md) §2.2。
 
 ---
 
@@ -95,3 +101,135 @@
 **方案**（可选）：把主进程侧的 IPC 命令名收敛为单一常量表（如 `ipc-commands.ts` 导出 `SETTINGS_COMMANDS` / `TABS_COMMANDS` / `FLOAT_COMMANDS`），`register*Ipc` 与 `smoke.ts` 的 `missingCmds` 都从它读。**注意**：preload 白名单与页面字面量仍无法共享（跨进程/跨语言），只能收敛主进程侧这一处。收益有限，低优先级。
 
 **状态**：☐ 待处理
+
+---
+
+# 2026-11-19 架构审查（Rust 侧）· 待决策清单
+
+> 来源 [architecture-review-2026-11-19.md](architecture-review-2026-11-19.md)。
+> **2026-11-19 第二轮复核已重排下列 6 条**：P-R3 升级为「立即可做」，P-R4 收敛为小修，
+> P-R5 缩水为「测试外置」，P-R6 / P-R7 改判**不做**（理由见各节）。
+
+## 一、建议执行（2 项）
+
+### P-R3 移动端 `open-tab` 绕过本地代理（P1，立即可做）
+
+**事实**：`mobilebar.rs:507 create_tab_with_url` 直接 `navigate_to(raw_url)`；桌面规则
+`tabs/ipc.rs:202 resolve_popup_url_for` 在 `#[cfg(windows)]` 模块内，Android 根本不编译。
+Android 只要 `proxy_enabled` 就恒走本地代理（`nav::local_proxy_enabled()` 非 Windows 分支不判 `--proxy-server`）。
+
+**影响（比首轮描述更大）**：
+
+| 上游情况 | 用户看到 |
+| --- | --- |
+| 需 Basic 鉴权 | 无 Authorization ⇒ 401 |
+| 内网域名 / 仅本机代理可达 | 白屏；`probe` 报「连接失败」，会被误判成网络故障 |
+| 公网可直连 | 页面能开，但**全程脱离代理**，该页后续相对链接一起脱管 |
+
+**方案对比**：
+
+| 方案 | 成本 | 判 |
+| --- | --- | --- |
+| A 纯函数上移 `nav::resolve_popup_target(&Navigation, Option<&str>)`，桌面留薄包装，移动侧调用 | ~30 行搬迁 + 10 条测试迁移 | **推荐**；`upstream_origin` 已在 `Navigation`（跨平台） |
+| B 移动端复制一份规则 | ~30 行 | 否；两处漂移，违背单一真源 |
+| C 不改 | 0 | 否；缺陷保留且两壳行为不一致 |
+
+**纠正**：首轮「等真机验证窗口」不成立 —— 改写规则是纯函数，本机单测即可覆盖语义；真机只是端到端确认，不阻塞排期。
+
+**状态**：☐ 待处理（下一轮可直接做）
+
+---
+
+### P-R4 `save_settings` 落盘失败后副作用不回滚（P2，小修）
+
+**事实链（复核补全）**：副作用（快捷键 / 托盘 / 球）先应用 → `persist_settings` 失败 `?` 返回 →
+内存态与文件仍旧值。此时新键已注册、旧键已注销，而快捷键回调比对的是**内存旧值**：
+新键无反应、旧键失效。用户重试保存时 diff 仍是「旧≠新」⇒ `register(新)` 返回「已注册」Err
+⇒ 走回滚 `register(旧)` ⇒ **该键再也存不进去，直到重启**。
+
+触发条件窄（磁盘满 / 只读 / 文件被占），但后果是静默的能力丢失。
+
+| 方案 | 说明 | 判 |
+| --- | --- | --- |
+| A 磁盘优先（先 persist 再 apply） | apply 失败需回写旧值，两次写盘 | 次选 |
+| B persist 失败时补偿回滚已应用项（快捷键 + 托盘） | ~25 行；球是纯 UI，下次保存自然纠正 | **推荐** |
+| C 只记录不改 | 0 行 | 可接受（概率极低） |
+
+**状态**：☐ 待处理（倾向 B，与下次设置页改动同批）
+
+---
+
+## 二、建议不做（3 项，附驳回理由）
+
+### P-R5 `mobilebar.rs` 拆分 —— 缩水为「测试外置」（P3）
+
+**复核**：生产 772 行 / 测试 218 行；生产部分已是「1 个状态机（140 行）+ 6 个事件入口 + 4 个 URL 工具 + 推送 / 导航」，
+耦合来源是共享 `MobileTabsState`，不是乱堆。
+- 拆 5 文件的主要收益是阅读体验，编辑器跳转已可替代。
+- 成本明确：Android 本机不可编译（只能静态验证）+ 契约测试 1049 行钉住单文件路径 + 每片重复 cfg。
+- **改结论**：只把 218 行测试搬到 `mobilebar/tests.rs`（`#[path]` 挂载，`BAR_RS` 扫描方式不变），
+  生产文件补 4 条章节 banner。
+
+**状态**：☐ 待处理（低优先，风险≈0）
+
+---
+
+### P-R6 「设置簇三条环」 —— 高估，不做（P3）
+
+**复核后按方向分层**：
+
+| 边 | 性质 | 判 |
+| --- | --- | --- |
+| `tray → settings::open_settings_window` | 功能 → 服务 | 健康 |
+| `floatwin → settings::set_float_enabled` / `→ tray::show_window` | 功能 → 服务 | 健康 |
+| `settings → tray::create_tray` / `floatwin::show / destroy` | 服务 → 功能 | **唯一反向边，3 个调用** |
+
+**纠正**：首轮方案「抽 `settings/apply.rs`」**断不了环** —— apply 仍 import tray / floatwin，只是换个文件名。
+真断环必须依赖注入（settings 持 `Box<dyn Fn>`，装配层注册），引入间接层且副作用错误不便回传。
+
+**结论**：不做。
+
+**状态**：☒ 已关闭（2026-11-19 复核）
+
+---
+
+### P-R7 `floatprobe` feature gate —— 明确不做（P3）
+
+**复核**：1137 行、零测试，经 `probe_mode()` 与 setup 的 `run` 全量进 Windows 产物。
+- 收益：一条 GUI 探针路径约 100–300KB（需出包对比才能精确测，估 <3%）。
+- 风险：feature 要三处出包入口同步（`tests/build-*.bat` / CI / 本地 pack），漏一处 = 探针**静默消失**；
+  而探针的价值正是「能在真产物上跑」。
+- 若为体积，优先做图标 / 资源 / 依赖 feature 这类零风险项。
+
+**状态**：☒ 已关闭（2026-11-19 复核）
+
+---
+
+## 三、维持「只做文档登记」
+
+### P-R8 cfg 双轨 `not(windows)` / `mobile`（P3）
+
+**复核计数**（含注释）：`not(windows)` 54、`cfg(mobile)` 12、`cfg(desktop)` 37。语义仍是「非 Windows 即 Android」。
+真加 Linux 目标时需**逐条判定**这 54 处的归属（Android 专属 vs 通用非 Windows），而非机械替换。
+
+**状态**：☐ 待处理（文档登记已完成，真加目标时再改）
+
+---
+
+## 四、本轮新增观察
+
+### N1 移动端缺单一装配边界（结构性，未定级）
+
+`not(windows)` 逻辑分散 5 处：`bootstrap.rs`（启动编排）、`nav.rs`（`BootReady` 时序）、
+`lib.rs`（事件接线）、`mobilebar.rs`（多页签）、`probe.rs`（可达性）。
+代价：追溯「Android 启动 → 首个页面」要跨 5 个文件；新增移动端能力没有明确落点。
+- **半步方案**：`mobilebar.rs` + `probe.rs` 归入 `mobile/`（纯路径搬迁，`include_str!` 与契约路径同步改）；
+  `bootstrap` / `nav` 的移动分支暂留（与启动时序强耦合，搬动风险高）。
+- 不做整包搬迁：Android 本机不能编译，无处验证。
+
+**状态**：☐ 待决策（建议「半步」，与下次 Android 改动同批）
+
+### N2 移动端无 `opener` / 「下载后关页签」——不是缺陷
+
+Android 下载走系统 DownloadManager（`patch-android-download.py`），不产生应用内
+「下载完成后回到发起页签」的场景。**不要照桌面行为补齐**。

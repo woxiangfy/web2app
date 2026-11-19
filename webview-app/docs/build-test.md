@@ -19,13 +19,15 @@ webview-app/
 │   ├── contract_tests/     # 静态契约测试（2026-10-25 按领域拆为 14 个子模块：IPC 命令注册表 / capabilities 与事件名字面量 / 顶栏配色 / 页签首页 / 加载层模式标记 / 启动可见性 / 后退守卫 / Android 管线（**目录派生**：脚本发现 + 双 workflow 真实调用与同序 + ci 循环非空）/ 悬浮球 / 启动日志归属 / 移动端底栏与打包字段 / 设置页快捷键；仅 cargo test 编译）
 │   ├── config.rs           # 编译期 env 注入常量 + 目录名/文件名清洗
 │   ├── nav.rs              # 导航 / 窗口会话登记数据枢纽（Navigation / BootReady / label 登记 / 导航原语；功能模块一律 → nav）
-│   ├── bootstrap.rs        # 启动编排（后台解析真实地址 → 就绪后导航；对外入口经 nav 的 boot 回调转发）
+│   ├── bootstrap.rs        # 启动编排（后台解析真实地址 → 就绪后导航；对外入口经 nav 的 boot 回调转发；Android 可达性探测已拆到 probe.rs）
+│   ├── probe.rs            # 非 Windows 导航后可达性探测（reqwest 探上游 → 失败分类/成功结论推给加载层；`any(not(windows), test)` 编译）
 │   ├── proxy.rs            # 本地反向代理根（ProxyState / start_proxy / proxy_handler）；子模块 proxy/{auth,ws,headers,tests}.rs（声明带显式 #[path]，sidecar 同源复用）
 │   ├── resolve.rs          # DNS TXT 查询 + 验签解密
 │   ├── loading.rs          # 启动过渡（splash + 加载层）状态机
 │   ├── debug_log.rs        # 诊断日志（dlog! 宏 / 落盘 / 1 MiB 轮转 / mask_url 去凭据 / log_startup 启动信息格式化）
-│   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写；落点 = 数据目录）
-│   ├── settings.rs         # 设置结构、快捷键转换、设置窗口/命令（持久化委托 store）
+│   ├── store.rs            # 运行期唯一那份 JSON 的契约（设置 + window 段几何，读-改-写；落点 = 数据目录；字段类型取自 model）
+│   ├── model.rs            # 跨壳数据契约：Settings / Hotkey 纯数据（零 crate 内依赖；store 与 settings 共同引用，破除类型环）
+│   ├── settings.rs         # 设置业务：校验 / 命令 / 设置窗 / 运行期副作用（模型见 model.rs，持久化委托 store）
 │   ├── tabs.rs             # 多页签根（docs / 重导出转发）；子模块 tabs/{state,window,ipc,tests}.rs（宿主窗口 + shell 标签栏 + tab 窗口 + IPC 命令）
 │   ├── tray.rs             # 系统托盘
 │   ├── window_state.rs     # 窗口几何：抓取 / 恢复策略（落盘在 store 的 window 段）

@@ -79,9 +79,13 @@ export class SidecarError extends Error {
   }
 }
 
-/** sidecar 可执行文件名（Windows 带 .exe）。 */
-function exeName(): string {
-  return process.platform === 'win32' ? 'w2a-proxy.exe' : 'w2a-proxy'
+/**
+ * sidecar 可执行文件名（Windows 带 .exe）——「平台 → 文件名」规则的**唯一**实现。
+ * 打包期裁剪（`sidecar-ship.ts`）re-export 同一函数，运行期定位与随包判定必须同名同规则
+ * （2026-11-18 架构复查：此前 sidecar-ship.ts 有一份逐字拷贝）。
+ */
+export function sidecarExeName(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? 'w2a-proxy.exe' : 'w2a-proxy'
 }
 
 /**
@@ -95,7 +99,7 @@ function exeName(): string {
  *   3. `webview-app/target/debug/` —— 只编了 debug 时的兜底。
  */
 export function locateSidecar(appPath: string, resourcesPath: string): string | null {
-  const name = exeName()
+  const name = sidecarExeName()
   return firstExisting([
     join(resourcesPath, 'sidecar', name),
     join(appPath, '..', 'webview-app', 'target', 'release', name),

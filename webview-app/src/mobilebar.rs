@@ -447,13 +447,17 @@ fn main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.get_webview_window(crate::nav::main_window_label())
 }
 
+/// 缓存的导航信息（首页落点 + 上游源）。
+///
+/// `open-tab` 改写地址时需要**整份** `Navigation`（入口 origin 与 `upstream_origin` 都要），
+/// 只取 `url` 不够；`Navigation` 是 `Clone`，克隆一份离开锁再算（不在锁内做 URL 解析）。
+fn home_nav(app: &AppHandle) -> Option<Navigation> {
+    app.state::<HomeNav>().0.lock().ok().and_then(|g| g.clone())
+}
+
 /// 缓存的首页地址（新建标签的落点）。
 fn home_url(app: &AppHandle) -> Option<String> {
-    app.state::<HomeNav>()
-        .0
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|n| n.url.clone()))
+    home_nav(app).map(|n| n.url)
 }
 
 /// 把 webview 当前所在 url 记进活动标签（切换 / 新建之前先保住旧标签的落点）。
@@ -528,13 +532,23 @@ fn create_tab_with_url(app: &AppHandle, raw_url: &str) {
         return;
     };
     bind_current_url(app);
+    // 「页面给的地址 → 本壳实际要访问的落点」：与桌面 `tabs/ipc.rs::resolve_popup_url` 共用
+    // 同一条规则（`nav::resolve_popup_target`）。没有这一步时，启用本地代理（Android 只要
+    // `proxy_enabled` 就必然走代理）的环境里，页面写死的上游绝对外链会：
+    //   ① 拿不到代理注入的 Authorization ⇒ 401；② 上游仅代理可达时白屏（还会被 probe
+    //      报成「连接失败」，误诊为网络故障）；③ 即使能直连，新页签及其后续相对链接
+    //      也全部脱离代理。
+    // 拿不到缓存的 Navigation（首启未就绪 / 解析失败）时回落到页面给的地址，与旧行为一致。
+    let target = home_nav(app)
+        .and_then(|nav| crate::nav::resolve_popup_target(&nav, Some(raw_url)))
+        .unwrap_or_else(|| raw_url.to_string());
     let target = {
         let state = app.state::<MobileTabsState>();
         let Ok(mut t) = state.0.lock() else {
             return;
         };
-        // new_tab 的入参就是新记录的落点 url（首页场景传首页地址），这里传页面给的链接。
-        let i = t.new_tab(raw_url);
+        // new_tab 的入参就是新记录的落点 url（首页场景传首页地址），这里传映射后的目标。
+        let i = t.new_tab(&target);
         t.tabs[i].url.clone()
     };
     navigate_to(app, &window, &target);
