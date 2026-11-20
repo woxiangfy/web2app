@@ -120,6 +120,19 @@ CI 报错行号一致。
 
 底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移（**含窄幅悬浮按钮 FAB**：fixed 贴底件无宽度门槛，且保留元素原 px 底边距），否则页面页脚 / FAB 会被底栏切掉半截。页面自己的**内嵌滚动区 / 子文档**（overflow 滚动容器、iframe，顶部有自己的头 ⇒ 整屏缩高判据认不出）底边被底栏压住时让出一格（`padding-bottom`，滚动到底内容停在底栏上沿；2026-11-20 底部遮挡缺陷修复，配套滚动根探测补跑自愈）。加载转圈层经 `__web2appMobileBarH` + `web2app:chrome-ready` 让出底栏，加载期间底栏仍可见可点。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径。
 
+**自适应配色（2026-11-20，`chrome.js` + `patch-android-extras.py::setChrome`）**：底栏 / 面板的底色与文字色走 CSS 变量（`--w2m-bg` / `--w2m-fg` / `--w2m-border`，兜底值仍是原来的中性色 ⇒ 采样失败时观感与改动前一致），由 `chrome.js` 在「接缝」处取色（顶部 = 页面视口 y=0，正好是状态栏下沿；底部 = 底栏上沿往上 2px），底栏按 `CHROME_TINT`（15%）与壳的表面色混合，图标 / 文字色由相对亮度决定。**顶部那一格在 Activity 窗口层**（insets 把内容视图内缩后露出的是主题 `windowBackground`），页面 CSS 改不到 ⇒ 经原生桥 `__web2appAndroid.setChrome(key, '#RRGGBB', light)` 刷窗口背景 + 切图标明暗；⚠️ Android 15 / targetSdk 35 起 `setStatusBarColor` 是 **no-op**，所以必须刷窗口背景（`statusBarColor` 只作为旧系统的补手）。取色顺序：`<meta name="theme-color">` → 接缝元素背景色 → 渐变色标（按渐变方向取靠近接缝那一侧，近似）→ 放弃并保持默认；**跨域图片 / 视频当背景时拿不到像素**，属已知边界。触发时机为首帧 / 首屏补采（300ms、1200ms）/ 滚动 / 视口变化 / 日夜切换 / DOM 变动，统一 120ms 去抖，无常驻轮询。底栏刻意**不用** `backdrop-filter`：它后面没有页面内容，模糊的只是窗口底色。
+
+### 自适应配色真机验证（2026-11-20）
+
+| # | 真机操作 | 预期现象 |
+| --- | --- | --- |
+| 1 | 打开高饱和渐变页面 | 状态栏区与页面顶边同色（白条消失），图标按底色自动切深 / 浅 |
+| 2 | 滚动到不同底色区域 | 状态栏区跟着变色；底栏只带一点页面色，仍能辨认是壳的 UI |
+| 3 | 站点带 `<meta name="theme-color">` | 状态栏区使用该主题色（不再取接缝色） |
+| 4 | 页面顶部是跨域大图 / 视频 | 保持 theme-color 或默认中性色，不出现怪异颜色 |
+| 5 | 系统切深色模式 | 底栏回到深色表面色 + 浅色文字（不是页面色的亮色变体） |
+| 6 | 打开底部是浅色长列表的页面 | 底栏接近白 / 浅灰（与页面协调），文字仍为深色可读 |
+
 **`target="_blank"` / `window.open()` 进移动页签**（2026-10-14 起，仅多页签模式）：`mobilebar/tabs.js` document-start 装 blank guard —— 捕获阶段 click 向上找最近 `<a>` 命中 `_blank` 且 http(s) 即拦，`window.open` 同拦（非 http(s) 回落原实现交 schemes 外跳），统一发 `web2app:open-tab` `{url}`；`mobilebar.rs` 新事件只承接 http(s) 并复用单 webview 页签记录开新页（它是新建页签的唯一入口 —— 无 payload 落首页的 `web2app:new-tab` 事件链 2026-11-20 随「＋ 新建标签」一并移除）。单页签包不装 guard。
 
 ### 拆分后逐项真机验证清单（2026-11-07，`src/mobilebar/` 五片）

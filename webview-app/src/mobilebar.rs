@@ -6,7 +6,7 @@
 //! `.github/scripts/patch-android-back.py`），没有前进、也没有「回到入口」。
 //! `mobile_bar=true` 时就在屏幕**底部**常驻一条导航条补上这几个动作。
 //!
-//! 前端真源是 `src/mobilebar/`（core + bottom_space + tabs + more + mount 五片，由 `lib.rs` 按序
+//! 前端真源是 `src/mobilebar/`（core + bottom_space + tabs + more + chrome + mount 六片，由 `lib.rs` 按序
 //! 拼成**同一个 IIFE**），本模块负责四类事：
 //!   1. 把「底栏高度 / 是否有页签可切」两个值注入给它（**必须在它之前**注册）；
 //!   2. 缓存启动期解析出的首页导航信息，供「首页」按钮复用；

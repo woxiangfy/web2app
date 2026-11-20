@@ -13,7 +13,7 @@
    **真共用**（Electron 打包时从本工程复制）：`src/{titlebar.js,loading.js,shell.html,splash.html}`、`dist/settings.html`、
    `icons/*`；**行为对齐但实现不同**：Ctrl+W 关页签（`tab_keys.js` vs Electron `before-input-event`）、页签标题回传（`tab_title.js`）；
    **单壳专属**：`tab_title.js` / `tab_keys.js` / `tab_doc_ready.js` / `dnd_polyfill.js`（WebView2/Tauri 注入，Electron 不消费）、
-   `mobilebar/*.js`（仅 Tauri 移动端；5 个分片由 `lib.rs` 按序拼成同一个 IIFE）、`floaticon.html`（仅 Electron）。
+   `mobilebar/*.js`（仅 Tauri 移动端；6 个分片由 `lib.rs` 按序拼成同一个 IIFE）、`floaticon.html`（仅 Electron）。
    `src/{proxy.rs,resolve.rs}` 经 sidecar `#[path]` 同源复用 —— 改一必双壳验证。
 2. **测试门禁**：改动后 `cargo test --all` 必须全绿（当前 338 通过 / 6 ignored）；`src/contract_tests/`（按领域 15 个子模块）
    是静态契约守卫 —— 改 `capabilities/*.json` 或注入脚本的事件名会被它拦下。

@@ -19,7 +19,7 @@
 const LIB_RS: &str = include_str!("../lib.rs");
 const BAR_RS: &str = include_str!("../mobilebar.rs");
 /// 底栏脚本 = `lib.rs` 里 `include_str!("mobilebar/<part>.js")` 的**按序拼接**：
-/// 运行时就是**同一个 IIFE**（五片共享闭包作用域）。这里从 `lib.rs` 派生分片清单，
+/// 运行时就是**同一个 IIFE**（六片共享闭包作用域）。这里从 `lib.rs` 派生分片清单，
 /// 不手抄第二份，拼出与运行时逐字相同的整脚本。
 fn bar() -> &'static str {
     use std::sync::OnceLock;
@@ -324,6 +324,60 @@ fn extras_patch_script_has_bridge_and_full_cleardata() {
             "patch-android-extras.py 必须包含：{needle}"
         );
     }
+}
+
+/// ④f 自适应配色（2026-11-20 真机反馈：顶部白条 + 底部灰条与页面不协调）。
+///
+/// 两条都是「认不出就保持原样」的静默路径，必须在静态层钉住：
+///   · 底栏 / 面板底色走 CSS 变量，兜底值仍是改动前的中性色（采样失败 = 观感不变）；
+///   · 顶部那一格属于 Activity 窗口层（insets 内缩后露出窗口底色），CSS 改不到 ⇒
+///     必须经原生桥 `setChrome` 上色，且 JS / Kotlin 两侧方法名逐字一致；
+///   · Android 15（targetSdk 35）起 `setStatusBarColor` 是 no-op ⇒ 必须刷窗口背景。
+#[test]
+fn chrome_colors_follow_the_page() {
+    // ① 变量化 + 兜底值 = 原来的中性色（亮 / 暗各一套，缺一个就会在对应主题下露白/露黑）。
+    for needle in [
+        "background:var(--w2m-bg,#eef0f2)!important",
+        "background:var(--w2m-bg,#1f2530)!important",
+        "color:var(--w2m-fg,#2c3440)!important",
+        "color:var(--w2m-fg,#e6ebf2)!important",
+    ] {
+        assert!(
+            bar().contains(needle),
+            "底栏配色必须变量化且保留默认中性色：{needle}"
+        );
+    }
+    // ② 采样侧：接缝取色（顶部 = 视口 y=0，底部 = 底栏上沿）+ 轻混色 + 只写自己的变量。
+    for needle in [
+        "CHROME_TINT",
+        "elementFromPoint",
+        "setProperty('--w2m-bg'",
+        "if (top) sendChrome(top);",
+    ] {
+        assert!(
+            bar().contains(needle),
+            "自适应配色缺少要素：{needle}（采样 / 混色 / 下发三条链缺一即静默不生效）"
+        );
+    }
+    // ③ 顶部必须走原生桥，且 JS 侧方法名与 Kotlin 侧逐字一致（改名 = 顶部永远不跟随）。
+    assert!(
+        bar().contains("b.setChrome(k, hexCss(color)"),
+        "顶部取色必须调原生桥 setChrome（CSS 改不到窗口层）"
+    );
+    assert!(
+        EXTRAS_PY.contains("fun setChrome(key: String?, color: String?, light: Boolean)"),
+        "patch-android-extras.py 必须提供 setChrome(key, color, light)"
+    );
+    // ④ 35+ 唯一生效路径：窗口背景上色（只写 setStatusBarColor 会在新系统上静默失效）。
+    assert!(
+        EXTRAS_PY.contains("window.setBackgroundDrawable(ColorDrawable(parsed))"),
+        "setChrome 必须刷窗口背景：Android 15 起 setStatusBarColor 是 no-op"
+    );
+    // ⑤ 反例锁定：底栏后面是窗口底色（不是页面内容），毛玻璃只会糊出一层白，禁用。
+    assert!(
+        !bar().contains("backdrop-filter"),
+        "底栏不得使用 backdrop-filter：它后面没有页面内容，模糊的是窗口底色"
+    );
 }
 
 /// ④e 两个 Android 打包 workflow 必须都挂 extras 补丁步，ci.yml 的 selftest 门禁名单

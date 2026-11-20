@@ -1,5 +1,5 @@
 // ⚠️ 本文件是 `src/mobilebar/` 的**分片**，不能单独运行：`lib.rs` 按
-//    core → bottom_space → tabs → more → mount 的顺序 `include_str!` 拼进**同一个 IIFE**，
+//    core → bottom_space → tabs → more → chrome → mount 的顺序 `include_str!` 拼进**同一个 IIFE**，
 //    分片共享同一份闭包作用域（不要改成各自独立的 IIFE）。
 // 职责（底板）：注入骨架与共享状态 —— 配置解析、常量/图标/样式、事件与 DOM 宿主工具、
 //     底栏本体与面板宿主（openSheet / closeSheet / renderSheet）、防重入与自愈的公共状态。
@@ -140,13 +140,16 @@
     'margin:0!important;',
     'z-index:2147483646!important;',
     'display:flex!important;align-items:stretch!important;gap:0!important;',
-    'background:#eef0f2!important;color:#2c3440!important;',
-    'border-top:1px solid rgba(0,0,0,.08)!important;',
+    // 配色走 CSS 变量：`chrome.js` 按页面取色后写在底栏元素的 inline 变量上，
+    // 认不出颜色 / 未注入成功时回落到这里的默认中性色（与改动前逐字一致）。
+    'background:var(--w2m-bg,#eef0f2)!important;color:var(--w2m-fg,#2c3440)!important;',
+    'border-top:1px solid var(--w2m-border,rgba(0,0,0,.08))!important;',
     'font:12px/1 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif!important;',
     '-webkit-user-select:none!important;user-select:none!important;',
     '}',
     '@media (prefers-color-scheme:dark){#__web2app_mobilebar__{',
-    'background:#1f2530!important;color:#e6ebf2!important;border-top-color:rgba(255,255,255,.07)!important;}}',
+    'background:var(--w2m-bg,#1f2530)!important;color:var(--w2m-fg,#e6ebf2)!important;',
+    'border-top-color:var(--w2m-border,rgba(255,255,255,.07))!important;}}',
     '#__web2app_mobilebar__ *{box-sizing:border-box!important;margin:0!important;padding:0!important;}',
     /* 按钮：整格铺满条高（触摸目标 ≥ 44px），反馈走 :active 而不是 :hover */
     '#__web2app_mobilebar__ .w2m-btn{',
@@ -169,11 +172,13 @@
     '#__web2app_mobilebar__ .w2m-sheet{',
     'position:fixed!important;left:0!important;right:0!important;bottom:' + RESERVE + '!important;',
     'max-height:50vh!important;overflow-y:auto!important;',
-    'background:#eef0f2!important;color:#2c3440!important;',
-    'border-top:1px solid rgba(0,0,0,.08)!important;',
+    // 面板是底栏的子节点 ⇒ 变量从底栏继承（同一套配色），默认值仍是原来的中性色。
+    'background:var(--w2m-bg,#eef0f2)!important;color:var(--w2m-fg,#2c3440)!important;',
+    'border-top:1px solid var(--w2m-border,rgba(0,0,0,.08))!important;',
     'z-index:2147483646!important;}',
     '@media (prefers-color-scheme:dark){#__web2app_mobilebar__ .w2m-sheet{',
-    'background:#1f2530!important;color:#e6ebf2!important;border-top-color:rgba(255,255,255,.07)!important;}}',
+    'background:var(--w2m-bg,#1f2530)!important;color:var(--w2m-fg,#e6ebf2)!important;',
+    'border-top-color:var(--w2m-border,rgba(255,255,255,.07))!important;}}',
     '#__web2app_mobilebar__ .w2m-row{',
     'display:flex!important;align-items:center!important;gap:8px!important;',
     'width:100%!important;min-height:44px!important;padding:10px 14px!important;',

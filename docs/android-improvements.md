@@ -74,6 +74,7 @@
 | 19 | 分发 | 增加 x86_64 / universal APK；评估 AAB | ❌ 不做（2026-11-14 决策，理由见 §5） | — |
 | 20 | 流程 | 真机能力验收清单入回归（见 §4） | 进行中（本文件 §4 即清单） | 每次打包后人工执行 |
 | 21 | P0 | 恒需 `ACCESS_NETWORK_STATE`：hickory 读系统 DNS 走 JNI `getActiveNetwork()`，缺权限 ⇒ 启动期「解析目标地址失败」整页失败 | ✅ 已实施（2026-11-19） | `patch-android-permissions.py` 恒需块 + `src/resolve.rs::fallback_config` 兜底 |
+| 22 | P2 | 顶 / 底配色跟随页面（状态栏区不再固定 #f7f8fa 白条，底栏不再固定中性灰） | ✅ 已实施（2026-11-20） | `src/mobilebar/chrome.js`（接缝取色 + 轻混色）+ `patch-android-extras.py::setChrome`（窗口背景上色，35+ 唯一生效路径） |
 
 状态取值：待办 / 进行中 / ✅ 已实施（日期）/ ❌ 不做（日期 + 理由见 §5）。
 

@@ -581,10 +581,10 @@ pub fn run() {
             //    顺序反了它只会落进「默认值」分支 —— 底栏照画，但高度与按钮清单不再由壳决定，
             //    是最难从表象反推的一类错位（与上面「模式标记必须排在 OVERLAY_SCRIPT 之前」
             //    同一条契约，由 contract_tests::mobile_bar_contract 钉住）。
-            // ⚠️ 底栏脚本是 `src/mobilebar/` 下五个**分片**按序拼成的**同一个 IIFE**（共享闭包
+            // ⚠️ 底栏脚本是 `src/mobilebar/` 下六个**分片**按序拼成的**同一个 IIFE**（共享闭包
             //    作用域）：core（底座）→ bottom_space（让位）→ tabs（页签）→ more（更多面板）
-            //    → mount（生命周期 + 闭 IIFE）。**顺序在此处唯一权威**，契约测试按这里派生分片
-            //    清单，不要另抄一份。`mount.js` 必须最后一片。
+            //    → chrome（自适应配色）→ mount（生命周期 + 闭 IIFE）。**顺序在此处唯一权威**，
+            //    契约测试按这里派生分片清单，不要另抄一份。`mount.js` 必须最后一片。
             #[cfg(mobile)]
             let wb = if crate::config::MOBILE_BAR {
                 wb.initialization_script(crate::mobilebar::config_script())
@@ -593,6 +593,7 @@ pub fn run() {
                         include_str!("mobilebar/bottom_space.js"),
                         include_str!("mobilebar/tabs.js"),
                         include_str!("mobilebar/more.js"),
+                        include_str!("mobilebar/chrome.js"),
                         include_str!("mobilebar/mount.js"),
                     ))
             } else {

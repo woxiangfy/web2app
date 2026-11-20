@@ -12,7 +12,12 @@
     且 wry 自己的 Kotlin `clearAllBrowsingData()` **漏清 Cookie 与 HTML5 存储**
     （只有 clearCache/clearHistory/clearFormData/deleteDatabase），不清 Cookie
     的「清除浏览数据」是假清除（登录态还在）；
-  · 退出应用 —— finishAndRemoveTask + 杀进程。
+  · 退出应用 —— finishAndRemoveTask + 杀进程；
+  · 顶部状态栏区取色（2026-11-20）—— 那一格属于 Activity 窗口层（insets 把内容视图
+    按状态栏高度内缩后露出窗口底色），页面 CSS 改不到，只能在这里刷窗口背景 +
+    图标明暗（`setChrome`，前端调用方是 `src/mobilebar/chrome.js`）。
+    ⚠️ Android 15 / targetSdk 35 起 `setStatusBarColor` 已是无操作 ⇒ 必须走
+    「系统栏保持透明 + 窗口背景上色」，不要只改状态栏颜色。
 
 本补丁改两个生成工程文件：
 
@@ -69,6 +74,11 @@ NEEDED_IMPORTS = (
     "import android.annotation.SuppressLint",
     "import android.app.Activity",
     "import android.content.Intent",
+    "import android.graphics.Color",
+    "import android.graphics.drawable.ColorDrawable",
+    "import android.os.Build",
+    "import android.view.View",
+    "import android.view.WindowInsetsController",
     "import android.webkit.CookieManager",
     "import android.webkit.JavascriptInterface",
     "import android.webkit.WebStorage",
@@ -165,6 +175,7 @@ def _full_override() -> str:
 METHODS_BLOCK = """  // {marker}：JS 桥（见 patch-android-extras.py）。所有方法先核当页密钥，
   // 且全部从 binder 线程 post 回 UI 线程执行（@JavascriptInterface 不在主线程回调）。
   @SuppressLint("JavascriptInterface")
+  @Suppress("DEPRECATION", "NewApi")
   private fun web2appSetupExtras(webView: WebView) {{
     webView.addJavascriptInterface(object {{
       // 系统分享面板：把当前页链接作为 text/plain 分享出去。
@@ -246,6 +257,43 @@ METHODS_BLOCK = """  // {marker}：JS 桥（见 patch-android-extras.py）。所
           webView.postDelayed({{
             android.os.Process.killProcess(android.os.Process.myPid())
           }}, 300)
+        }}
+      }}
+
+      // 顶部状态栏区取色（2026-11-20，调用方 src/mobilebar/chrome.js）：页面在状态栏下沿
+      // 的颜色（hex "#RRGGBB"）+ 图标该用深色还是浅色。
+      // 做法：系统栏保持透明（模板的 enableEdgeToEdge），insets 把内容视图内缩后露出的是
+      // 窗口底色 ⇒ 刷窗口背景即可各版本一致生效；statusBarColor 只为旧系统补一手
+      //（Android 15 / targetSdk 35 起它是 no-op，绝不能只依赖它）。
+      @JavascriptInterface
+      fun setChrome(key: String?, color: String?, light: Boolean) {{
+        if (!web2appBridgeOk(key)) return
+        val raw = color ?: return
+        val parsed = try {{
+          Color.parseColor(raw)
+        }} catch (e: Exception) {{
+          return
+        }}
+        webView.post {{
+          try {{
+            val activity = webView.context as? Activity ?: return@post
+            val window = activity.window
+            window.setBackgroundDrawable(ColorDrawable(parsed))
+            window.statusBarColor = parsed
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {{
+              val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+              window.insetsController?.setSystemBarsAppearance(if (light) mask else 0, mask)
+            }} else {{
+              var flags = window.decorView.systemUiVisibility
+              flags = if (light) {{
+                flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+              }} else {{
+                flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+              }}
+              window.decorView.systemUiVisibility = flags
+            }}
+          }} catch (e: Exception) {{
+          }}
         }}
       }}
 
@@ -433,6 +481,11 @@ def selftest() -> int:
         "fun openBrowser(key: String?, url: String?)",
         "fun clearData(key: String?)",
         "fun quitApp(key: String?)",
+        # 顶部状态栏区取色：窗口背景上色（35+ 唯一生效路径）+ 图标明暗两套实现。
+        "fun setChrome(key: String?, color: String?, light: Boolean)",
+        "window.setBackgroundDrawable(ColorDrawable(parsed))",
+        "WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS",
+        "View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR",
         "Intent.ACTION_SEND",
         "Intent.createChooser(send, \"分享到\")",
         "Intent.ACTION_VIEW",
