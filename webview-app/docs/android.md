@@ -114,13 +114,13 @@ CI 报错行号一致。
 
 编译期开关 `MOBILE_BAR=true` 开启（默认关，**仅移动端**）：屏幕底部常驻一条导航条 —— **首页**（回到 `app_url`，已在首页则重新加载；未就绪时重走一次 bootstrap）/ **后退** / **前进** / **列表**（仅多页签）/ **更多**（恒在最后，无条件渲染）。
 
-**「更多」面板（2026-10-14 起）** 从底栏升起，六行：刷新 / 复制链接（Clipboard + execCommand 兜底）/ 分享 / 在浏览器打开 / **清除浏览数据（两步确认，3s 撤防）** / 退出；后四个动作经打包期注入的 Kotlin 桥 `__web2appAndroid` 直达，带主框架一次性密钥、iframe 调不到，操作反馈走面板 toast。后退前进的**落点守卫与桌面端标题栏同一条规则**（没有真实上/下一条、或落点是内置 splash 时不动作并置灰），与 Android 系统返回键的判定同源。
+**「更多」面板** 从底栏升起，**两行：清除浏览数据（两步确认，3s 撤防）/ 退出应用**（2026-11-20 按产品需求精简：刷新 / 复制链接 / 分享 / 在浏览器打开与顶部的当前地址展示全部下线，面板不再显示链接地址；Kotlin 桥的 `share` / `openBrowser` 方法保留为预留能力，无 UI 入口）。动作经打包期注入的 Kotlin 桥 `__web2appAndroid` 直达，带主框架一次性密钥、iframe 调不到，操作反馈走面板 toast。后退前进的**落点守卫与桌面端标题栏同一条规则**（没有真实上/下一条、或落点是内置 splash 时不动作并置灰），与 Android 系统返回键的判定同源。
 
-**「列表」按钮只在 `tabs_enabled=true` 时渲染**（2026-10-13 起移动端落地【单 webview 页签记录】：面板可新建 / 切换 / 关闭，首页固定 0 号位；wry 不支持同窗口多子 webview，切换 = 按记录 url 重新加载，页面状态不保留；判定单一真源 `mobilebar.rs::tabs_available`），关闭时只画前三个按钮，绝不出现死按钮。
+**「列表」按钮只在 `tabs_enabled=true` 时渲染**（2026-10-13 起移动端落地【单 webview 页签记录】：面板可切换 / 关闭，首页固定 0 号位；「＋ 新建标签」入口 2026-11-20 已下线，新建页签只剩网页 `target=_blank` / `window.open` 一条路；wry 不支持同窗口多子 webview，切换 = 按记录 url 重新加载，页面状态不保留；判定单一真源 `mobilebar.rs::tabs_available`），关闭时只画前三个按钮，绝不出现死按钮。
 
-底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移（**含窄幅悬浮按钮 FAB**：fixed 贴底件无宽度门槛，且保留元素原 px 底边距），否则页面页脚 / FAB 会被底栏切掉半截。加载转圈层经 `__web2appMobileBarH` + `web2app:chrome-ready` 让出底栏，加载期间底栏仍可见可点。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径。
+底栏按**底部空间契约**把 `body` 缩高一格底栏并让出 `env(safe-area-inset-bottom)`，同时把页面自己的贴底固定条上移（**含窄幅悬浮按钮 FAB**：fixed 贴底件无宽度门槛，且保留元素原 px 底边距），否则页面页脚 / FAB 会被底栏切掉半截。页面自己的**内嵌滚动区 / 子文档**（overflow 滚动容器、iframe，顶部有自己的头 ⇒ 整屏缩高判据认不出）底边被底栏压住时让出一格（`padding-bottom`，滚动到底内容停在底栏上沿；2026-11-20 底部遮挡缺陷修复，配套滚动根探测补跑自愈）。加载转圈层经 `__web2appMobileBarH` + `web2app:chrome-ready` 让出底栏，加载期间底栏仍可见可点。桌面端（Windows Tauri / Electron）忽略该开关：常量整体 `#[cfg(mobile)]`，桌面目标无此代码路径。
 
-**`target="_blank"` / `window.open()` 进移动页签**（2026-10-14 起，仅多页签模式）：`mobilebar/tabs.js` document-start 装 blank guard —— 捕获阶段 click 向上找最近 `<a>` 命中 `_blank` 且 http(s) 即拦，`window.open` 同拦（非 http(s) 回落原实现交 schemes 外跳），统一发 `web2app:open-tab` `{url}`；`mobilebar.rs` 新事件（与无 payload 落首页的 `web2app:new-tab` 区分）只承接 http(s) 并复用单 webview 页签记录开新页。单页签包不装 guard。
+**`target="_blank"` / `window.open()` 进移动页签**（2026-10-14 起，仅多页签模式）：`mobilebar/tabs.js` document-start 装 blank guard —— 捕获阶段 click 向上找最近 `<a>` 命中 `_blank` 且 http(s) 即拦，`window.open` 同拦（非 http(s) 回落原实现交 schemes 外跳），统一发 `web2app:open-tab` `{url}`；`mobilebar.rs` 新事件只承接 http(s) 并复用单 webview 页签记录开新页（它是新建页签的唯一入口 —— 无 payload 落首页的 `web2app:new-tab` 事件链 2026-11-20 随「＋ 新建标签」一并移除）。单页签包不装 guard。
 
 ### 拆分后逐项真机验证清单（2026-11-07，`src/mobilebar/` 五片）
 
@@ -133,28 +133,30 @@ CI 报错行号一致。
 | 1 | `mobile_bar=true`、`tabs_enabled=false` 打包安装并打开 | 底部 4 格：首页/后退/前进/更多（**无列表**）；高度正确、不盖住页面 | 注入时序（core 读 cfg）、按钮条件渲染（core） |
 | 2 | 点「后退」「前进」 | 与系统行为一致；无历史时置灰且点击无动作 | 导航落点判定（core） |
 | 3 | 点「首页」 | 已在首页则重新加载；否则回到 `app_url` | 首页按钮（core + `web2app:home`） |
-| 4 | 点「更多」 | 面板自底栏上沿升起，六行齐全；点遮罩 / 再点「更多」可收起 | 面板宿主（core）+ more.js |
-| 5 | 「更多」→ 刷新 / 复制链接 / 分享 / 在浏览器打开 | 刷新生效；复制后 toast；分享与浏览器打开拉起系统面板 | more.js + Kotlin 桥（密钥轮换） |
+| 4 | 点「更多」 | 面板自底栏上沿升起，两行齐全（清除浏览数据 / 退出应用）且**不显示当前地址**；点遮罩 / 再点「更多」可收起 | 面板宿主（core）+ more.js |
+| 5 | 「更多」面板反向确认 | 只有两行，无地址行，无刷新 / 复制链接 / 分享 / 在浏览器打开（2026-11-20 精简，契约测试有反例锁定） | more.js |
 | 6 | 「更多」→ 清除浏览数据（两步确认） | 首点变「再点一次」，3s 内不点自动撤防；确认后 toast 且站点数据清空 | more.js 的 `clearArmed` 状态机 |
 | 7 | 「更多」→ 退出 | 应用退出，不残留后台 | more.js |
 | 8 | 页面底部有 `position:fixed` 的 FAB / 客服球 | FAB 整体在底栏之上，不被切半；原 px 底边距保留 | bottom_space.js |
 | 9 | 打开 `100vh` 满屏页面 | 容器缩一格外加 safe-area，不出现双滚动条 | bottom_space.js |
 | 10 | 页面加载中（转圈层） | 转圈层只到「底栏之上」，底栏可见可点 | core 的 `markChromeReady` + loading.js |
 | 11 | 横竖屏 / 三大键↔手势导航切换 | 底栏高度稳定，安全区随设备生效 | bottom_space.js 重排 |
-| 12 | `tabs_enabled=true` 打包，点「列表」 | 页签面板可新建/切换/关闭；首页固定 0 号且不可关 | tabs.js |
+| 12 | `tabs_enabled=true` 打包，点「列表」 | 页签面板可切换/关闭（无「＋ 新建标签」、无切换重载提示）；首页固定 0 号且不可关 | tabs.js |
 | 13 | 多页签下点 `target="_blank"` / 页面调 `window.open` | 链接进移动页签记录并加载，不再点击无反应 | tabs.js::installBlankGuard |
 | 14 | 切换页签后观察壳侧 | 页签标题与 url 跟随当前文档更新（不是空白 / 旧标题） | tabs.js::watchDoc + `web2app:mobile-doc` |
 | 15 | 打开内置启动页 / splash | 底栏不画、blank guard 不装（`mount.js` 早退分支生效） | mount.js 内置页早退 |
+| 16 | 打开「顶部自有头 + 自滚动内容区」的页面（列表页），滚到底 | 最后一行完整停在底栏上沿，不被压住；含 iframe 子文档页面 | bottom_space.js 内嵌滚动区让位 |
 
 **主要风险点**（按概率排序）：
 
 1. **分片顺序 / 拼接完整性**：必须按 `core → bottom_space → tabs → more → mount` 拼成**同一个 IIFE**。
    顺序错或某片被改成独立 IIFE ⇒ 共享闭包状态（`tabRows` / `activePanel` / `clearArmed`）失联，
    表象是「按钮在但点了没反应」「面板空白」。契约测试 ⑮ 钉住「以 `})();` 结尾」与防重标记唯一，
-   但**漏片 / 拼错片名**只能靠本清单 #12–#15 发现。
+   但**漏片 / 拼错片名**只能靠本清单 #12–#16 发现。
 2. **注入时序**：`config_script()` 必须仍排在底栏脚本之前（契约测试 ③ 钉着）。
 3. **原生桥契约**：`more.js` 的 `__web2appAndroid` / `__web2appAndroidKey` 与
-   `patch-android-extras.py` 的常量逐字一致，改名会**静默失效**（清单 #5–#7）。
+   `patch-android-extras.py` 的常量逐字一致，改名会**静默失效**（清单 #5–#7；`share` /
+   `openBrowser` 2026-11-20 起无 UI 入口，仅 `clearData` / `quitApp` 由面板触达）。
 4. **行尾**：分片沿用原文件 CRLF，拼接后与拆分前逐行同源；编辑器批量改 LF 会让 diff 整文件翻新（不影响运行）。
 
 **快速回退**：单笔回退本轮变更即可 —— 恢复 `src/mobilebar.js`，把 `lib.rs` 的

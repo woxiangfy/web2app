@@ -10,7 +10,8 @@
 ///   · cfg 脚本必须排在 底栏脚本 之前（初始化脚本按注册顺序执行）；
 ///   · 按钮清单与顺序（首页 / 后退 / 前进 / [列表] / 更多）；
 ///   · 「列表」按钮**由页签可用性决定**，不是无条件渲染（死按钮守卫）；
-///   · 「更多」面板无条件渲染且固定最后：六个动作 + Android 原生桥要素 + 密钥 + 两步清数据；
+///   · 「更多」面板无条件渲染且固定最后：两个动作（清除浏览数据 / 退出应用，2026-11-20
+///     按产品需求精简）+ Android 原生桥要素 + 密钥 + 两步清数据；
 ///   · 底部空间契约（与顶部空间契约镜像）+ 前进后退落点守卫 + 启动页不画底栏；
 ///   · 打包配置字段 `mobile_bar` / `android_permissions` 的**语义**（白名单三值、
 ///     归一函数、`#[cfg(mobile)]` 形态、include_str! 唯一注入点）；
@@ -79,8 +80,6 @@ const SWITCH_IN_JS: &str = concat!("'", "web2app:switch-tab", "'");
 const SWITCH_IN_RUST: &str = concat!("\"", "web2app:switch-tab", "\"");
 const CLOSE_IN_JS: &str = concat!("'", "web2app:close-tab", "'");
 const CLOSE_IN_RUST: &str = concat!("\"", "web2app:close-tab", "\"");
-const NEW_IN_JS: &str = concat!("'", "web2app:new-tab", "'");
-const NEW_IN_RUST: &str = concat!("\"", "web2app:new-tab", "\"");
 const OPEN_IN_JS: &str = concat!("'", "web2app:open-tab", "'");
 const OPEN_IN_RUST: &str = concat!("\"", "web2app:open-tab", "\"");
 const REQUEST_IN_JS: &str = concat!("'", "web2app:request-tabs", "'");
@@ -114,7 +113,6 @@ fn event_names_match_between_page_and_rust() {
             "app.listen(CLOSE_TAB_EVENT",
             "web2app:close-tab",
         ),
-        (NEW_IN_JS, "app.listen(NEW_TAB_EVENT", "web2app:new-tab"),
         (OPEN_IN_JS, "app.listen(OPEN_TAB_EVENT", "web2app:open-tab"),
         (
             REQUEST_IN_JS,
@@ -137,7 +135,6 @@ fn event_names_match_between_page_and_rust() {
         (NAV_HOME_IN_RUST, "web2app:nav-home"),
         (SWITCH_IN_RUST, "web2app:switch-tab"),
         (CLOSE_IN_RUST, "web2app:close-tab"),
-        (NEW_IN_RUST, "web2app:new-tab"),
         (OPEN_IN_RUST, "web2app:open-tab"),
         (REQUEST_IN_RUST, "web2app:request-tabs"),
         (DOC_IN_RUST, "web2app:mobile-doc"),
@@ -206,7 +203,7 @@ fn bar_renders_home_back_forward_list_then_more() {
     }
 }
 
-/// ④b 「更多」按钮必须**无条件**渲染（不像列表受 HAS_TABS 控制）—— 刷新/复制/分享等
+/// ④b 「更多」按钮必须**无条件**渲染（不像列表受 HAS_TABS 控制）—— 清数据/退出等
 ///     动作与是否多页签无关；它要是也被 HAS_TABS 门控，单页签包就没有任何动作入口。
 #[test]
 fn more_button_is_unconditional() {
@@ -229,27 +226,33 @@ fn more_button_is_unconditional() {
     );
 }
 
-/// ④c 「更多」面板：六个动作齐全；原生四动作必须走 `__web2appAndroid` 桥并带一次性密钥；
-///     清数据必须两步确认；危险动作必须有主框架门控（iframe 拿不到密钥 / 调不了桥）。
+/// ④c 「更多」面板：**只保留两个动作**（清除浏览数据 / 退出应用，2026-11-20 产品需求
+///     精简，其余动作与地址展示全部下线）；两动作必须走 `__web2appAndroid` 桥并带一次性
+///     密钥；清数据必须两步确认；危险动作必须有主框架门控（iframe 拿不到密钥 / 调不了桥）。
 #[test]
 fn more_panel_actions_and_bridge_contract() {
-    // 六个菜单项（文案即真机可见契约，改文案先改测试）。
-    for label in [
-        "刷新",
-        "复制链接",
-        "分享",
-        "在浏览器打开",
-        "清除浏览数据",
-        "退出应用",
-    ] {
+    // 两个菜单项（文案即真机可见契约，改文案先改测试）。
+    for label in ["清除浏览数据", "退出应用"] {
         assert!(bar().contains(label), "「更多」面板必须含菜单项「{label}」");
+    }
+    // 反例锁定：已下线的四行与地址头一个都不许回来（改回即本测试 FAIL）。
+    for gone in [
+        "moreRow(ICO_REFRESH",
+        "moreRow(ICO_COPY",
+        "moreRow(ICO_SHARE",
+        "moreRow(ICO_EXTERNAL",
+        "w2m-morehead",
+        "copyCurrentLink",
+    ] {
+        assert!(
+            !bar().contains(gone),
+            "「更多」面板已精简为两行，不得再出现：{gone}"
+        );
     }
     // 桥名 / 密钥 JS 变量必须与 patch-android-extras.py 注入侧逐字一致。
     for needle in [
         "__web2appAndroid",
         "__web2appAndroidKey",
-        "b.share(bridgeKey()",
-        "b.openBrowser(bridgeKey()",
         "b.clearData(bridgeKey()",
         "b.quitApp(bridgeKey()",
     ] {
@@ -272,12 +275,6 @@ fn more_panel_actions_and_bridge_contract() {
         bar().contains("}, 3000)"),
         "清数据确认态必须有超时自动撤防（3s）"
     );
-    // 复制链接必须有 Clipboard API 之外的 execCommand 兜底（部分 WebView 无权限）。
-    assert!(
-        bar().contains("navigator.clipboard.writeText")
-            && bar().contains("document.execCommand('copy')"),
-        "复制链接必须 Clipboard API 优先 + execCommand 兜底"
-    );
     // 反馈通道：toast 元素与桥缺失提示。
     assert!(
         bar().contains("w2m-toast") && bar().contains("当前版本不支持该操作"),
@@ -295,7 +292,8 @@ fn extras_patch_script_has_bridge_and_full_cleardata() {
         "addJavascriptInterface",
         "\"__web2appAndroid\"",
         "@JavascriptInterface",
-        // 四个桥方法（JS 侧 ④c 按同名调用，漂移即「点了没反应」）。
+        // 四个桥方法（JS 侧 ④c 调 clearData/quitApp；share/openBrowser 为预留桥能力，
+        // 2026-11-20 起没有 UI 入口）。
         "fun share(",
         "fun openBrowser(",
         "fun clearData(",
@@ -390,13 +388,14 @@ fn list_button_is_conditional_on_tab_availability() {
     );
 }
 
-/// ⑤b 单 webview 页签的端到端骨架必须齐：面板有「新建标签」入口、打开时拉取最新行、
-///     页面上报 url/标题、壳侧把四元组 eval 回 setTabs，并且首页固定位次 0。
+/// ⑤b 单 webview 页签的端到端骨架必须齐：打开时拉取最新行、页面上报 url/标题、
+///     壳侧把四元组 eval 回 setTabs，并且首页固定位次 0。
 #[test]
 fn mobile_tab_skeleton_is_wired_end_to_end() {
+    // 「新建标签」入口已下线（2026-11-20）：新建页签只剩 target=_blank 的 open-tab。
     assert!(
-        bar().contains("'web2app:new-tab'") && bar().contains("w2m-newrow"),
-        "列表面板必须有「新建标签」行（class=w2m-newrow，emit new-tab）"
+        !bar().contains("w2m-newrow") && !bar().contains("'web2app:new-tab'"),
+        "列表面板不得再有「新建标签」行（w2m-newrow / new-tab 一并下线）"
     );
     assert!(
         bar().contains("'web2app:request-tabs'"),
@@ -559,6 +558,34 @@ fn bottom_space_contract_mirrors_the_top_one() {
     assert!(
         bar().contains("env(safe-area-inset-bottom, 0px)"),
         "底栏必须让出 env(safe-area-inset-bottom)：手势导航条高度随设备变化，写死必然压到系统条"
+    );
+}
+
+/// ⑥b 底部遮挡的两条自愈链（2026-11-20 真机缺陷：列表页底部一行被底栏压住且滚不到）：
+///    ① 页面自己的「内嵌滚动区 / 子文档」（顶部有自己的头 ⇒ shrink 判据认不出）底边落进
+///       底栏压盖带 ⇒ 让位（padding-bottom 一格，滚动到底内容停在底栏上沿）；
+///    ② 滚动根契约探测补跑 + 退路可撤销（首探早于页面样式落定会假绿 / 假红）。
+#[test]
+fn bottom_occlusion_self_heals() {
+    assert!(
+        bar().contains("data-web2app-mobile-pad"),
+        "内嵌滚动区让位必须有独立标记（data-web2app-mobile-pad）"
+    );
+    assert!(
+        bar().contains("paddedBottom(") && bar().contains("'IFRAME'"),
+        "iframe / 子文档也要让位，且保留页面原有 px 内边距（paddedBottom）"
+    );
+    assert!(
+        bar().contains("'padding-bottom'") && bar().contains("pads[m].el"),
+        "让位必须走 padding-bottom：滚动到底时内容停在底栏上沿（对子文档减高度无效）"
+    );
+    assert!(
+        bar().contains("installScrollRootRecheck") && bar().contains("setTimeout(recheck"),
+        "滚动根契约探测必须补跑（load + 两个定时），首探假绿会让底部内容被压住"
+    );
+    assert!(
+        bar().contains("undoScrollFallback"),
+        "探测转绿必须撤销退路 inline !important 样式（假红自愈）"
     );
 }
 
@@ -820,7 +847,7 @@ fn blank_targets_open_in_new_mobile_tab() {
         BAR_RS.contains("url.scheme() != \"http\" && url.scheme() != \"https\""),
         "create_tab_with_url 必须只承接 http(s)（tel/mailto 等交给 scheme 拦截）"
     );
-    // 与 new-tab 的区分：open-tab 必须带 {url} payload 解析。
+    // open-tab 必须带 {url} payload 解析（它是新建页签的唯一入口）。
     assert!(
         has_code_line(BAR_RS, "fn open_tab_url_of(payload: &str)"),
         "mobilebar.rs 必须从 open-tab payload 解析 url"
@@ -934,25 +961,6 @@ fn back_key_requires_double_press_to_exit() {
         .map(|i| win + i)
         .unwrap_or_else(|| panic!("双按窗口之后必须有 finish() 退出分支"));
     assert!(win < fin, "finish() 必须被双按窗口包住，不能无条件退出");
-}
-
-/// ⑱ #11 页签切换会重载：面板里必须真的画出这句说明（移动端单 webview 的固有限制）。
-#[test]
-fn tabs_sheet_explains_reload_semantics() {
-    assert!(
-        bar().contains("切换标签会重新加载页面"),
-        "页签面板必须明示「切换 = 重新加载」，否则会被当成丢状态的 bug"
-    );
-    assert!(
-        bar().contains("w2m-hint"),
-        "说明行必须有独立 class（样式与断言都靠它）"
-    );
-    let add = bar().find("w2m-newrow").unwrap();
-    let hint = bar().find("w2m-hint").unwrap();
-    assert!(
-        add < hint,
-        "说明必须排在「新建标签」之后（顺序反了用户根本看不到）"
-    );
 }
 
 /// ⑲ #12 软键盘让位：只认 visualViewport 的显著差值，且不破坏底部让位契约。

@@ -19,7 +19,8 @@
  *   · 后退 / 前进：驱动当前文档的 `window.history`，但**先判定落点**（与桌面端标题栏、
  *     Android 系统返回键同一条规则）：上/下一条不是真实网页、或落点是内置启动页时【不动作】，
  *     并把按钮置灰。移动端绝不允许退回到内置页面。
- *   · 列表：展开已打开的页签并切换 / 关闭，面板顶部还有「新建标签」。**只在壳告诉它
+ *   · 列表：展开已打开的页签并切换 / 关闭（面板不提供「新建标签」入口，2026-11-20 起
+ *     新建页签只剩网页 target=_blank / window.open 一条路）。**只在壳告诉它
  *     「真的有页签可切」时才渲染**（`window.__web2appMobileBarCfg.tabs`，真源
  *     `mobilebar.rs::tabs_available` = 打包配置 `tabs_enabled`）。
  *     ⚠️ 移动端是【单 webview 页签记录】：Tauri/wry 在 Android 不支持同一窗口挂多个
@@ -45,7 +46,9 @@
  *   · 页面自己的「贴底固定条」（`position:fixed/absolute` 且底边贴视口底）→ 标记 + inline
  *     `bottom:Hpx!important`（上移一格，别被压住）；
  *   · 页面自己的「按视口高度定尺寸的容器」（`height:100vh` / `min-height:100vh`）→ 标记 +
- *     inline 高度减一格（缩高，别被顶出视口底）。
+ *     inline 高度减一格（缩高，别被顶出视口底）；
+ *   · 页面自己的「内嵌滚动区 / 子文档」（overflow-y 滚动容器、iframe 等，底边被底栏压住）
+ *     → 标记 + inline `padding-bottom:一格`（滚动到底时内容停在底栏上沿，别被压住）。
  * 认不出来就什么都不做，页面最多维持原样（识别条件刻意保守）。
  *
  * ---------------------------------------------------------------------------
@@ -90,6 +93,7 @@
 
   var SHIFT_ATTR = 'data-web2app-mobile-shift';   // 已上移的贴底固定条
   var SHRINK_ATTR = 'data-web2app-mobile-shrink'; // 已缩高的整屏容器
+  var PAD_ATTR = 'data-web2app-mobile-pad';       // 已让位的内嵌滚动区 / 子文档
   var VH_TOL = 1;
 
   var ICO_HOME =
@@ -113,27 +117,6 @@
     '<circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/>' +
     '<circle cx="12" cy="19" r="1.8"/></svg>';
   // 「更多」面板各行图标（统一 18px 线性风格）。
-  var ICO_REFRESH =
-    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M23 4v6h-6M1 20v-6h6"/>' +
-    '<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
-  var ICO_COPY =
-    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
-    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-  var ICO_SHARE =
-    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>' +
-    '<line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>' +
-    '<line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>';
-  var ICO_EXTERNAL =
-    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>' +
-    '<polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
   var ICO_TRASH =
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
@@ -199,14 +182,6 @@
     '-webkit-tap-highlight-color:transparent!important;touch-action:manipulation!important;}',
     '#__web2app_mobilebar__ .w2m-row:active{background:rgba(120,133,153,.22)!important;}',
     '#__web2app_mobilebar__ .w2m-row.active{font-weight:600!important;}',
-    /* 「新建标签」行：与列表行同高，但文案居中、不带关闭区（壳侧收到事件后新开一个标签）。 */
-    '#__web2app_mobilebar__ .w2m-newrow{',
-    'display:flex!important;align-items:center!important;justify-content:center!important;',
-    'width:100%!important;min-height:44px!important;padding:10px 14px!important;',
-    'border:0!important;border-bottom:1px solid rgba(0,0,0,.10)!important;',
-    'background:transparent!important;color:inherit!important;font:inherit!important;font-size:13px!important;',
-    '-webkit-tap-highlight-color:transparent!important;touch-action:manipulation!important;}',
-    '#__web2app_mobilebar__ .w2m-newrow:active{background:rgba(120,133,153,.22)!important;}',
     '#__web2app_mobilebar__ .w2m-row .w2m-label{',
     'flex:1!important;min-width:0!important;font-size:13px!important;',
     'white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;}',
@@ -218,11 +193,6 @@
     '#__web2app_mobilebar__ .w2m-close:active{background:rgba(120,133,153,.22)!important;}',
     '#__web2app_mobilebar__ .w2m-empty{',
     'padding:14px!important;font-size:12px!important;opacity:.6!important;}',
-    /* 「更多」面板：顶部一行当前地址（可截断），其余复用 .w2m-row 行样式。 */
-    '#__web2app_mobilebar__ .w2m-morehead{',
-    'padding:10px 14px!important;font-size:11px!important;line-height:1.3!important;opacity:.6!important;',
-    'white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important;',
-    'border-bottom:1px solid rgba(0,0,0,.06)!important;}',
     /* 危险动作（清除浏览数据二次确认态）：整行红色提示，暗色模式提亮。 */
     '#__web2app_mobilebar__ .w2m-row.danger .w2m-ico,',
     '#__web2app_mobilebar__ .w2m-row.danger .w2m-label{color:#d33f3f!important;opacity:1!important;}',
@@ -251,12 +221,6 @@
     'scroll-behavior:inherit!important;}',
     '[' + SHIFT_ATTR + ']{bottom:' + RESERVE + '!important;}',
     '[' + SHRINK_ATTR + ']{height:' + FIT_H + '!important;min-height:' + FIT_H + '!important;}',
-    /* 页签面板顶部说明：移动端「切换 = 重新加载」，不说清楚会被当成丢状态的 bug（#11）。 */
-    '#__web2app_mobilebar__ .w2m-hint{',
-    'padding:8px 14px!important;font-size:11px!important;line-height:1.45!important;opacity:.62!important;',
-    'border-bottom:1px solid rgba(0,0,0,.06)!important;}',
-    '@media (prefers-color-scheme:dark){#__web2app_mobilebar__ .w2m-hint{',
-    'border-bottom-color:rgba(255,255,255,.06)!important;}}',
     /* 宽屏（平板 / 横屏）：底栏与面板限宽居中 —— 否则一排按钮被拉成一米宽，拇指够不着（#16）。
      * 只改 max-width / left / transform：inline 钉的 width 仍由 syncBarWidth 负责，
      * max-width 会把它限制在上限内，不需要动 JS。 */
@@ -451,7 +415,7 @@
   // ---------------------------------------------------------------------
   /// 按 cfg 生成按钮 HTML。⚠️「列表」按钮只在 HAS_TABS 时才出现 —— 移动端目前没有多页签，
   /// 无条件画它就是一个点了没反应的死按钮（本文件的核心约束之一）。
-  /// 「更多」无条件出现且固定在最后：刷新/复制/分享/浏览器打开/清数据/退出的唯一入口，
+  /// 「更多」无条件出现且固定在最后：清除浏览数据 / 退出应用的唯一入口，
   /// 与是否多页签无关。
   function barHtml() {
     var items = [

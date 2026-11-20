@@ -1,6 +1,7 @@
   // =====================================================================
   // 分片：底部空间契约的 JS 半边（由 lib.rs 按序拼进同一 IIFE，共享 core 作用域）
-  // 职责：底栏让位探测、页面贴底元素上移、100vh 容器缩高、重排调度。
+  // 职责：底栏让位探测（含补跑自愈）、页面贴底元素上移、100vh 容器缩高、内嵌滚动区
+  //      让位、重排调度。
   // =====================================================================
   // ---------------------------------------------------------------------
   // 底部空间契约的 JS 半边
@@ -10,7 +11,50 @@
   //
   // ⚠️ 探测必须在样式表挂上之后跑：早一步跑，computed style 还是页面原样，探测必然判失败、
   //    并把退路写死在 inline style 上（inline !important 会永久压住我们的样式表）。
+  // ⚠️ 但首探仍可能早于【页面样式】落定（假绿：页面样式随后盖掉契约 CSS；假红：body 还没
+  //    布局就量到 0）。所以退路 inline 样式必须成对可撤销，并由 installScrollRootRecheck
+  //    在样式落定后补探自愈（详见各函数注释，2026-11-20 底部遮挡缺陷）。
   var bodyScrollOK = false;
+  var fallbackOn = false; // 退路 inline !important 样式已写入（探测转绿时必须撤掉）
+
+  /// 退路 inline 样式：与契约 CSS 一一对应的「html 底部留白 + 页面自己滚」旧模式。
+  /// ⚠️ 全是 !important（要压住页面样式），写下去就永久压住我们的样式表 ⇒ 必须成对可撤销。
+  function applyScrollFallback() {
+    var de = document.documentElement;
+    var b = document.body;
+    b.style.setProperty('margin-bottom', '0px', 'important');
+    b.style.setProperty('height', 'auto', 'important');
+    b.style.setProperty('min-height', '0px', 'important');
+    b.style.setProperty('overflow-y', 'visible', 'important');
+    de.style.setProperty('height', 'auto', 'important');
+    de.style.setProperty('overflow-y', 'auto', 'important');
+    de.style.setProperty('padding-bottom', reservePx() + 'px', 'important');
+    fallbackOn = true;
+  }
+
+  /// 探测转绿（或换上了新 body）时撤销退路：把我们写过的 inline 属性原样摘掉，
+  /// 交回契约 CSS 接管。只摘自己写过的属性，不动页面其它 inline 样式。
+  function undoScrollFallback() {
+    if (!fallbackOn) return;
+    fallbackOn = false;
+    try {
+      var b = document.body;
+      if (b && b.style) {
+        b.style.removeProperty('margin-bottom');
+        b.style.removeProperty('height');
+        b.style.removeProperty('min-height');
+        b.style.removeProperty('overflow-y');
+      }
+    } catch (e) { /* noop */ }
+    try {
+      var de = document.documentElement;
+      if (de && de.style) {
+        de.style.removeProperty('height');
+        de.style.removeProperty('overflow-y');
+        de.style.removeProperty('padding-bottom');
+      }
+    } catch (e) { /* noop */ }
+  }
 
   function ensureScrollRoot(h) {
     try {
@@ -25,20 +69,28 @@
       var want = (window.innerHeight || 0) - reservePx();
       var got = b.getBoundingClientRect().height;
       bodyScrollOK = rootHidden && bodyScrolls && want > 0 && Math.abs(got - want) <= 2;
-      if (bodyScrollOK) return;
+      if (bodyScrollOK) {
+        undoScrollFallback(); // 绿了就撤掉可能写下的退路（假红自愈）
+        return;
+      }
       // ---- 退路：宁可底栏压住页面底部的一小条，也不能让页面滚不动 ----
-      b.style.setProperty('margin-bottom', '0px', 'important');
-      b.style.setProperty('height', 'auto', 'important');
-      b.style.setProperty('min-height', '0px', 'important');
-      b.style.setProperty('overflow-y', 'visible', 'important');
-      de.style.setProperty('height', 'auto', 'important');
-      de.style.setProperty('overflow-y', 'auto', 'important');
-      de.style.setProperty('padding-bottom', reservePx() + 'px', 'important');
+      applyScrollFallback();
       try {
         console.error('[web2app] 底部滚动根契约未生效（html overflow=' + hcs.overflowY +
           ' body overflowY=' + bcs.overflowY + '），已退回 html 底部留白模式。');
       } catch (e) { /* noop */ }
     } catch (e) { /* 探测本身失败：按现状继续，绝不打扰宿主页面 */ }
+  }
+
+  /// 滚动根契约探测补跑（2026-11-20 底部遮挡缺陷）：首探早于页面样式落定时会「假绿」——
+  /// 探测绿了不再复查，页面样式随后把 body 的滚动定位盖掉，页面底部内容就被底栏压住且
+  /// 滚不到。样式落定后（load + 两个定时）各补探一次：绿则撤销退路（假红自愈）、
+  /// 红则落/保持退路（假绿自愈），两条错路都能回头。
+  function installScrollRootRecheck(style) {
+    function recheck() { ensureScrollRoot(style); }
+    try { window.addEventListener('load', recheck); } catch (e) { /* noop */ }
+    try { setTimeout(recheck, 1500); } catch (e) { /* noop */ }
+    try { setTimeout(recheck, 3000); } catch (e) { /* noop */ }
   }
 
   /// 底栏实际占掉的高度（内容区 + 安全区）。唯一实测来源：底栏自身的盒子高度。
@@ -70,6 +122,24 @@
     return RESERVE;
   }
 
+  /// 内嵌滚动区 / 子文档让位后的 padding-bottom：页面原有的 px 内边距加在预留之上
+  /// （与 shiftedBottom 同一条思路：不吞掉页面已有的留白）。padding 让位的机制：
+  /// 滚动容器滚到底时，内容会停在「容器底 - padding」的位置，正好落在底栏上沿 ——
+  /// 对子文档（iframe）padding 还会把内嵌视口缩到预留之上，所以这一招对 iframe 同样成立，
+  /// 而单纯「减高度」对子文档无效（渲染进的是自己的滚动区）。
+  function paddedBottom(declared) {
+    try {
+      if (declared && declared !== 'auto') {
+        var m = /^(\d+(?:\.\d+)?)px$/.exec(declared.trim());
+        if (m) {
+          var n = parseFloat(m[1]);
+          if (n > 0) return 'calc(' + RESERVE + ' + ' + n + 'px)';
+        }
+      }
+    } catch (e) { /* noop */ }
+    return RESERVE;
+  }
+
   /// 让页面自己的「贴底固定条」上移、把「按视口高度定尺寸的容器」缩高一格底栏。
   /// 两阶段（先只读收集、再统一写）：边读边写会让每次 getBoundingClientRect 触发重排。
   function applyChromeFit() {
@@ -84,6 +154,7 @@
       var all = root.getElementsByTagName('*');
       var shifts = [];
       var shrinks = [];
+      var pads = [];
 
       for (var i = 0; i < all.length; i++) {
         var el = all[i];
@@ -92,7 +163,8 @@
         if (el === de) continue;
         var needShift = !el.hasAttribute(SHIFT_ATTR);
         var needShrink = !el.hasAttribute(SHRINK_ATTR);
-        if (!needShift && !needShrink) continue;
+        var needPad = !el.hasAttribute(PAD_ATTR);
+        if (!needShift && !needShrink && !needPad) continue;
 
         var r = el.getBoundingClientRect();
         if (r.height <= 0) continue;
@@ -101,7 +173,11 @@
         // 整屏：高度≈视口高且底边已到/越过视口底（100vh 容器被顶出可视区）
         var viewportTall = needShrink && r.width >= vw * 0.5 &&
           r.height >= vh - VH_TOL && r.height <= vh + VH_TOL && r.bottom >= vh - VH_TOL;
-        if (!atBottom && !viewportTall) continue;
+        // 压盖带：底边被底栏压住（页面自己的内嵌滚动区 / 子文档）。容器矮于整屏
+        //（顶部有自己的头）时 shrink 判据（高度≈视口高）认不出它，只能让内容在
+        // 容器内部让出一格 —— 见 paddedBottom。
+        var bottomHidden = needPad && r.bottom > vh - reserve + 2 && r.bottom <= vh + 2;
+        if (!atBottom && !viewportTall && !bottomHidden) continue;
 
         var cs = window.getComputedStyle(el);
         var pos = cs.position;
@@ -113,13 +189,28 @@
         var bottomFixed = atBottom && pos === 'fixed';
         var bottomWideBar = atBottom && r.width >= vw * 0.5 && (pos === 'sticky' ||
           (pos === 'absolute' && r.bottom >= vh - 2));
+        var handled = false;
         if (bottomFixed || bottomWideBar) {
           // 声明式 bottom 已经比底栏高的（页面自己让开了）不动。
           if (cs.bottom === 'auto' || parseFloat(cs.bottom) < reserve) {
             shifts.push({ el: el, bottom: shiftedBottom(cs.bottom) });
+            handled = true;
           }
         }
-        if (needShrink && viewportTall && cs.bottom === 'auto') shrinks.push(el);
+        if (needShrink && viewportTall && cs.bottom === 'auto') {
+          shrinks.push(el);
+          continue; // 缩高已把整个盒子抬到底栏上沿，别再叠 padding 让位
+        }
+        // 内嵌滚动区 / 子文档让位：只认「真会滚」的容器（overflow-y auto/scroll）和
+        // iframe / object / embed —— 普通块级元素的底边偶尔扫过压盖带（文档滚动途中），
+        // 不是常驻贴底件，不动它。
+        if (bottomHidden && !handled) {
+          var tag = el.tagName;
+          if (cs.overflowY === 'auto' || cs.overflowY === 'scroll' ||
+            tag === 'IFRAME' || tag === 'OBJECT' || tag === 'EMBED') {
+            pads.push({ el: el, pad: paddedBottom(cs.paddingBottom) });
+          }
+        }
       }
 
       for (var j = 0; j < shrinks.length; j++) {
@@ -133,6 +224,12 @@
         try {
           shifts[k].el.setAttribute(SHIFT_ATTR, '');
           shifts[k].el.style.setProperty('bottom', shifts[k].bottom, 'important');
+        } catch (e) { /* noop */ }
+      }
+      for (var m = 0; m < pads.length; m++) {
+        try {
+          pads[m].el.setAttribute(PAD_ATTR, '');
+          pads[m].el.style.setProperty('padding-bottom', pads[m].pad, 'important');
         } catch (e) { /* noop */ }
       }
     } catch (e) { /* 绝不把异常抛给宿主页面 */ }

@@ -22,7 +22,9 @@
 //! 并行、状态各自保留）本质不同：
 //!   · 壳侧只持有每个标签的 `{label,url,title}` 记录（[`MobileTabs`]），真正存活的页面
 //!     永远只有主 webview 里的当前这一个；
-//!   · 新建标签 = 增加一条记录并导航到首页；切换 = 按记录的 url **重新加载**（页面状态
+//!   · 打开新页签 = 增加一条记录并导航到目标地址（入口只剩网页 target=_blank /
+//!     window.open；列表面板的「＋ 新建标签」2026-11-20 已下线）；切换 = 按记录的 url
+//!     **重新加载**（页面状态
 //!     不保留）；关闭当前标签 = 删记录并导航到邻格；首页固定 0 号位、不可关闭（与
 //!     桌面端 2026-10-13 起的位次 0 约定一致）；
 //!   · 前端经 `web2app:mobile-doc` 上报当前文档 url/标题，壳侧经 eval
@@ -117,11 +119,9 @@ pub(crate) const NAV_HOME_EVENT: &str = "web2app:nav-home";
 pub(crate) const SWITCH_TAB_EVENT: &str = "web2app:switch-tab";
 /// 页签列表里点关闭的事件名。
 pub(crate) const CLOSE_TAB_EVENT: &str = "web2app:close-tab";
-/// 列表面板里点「新建标签」的事件名（无 payload，落点固定为首页）。
-pub(crate) const NEW_TAB_EVENT: &str = "web2app:new-tab";
 /// 页面请求「在新页签里打开指定 url」的事件名（payload `{url}`）。
 ///
-/// 与 [`NEW_TAB_EVENT`]（无 payload、落首页）区分开：这个事件承接网页里
+/// 这个事件承接网页里
 /// `target="_blank"` 链接与 `window.open(url)`（见 `mobilebar/tabs.js::installBlankGuard`）——
 /// wry Android 不支持多窗口，不拦截则链接静默无反应，拦截后落到单 webview 页签记录里。
 pub(crate) const OPEN_TAB_EVENT: &str = "web2app:open-tab";
@@ -192,13 +192,13 @@ impl MobileTabs {
         self.seq = 1;
     }
 
-    /// 新建标签（落在首页地址），返回新标签的位次。
-    fn new_tab(&mut self, home_url: &str) -> usize {
+    /// 新页签压栈（落点为调用方给的 url），返回新标签的位次。
+    fn new_tab(&mut self, url: &str) -> usize {
         let label = format!("m{}", self.seq);
         self.seq += 1;
         self.tabs.push(MTab {
             label,
-            url: home_url.to_string(),
+            url: url.to_string(),
             title: String::new(),
         });
         self.active = self.tabs.len() - 1;
@@ -412,11 +412,6 @@ pub(crate) fn setup(app: &AppHandle) {
         navigate_home(&home);
     });
 
-    let new = app.clone();
-    app.listen(NEW_TAB_EVENT, move |_event| {
-        create_tab(&new);
-    });
-
     let opn = app.clone();
     app.listen(OPEN_TAB_EVENT, move |event| {
         match open_tab_url_of(event.payload()) {
@@ -465,12 +460,7 @@ fn home_nav(app: &AppHandle) -> Option<Navigation> {
     app.state::<HomeNav>().0.lock().ok().and_then(|g| g.clone())
 }
 
-/// 缓存的首页地址（新建标签的落点）。
-fn home_url(app: &AppHandle) -> Option<String> {
-    home_nav(app).map(|n| n.url)
-}
-
-/// 把 webview 当前所在 url 记进活动标签（切换 / 新建之前先保住旧标签的落点）。
+/// 把 webview 当前所在 url 记进活动标签（切换 / 打开之前先保住旧标签的落点）。
 ///
 /// ⚠️ 用 [`CurrentUrl`] 缓存而不是 `window.url()`：调用点（事件回调）在 Android 上同样是
 ///    UI 线程，现问地址会把 UI 线程钉住 10 秒并最终 abort 进程（见模块头）。
@@ -484,42 +474,13 @@ fn bind_current_url(app: &AppHandle) {
     }
 }
 
-/// 新建标签：记录压栈 → 主 webview 导航到首页。
 // ============================================================
-// 四、页签动作（新建 / 切换 / 关闭）
+// 四、页签动作（打开 / 切换 / 关闭）
 // ============================================================
-fn create_tab(app: &AppHandle) {
-    if !tabs_available() {
-        unsupported_tab_action("新建", None);
-        return;
-    }
-    let Some(window) = main_window(app) else {
-        return;
-    };
-    let Some(home) = home_url(app) else {
-        // 启动尚未成功就点了新建：与「首页」按钮同策略，重走一次完整 bootstrap。
-        dlog!("[mobilebar] 首页导航信息尚未就绪，重走一次完整启动流程");
-        crate::nav::bootstrap(app.clone());
-        return;
-    };
-    bind_current_url(app);
-    let target = {
-        let state = app.state::<MobileTabsState>();
-        let Ok(mut t) = state.0.lock() else {
-            return;
-        };
-        let i = t.new_tab(&home);
-        t.tabs[i].url.clone()
-    };
-    navigate_to(app, &window, &target);
-    push_rows(app);
-}
-
 /// 在新页签里打开**指定 url**（承接网页 target=_blank / window.open，见模块头）。
 ///
-/// 与 [`create_tab`] 同一条「记录压栈 → bind 当前 url → 导航 → 推列表」链路，差别只在落点：
-/// 新建标签落首页地址，本函数落页面给的链接。只接受 http(s) —— 非 http(s) 的外跳
-/// （tel:/mailto:/weixin:…）交给 `patch-android-schemes.py` 的主框架拦截，不该在这里
+/// 链路是「记录压栈 → bind 当前 url → 导航 → 推列表」。只接受 http(s) —— 非 http(s) 的
+/// 外跳（tel:/mailto:/weixin:…）交给 `patch-android-schemes.py` 的主框架拦截，不该在这里
 /// 被压成一条页签记录。
 fn create_tab_with_url(app: &AppHandle, raw_url: &str) {
     if !tabs_available() {

@@ -43,9 +43,9 @@ webview-app/
 │   ├── mobilebar.rs        # 移动多页签 + 底栏装配（纯状态机 / 事件入口 / 导航判定；`#[cfg(any(mobile, test))]`）；单测外置到 mobilebar/tests.rs（`#[path]` 挂载，2026-11-19 P-R5）
 │   ├── mobilebar/          # 移动端底栏注入脚本（5 个 js 分片由 lib.rs 按序拼成同一 IIFE；仅移动端）+ tests.rs（mobilebar.rs 的单测）
 │   │   ├── core.js         # 底座：配置/常量/样式/共享状态/底栏本体/面板宿主
-│   │   ├── bottom_space.js # 底部空间契约（让位/贴底元素上移/100vh 缩高）
+│   │   ├── bottom_space.js # 底部空间契约（让位/贴底元素上移/100vh 缩高/内嵌滚动区让位）
 │   │   ├── tabs.js         # 页签能力（面板/文档 url·标题上报/_blank 拦截）
-│   │   ├── more.js         # 「更多」面板 + 原生桥 + 复制链接
+│   │   ├── more.js         # 「更多」面板（清除浏览数据 / 退出）+ 原生桥
 │   │   └── mount.js        # 入口生命周期（⚠️ 必须最后一片，负责关闭 IIFE）
 │   ├── loading.js          # 加载层注入脚本
 │   ├── tab_title.js        # 多页签真实标题回传

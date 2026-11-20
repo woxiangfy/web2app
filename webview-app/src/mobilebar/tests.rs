@@ -75,7 +75,8 @@ fn event_names_are_stable() {
     assert_eq!(NAV_HOME_EVENT, "web2app:nav-home");
     assert_eq!(SWITCH_TAB_EVENT, "web2app:switch-tab");
     assert_eq!(CLOSE_TAB_EVENT, "web2app:close-tab");
-    assert_eq!(NEW_TAB_EVENT, "web2app:new-tab");
+    // 「新建标签」入口已下线（2026-11-20）：`web2app:new-tab` 事件链一并移除，
+    // 新建页签只剩 `web2app:open-tab`（target=_blank / window.open）一条路。
     assert_eq!(OPEN_TAB_EVENT, "web2app:open-tab");
     assert_eq!(REQUEST_TABS_EVENT, "web2app:request-tabs");
     assert_eq!(DOC_EVENT, "web2app:mobile-doc");

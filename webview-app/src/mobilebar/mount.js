@@ -37,6 +37,9 @@
     }
 
     ensureScrollRoot(mounted ? mounted.style : null);
+    // 探测补跑自愈：首探早于页面样式落定会假绿 / 假红（2026-11-20 底部遮挡缺陷），见
+    // bottom_space.js::installScrollRootRecheck。
+    installScrollRootRecheck(mounted ? mounted.style : null);
     scheduleChromeFit();
     // 软键盘让位（#12）：只对「键盘覆盖页面」的引擎模式生效，resize 模式自动无操作。
     installKeyboardAvoid();

@@ -60,10 +60,10 @@
 | 5 | P1 | 相机 / 麦克风 / 定位权限声明 | ✅ 已实施（2026-10-14） | 打包字段 `android_permissions`（21 键）+ `patch-android-permissions.py` |
 | 6 | P1 | 网页视频全屏（wry 0.57 的 onShowCustomView 是空实现） | ✅ 已实施（2026-10-14） | `patch-android-fullscreen.py`（整体替换 onShow/onHide） |
 | 7 | P1 | `target=_blank` / `window.open` 拦截进移动页签 | ✅ 已实施（2026-10-14） | `src/mobilebar/tabs.js` blank guard + `mobilebar.rs` 新事件 `web2app:open-tab` |
-| 8 | P1 | 底栏「更多」面板（刷新 / 复制链接 / 分享 / 浏览器打开 / 清数据 / 退出） | ✅ 已实施（2026-10-14） | `src/mobilebar/more.js` + `patch-android-extras.py`（Kotlin 桥；`mobilebar.rs` 零改动） |
+| 8 | P1 | 底栏「更多」面板（刷新 / 复制链接 / 分享 / 浏览器打开 / 清数据 / 退出） | ✅ 已实施（2026-10-14）；2026-11-20 按产品需求精简为**只留清数据 / 退出**（含地址展示在内的其余全部下线） | `src/mobilebar/more.js` + `patch-android-extras.py`（Kotlin 桥；`mobilebar.rs` 零改动） |
 | 9 | P2 | 返回键优先关闭页签列表面板等浮层 | ✅ 已实施（2026-11-14） | `patch-android-back.py`（`evaluateJavascript` 续延）+ `core.js::closeSheetIfOpen` |
 | 10 | P2 | 无历史时「再按一次退出」而不是立即 finish | ✅ 已实施（2026-11-14） | `patch-android-back.py`（Toast + 2s 窗口） |
-| 11 | P2 | 页签切换重载丢状态：先文案明示，后评估快照 | ✅ 文案已实施（2026-11-14）；❌ 快照不做（与 #17 同判据） | `src/mobilebar/tabs.js` 面板 `.w2m-hint` |
+| 11 | P2 | 页签切换重载丢状态：先文案明示，后评估快照 | ✅ 文案已实施（2026-11-14）；❌ 快照不做（与 #17 同判据）；2026-11-20 文案行与「＋ 新建标签」一并按产品需求下线 | `src/mobilebar/tabs.js` 面板 `.w2m-hint`（已删） |
 | 12 | P2 | 软键盘弹出时底栏让位（visualViewport） | ✅ 已实施（2026-11-14） | `src/mobilebar/bottom_space.js::installKeyboardAvoid` |
 | 13 | P2 | 暗色启动底色（原生主题 `windowBackground` 随系统日夜） | ✅ 已实施（2026-11-14） | `patch-android-splash-theme.py`（纯资源；Rust 侧一行未改） |
 | 14 | P2 | DNS TXT 解析结果持久化（冷启动秒开 + 后台静默更新） | ❌ 不做（2026-11-14 决策，理由见 §5） | — |
@@ -247,6 +247,8 @@
 **#11 页签切换 = 重新加载（只做文案）**
 
 - 面板「新建标签」下方固定一行「切换标签会重新加载页面（移动端同时只保留一个页面）」。
+  （⚠️ 2026-11-20 按产品需求，该说明行与「＋ 新建标签」行一并下线；「切换 = 重载」的行为
+  本身未变。）
 - 不做状态快照：单 webview 下要序列化 `history.state` + 表单 + 滚动位置，收益与风险不对等
   （§5 记为「不建议做」）。
 - 真机验收：§4 第 6 项顺带看一眼。

@@ -17,7 +17,7 @@
 //! `webview_hooks → nav` 构成新的层级环 —— 双向耦合只是换了个名字，正是本次收敛要消灭的形态。
 //! 所以改成 fn 指针，由 `lib.rs` 装配时登记（装配层是唯一允许「认识所有人」的地方）：
 //!   · [`register_boot_entry`]：登记启动编排入口；[`bootstrap`] / [`bootstrap_for_label`] 经它
-//!     转发，mobilebar（首页 / 新建标签）与 tabs / loading（重试）因此只依赖本模块；
+//!     转发，mobilebar（首页 / 打开新页签）与 tabs / loading（重试）因此只依赖本模块；
 //!   · [`register_attach_hooks`]（仅 Windows）：登记 WebView2 钩子装配；[`navigate_window`]
 //!     先经它挂钩子、再真正导航。
 //! 移动端的 `mobilebar::on_page_finished` 同理由 `lib.rs` 的 `on_page_load` 闭包直接接线

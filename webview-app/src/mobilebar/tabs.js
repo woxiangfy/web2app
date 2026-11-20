@@ -11,23 +11,9 @@
     var sheet = document.createElement('div');
     sheet.className = 'w2m-sheet';
 
-    // 「新建标签」固定在面板顶部：移动端没有桌面那条常驻标签栏，新增入口只能放这里。
-    var addBtn = document.createElement('button');
-    addBtn.type = 'button';
-    addBtn.className = 'w2m-newrow';
-    addBtn.textContent = '＋ 新建标签';
-    addBtn.addEventListener('click', function () {
-      emit('web2app:new-tab', null);
-      closeSheet(bar);
-    });
-    sheet.appendChild(addBtn);
-
     // 移动端是单 webview 页签：切换 = 按记录地址重新加载，页面内状态不保留（#11）。
-    // 先说清楚，比事后被当成「切回来内容丢了」的 bug 便宜得多。
-    var hint = document.createElement('div');
-    hint.className = 'w2m-hint';
-    hint.textContent = '切换标签会重新加载页面（移动端同时只保留一个页面）';
-    sheet.appendChild(hint);
+    // ⚠️ 面板顶部的「＋ 新建标签」行与「切换标签会重新加载页面」说明已按产品需求
+    //    （2026-11-20）下线；新建页签只剩网页 target=_blank / window.open 一条路。
 
     if (!tabRows.length) {
       var empty = document.createElement('div');
