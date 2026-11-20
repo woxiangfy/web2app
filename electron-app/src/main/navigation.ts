@@ -28,6 +28,8 @@ import type { SplashPage } from './splash-page'
 export interface NavigatorDeps {
   /** 运行期配置（解析目标 / 起 sidecar 的参数来源） */
   cfg: AppConfig
+  /** 诊断可见性（`DEBUG` 预计算）：决定失败文案里是否带原始异常 / 地址 */
+  debug: boolean
   /** 启动页渲染器（失败态烘焙 + 重载） */
   splashPage: SplashPage
   /** 主窗口（导航目标）；getter：装配期窗口尚未创建 */
@@ -78,7 +80,7 @@ function howLabel(how: ResolveHow): string {
 }
 
 export function createNavigator(deps: NavigatorDeps): Navigator {
-  const { cfg, splashPage, getMainWindow, appPath, resourcesPath } = deps
+  const { cfg, debug, splashPage, getMainWindow, appPath, resourcesPath } = deps
 
   /** 解析结果缓存（多页签复用；重试路径显式置 null）。 */
   let target: ResolvedTarget | null = null
@@ -154,7 +156,7 @@ export function createNavigator(deps: NavigatorDeps): Navigator {
    */
   async function resolveAndCache(): Promise<ResolveOutcome> {
     if (target) return { ok: true, target }
-    const r = await resolveTarget(cfg, { startSidecar: launchSidecar })
+    const r = await resolveTarget(cfg, { startSidecar: launchSidecar, debug })
     if (!r.ok) return { ok: false, title: r.title, detail: r.detail }
     console.log(
       `[web2app] 目标地址：${r.url}（${howLabel(r.how)}${r.user ? '，已记录 Basic 鉴权凭据' : ''}）`

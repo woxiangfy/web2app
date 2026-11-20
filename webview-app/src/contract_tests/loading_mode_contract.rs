@@ -24,7 +24,10 @@ const MODE_MARKER: &str = concat!(
     "splash.localhost'"
 );
 /// 注册加载层那一句（`loading::` 限定符把它与 tabs.rs 的 `crate::loading::` 版本区分开）。
-const OVERLAY_REG: &str = concat!(".initialization_script(loading::", "OVERLAY_SCRIPT)");
+///
+/// ⚠️ 2026-11-21 起注入的是 `overlay_script()`（带诊断可见性标记），不再是源码常量
+/// `OVERLAY_SCRIPT` —— 后者只作为静态守卫的锚点存在。
+const OVERLAY_REG: &str = concat!(".initialization_script(loading::", "overlay_script())");
 
 /// 主窗口：模式标记必须存在，且排在 OVERLAY_SCRIPT 之前。
 #[test]
@@ -35,7 +38,7 @@ fn main_window_registers_mode_marker_before_overlay() {
     );
     let overlay = LIB_RS
         .find(OVERLAY_REG)
-        .expect("lib.rs 主窗口应注册 loading::OVERLAY_SCRIPT");
+        .expect("lib.rs 主窗口应注册 loading::overlay_script()");
     assert!(
         marker < overlay,
         "模式标记必须注册在 OVERLAY_SCRIPT【之前】：初始化脚本按注册顺序执行，\

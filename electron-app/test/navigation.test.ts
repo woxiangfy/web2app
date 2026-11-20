@@ -35,7 +35,10 @@ type FakeWin = {
   webContents: { send: (ch: string, m: unknown) => void }
 }
 
-function harness(appUrl: string | string[] = 'https://example.com/', opts?: { destroyed?: boolean }) {
+function harness(
+  appUrl: string | string[] = 'https://example.com/',
+  opts?: { destroyed?: boolean; debug?: boolean },
+) {
   const loaded: string[] = []
   const sent: { ch: string; m: unknown }[] = []
   const failed: { title: string; detail: string }[] = []
@@ -53,6 +56,7 @@ function harness(appUrl: string | string[] = 'https://example.com/', opts?: { de
   let current: FakeWin | null = win
   const nav = createNavigator({
     cfg: cfg(appUrl),
+    debug: opts?.debug ?? false,
     splashPage,
     getMainWindow: () => current as never,
     appPath: '',
@@ -74,8 +78,8 @@ test('resolveAndCache：直连模式解析，缓存由调用方写入后命中�
   assert.equal(b.ok && b.target, a, 'resolveInitialTarget 写入缓存后，resolveAndCache 应命中同一份对象')
 })
 
-test('resolveAndCache：非法地址 → 失败文案，不抛异常', async () => {
-  const h = harness('ftp://example.com/')
+test('resolveAndCache：非法地址 → 失败文案，不抛异常（debug 包保留原因）', async () => {
+  const h = harness('ftp://example.com/', { debug: true })
   const r = await h.nav.resolveAndCache()
   assert.equal(r.ok, false)
   if (r.ok) return
@@ -83,8 +87,18 @@ test('resolveAndCache：非法地址 → 失败文案，不抛异常', async () 
   assert.ok(r.detail.includes('http'))
 })
 
+test('resolveAndCache：debug=false 的失败文案不泄漏协议 / 地址', async () => {
+  const h = harness('ftp://example.com/')
+  const r = await h.nav.resolveAndCache()
+  assert.equal(r.ok, false)
+  if (r.ok) return
+  assert.equal(r.title, '加载失败')
+  assert.ok(!r.detail.includes('ftp://'), '默认包不得把配置地址摆到屏幕上')
+  assert.ok(!r.detail.includes('http'), '默认包不得把内部协议判定细节摆到屏幕上')
+})
+
 test('resolveInitialTarget：失败时抛错（多页签首签的调用方靠它中止）', async () => {
-  const h = harness('nope')
+  const h = harness('nope', { debug: true })
   await assert.rejects(() => h.nav.resolveInitialTarget(), /不合法/)
 })
 

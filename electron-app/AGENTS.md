@@ -157,7 +157,7 @@ pnpm run dist:all        # 绿色版 + 安装版一次出齐
 | 账号密码保存（`credentials*.ts`、`w2a:pwd-*`、两 preload 密码段） | `unit`（`credentials` + `password-contract`）+ `probe`（第 18 节）+ `probe --tabs`（P13）+ 真机登录一次 |
 | sidecar 参数拼装 / 可执行文件定位（`sidecar.ts`） | `unit` + `probe` |
 | 导航状态机（`navigation.ts`：target 缓存 / 自动 bootstrap 名额 / 重试重置） | `unit` + `probe` |
-| 启动日志（`startup-log.ts`）、`debug` 开关与 `silenceConsole()` | `smoke` |
+| 启动日志（`startup-log.ts`）、`debug` 开关与 `silenceConsole()`、Chromium 日志静音（`--log-level=3` / `--disable-logging`）、屏幕诊断门控（`DIAG_MARKER` + `navFailText` / `parseAppUrl` / `sidecarFailureText` 的 `debug` 参数） | `smoke` + `unit`（`nav-text` / `navigation`）+ 跨壳守卫 `webview-app/src/contract_tests/diagnostics_visibility_contract.rs` |
 | 打包配置 / 出包前后 | `probe` + `真机双击产物` + 核对包内无 `out/main/probe*`（`prune` 与 asar 反向断言）+ 核对 `resources/sidecar/w2a-proxy.exe` 与 `needsSidecar` 一致（`afterPack` + asar **双向**断言） |
 | 任何提交前 | `typecheck` |
 

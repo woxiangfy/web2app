@@ -66,10 +66,19 @@ function stripUserinfo(u: URL): string {
   return clean.toString()
 }
 
-/** 校验字符串形式的 app_url；不合法时给出与 Tauri 版一致的文案。 */
-function parseAppUrl(raw: string): { ok: true; parsed: URL } | TargetFailure {
+/**
+ * 校验字符串形式的 app_url；不合法时给出与 Tauri 版一致的文案。
+ *
+ * `debug=false`（打包默认）只给最终用户可操作的结论：原始 parse 错误与地址本身
+ * （可能带内部端口 / 查询参数）只在 debug 包里展示，与 `bootstrap.rs` 的分级同源。
+ */
+function parseAppUrl(raw: string, debug = false): { ok: true; parsed: URL } | TargetFailure {
   if (!raw) {
-    return { ok: false, title: '加载失败', detail: '配置里的 app_url 为空' }
+    return {
+      ok: false,
+      title: '加载失败',
+      detail: debug ? '配置里的 app_url 为空' : '应用配置的地址无效，请联系打包者',
+    }
   }
   let parsed: URL
   try {
@@ -79,14 +88,18 @@ function parseAppUrl(raw: string): { ok: true; parsed: URL } | TargetFailure {
     return {
       ok: false,
       title: '加载失败',
-      detail: `应用配置的网址不合法（${(e as Error).message}）：${raw}`,
+      detail: debug
+        ? `应用配置的网址不合法（${(e as Error).message}）：${raw}`
+        : '应用配置的地址无效，请联系打包者',
     }
   }
   if (!/^https?:$/.test(parsed.protocol)) {
     return {
       ok: false,
       title: '加载失败',
-      detail: `只支持 http / https 地址，当前是 ${parsed.protocol}：${raw}`,
+      detail: debug
+        ? `只支持 http / https 地址，当前是 ${parsed.protocol}：${raw}`
+        : '应用配置的地址无效，请联系打包者',
     }
   }
   return { ok: true, parsed }
@@ -98,24 +111,33 @@ function parseAppUrl(raw: string): { ok: true; parsed: URL } | TargetFailure {
  * ⚠️ `resolve` 类失败沿用 Tauri 版的固定文案（「服务器连接失败，请检查网络后重试」），
  * 底层原因只进日志 —— 与 Tauri 侧 `map_err(|_| ...)` 的取舍一致，用户看到的提示两端相同。
  */
-export function sidecarFailureText(e: unknown): string {
+export function sidecarFailureText(e: unknown, debug = false): string {
   const err = e instanceof SidecarError ? e : null
   const raw = err?.message ?? String(e)
   switch (err?.kind) {
     case 'resolve':
       return '服务器连接失败，请检查网络后重试'
     case 'missing':
-      return `缺少本地代理组件（w2a-proxy），本可执行文件不完整：${raw}`
+      return debug
+        ? `缺少本地代理组件（w2a-proxy），本可执行文件不完整：${raw}`
+        : '本地组件缺失，请重新获取完整的应用包'
     case 'timeout':
-      return `本地代理组件无响应：${raw}`
+      return debug ? `本地代理组件无响应：${raw}` : '本地组件无响应，请重试或联系打包者'
     default:
-      return `本地代理组件启动失败：${raw}`
+      return debug ? `本地代理组件启动失败：${raw}` : '本地组件启动失败，请重试或联系打包者'
   }
 }
 
 export interface ResolveContext {
   /** 启动 sidecar。由 index.ts 注入真实实现（探针可换成假实现）。 */
   startSidecar: (req: SidecarRequest) => Promise<SidecarHandle>
+  /**
+   * 诊断可见性（进程级 `DEBUG` 预计算，含 `--w2a-debug` 逃生口）。
+   *
+   * 决定失败文案里是否出现原始异常 / 地址 / 组件名 —— 与加载层的 `__web2appDiag`
+   * 是同一条判据，只是这里由主进程直接排版。
+   */
+  debug: boolean
 }
 
 /**
@@ -134,7 +156,7 @@ export async function resolveTarget(
 
   // ---------- 路径 1：直连 / 外部代理，完全不需要 sidecar ----------
   if (!dns && !useProxy) {
-    const p = parseAppUrl(raw)
+    const p = parseAppUrl(raw, ctx.debug)
     if (!p.ok) return p
     // 注意：`new URL('http://u:%ZZbad@h')` 本身能解析成功，但对 userinfo 再做
     // decodeURIComponent 会抛 URIError。这里没有外层 try（try 只包 sidecar 分支），
@@ -148,7 +170,9 @@ export async function resolveTarget(
       return {
         ok: false,
         title: '加载失败',
-        detail: `应用配置网址的用户名或密码含非法百分号编码（${(e as Error).message}）：${raw}`,
+        detail: ctx.debug
+          ? `应用配置网址的用户名或密码含非法百分号编码（${(e as Error).message}）：${raw}`
+          : '应用配置的账号信息无效，请联系打包者',
       }
     }
     return {
@@ -163,14 +187,16 @@ export async function resolveTarget(
   // ---------- 路径 2 / 3：交给 sidecar ----------
   // 本地能查出来的配置错误就先查掉，别丢给 sidecar 去报（那边报出来的文案更笼统）。
   if (!dns) {
-    const p = parseAppUrl(raw)
+    const p = parseAppUrl(raw, ctx.debug)
     if (!p.ok) return p
   }
   if (dns && !cfg.public_key.trim()) {
     return {
       ok: false,
       title: '加载失败',
-      detail: '配置使用域名解析模式（app_url 是数组），但没有提供 public_key',
+      detail: ctx.debug
+        ? '配置使用域名解析模式（app_url 是数组），但没有提供 public_key'
+        : '应用配置缺少必要的解析参数，请联系打包者',
     }
   }
 
@@ -197,6 +223,6 @@ export async function resolveTarget(
   } catch (e) {
     // 失败原因进日志（含 sidecar 的 stderr），界面用收敛后的文案
     console.error(`[web2app] sidecar 失败：${(e as Error).message}`)
-    return { ok: false, title: '加载失败', detail: sidecarFailureText(e) }
+    return { ok: false, title: '加载失败', detail: sidecarFailureText(e, ctx.debug) }
   }
 }

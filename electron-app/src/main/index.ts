@@ -145,20 +145,8 @@ if (PROBE || process.env.WEB2APP_NO_GPU === '1' || hasFlag('--disable-gpu')) {
 // 再原样分发出去而使用者看不出区别。现在想改必须重新打包（与 Tauri 版一致）。
 // 开发时（electron .）直接读 webview-app/src，避免复制出第二份会分叉的脚本。
 // ⚠️ 候选集与打包/开发判据统一在 paths.ts（M-3）；这里只管读取与缓存。
+// `readInject` 的定义在 DEBUG 判定之后（它要给 loading.js 前置诊断可见性标记，见那里）。
 const injectCache = new Map<string, string | null>()
-
-function readInject(name: string): string | null {
-  const hit = injectCache.get(name)
-  if (hit !== undefined) return hit
-  let out: string | null = null
-  try {
-    out = readFileSync(injectFile(name), 'utf8')
-  } catch {
-    out = null
-  }
-  injectCache.set(name, out)
-  return out
-}
 
 // ---------- 1. 运行期配置：读自包内 asar（不可读改） ----------
 //
@@ -187,6 +175,50 @@ const cfg: AppConfig = loaded.config
  */
 const DEBUG =
   cfg.debug || debugFlagTruthy(process.env.WEB2APP_DEBUG) || hasFlag('--w2a-debug') || PROBE || SMOKE
+
+/**
+ * 诊断可见性标记（与 `DEBUG` 同源）：写进加载层脚本**同一段**代码的前面。
+ *
+ * ⚠️ 只管「屏幕上会不会出现技术细节」（失败卡的地址 / UA / readyState / 阶段进度），
+ *    与是否落盘日志是两条独立的判据，只是恰好共用一个开关。
+ * ⚠️ 缺省按 `false` 处理（`loading.js` 里的 `DIAG` 只在严格等于 true 时开启）——
+ *    标记没送到也不会把诊断泄漏给最终用户。
+ */
+const DIAG_MARKER = `window.__web2appDiag = ${DEBUG ? 'true' : 'false'};\n`
+
+// `debug=false` 时把 **Chromium 自身**的日志也一起关掉。
+//
+// 上面 `silenceConsole()` 只管 JS 的 console.*；Chromium 原生层（GPU process / network
+// service / 证书告警 / `DevTools listening`）是直接往 stderr 写的，从 cmd 或带控制台的
+// 快捷方式启动时照样刷屏 —— 对最终用户是没有意义的噪音。`--log-level=3`（FATAL）+
+// `--disable-logging` 是 Electron 官方文档给出的静音组合。
+// ⚠️ 必须在 app ready 之前 append；debug=true / 探针 / 冒烟**不动**（那些输出正是取证依据）。
+if (!DEBUG) {
+  app.commandLine.appendSwitch('log-level', '3')
+  app.commandLine.appendSwitch('disable-logging')
+}
+
+/**
+ * 读取注入脚本（titlebar.js / loading.js / splash.html / shell.html…）。
+ *
+ * ⚠️ `loading.js` 必须带上诊断可见性标记：它注入到**主世界**（preload 里用
+ *    `webFrame.executeJavaScript`），主进程另行 eval 一个标记并不可靠（时机 / 世界都不同），
+ *    所以直接拼在脚本前面 —— 与 Tauri 侧 `loading.rs::overlay_script()` 同一条契约。
+ * 缓存里存的是**已拼好标记**的内容；DEBUG 是进程级常量，整个生命周期不会变。
+ */
+function readInject(name: string): string | null {
+  const hit = injectCache.get(name)
+  if (hit !== undefined) return hit
+  let out: string | null = null
+  try {
+    out = readFileSync(injectFile(name), 'utf8')
+  } catch {
+    out = null
+  }
+  if (out && name === 'loading.js') out = DIAG_MARKER + out
+  injectCache.set(name, out)
+  return out
+}
 
 // 排障：DEBUG 时把「每一次新建窗口」都记一行。用户看到「屏幕上多出来的窗口」时，这行是判断
 // 它到底是不是我们造出来的唯一凭据（2026-11-15 真机「第二个另存为」就卡在这上面）。
@@ -340,6 +372,7 @@ const TABS_MODE = TABS_PROBE ? true : PROBE ? false : cfg.tabs_enabled
  */
 const nav = createNavigator({
   cfg,
+  debug: DEBUG,
   splashPage,
   getMainWindow: () => mainWindow,
   appPath: app.getAppPath(),
@@ -460,7 +493,7 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     // -3 = ERR_ABORTED：正常重定向 / 被后续导航顶掉，不是错误
     if (!isMainFrame || code === -3) return
-    const detail = navFailText(url, desc, code)
+    const detail = navFailText(url, desc, code, DEBUG)
     console.error(`[web2app] ${detail}`)
     nav.sendOverlay({ kind: 'fail', title: '加载失败', detail })
   })
@@ -551,6 +584,7 @@ function createWindow(show: boolean, plan: RestorePlan): BrowserWindow {
         resolveInitialTarget: () => nav.resolveInitialTarget(),
         getTabManager: () => tabManager,
         devtools: devtoolsEnabled(app.isPackaged, cfg.debug),
+        debug: DEBUG,
         openSettings: () => openSettings(),
       }),
     })
@@ -622,7 +656,11 @@ function spawnFirstTab(): Promise<void> {
   return tabManager.spawnTab().then(
     (label) => {
       if (label === null) {
-        showShellStartupError(win, `首个页签创建被拒（页签数已达 ${MAX_TABS} 个上限？）`)
+        showShellStartupError(
+          win,
+          DEBUG ? `首个页签创建被拒（页签数已达 ${MAX_TABS} 个上限？）` : '无法新建页签，请关闭部分页签后重试。',
+          DEBUG,
+        )
         console.error('[web2app] 首个页签创建失败：已达页签上限')
       } else {
         hideShellStartupError(win)
@@ -630,7 +668,11 @@ function spawnFirstTab(): Promise<void> {
     },
     (e: Error) => {
       console.error(`[web2app] 首个页签创建失败：${e.message}`)
-      showShellStartupError(win, `首个页签加载失败：${e.message}`)
+      showShellStartupError(
+        win,
+        DEBUG ? `首个页签加载失败：${e.message}` : '页面加载失败，请检查网络后重试。',
+        DEBUG,
+      )
     },
   )
 }

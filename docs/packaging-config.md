@@ -57,7 +57,7 @@
 | `data_dir` | **string** | `"data"` | Win + Electron | 应用数据目录。`"data"` = 程序所在目录下的 `data\`（跟着程序走）；`""` = 系统默认程序目录（由 `app_name` 命名）。运行期文件（`settings.json` / `logs\`）都落在这个目录下。见 §4.3 |
 | `tabs_enabled` | **`bool`** | `false` | Windows / Electron / **Android**（形态不同） | 多页签模式。Win/Electron = 多 webview；Android = 底栏内单 webview 页签记录（需同时开 `mobile_bar`）。见 §3.8 |
 | `mobile_bar` | **`bool`** | `false` | 仅移动端 | 移动端底栏模式（底部常驻导航条：首页 / 后退 / 前进 / 列表）。桌面端忽略。见 §3.8 |
-| `debug` | **`bool`** | `false` | 全平台 | 诊断日志开关：`true` = 写 `<数据目录>\logs\startup.log` 并同时打印；`false` = **不建目录、不写文件，控制台输出也一并静默**。见 §3.5 |
+| `debug` | **`bool`** | `false` | 全平台 | 诊断开关：`true` = 写 `<数据目录>\logs\startup.log` 并同时打印，**且**失败卡 / 启动页显示完整技术细节；`false` = **不建目录、不写文件，控制台输出也一并静默，屏幕上只留普通用户可执行的结论**。见 §3.5 |
 | `public_key` | string | `""` | 全平台 | Ed25519 公钥（裸 base64 或 SPKI PEM）。**`app_url` 为数组时必填** |
 | `resolve_secret` | string | `""` → 代码内置默认 | 全平台 | AES 对称 Secret，须与服务端生成密文时一致。⚠️ **编译期**注入 |
 | `android_keystore_base64` | string | `""` | 仅 Android | keystore(.jks/.keystore) 的 base64；优先于仓库 Secrets |
@@ -185,14 +185,15 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
   字符串模式只走 direct / proxy 两条路，`SECRET`（`resolve-core::derive_key` 的唯一消费者）
   **没有任何调用点** ⇒ 此时告警属于「狼来了」，会把真该修的配置问题淹掉。
 
-### 3.5 `debug` —— 诊断日志开关（不是「日志级别」）
+### 3.5 `debug` —— 诊断开关（不是「日志级别」）
 
-两态开关，管的是「有没有诊断输出」这件事本身：
+两态开关，管的是「有没有诊断输出」这件事本身。**它同时管两件事**：磁盘/控制台日志，
+以及**屏幕上可见的技术信息**（2026-11-21 起，见下方「屏幕可见性」）。
 
-| 取值 | 行为 |
-|---|---|
-| `false`（**默认**） | 不建 `logs\`、不写文件；**控制台输出也一并静默**（Electron 侧 `console.log/warn/error` 被换成空函数） |
-| `true` | 写 `<数据目录>\logs\startup.log`，**并且**照常打印到 stdout / stderr |
+| 取值 | 磁盘 / 控制台 | 屏幕（失败卡 / 启动页 / 页签标题） |
+|---|---|---|
+| `false`（**默认**） | 不建 `logs\`、不写文件；**控制台输出也一并静默**（Electron 侧 `console.log/warn/error` 被换成空函数，Chromium 自身的 GPU / network service stderr 也关） | 只给普通用户可执行的结论（「页面无法打开，请检查网络后重试」）+ 重试按钮；地址 / UA / readyState / HTTP / 资源数 / 脚本错误 / 阶段进度 / 可达性探测结论 / net error code **一律不出现** |
+| `true` | 写 `<数据目录>\logs\startup.log`，**并且**照常打印到 stdout / stderr | 失败卡带完整现场诊断（地址经脱敏）、启动阶段进度、探测结论；排障包就该长这样 |
 
 - **为什么是布尔而不是 `off/error/info/debug` 那种级别**：分级会让默认值变成「有一条输出但不告诉你」。
   排查时最先要回答的问题是「**到底有没有日志**」，四态里没有哪一态能一眼回答，两态可以。
@@ -219,6 +220,32 @@ Secret，用户配的 `resolve_secret` 会**静默失效**（域名解析一律�
   ⇒ **`data_dir` 一改，两壳的日志位置一起改**。
 - **唯一例外**：Electron 的探针（`--probe`）与冒烟（`--smoke`）**内部强制打开** debug。
   这两个模式的全部结论来自 stdout，不能因为「默认关日志」而自检失声。
+- **屏幕可见性（2026-11-21 起，与日志同一条判据）**：`debug` 也是「用户能不能看到技术细节」的
+  总闸，两壳同一条契约 —— 判据是「这句话对最终用户有没有可操作性」，没有的一律进诊断分支。
+  - `loading.js` 读 `window.__web2appDiag`（**缺省 false**）：Tauri 由
+    `loading.rs::overlay_script()` 在脚本**同一段**前面写标记（`splash_html` 也走它），
+    Electron 由 `index.ts::readInject` 给 `loading.js` 前置同一行。标记没送到 = 少显示诊断
+    （安全侧），不会把 UA / 地址泄漏给用户。
+  - ⚠️ **标记的取值判据两壳统一为「运行时生效的 debug」**：Tauri 走
+    `debug_log::enabled()`（编译期 `DEBUG` **或** `--debug` / `WEB2APP_DEBUG=1`），不是直接读
+    编译期常量 —— 否则交付包加了 `--debug` 只有日志、屏幕照旧不给诊断，而手机上屏幕恰恰是
+    唯一能取到的现场。Android 没有命令行/环境变量入口 ⇒ 实际只有编译期 `DEBUG`，改完要重新打包。
+  - 可达性探测的**失败**详情走 `fail(t,d,soft)` 直达卡片、绕开 `pushNote` ⇒ 分级在 Rust 侧
+    （`probe.rs::probe_failure_detail`）；`debug=false` 时只留标题 + 一句可执行提示，主机名、
+    DNS / TLS 分类术语不出现。
+  - 失败卡上的 `diagText()`（地址 / readyState / 元素数 / HTTP / 资源数 / 整条 UA / 脚本错误）、
+    `pushNote`（阶段进度 + 可达性探测结论）、「仍停在启动页：导航没有提交」全部随它开关；
+    `debug=false` 时连 40 秒兜底卡也只有一句可执行文案 + 重试按钮。
+  - 壳侧文案同步分级：Tauri `bootstrap.rs` 的 `解析目标地址失败：{e}` / `无法打开页面：{e}` /
+    `本地代理启动失败：{e}` / panic 文本 / scheme 白名单错误；Electron `navFailText` 的
+    URL + net error code、`parseAppUrl` / `sidecarFailureText` 的原始异常、
+    `showShellStartupError` 里的 `e.message` 与重试失败弹窗。
+  - Electron 额外关掉 **Chromium 原生** stderr（`--log-level=3` + `--disable-logging`）：
+    那部分不受 `silenceConsole()` 管辖。`--w2a-debug` / `WEB2APP_DEBUG` 逃生口同样打开屏幕诊断。
+  - 守卫：`webview-app/src/contract_tests/diagnostics_visibility_contract.rs`（跨两壳静态断言，
+    含六组反向对照：删 `!DIAG` 短路 / 注入点回退成源码常量 / 文案门控改死 / 标记回退编译期常量 /
+    探测详情去掉分级 / 启动错误串回退编译期常量）。
+
 - **sidecar（`w2a-proxy.exe`）自己不做门控**：它是**控制台进程**，`stderr` 由宿主逐行读走
   （`sidecar.ts` 的回调 → `index.ts` 的 `log: (line) => console.log(line)`），再按**宿主的**
   `debug` 决定去向 —— 关闭时宿主的 `console.log` 是空操作，这些行不落到任何地方；打开时才进

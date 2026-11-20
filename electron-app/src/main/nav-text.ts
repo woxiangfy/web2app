@@ -6,9 +6,16 @@
  * 而 wry 在 Windows/Android 会把启动页改写成 `https://splash.localhost/`）。
  */
 
-/** 加载失败的统一文案（单窗口与页签共用，改文案只改这里）。 */
-export function navFailText(url: string, desc: string, code: number): string {
-  return `无法打开 ${url}（${desc}，${code}）`
+/**
+ * 加载失败的统一文案（单窗口与页签共用，改文案只改这里）。
+ *
+ * `debug=false`（打包默认）只给最终用户可执行的结论 —— 完整 URL 与 Chromium 的
+ * net error code（`ERR_CONNECTION_REFUSED，-102`）属诊断：屏幕上帮不上用户，还会把
+ * 内部入口（`127.0.0.1:<port>`、上游主机名）暴露出去。`debug=true` 时保持原样。
+ */
+export function navFailText(url: string, desc: string, code: number, debug = false): string {
+  if (debug) return `无法打开 ${url}（${desc}，${code}）`
+  return '页面无法打开，请检查网络连接后重试。'
 }
 
 /**

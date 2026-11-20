@@ -17,12 +17,14 @@ import { TAB_BAR_HEIGHT } from './tabs'
 const SHELL_FAIL_ID = '__w2a_shell_fail'
 
 /** 在壳页面注入失败遮罩（错误文案 + 「重试」按钮）。幂等：重复调用先撤旧遮罩。 */
-export function showShellStartupError(win: BrowserWindow, detail: string): void {
+export function showShellStartupError(win: BrowserWindow, detail: string, debug = false): void {
   if (win.isDestroyed()) return
   // 文案经 JSON.stringify 嵌入（天然 JS 字符串转义，杜绝引号/换行注入断脚本）；
   // 按钮经 shell-preload 白名单里的 retry_first_tab 重试，主进程侧还有 assertShell 校验。
   // 遮罩的 top 与标签栏高度同源（TAB_BAR_HEIGHT 插值）：写死 38 会在改栏高时盖住标签栏。
+  // ⚠️ `debug` 同时决定「重试失败」弹窗里要不要带原始异常 —— `e.message` 是内部错误串。
   const js = `(function () {
+    var DEBUG = ${debug ? 'true' : 'false'};
     var OLD = document.getElementById(${JSON.stringify(SHELL_FAIL_ID)});
     if (OLD) OLD.parentNode.removeChild(OLD);
     var box = document.createElement('div');
@@ -47,7 +49,7 @@ export function showShellStartupError(win: BrowserWindow, detail: string): void 
       window.__TAURI_INTERNALS__.invoke('retry_first_tab').catch(function (e) {
         btn.disabled = false;
         btn.textContent = '重试';
-        alert('重试失败：' + (e && e.message ? e.message : String(e)));
+        alert('重试失败：' + (DEBUG && e && e.message ? e.message : '请稍后再试'));
       });
     };
     box.appendChild(msg);

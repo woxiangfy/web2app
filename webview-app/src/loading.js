@@ -20,6 +20,12 @@
  * 状态机：loading（转圈 + 进度条）→ slow（慢提示，仍可自动完成）→ done（淡出移除）
  *                                                              ↘ failed（错误 + 重试）
  *
+ * 诊断可见性（`window.__web2appDiag`，与打包配置 `debug` 同源，**默认 false**）：
+ *   关闭时失败卡只给普通用户可读的结论（「无法连接服务器，请检查网络后重试」）与重试按钮；
+ *   地址 / readyState / HTTP / 资源数 / 整条 UA / 脚本错误、壳侧阶段进度、可达性探测结论
+ *   **一律不出现在屏幕上**（`pushNote` 直接丢弃，`diagText()` 不拼）。打开时与既有完全一致。
+ *   ⚠️ 标记必须由注入方写在本脚本**同一段**代码的前面 —— 见下方 `DIAG` 的注释。
+ *
  * 设计约束（务必保持）：
  *   1. 零依赖、零网络请求、无外部字体/图片，脚本体积控制在几 KB，不影响真实启动速度。
  *   2. 全程包在 try/catch 里：注入到第三方页面，任何异常都不能破坏宿主页面。
@@ -56,6 +62,18 @@
   // 为对应 tab 重走 bootstrap（见 tabs::retry_tab_bootstrap）。
   // ⚠️ 事件名必须与 tabs.rs 的 TAB_RETRY_EVENT 逐字一致（lib.rs 有静态守卫）。
   var TAB_RETRY_EVENT = 'web2app:retry-bootstrap';
+
+  // 诊断可见性（与打包配置 `debug` 同源，**默认关闭**）。
+  //
+  // ⚠️⚠️ 这是「屏幕上会出现什么」的总闸，与日志开关是两件事：日志写不写文件在壳侧判定，
+  //    这里管的是**用户看得见的字** —— 失败卡上的地址 / readyState / HTTP / 资源数 /
+  //    整条 UA / 脚本错误，以及壳侧推来的阶段进度与可达性探测结论。
+  //
+  // 由壳侧在注入本脚本**同一段**代码的前面写 `window.__web2appDiag = true/false;`
+  // （Tauri：`loading.rs::overlay_script` / `splash_html`；Electron：`index.ts::readInject`）。
+  // 缺省按 false 处理 —— 安全默认：老壳、第三方注入或标记丢失时**不泄漏**技术细节。
+  var DIAG = false;
+  try { DIAG = window.__web2appDiag === true; } catch (e) { /* noop */ }
 
   var state = 'loading'; // loading | slow | failed | done
   var t0 = Date.now();
@@ -374,6 +392,8 @@
    *                壳内白屏」的高发原因：TLS 证书链 / HTTP2 不兼容）；
    *   · 脚本错误 —— document-start 起捕获到的最后一条页面错误（如有）。
    * 只展示在用户自己的屏幕上，不上报、不外发。
+   * ⚠️ 仅在 `window.__web2appDiag === true`（打包参数 debug=true）时被拼进失败卡；
+   *    debug=false 时这整段对用户不可见（见文件头「诊断可见性」与 `DIAG`）。
    */
   /// 抹掉地址里的凭据再显示。
   ///
@@ -443,6 +463,10 @@
    */
   function pushNote(line) {
     if (!line) return;
+    // ⚠️ 诊断关闭时**直接丢弃**（不累积、不渲染）：这些行是「正在解析目标地址（N 个域名）」
+    //    「正在启动本地反向代理」「可达性探测：…内核 / TLS…」这类打包者视角的进度，
+    //    普通用户看了既不懂也不需要；debug 打开时行为与既有完全一致。
+    if (!DIAG) return;
     try {
       if (notes.indexOf(line) >= 0) return; // 幂等：重试 / 多次探测不重复堆同一行
       notes.push(line);
@@ -482,7 +506,7 @@
       pushNote('【' + (title || '加载失败') + '】' + (detail || ''));
       return;
     }
-    toFail(title, (detail || '请检查网络连接后重试。') + '\n' + diagText());
+    toFail(title, (detail || '请检查网络连接后重试。') + (DIAG ? '\n' + diagText() : ''));
   }
 
   function emitTauriEvent(evt, payload) {
@@ -570,10 +594,13 @@
         // 诊断行直接拼在卡片上：用户截图即可判断「停在启动页 / 外链空白错误文档 /
         // 页面脚本崩溃」哪一种，无需 adb。文案不再把锅单方面推给网络——手机浏览器
         // 能打开而壳内空白时，常见根因是系统内置 WebView 版本过旧（见 UA 行）。
+        // ⚠️ 上述诊断只在 debug=true 时出现；debug=false 时给普通用户一句可执行的提示。
         toFail(
           '加载失败',
-          '页面长时间为空白。若手机浏览器能打开同一网址，请把下方信息反馈给打包者：\n' +
-          diagText()
+          DIAG
+            ? '页面长时间为空白。若手机浏览器能打开同一网址，请把下方信息反馈给打包者：\n' +
+              diagText()
+            : '页面长时间为空白，请检查网络连接后重试。'
         );
         return;
       }
@@ -682,8 +709,9 @@
       toFail(
         IS_SPLASH ? '启动超时' : '加载超时',
         (IS_SPLASH ? '应用初始化耗时过长，请检查网络后重试。' : '页面响应超时，请检查网络连接后重试。') +
-          (isSplashDoc() ? '\n仍停在启动页：目标地址的导航没有提交。' : '') +
-          '\n' + diagText()
+          // 「仍停在启动页：导航没有提交」是分诊结论，不是给最终用户的建议 ⇒ 同属诊断。
+          (DIAG && isSplashDoc() ? '\n仍停在启动页：目标地址的导航没有提交。' : '') +
+          (DIAG ? '\n' + diagText() : '')
       );
     }, FAIL_MS);
 

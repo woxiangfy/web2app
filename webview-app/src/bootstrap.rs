@@ -230,14 +230,19 @@ fn bootstrap_inner(app: tauri::AppHandle, label: String, cache_navigation: bool)
         let outcome = match prepared {
             Ok(r) => r,
             Err(pa) => {
-                let msg = if let Some(s) = pa.downcast_ref::<&str>() {
-                    format!("启动过程发生内部错误：{s}")
+                // panic 文本是纯内部信息（模块名 / 断言表达式），只在 debug 包里给打包者。
+                let raw = if let Some(s) = pa.downcast_ref::<&str>() {
+                    (*s).to_string()
                 } else if let Some(s) = pa.downcast_ref::<String>() {
-                    format!("启动过程发生内部错误：{s}")
+                    s.clone()
                 } else {
-                    "启动过程发生内部错误（未知 panic）".to_string()
+                    "未知 panic".to_string()
                 };
-                Err(msg)
+                Err(if crate::debug_log::enabled() {
+                    format!("启动过程发生内部错误：{raw}")
+                } else {
+                    "启动过程发生内部错误，请重试或联系打包者".to_string()
+                })
             }
         };
 
@@ -339,13 +344,28 @@ fn prepare_navigation(
         // ⚠️ 不要把具体原因（`_`）丢掉只留一句「服务器连接失败」：启动期故障的具体成因
         //（读系统 DNS 配置失败 / 查询某域名失败 / 全部密文解不开 / 预算超时）是唯一能指导
         // 下一步的信息（项目约定：环境级故障也要可见）。
-        .map_err(|e| format!("解析目标地址失败：{e}"))?
+        // ⚠️⚠️ 但它属于**诊断**：`debug=false` 的交付包不把 hickory / JNI 的原始错误串
+        // 摆到用户面前 —— 那些字既无法操作，又会暴露内部实现。debug 打开时保持原样。
+        .map_err(|e| {
+            if crate::debug_log::enabled() {
+                format!("解析目标地址失败：{e}")
+            } else {
+                "无法连接服务器，请检查网络连接后重试".to_string()
+            }
+        })?
     } else {
         APP_URL.to_string()
     };
 
-    let parsed = Url::parse(&resolved_url)
-        .map_err(|e| format!("应用配置的网址不合法（{e}）：{resolved_url}"))?;
+    let parsed = Url::parse(&resolved_url).map_err(|e| {
+        // 同 `解析目标地址失败`：原始 parse 错误 + 地址（可能带内部端口 / 参数）只在
+        // debug 包里给打包者看；默认包给一句用户能执行的结论。
+        if crate::debug_log::enabled() {
+            format!("应用配置的网址不合法（{e}）：{resolved_url}")
+        } else {
+            "应用配置的地址不合法，请联系打包者".to_string()
+        }
+    })?;
 
     // scheme 白名单：与 sidecar（proxy-server/main.rs）同一语义。非 http(s) 配置
     // （或 DNS 解出异常 scheme）下继续启动只会让代理每条请求 502、启动页既不报错也无法
@@ -353,9 +373,11 @@ fn prepare_navigation(
     match parsed.scheme() {
         "http" | "https" => {}
         other => {
-            return Err(format!(
-                "只支持 http / https 上游，当前是 {other}：{resolved_url}"
-            ))
+            return Err(if crate::debug_log::enabled() {
+                format!("只支持 http / https 上游，当前是 {other}：{resolved_url}")
+            } else {
+                "应用配置的地址无效，请联系打包者".to_string()
+            })
         }
     }
 
@@ -370,7 +392,14 @@ fn prepare_navigation(
         note(app, label, "正在启动本地反向代理…");
         // 自身实现的本地反向代理：给每个请求（含 WebSocket 握手）注入 Authorization。
         let (u, abort) = tauri::async_runtime::block_on(crate::proxy::start_proxy(&parsed))
-            .map_err(|e| format!("本地代理启动失败：{e}"))?;
+            .map_err(|e| {
+                // 代理启动失败的原因（端口占用 / 上游解析 / IO）属诊断：默认包给可执行结论。
+                if crate::debug_log::enabled() {
+                    format!("本地代理启动失败：{e}")
+                } else {
+                    "本地组件启动失败，请重试或联系打包者".to_string()
+                }
+            })?;
         (u, Some(abort))
     } else {
         // 直连 / 外部代理：导航到去掉 userinfo 的上游地址（鉴权由原生事件或外部代理注入）。
@@ -469,7 +498,11 @@ fn navigate_main(app: &tauri::AppHandle, label: &str, nav: Navigation) {
                         app,
                         label,
                         "加载失败",
-                        &format!("无法打开页面：{e}"),
+                        &if crate::debug_log::enabled() {
+                            format!("无法打开页面：{e}")
+                        } else {
+                            "页面无法打开，请检查网络连接后重试".to_string()
+                        },
                     ),
                 }
             }

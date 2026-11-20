@@ -104,6 +104,24 @@ fn probe_failure_message(kind: ProbeFailure, host: &str) -> (String, String) {
     }
 }
 
+/// `debug=false` 时给普通用户的探测失败详情：一句可执行提示，不含主机名与失败分类。
+///
+/// ⚠️ 与 `loading.js` 的 `DIAG` 门控是**同一条契约**：探测失败走 `fail(t,d,soft)` 直达卡片，
+/// 不经过 `pushNote`，所以 JS 侧的总闸管不到它 —— 必须在 Rust 侧就分好级，否则会出现
+/// 「探测成功时结论被隐藏、探测失败时主机名 + DNS/TLS 术语反而露出来」的诡异分叉。
+#[cfg(any(not(windows), test))]
+const PROBE_FAIL_USER_DETAIL: &str = "页面无法打开，请检查网络连接后重试。";
+
+/// 探测失败详情的可见性分级（纯函数：两个分支都能在桌面 `cargo test` 上钉住）。
+#[cfg(any(not(windows), test))]
+fn probe_failure_detail(detail: String, diag: bool) -> String {
+    if diag {
+        detail
+    } else {
+        PROBE_FAIL_USER_DETAIL.to_string()
+    }
+}
+
 /// 可达性探测**成功**时给卡片的一行结论（纯函数，跨平台可单测）。
 ///
 /// 为什么成功也要报：先前只把**失败**推给卡片、成功时静默 —— 于是最需要的那条判据恰好丢了。
@@ -206,6 +224,8 @@ pub(crate) fn spawn_reachability_probe(
         match probe_once(&url).await {
             ProbeOutcome::Failed(kind) => {
                 let (title, detail) = probe_failure_message(kind, &host);
+                // 主机名 / DNS / TLS 分类属诊断：交付包（debug=false）只给一句可执行提示。
+                let detail = probe_failure_detail(detail, crate::debug_log::enabled());
                 let a = app.clone();
                 let l = label.clone();
                 // eval 必须回主线程（Tauri 的 WebView 操作都要求主线程）。
@@ -325,6 +345,31 @@ mod tests {
             assert!(d.contains(detail_kw), "{t:?} 详情应含 {detail_kw:?}：{d}");
             assert!(titles.insert(t.clone()), "失败标题不能重复：{t}");
         }
+    }
+
+    #[test]
+    fn probe_failure_detail_is_gated_by_diagnostics_switch() {
+        // debug 打开：保留「主机名 + 失败分类」的完整结论（排障用）。
+        let (_t, d) = probe_failure_message(ProbeFailure::Tls, "a.example");
+        assert!(
+            d.contains("a.example") && d.contains("TLS"),
+            "诊断分支应保留原详情：{d}"
+        );
+        assert_eq!(probe_failure_detail(d.clone(), true), d);
+
+        // debug 关闭：只留一句可执行提示 —— 主机名与 DNS/TLS 术语一个都不许出现。
+        let (_t, d2) = probe_failure_message(ProbeFailure::Connect, "a.example");
+        let user = probe_failure_detail(d2, false);
+        assert_eq!(user, PROBE_FAIL_USER_DETAIL);
+        assert!(!user.contains("a.example"), "交付包不得显示主机名：{user}");
+        assert!(
+            !user.contains("TLS") && !user.contains("域名解析"),
+            "交付包不得显示失败分类术语：{user}"
+        );
+        assert!(
+            !PROBE_FAIL_USER_DETAIL.contains('{') && !PROBE_FAIL_USER_DETAIL.contains("{}"),
+            "通用文案不许带格式化占位符（否则主机名会被拼进来）"
+        );
     }
 
     #[test]

@@ -43,22 +43,53 @@ pub const TOKEN_TITLE: &str = "__WEB2APP_TITLE__";
 pub const TOKEN_TITLEBAR_JS: &str = "__WEB2APP_TITLEBAR_JS__";
 pub const TOKEN_LOADING_JS: &str = "__WEB2APP_LOADING_JS__";
 
-/// 注入到每一次导航目标文档的加载层脚本。
+/// 注入到每一次导航目标文档的加载层脚本（**源码本体**）。
 ///
 /// 通过 `WebviewWindowBuilder::initialization_script` 注册，在 document-created 阶段执行，
 /// 早于页面自身脚本与首次绘制 —— 这是它能盖住白屏、又不会让页面"闪一下再被遮住"的关键。
 ///
-/// ⚠️⚠️ 注册方**必须**在本脚本【之前】再注册一条模式标记脚本（初始化脚本按注册顺序执行），
+/// ⚠️⚠️ 注册方**必须**注册 [`overlay_script()`] 而不是本常量：后者不带诊断可见性标记，
+/// 直接注入会让 `loading.js` 按「诊断关闭」的缺省值运行（debug=true 的包也看不到技术细节）。
+/// 本常量保留为「loading.js 源码」的静态守卫锚点。
+///
+/// 注册方还必须在本脚本【之前】再注册一条模式标记脚本（初始化脚本按注册顺序执行），
 /// 否则启动页会被当成目标页跑（overlay 语义），命中 15s 空白文档硬上限：
 /// ```text
 /// .initialization_script("window.__web2appLoadingMode = (location.hostname === \
 ///     'splash.localhost' || location.protocol === 'splash:') ? 'splash' : 'overlay';")
-/// .initialization_script(loading::OVERLAY_SCRIPT)
+/// .initialization_script(loading::overlay_script())
 /// ```
 /// 单窗口见 `lib.rs::build_main_window`（实为 `run()` 内的闭包），多页签见
 /// `tabs.rs::create_tab_window`（那里钉的是 `tauri.localhost`）。
-/// 静态守卫：`contract_tests.rs::loading_mode_contract`。
+/// 静态守卫：`contract_tests::loading_mode_contract`。
+/// 静态守卫与单测的锚点（生产注入一律走 [`overlay_script()`]）。
+#[cfg(test)]
 pub const OVERLAY_SCRIPT: &str = LOADING_JS;
+
+/// 诊断可见性标记（与打包参数 `debug` 同源）。
+///
+/// ⚠️ 必须写在加载层脚本**同一段代码**的前面，而不是另注册一条 `initialization_script`：
+/// 后者虽然也能按顺序执行，但会把「标记丢了」变成一类只在运行时才看得见的错（脚本照跑，
+/// 只是 debug=true 的包也看不到诊断）；写进同一段则不可能晚于读取点，且静态守卫只需看一处。
+///
+/// ⚠️ 判定必须用 [`crate::debug_log::enabled()`]（编译期 `DEBUG` **或** `--debug` /
+/// `WEB2APP_DEBUG=1`），不能只看编译期常量：`--debug` 是交付包的唯一运行时逃生口，
+/// 若屏幕诊断不认它，排障包就得重新编译 —— 而 Electron 侧 `DEBUG` 本就包含运行时开关，
+/// 两壳会分叉成「同一个 --debug，一个看得到诊断、一个看不到」。
+fn diag_prefix() -> &'static str {
+    if crate::debug_log::enabled() {
+        "window.__web2appDiag = true;\n"
+    } else {
+        "window.__web2appDiag = false;\n"
+    }
+}
+
+/// 实际注入用的加载层脚本：`loading.js` + 前置的诊断可见性标记。
+///
+/// 与 [`OVERLAY_SCRIPT`] 的唯一差别就是前面那一行 —— 后者是源码本体，供静态守卫断言。
+pub fn overlay_script() -> String {
+    format!("{}{}", diag_prefix(), LOADING_JS)
+}
 
 /// 启动页地址。
 pub fn splash_url() -> Url {
@@ -84,10 +115,13 @@ pub fn splash_html(title: &str) -> String {
     // 空串 —— 占位符仍照常消费（模板与 `splash_template_has_no_token_in_comments` 都按「恰好出现
     // 一次」约束，不能直接删掉占位符）。
     let titlebar_js = if cfg!(windows) { TITLEBAR_JS } else { "" };
+    // ⚠️ 用 `overlay_script()` 而不是裸 `LOADING_JS`：启动页同样要吃 `debug` 门控，
+    //    否则「启动页上的失败卡」和「目标页上的失败卡」会一半显示诊断、一半不显示。
+    let loading_js = overlay_script();
     SPLASH_TEMPLATE
         .replace(TOKEN_TITLE, &html_escape(title))
         .replace(TOKEN_TITLEBAR_JS, titlebar_js)
-        .replace(TOKEN_LOADING_JS, LOADING_JS)
+        .replace(TOKEN_LOADING_JS, &loading_js)
 }
 
 /// splash 自定义协议的处理器。
@@ -430,19 +464,36 @@ mod tests {
         );
     }
 
-    /// 启动页 40s 兜底卡必须带现场诊断 + 「仍停在启动页」的判读提示。
+    /// 启动页 40s 兜底卡：debug 打开时带现场诊断 + 「仍停在启动页」判读提示；
+    /// debug 关闭时两者都不出现（诊断可见性由打包参数 `debug` 决定，2026-11-21）。
     ///
     /// 它以前是**唯一不带诊断**的失败卡（CAP 卡与 fail API 卡都带 `diagText()`），真机上就
-    /// 只能给出一句「应用初始化耗时过长」——无从判断卡在哪一步。
+    /// 只能给出一句「应用初始化耗时过长」——无从判断卡在哪一步。现在补上了，但必须受门控：
+    /// debug=false 的交付包不该把地址 / UA / readyState 摆给最终用户。
     #[test]
-    fn splash_fallback_card_carries_diagnostics() {
+    fn splash_fallback_card_gates_diagnostics_by_debug() {
         let js = OVERLAY_SCRIPT;
         let i = js.find("'启动超时'").expect("splash 兜底卡文案应存在");
-        let seg = &js[i..(i + 420).min(js.len())];
-        assert!(seg.contains("diagText()"), "启动超时卡必须带现场诊断");
+        let mut end = (i + 800).min(js.len());
+        while !js.is_char_boundary(end) {
+            end -= 1;
+        }
+        let seg = &js[i..end];
+        assert!(
+            seg.contains("diagText()"),
+            "debug 打开时启动超时卡必须带现场诊断"
+        );
+        assert!(
+            seg.contains("(DIAG ? '\\n' + diagText() : '')"),
+            "诊断必须受 DIAG 门控 —— 否则 debug=false 的包仍把 UA / 地址摆给最终用户"
+        );
         assert!(
             seg.contains("仍停在启动页"),
             "地址仍是 splash 时应给出「导航没有提交」的判读提示"
+        );
+        assert!(
+            seg.contains("DIAG && isSplashDoc()"),
+            "「仍停在启动页」属分诊结论，同样要随 DIAG 隐藏"
         );
     }
 

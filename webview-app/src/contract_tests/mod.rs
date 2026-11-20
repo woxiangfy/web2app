@@ -6,6 +6,8 @@
 //!   · `tab_home_marker_contract` —— 「首页」页签固定第一位、不可关闭；
 //!   · `webview2_password_autosave` —— WebView2 密码自动保存开关（Windows）；
 //!   · `loading_mode_contract` —— 加载层模式标记必须在 OVERLAY_SCRIPT 之前注册（跨平台）；
+//!   · `diagnostics_visibility_contract` —— 屏幕上的技术细节由打包参数 `debug` 决定：
+//!     loading.js 的诊断总闸 / notes 短路 / 两壳注入标记 / Electron 文案与 Chromium 日志；
 //!   · `startup_visibility_contract` —— 启动可见性 / Android 首屏等待与重试；
 //!   · `back_navigation_guard_contract` —— 标题栏后退落点守卫（含 Android 补丁链）；
 //!   · `android_pipeline_contract` —— CI workflow 与 Android 补丁脚本管线契约（含打包输入面冻结）；
@@ -78,6 +80,9 @@ mod webview2_password_autosave;
 
 #[cfg(test)]
 mod loading_mode_contract;
+
+#[cfg(test)]
+mod diagnostics_visibility_contract;
 
 #[cfg(test)]
 mod startup_visibility_contract;

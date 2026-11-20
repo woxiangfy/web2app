@@ -26,12 +26,14 @@ export interface TabSpawnDeps {
   getTabManager: () => TabManager | null
   /** F12 开发者工具开关（`devtoolsEnabled(app.isPackaged, cfg.debug)` 预计算） */
   devtools: boolean
+  /** 诊断可见性（`DEBUG` 预计算）：决定加载失败提示里是否带 URL / net error code */
+  debug: boolean
   /** 右键菜单「设置」入口 */
   openSettings: () => void
 }
 
 export function makeTabSpawn(deps: TabSpawnDeps): TabsOptions['onSpawn'] {
-  const { resolveInitialTarget, getTabManager, devtools, openSettings } = deps
+  const { resolveInitialTarget, getTabManager, devtools, debug, openSettings } = deps
   return async (view, label, url) => {
     // ⚠️⚠️ 新页签**不得**调 bootstrap()（其开头 stopActiveSidecar 会掐掉在服页签的代理，
     //   末尾会把主窗口导航走污染壳页面）。这里用 resolveInitialTarget 复用 target 缓存，
@@ -162,7 +164,7 @@ export function makeTabSpawn(deps: TabSpawnDeps): TabsOptions['onSpawn'] {
     //   -3 = ERR_ABORTED：正常重定向 / 被后续导航顶掉，不是错误。
     view.webContents.on('did-fail-load', (_e, code, desc, url2, isMainFrame) => {
       if (!isMainFrame || code === -3) return
-      const detail = navFailText(url2, desc, code)
+      const detail = navFailText(url2, desc, code, debug)
       console.error(`[web2app] 页签加载失败：${detail}`)
       getTabManager()?.setTabTitle(label, '加载失败')
     })

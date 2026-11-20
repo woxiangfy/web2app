@@ -8,11 +8,18 @@ import { test } from 'node:test'
 
 import { isInternalUrl, isSplashUrl, navFailText } from '../src/main/nav-text.ts'
 
-test('navFailText：单窗口与页签共用同一条文案', () => {
+test('navFailText：debug 包保留 URL 与 net error code（单窗口与页签共用）', () => {
   assert.equal(
-    navFailText('https://example.com/x', 'ERR_NAME_NOT_RESOLVED', -105),
+    navFailText('https://example.com/x', 'ERR_NAME_NOT_RESOLVED', -105, true),
     '无法打开 https://example.com/x（ERR_NAME_NOT_RESOLVED，-105）'
   )
+})
+
+test('navFailText：默认包（debug=false）不把 URL / 错误码摆给最终用户', () => {
+  const s = navFailText('http://127.0.0.1:8123/auth.html?w2a_key=abc', 'ERR_CONNECTION_REFUSED', -102)
+  assert.equal(s, '页面无法打开，请检查网络连接后重试。')
+  assert.ok(!s.includes('127.0.0.1'), '内部入口地址不得出现在用户可见文案里')
+  assert.ok(!s.includes('-102'), 'net error code 属诊断')
 })
 
 test('isSplashUrl：splash:// 与 wry 改写形态都认，伪装域名不认', () => {

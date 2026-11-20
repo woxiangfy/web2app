@@ -51,7 +51,7 @@ const PROXY_BYPASS: &str = "localhost;127.0.0.1;<-loopback>";
 
 改完直接 `cargo build`（见 [build-test.md](build-test.md)）。
 
-## 诊断日志（`debug`，默认关闭）
+## 诊断日志与屏幕可见性（`debug`，默认关闭）
 
 ⚠️ **Windows 上它是 GUI 子系统程序**（`src/main.rs` 的 `windows_subsystem = "windows"`）：双击运行时
 没有控制台可挂，`eprintln!` 的输出**没有任何去处**。于是「双击没反应 / 打开的是 example.com /
@@ -63,6 +63,21 @@ const PROXY_BYPASS: &str = "localhost;127.0.0.1;<-loopback>";
 |---|---|
 | Windows | `<数据目录>\logs\startup.log`（目录规则同 `DATA_DIR`，默认 `<exe 所在目录>\data\logs\`） |
 | Android | `/data/data/<pkg>/logs/startup.log`（应用私有目录，见 [android.md](android.md)） |
+
+⚠️ **同一个开关也决定屏幕上是否出现技术细节**（2026-11-21 起，两壳同一条契约）：`debug=false` 时
+失败卡只给「页面无法打开，请检查网络后重试」+ 重试按钮，**地址 / readyState / 元素数 / HTTP /
+资源数 / 整条 UA / 脚本错误 / 启动阶段进度 / 可达性探测结论**一律不渲染；`bootstrap.rs` 的
+`解析目标地址失败：<e>` / `无法打开页面：<e>` / 本地代理失败 / panic 文本也退化成可执行结论。
+
+实现：`loading.js` 读 `window.__web2appDiag`（缺省 false），标记由
+`loading.rs::overlay_script()` 写在脚本**同一段**前面；`splash_html()` 与主窗口 / 多页签两处
+`initialization_script` 都用它（`OVERLAY_SCRIPT` 常量只作 `#[cfg(test)]` 守卫锚点）。
+标记的取值与日志**同一条判据** —— `debug_log::enabled()`（编译期 `DEBUG` 或运行时
+`--debug` / `WEB2APP_DEBUG=1`），所以下面那个逃生口对**屏幕诊断同样有效**，不必重新打包。
+⚠️ Android 没有命令行 / 环境变量入口 ⇒ 只能靠编译期 `DEBUG`，改完必须重新打包。
+可达性探测的失败详情（主机名 / DNS / TLS 分类）在 `probe.rs::probe_failure_detail` 里分级，
+`debug=false` 时只留标题 + 一句可执行提示。
+契约：`src/contract_tests/diagnostics_visibility_contract.rs`。
 
 **为什么不默认开**：每次启动都在用户的数据目录里留下交付物以外的文件，不是期望行为。代价要写清楚：
 上面那条「用户侧第一现场」在默认配置下**不存在**。所以留了**运行时逃生口**（交付出去的包也能临时

@@ -327,7 +327,8 @@ pub(crate) fn spawn_tab_with_target(
             "window.__web2appLoadingMode = (location.hostname === 'tauri.localhost' \
              || location.protocol === 'tauri:') ? 'splash' : 'overlay';",
         )
-        .initialization_script(crate::loading::OVERLAY_SCRIPT)
+        // ⚠️ 必须走带诊断可见性标记的 `overlay_script()`（与主窗口同一条契约）。
+        .initialization_script(crate::loading::overlay_script())
         .initialization_script(format!(
             "window.web2appExtra = {};",
             crate::config::extra_json()
