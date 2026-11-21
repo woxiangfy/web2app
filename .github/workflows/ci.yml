@@ -181,7 +181,8 @@ jobs:
         #    在 -D warnings 下直接编译失败。2026-09-22 的 `settings.rs` 即为此例：APP_NAME 的唯一
         #    使用点（open_settings_window 里拼设置窗标题）被 cfg(desktop) 包住后，导入未同步拆开。
         #    ⇒ 给某个 item 加 cfg(desktop) 时，同步检查它的导入是否也要按 cfg 拆开。
-        #    （本 crate 有全量 `#![allow(dead_code)]`，所以这里唯一会拦的就是 unused import 这一类。）
+        #    （⚠️ 过时信息已修正：P2-2 起 crate 级 `#![allow(dead_code)]` 已移除，dead_code
+        #      同样会拦；平台专属符号必须挂精确 `cfg_attr` 豁免并注明调用方目标，见 lib.rs 顶部。）
         run: cargo ndk -t arm64-v8a clippy -- -D warnings
 
   # ---------------------------------------------------------------------------

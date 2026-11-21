@@ -6,6 +6,9 @@
 /// 显式置 true。COM 调用无法在单测里执行，这里用源码断言把「开关确实接上、且置的是 true」
 /// 钉死，防止误删或误改成 false。
 /// 被测真源：Windows WebView2 钩子注册代码本体。
+/// ⚠️ 唯一使用点的测试是 `#[cfg(windows)]`，Linux / Android 下常量无消费方 ⇒ dead_code
+///    （架构审查 P2-2 已取消 crate 级豁免），故常量与测试同挂 `cfg(windows)`。
+#[cfg(windows)]
 const HOOKS_RS: &str = include_str!("../webview_hooks.rs");
 
 #[cfg(windows)]

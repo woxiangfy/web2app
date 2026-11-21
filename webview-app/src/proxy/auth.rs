@@ -57,6 +57,11 @@ pub(super) fn generate_access_token() -> String {
 ///
 /// ⚠️ 放本模块（而非 tabs / floatwin 各自一份）是因为两者**逐字节相同**，且本模块是 sidecar
 /// 经 `#[path]` 复用的单一真源，天然适合承载“安全随机”类小工具（与 [`generate_access_token`] 并列）。
+///
+/// ⚠️ 死代码豁免（P2-2）：主 crate 的唯一调用点是 `tabs/window.rs`（`mod tabs` 整体
+///    `#[cfg(windows)]`）；Linux / Android 目标下无调用方，故按目标精确豁免。
+///    （sidecar 的 `proxy-server` bin 经 `#[path]` 复用本文件，但它本就不调用此函数。）
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn random_hex_token() -> Option<String> {
     let mut buf = [0u8; 16];
     getrandom::getrandom(&mut buf).ok()?;

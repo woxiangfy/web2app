@@ -381,6 +381,10 @@ pub(crate) const DEVTOOLS_ENABLED: bool = false;
 // ⚠️⚠️ 这里**不能**用 `env_str!`：那个宏把空串当成「未设置」并回落到默认值，而空串在本字段里
 //    是**有含义的取值**（= 用系统默认目录）。必须用裸 `option_env!` 原样保留空串。
 //    它与打包配置契约绑定：解析器把 `"data_dir": ""` 写成一行 `DATA_DIR=`（值就是空）。
+// ⚠️ 死代码豁免（架构审查 P2-2）：本常量的唯一生产调用方是 Windows 的
+//    `data_dir()` / `resolve_data_dir()`（下面都是 `#[cfg(windows)]`）；Linux / Android
+//    目标下没有调用方，故按「某目标才有调用方」挂精确豁免，不恢复 crate 级 `allow(dead_code)`。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const DATA_DIR: &str = match option_env!("DATA_DIR") {
     Some(s) => s,
     None => "data",
@@ -392,12 +396,18 @@ pub(crate) const PROXY_ENABLED: bool = env_bool!("PROXY_ENABLED", false);
 // 【重要】自实现本地反向代理（HTTP+WS 统一注入 Basic 鉴权，覆盖 WebSocket）的启用条件是：
 //   PROXY_ENABLED = true 且 PROXY_HTTP / PROXY_HTTPS 均为空 ""。
 // 因此下面两个必须保持空串作为默认；只有你【确实要用外部 HTTP 代理】时才填。
+// ⚠️ 死代码豁免（P2-2）：三个常量的唯一生产调用方是 `build_proxy_args()`，
+//    它是 `#[cfg(windows)]`（WebView2 `--proxy-server` 仅 Windows 支持）；
+//    Linux / Android 目标无调用方，挂精确豁免而非 crate 级 blanket allow。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const PROXY_HTTP: &str = env_str!("PROXY_HTTP", "");
 // HTTPS 代理地址；留空 "" 表示和 HTTP 代理用同一个（同样：留空即走自实现代理）。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const PROXY_HTTPS: &str = env_str!("PROXY_HTTPS", "");
 // 不走代理的地址（分号分隔）。默认值与打包配置 JSON 的默认值、
 // 以及 Electron 绿色版 config.ts::DEFAULTS 三处**必须一致**（同一个串）。
 // 留空 = 不下发 --proxy-bypass-list（即沿用 Chromium 自身默认）。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.0.1;<-loopback>");
 
 // ---------- 多页签（tab）模式 ----------
@@ -412,6 +422,10 @@ pub(crate) const PROXY_BYPASS: &str = env_str!("PROXY_BYPASS", "localhost;127.0.
 // ⚠️ 不再用 `cfg!(windows) &&` 把值在非 Windows 上压成 false：移动端底栏要按这个开关
 //    决定是否渲染「列表」按钮（`mobilebar::tabs_available`）。桌面端引用本常量的只有
 //    `mod tabs` 与 mobilebar（后者仅 test 形态编译），语义不变。
+// ⚠️ 死代码豁免（P2-2）：消费方按目标分家 —— Windows 由 `mod tabs` / `nav::main_window_label`
+//    使用，移动端由 `mobilebar::tabs_available` 使用（Linux 的 `cargo check --all-targets`
+//    在 lib 目标下两侧都被 cfg 摘掉 ⇒ dead_code）。故豁免条件必须同时排除三处。
+#[cfg_attr(not(any(windows, mobile, test)), allow(dead_code))]
 pub(crate) const TABS_ENABLED: bool = env_bool!("TABS_ENABLED", false);
 
 // ---------- 移动端底栏（mobile_bar，仅移动端）----------

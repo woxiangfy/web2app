@@ -208,6 +208,10 @@ pub(crate) fn origin_of(u: &Url) -> Option<String> {
 /// 直连模式（不走本地代理）下，Authorization 注入与 401 自动应答都必须先过这道闸 ——
 /// 页面里的第三方子资源 / 被注入内容诱导出的外域请求一律不发凭据。`upstream` 为 None
 /// （解析不出源）时**失败关闭**：拒绝注入，而不是盲发。
+///
+/// ⚠️ 死代码豁免（P2-2）：生产调用方只有 Windows 的 `webview_hooks.rs`（`#[cfg(windows)]`）；
+///    Linux / Android 目标下无生产调用方，但 `cfg(test)` 下的本模块单测仍要引用它。
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub(crate) fn is_upstream_request(upstream: Option<&str>, request_url: &str) -> bool {
     let Some(upstream) = upstream else {
         return false;
@@ -239,6 +243,11 @@ pub(crate) fn is_upstream_request(upstream: Option<&str>, request_url: &str) -> 
 ///    本地反向代理也只对固定上游注入凭据。
 ///
 /// `None` = 目标不是可导航的 http(s) 地址（`about:blank` / `javascript:` / 解析失败），调用方应忽略。
+///
+/// ⚠️ 死代码豁免（P2-2）：三处调用方分别挂在 `#[cfg(windows)]`（`tabs/ipc.rs`）、
+///    `#[cfg(mobile)]`（`mobilebar.rs`）与 `#[cfg(test)]`（本模块单测）下；只有三者
+///    全假（如 Linux 的 lib 目标）才是真死代码，故豁免条件按三取或。
+#[cfg_attr(not(any(windows, mobile, test)), allow(dead_code))]
 pub(crate) fn resolve_popup_target(nav: &Navigation, target: Option<&str>) -> Option<String> {
     let target = target?;
     let tu = Url::parse(target).ok()?;
