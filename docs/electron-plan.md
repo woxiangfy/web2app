@@ -118,7 +118,7 @@
 | **M4 页面行为** | 新窗口策略、下载另存为、右键菜单、F12、加载层、外链不泄漏凭据 | ✅ **已交付（2026-09-24）**：下载接管 / 右键菜单 / F12 三项补齐（实现在 `electron-app/src/main/page-behavior.ts`）；新窗口策略与加载层随 M1 已交付 |
 | **M5 多页签** | `WebContentsView` + `shell.html` 标签栏 + 标题回传 | ✅ 完成（T0–T4；2026-09-27 时点探针**多页签 33/33、单窗口 138/138**；**现为页签 39/39、单窗口 150/150**；2026-09-18 真机目视 V1–V4 关闭） |
 | **M6 打包** | 三形态出包、版本信息、config 注入、日志目录、SmartScreen 文案 | ✅ 完成 |
-| **M7 CI** | Windows workflow：build → lint → E2E → 产物上传 | ✅ **已落库（2026-09-24）**：`.github/workflows/electron-ci.yml`，lint（Ubuntu）+ e2e（Windows）+ package（非 PR，上传 zip / portable）三作业 |
+| **M7 CI** | Windows workflow：build → lint → E2E → 产物上传 | ✅ **已落库（2026-09-24）**：`.github/workflows/electron-ci.yml`，lint（Ubuntu）+ e2e（Windows）+ package（非 PR，上传 zip / portable）三作业。**2026-11-21 起改为两作业**：`package` 开关删除、出包并入 `e2e-package`（`needs: lint`）——一次手动触发跑完 lint/unit → 探针/冒烟 → 出包+上传（详见 `docs/changes/2026-11-21.md`） |
 
 ### 4.1 测试能力（Electron 侧比 Tauri 侧强得多）
 

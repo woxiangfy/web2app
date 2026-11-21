@@ -8,8 +8,11 @@ name: CI（Electron）
 #     `defaults.run.working-directory: webview-app` 决定了它天然不覆盖本目录，
 #     所以 Electron 侧必须另开一个文件，而不是往 `ci.yml` 里加作业；
 #   - `electron-build-custom.yml` —— **手动**打包（贴一份配置 JSON → 出 zip / portable / NSIS 安装包）。
-#     本文件同样只**手动触发**（`workflow_dispatch`）：跑 lint 与端到端探针，
-#     触发时把 `package` 开关打开（默认开）则另产出包。
+#     本文件同样只**手动触发**（`workflow_dispatch`），但**一次触发跑完全部**：
+#     lint / 单测 → 端到端探针 + 冒烟 → 出包并上传产物。
+#     ⚠️ 2026-11-21 起**没有 `package` 开关**：出包是这条流水线的固定一环，
+#        「只跑一半」会让打包链路（stage/prune/afterPack/asar 护栏）长期无人验证 ——
+#        手动 CI 本来就只在人想看的时候跑，再给它加开关只会让那一半永远绿不了。
 #     两者共用同一个共享解析器与同一份脚本，不重复实现。
 #
 # ⚠️ 三个只在 CI 上才现形的坑（都写进注释，改前先读）：
@@ -22,24 +25,29 @@ name: CI（Electron）
 #      故 CI 是**没有** config.json 的 —— 这不是缺陷，而是本流水线刻意验证的场景：
 #      「fresh clone 直接能跑」。`config.ts` 找不到文件时回落 `DEFAULTS`
 #      （见 `src/main/config.ts:336`），而探针**自己起 127.0.0.1 随机端口的夹具站点**
-#      （`src/main/probe.ts:360`），不依赖任何外部站点 ⇒ 无配置也能跑完 134 条断言。
+#      （`src/main/probe.ts:360`），不依赖任何外部站点 ⇒ 无配置也能跑完全部断言。
 #      ⚠️ 所以**不要**在这里生成 config.json —— 那样反而掩盖了「缺省能不能跑」这件事。
 #   3. **pnpm 版本**：`electron-app/pnpm-workspace.yaml` 用了 `allowBuilds`（pnpm 11+ 键名）
 #      与 `nodeLinker: hoisted`。版本不对会报 `ERR_PNPM_IGNORED_BUILDS` 或符号链接失败，
 #      故固定 v12（与 `electron-build-custom.yml` 一致）。
 #
 # Node 版本取 22：①与 `electron-build-custom.yml` 一致；②`pnpm run unit` 直接
-#   `node --test "test/**/*.test.ts"`（不带编译步骤），依赖 Node 的类型剥离，
-#   当前 47/47（数量随用例增长，失败信息以 pnpm run unit 实际输出为准）。
+#   `node --test "test/**/*.test.ts"`（不带编译步骤），依赖 Node 的类型剥离。
+#   ⚠️ 断言条数是**时点值**，以 `pnpm run unit` / 探针的实际输出为准
+#      （2026-11-21：unit 236 / 单窗口 178 / 页签 69）—— 别把数字抄进步骤名，
+#      抄一次就得每次跟着改，改漏了就变成误导。
 # ---------------------------------------------------------------------------
 on:
   workflow_dispatch:
-    inputs:
-      package:
-        description: '出包并上传产物（zip + portable exe + NSIS 安装包）。关掉则只跑 lint / 探针 / 冒烟'
-        required: false
-        default: true
-        type: boolean
+
+# 最小权限：只读代码 + 上传本工作流的 artifact，不需要写仓库任何资源。
+permissions:
+  contents: read
+
+# 同分支连续手动触发时取消上一次（旧运行没有保留价值，且每次都要真出包）。
+concurrency:
+  group: ci-electron-${{ github.ref }}
+  cancel-in-progress: true
 
 # ⚠️ 与 `electron-build-custom.yml` 同一条纪律：run 步骤在 `electron-app/` 下执行，
 #    但 `uses:` 步骤（upload-artifact 等）的 `path:` 以**仓库根**为基准 ⇒ 那里要带前缀。
@@ -49,8 +57,8 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1) 静态检查 + 纯函数单测（Ubuntu，最快最便宜）
-  #    只跑 `typecheck` 与 `unit`，两者都不需要 Electron 二进制、不需要窗口。
+  # 1) 静态检查 + 纯函数单测 + 共享脚本语法（Ubuntu，最快最便宜）
+  #    只跑 `typecheck` / `unit` / 注入脚本语法，都不需要 Electron 二进制、不需要窗口。
   #    ⚠️ 但 install **不能**加 `--ignore-scripts`：pnpm 12 对「既没允许也没拒绝」的
   #       包会直接报 `ERR_PNPM_IGNORED_BUILDS` 中断安装（见 pnpm-workspace.yaml 的注释），
   #       省那 160MB 的代价是踩一个与环境强相关的坑，不划算。
@@ -58,18 +66,25 @@ jobs:
   lint:
     name: Lint & Unit (Ubuntu)
     runs-on: ubuntu-latest
+    # 防挂死：本作业最坏也就两三分钟，卡住（注册表超时）不该烧满 6 小时。
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-
+      # ⚠️ 顺序不能反：`actions/setup-node` 的 `cache: pnpm` 会在缓存前后各跑一次
+      #    `pnpm store path`，pnpm 必须先就位（否则报 `Unable to locate executable file: pnpm`）。
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
           version: '12'
+
+      - name: Set up Node（带 pnpm store 缓存）
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          # 单仓库：锁文件在 `electron-app/` 下，不是仓库根。
+          cache-dependency-path: electron-app/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
@@ -80,10 +95,18 @@ jobs:
       - name: Unit tests
         run: pnpm run unit
 
+      - name: 注入 / 内联脚本语法门禁（两壳共用真源）
+        # `webview-app/src/*.js`（titlebar / loading …）、mobilebar 分片拼接、四个 HTML 的
+        # 内联 `<script>` 全是**运行期注入**的：编译期不检查，坏了表现为「标题栏不见 / 白屏」。
+        # 与 `ci.yml` 共用同一个脚本（`scripts/check-js-syntax.mjs`），不各写一份。
+        # ⚠️ 放在 Ubuntu 作业里是为了**几秒出结果**：Windows 探针也能发现这类问题，
+        #    但要等装依赖 + 编 sidecar + 起 GUI。
+        run: node ../scripts/check-js-syntax.mjs
+
   # ---------------------------------------------------------------------------
-  # 2) 端到端探针（Windows）
+  # 2) 端到端探针 + 冒烟 + 出包（Windows，**一次跑完**，没有开关）
   #    跑的是**真实窗口**：`launch.cjs` 拉起 Electron 后在窗内逐条断言
-  #    （单窗口 134 条 + 多页签 31 条），最后 `smoke` 验证真实启动路径。
+  #    （单窗口 + 多页签两批），再 `smoke` 验证真实启动路径。
   #
   #    ⚠️ 三个参数的来历（本机踩出来的，CI 上同样需要）：
   #      - `--no-sandbox --in-process-gpu`：CI runner 没有可用的 GPU 沙箱，
@@ -96,79 +119,63 @@ jobs:
   #    ⚠️ 未在本机覆盖的风险：GitHub 的 windows-latest 是否有可用的桌面会话
   #        （Electron 起 GUI 进程需要）。本项目只能靠**首次实跑**确认；
   #        若这一步失败，先怀疑显示环境而不是断言本身。
+  #
+  #    ⚠️ 为什么探针与出包**合并成一个作业**（原先 package 是独立作业）：
+  #        ① 出包原先 `needs: [lint, e2e]`，本来就是串行，合并后墙钟时间不变；
+  #        ② 省掉一整套重复的 checkout / pnpm install / cargo 缓存恢复（约 3–5 分钟）；
+  #        ③ 探针阶段已经编好 sidecar 与 out/，`pnpm run dist` 里那几步是零成本复用。
+  #        `needs: lint` 保留「类型不过不出包」这条闸门，不合格的运行连 Windows 机器都不占。
   # ---------------------------------------------------------------------------
-  e2e:
-    name: E2E Probe (Windows)
+  e2e-package:
+    name: E2E + Package (Windows)
     runs-on: windows-latest
+    needs: lint
+    # 防挂死：GUI 探针曾经在本机间歇卡死（重试即可），CI 上不能让它烧满 6 小时。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:
           version: '12'
 
+      - name: Set up Node（带 pnpm store 缓存）
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: electron-app/pnpm-lock.yaml
+
       - name: Install Rust toolchain（sidecar）
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          # sidecar 用 `--manifest-path ../webview-app/Cargo.toml` 编译，target 落在
+          # `webview-app/target`；不显式指这个目录，缓存会对着「仓库根」找（那里没有 Cargo.toml）。
+          workspaces: webview-app
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
 
-      - name: 单窗口探针（134 条）
+      - name: Unit tests (Windows)
+        # Linux 上的那轮跑不到「真 win32 分支」（sidecar 可执行名、窗口平台判定等），
+        # 这里用同一个命令再跑一次：依赖已装好，成本几秒。
+        run: pnpm run unit
+
+      - name: 单窗口探针
         run: pnpm run probe --no-sandbox --in-process-gpu
 
-      - name: 多页签探针（31 条）
+      - name: 多页签探针
         run: pnpm run probe --tabs --no-sandbox --in-process-gpu
 
       - name: 启动冒烟
         run: pnpm run smoke
 
-  # ---------------------------------------------------------------------------
-  # 3) 出包并上传产物
-  #    只在手动触发且 `package` 开关打开（默认开）时跑：出包慢，上传的还只是一个
-  #    默认配置的应用，只想验证 lint / 探针时不必每次都打。
-  #
-  #    ⚠️ 出包用的是**仓库默认配置**（没有 config.json ⇒ `DEFAULTS`），
-  #       产物只用于验证「打包链路活着」，**不是**给终端用户的发行包 ——
-  #       真正的定制包走 `electron-build-custom.yml`（手动、带配置 JSON）。
-  # ---------------------------------------------------------------------------
-  package:
-    name: Package (Windows)
-    runs-on: windows-latest
-    needs: [lint, e2e]
-    if: ${{ inputs.package }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: '12'
-
-      - name: Install Rust toolchain（sidecar）
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
-
       - name: 出包（zip + portable 绿色版，NSIS 安装版）
-        # `dist` = sidecar → build → stage → electron-builder --win zip portable。
+        # `dist` = sidecar → build → stage → prune → electron-builder --win zip portable。
         # ⚠️ `stage` 会校验三个布尔字段的真 bool 类型 —— 配置写错在这里失败，而不是等用户双击。
         #
         # ⚠️ NSIS 必须是**独立的第二次构建**（与 electron-build-custom.yml 同一条纪律）：
@@ -178,6 +185,10 @@ jobs:
         #    out/ 与 sidecar 在 `dist` 里已就绪，这里只重新封一次包，不重复编译。
         #    ⚠️ 不能图省事用 `pnpm run dist:installer`：那个脚本把输出重定向到 ../tests/pack
         #       （供本地安装测试用），产物不会落在下面 upload 的 release/ 目录。
+        #
+        # ⚠️ 出包用的是**仓库默认配置**（没有 config.json ⇒ `DEFAULTS`），产物只用于验证
+        #    「打包链路活着」，**不是**给终端用户的发行包 —— 真正的定制包走
+        #    `electron-build-custom.yml`（手动、带配置 JSON）。
         run: |
           pnpm run dist
           pnpm exec electron-builder --win nsis -c.extraMetadata.distribution=nsis
@@ -186,6 +197,7 @@ jobs:
         # 防的是**静默失败**：配置或注入资源（titlebar.js / loading.js / shell.html /
         # settings.html 等）没进包时 electron-builder 照样出包、双击照样打开，
         # 只是静默退回内置默认地址或白屏，构建日志全绿。
+        # 同时**双向**断言 sidecar 与 `needsSidecar` 一致、包内不含 probe* 产物。
         run: node scripts/check-asar-config.cjs
 
       - name: Upload 解压目录版（zip）

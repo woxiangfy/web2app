@@ -17,7 +17,7 @@
 | M4 页面行为（下载接管 / 右键菜单 / F12） | ✅ | `src/main/page-behavior.ts`；F12 由 `devtoolsEnabled()` = `!isPackaged \|\| debug` 控制 |
 | M5 多页签 | ✅ | `tabs_enabled=true`；选型见 `../docs/electron-tabs-design.md`、真机验收见 `../docs/electron-tabs-test-steps.md`（V1–V4 已关闭） |
 | M6 出包（dir / zip / portable / NSIS） | ✅ | → [build-package.md](docs/build-package.md) |
-| M7 CI 流水线 | ✅ | `.github/workflows/electron-ci.yml`（lint / e2e / package） |
+| M7 CI 流水线 | ✅ | `.github/workflows/electron-ci.yml`：**手动触发、一次跑完**（lint / unit / 探针 / 冒烟 / 出包），**无 `package` 开关** |
 
 ## 命令
 
@@ -34,7 +34,7 @@ pnpm run sidecar     # 编出 ../webview-app/target/release/w2a-proxy.exe
 pnpm run stage       # 打包前置：铺 build/icon.ico 与 out/config.json
 pnpm run prune       # 打包前置：剔除 out/ 下的探针产物（probe*、tabs-probe-preload）
 pnpm run smoke       # 冒烟自检（内部强制 debug=true），退出码即结论
-pnpm run probe       # 兼容契约探针：158 条断言，退出码即结论
+pnpm run probe       # 兼容契约探针：退出码即结论（断言条数是时点值，以输出为准）
 pnpm run shot        # 布局取证：四条判据 + PNG
 
 pnpm run pack        # 只出解压目录 release/win-unpacked/

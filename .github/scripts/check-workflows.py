@@ -14,8 +14,15 @@
 
 本脚本把这三类都变成「提交前就能跑出结果」的检查。挂进 `ci.yml` 的 config-contract 作业。
 
+另有两条**GitHub 自己不报错**的结构性错误（2026-11-21 补，`--selftest` 13 条反向对照）：
+
+4. `needs:` 指向不存在的作业 id ⇒ 依赖它的作业一直 pending 到超时 / 直接跳过，看起来像「排队卡住」；
+5. 引用未声明的 `inputs.<name>` ⇒ 表达式恒为空，带它的 `if:` 让作业**静默跳过**
+   （删掉一个 `workflow_dispatch` 输入却忘了清理 `if:` 就是这个症状）。
+
 用法：
-    python3 .github/scripts/check-workflows.py
+    python3 .github/scripts/check-workflows.py             # 真检查
+    python3 .github/scripts/check-workflows.py --selftest  # 反向对照
 """
 
 from __future__ import annotations
@@ -201,16 +208,100 @@ def check_bash_syntax(name: str, run: str, errors: list[str]) -> None:
         pathlib.Path(path).unlink(missing_ok=True)
 
 
+def _plain_on(doc: dict):
+    """取 `on:` 段。
+
+    ⚠️ YAML 1.1 把裸 `on` 解析成**布尔 True**（PyYAML 的经典坑），所以键既可能是 `True`
+    也可能是字符串 `"on"`（引号写法），两种都要认。
+    """
+    if True in doc:
+        return doc[True]
+    return doc.get("on")
+
+
+def declared_inputs(doc: dict) -> set[str]:
+    """`on.workflow_dispatch.inputs` 里声明过的 input 名（没有就是空集）。"""
+    on = _plain_on(doc)
+    if not isinstance(on, dict):
+        return set()
+    wd = on.get("workflow_dispatch")
+    if not isinstance(wd, dict):
+        return set()
+    return set((wd.get("inputs") or {}).keys())
+
+
+def check_job_refs(rel: str, doc: dict, errors: list[str]) -> int:
+    """`needs:` 必须指向本文件里真实存在的作业 id。
+
+    这类错 GitHub **不会在触发时报错**，而是让依赖它的作业永远 pending 到超时（或直接跳过），
+    看起来像「排队卡住了」。改作业 id（如把 e2e + package 合并成 e2e-package）时最容易漏。
+    """
+    jobs = doc.get("jobs") or {}
+    ids = set(jobs.keys())
+    checked = 0
+    for name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        needs = job.get("needs")
+        if needs is None:
+            continue
+        refs = [needs] if isinstance(needs, str) else list(needs)
+        for ref in refs:
+            checked += 1
+            if ref not in ids:
+                errors.append(
+                    f"{rel}: 作业 `{name}` 的 needs 指向不存在的作业 `{ref}`"
+                    f"（本文件作业：{', '.join(sorted(ids)) or '无'}）"
+                )
+    return checked
+
+
+INPUT_REF = re.compile(r"(?<![\w.])inputs\.([A-Za-z_][\w-]*)")
+
+
+def check_input_refs(rel: str, text: str, doc: dict, errors: list[str]) -> int:
+    """`inputs.<name>` 必须来自 `on.workflow_dispatch.inputs` 的声明。
+
+    ⚠️ 引用了**没声明**的 input 时 GitHub 不报错，表达式的值是空 ⇒ `if:` 永远为假、
+    作业**静默跳过**（删掉一个 input 却忘了清理 `if:` 就是这个症状）。
+    只扫**整行注释之外**的内容，避免把注释里的举例当成真引用。
+    `github.event.inputs.x` 由负向后视排除（那是另一套、带默认值语义的写法）。
+    """
+    declared = declared_inputs(doc)
+    seen: set[str] = set()
+    hits = 0
+    for line in text.splitlines():
+        if re.match(r"^\s*#", line):
+            continue
+        for m in INPUT_REF.finditer(line):
+            name = m.group(1)
+            hits += 1
+            if name not in declared and name not in seen:
+                seen.add(name)
+                where = "、".join(sorted(declared)) or "无"
+                errors.append(
+                    f"{rel}: 引用了未声明的 input `{name}`（on.workflow_dispatch.inputs 里有：{where}）"
+                    " —— 该表达式恒为空，带它的 if: 会让作业静默跳过"
+                )
+    return hits
+
+
 def main() -> int:
     errors: list[str] = []
     checked = 0
     for path in WORKFLOWS:
         rel = path.relative_to(ROOT).as_posix()
         try:
-            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            doc = yaml.safe_load(text)
         except yaml.YAMLError as e:
             errors.append(f"{rel}: YAML 解析失败：{e}")
             continue
+        if not isinstance(doc, dict):
+            errors.append(f"{rel}: 顶层不是映射（workflow 必须是一个字典）")
+            continue
+        checked += check_job_refs(rel, doc, errors)
+        checked += check_input_refs(rel, text, doc, errors)
         for job_name, job in (doc.get("jobs") or {}).items():
             for step in job.get("steps") or []:
                 run = step.get("run")
@@ -253,10 +344,61 @@ def main() -> int:
     return 0
 
 
+def selftest() -> int:
+    """反向对照：确认上面两条「GitHub 不会报错」的检查真能抓到问题。
+
+    ⚠️ 没有这一步，`needs` / `inputs` 检查本身写错（正则失误、取错 `on` 段）时会静默全绿，
+    而它守的恰恰是「静默跳过」这一类故障 —— 不能自己也是静默的。
+    """
+    cases: list[tuple[str, bool]] = []
+
+    def job_refs(doc, want_errors: int) -> None:
+        errs: list[str] = []
+        check_job_refs("t.yml", doc, errs)
+        cases.append((f"needs 检查应报 {want_errors} 条（实际 {len(errs)}）", len(errs) == want_errors))
+
+    job_refs({"jobs": {"a": {}, "b": {"needs": "a"}}}, 0)
+    job_refs({"jobs": {"a": {}, "c": {}, "b": {"needs": ["a", "c"]}}}, 0)
+    job_refs({"jobs": {"a": {"needs": "zzz"}}}, 1)
+    job_refs({"jobs": {"a": {"needs": ["ok", "zzz"]}, "ok": {}}}, 1)
+
+    def input_refs(text: str, doc: dict, want_errors: int) -> None:
+        errs: list[str] = []
+        check_input_refs("t.yml", text, doc, errs)
+        cases.append((f"inputs 检查应报 {want_errors} 条（实际 {len(errs)}）", len(errs) == want_errors))
+
+    dispatch_none = {True: {"workflow_dispatch": None}}
+    dispatch_pkg = {True: {"workflow_dispatch": {"inputs": {"package": {"type": "boolean"}}}}}
+    input_refs("    if: ${{ inputs.package }}\n", dispatch_none, 1)
+    input_refs("    if: ${{ inputs.package }}\n", dispatch_pkg, 0)
+    # 同一未声明 input 出现多次只报一次（避免一个 if 刷出一屏）
+    input_refs("if: inputs.x\nrun: echo inputs.x\n", dispatch_none, 1)
+    # 整行注释、github.event.inputs 都不算引用（前者跳过、后者是另一套语义）
+    input_refs("  # if: ${{ inputs.ghost }}\n", dispatch_none, 0)
+    input_refs("# if: inputs.ghost\n", dispatch_none, 0)
+    input_refs("      if: ${{ github.event.inputs.pkg }}\n", dispatch_none, 0)
+
+    # YAML 把裸 `on:` 解析成布尔 True —— declared_inputs 必须两种键名都认
+    parsed = yaml.safe_load("on:\n  workflow_dispatch:\n    inputs:\n      package:\n        type: boolean\njobs: {}\n")
+    cases.append(("裸 on: 解析成 True 时也能取到 inputs", declared_inputs(parsed) == {"package"}))
+    quoted = yaml.safe_load('"on":\n  workflow_dispatch:\n    inputs:\n      x:\n        type: string\njobs: {}\n')
+    cases.append(("引号写法 on: 同样能取到 inputs", declared_inputs(quoted) == {"x"}))
+    cases.append(("没有 on 段时返回空集", declared_inputs({"jobs": {}}) == set()))
+
+    bad = [name for name, ok in cases if not ok]
+    if bad:
+        print("check-workflows --selftest 失败：")
+        for name in bad:
+            print(f"::error::  ✗ {name}")
+        return 1
+    print(f"check-workflows --selftest 通过 ✓（{len(cases)} 条反向对照）")
+    return 0
+
+
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass
-    sys.exit(main())
+    sys.exit(selftest() if "--selftest" in sys.argv[1:] else main())

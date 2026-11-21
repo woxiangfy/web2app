@@ -4,6 +4,15 @@ name: CI（tauri）
 on:
   workflow_dispatch:
 
+# 最小权限：本流水线只读代码、只跑测试，不写任何 GitHub 资源（产物走 release.yml / 手动打包）。
+permissions:
+  contents: read
+
+# 同分支连续手动触发时，取消上一次（本流水线只验证「当前 HEAD 是否绿」，旧运行没有保留价值）。
+concurrency:
+  group: ci-tauri-${{ github.ref }}
+  cancel-in-progress: true
+
 # ---------------------------------------------------------------------------
 # ⚠️ 单仓库化（2026-09-22）：仓库根已上移到仓库目录（本文件所在的上一级），
 #    Rust 工程仍在 `webview-app/` 子目录里。原先 `cargo` 命令能跑通，是因为
@@ -35,6 +44,8 @@ jobs:
   lint-and-test:
     name: Lint & Test (Ubuntu)
     runs-on: ubuntu-latest
+    # 超时是**防挂死**而不是估时：卡住的 `cargo test`（等 socket / 等锁）默认能烧满 6 小时。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -72,31 +83,37 @@ jobs:
   check-windows:
     name: Check (Windows)
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Cargo check (Windows target)
-        run: cargo check --all-targets
-
-      - name: Cargo check (Windows, 多页签模式)
-        # 验证 TABS_ENABLED=true 的多页签（tab）代码路径也能在 Windows 下编译通过。
-        # 该路径默认不参与编译（开关默认 false），故单独加一步显式检查，避免改动 tabs 代码后
-        # 只在真机打包时才暴露编译错误。
-        env:
-          TABS_ENABLED: "true"
-        run: cargo check --all-targets
 
       - name: Clippy (Windows)
         # ⚠️ 不可省略：Ubuntu 的 clippy 作业编译的是 Linux 目标，`#[cfg(windows)]` 的
         # 代码（tabs.rs / webview_hooks.rs）根本不参与编译，其中的 clippy 问题（如
         # let_unit_value）在 Linux 上永远发现不了。Windows 端必须单独跑一次 clippy。
+        #
+        # 本步**同时取代原先单独的 `cargo check --all-targets`**：clippy 先编译再 lint，
+        # 编译错误一样红，两步合并省掉一整轮全量编译（原先是 check → check(TABS) →
+        # clippy → test 四轮），覆盖范围一点没少。
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo check (Windows, 多页签模式)
+        # `TABS_ENABLED` 是 `option_env!` 读的**编译期**常量（config.rs），改值会重编本 crate，
+        # 因此这一步单独跑一次：验证「页签开着」的那套编译结果也成立（移动端底栏
+        # `tabs_available()` 与 `mod tabs` 都读它）。
+        # ⚠️ 旧注释写的「该路径默认不参与编译」已不准确：`mod tabs` 整体是 `#[cfg(windows)]`，
+        #    与 TABS_ENABLED 无关；真正会随它变化的是常量求值与 mobilebar 的 cfg 脚本。
+        env:
+          TABS_ENABLED: "true"
+        run: cargo check --all-targets
 
       - name: Run tests (Windows)
         # 同理，`#[cfg(windows)]` 的单元/集成测试（如 proxy.rs 的流式转发、cookie 重写、
@@ -117,6 +134,7 @@ jobs:
   check-android:
     name: Check (Android aarch64)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -186,6 +204,9 @@ jobs:
   #         错误文案 / `config.json` 字节），是唯一能自动发现漂移的手段。
   #         ⚠️ 必须在 Linux 上跑：本机 Windows 的 Python 会把换行翻成 CRLF，`--parity` 只能
   #            把这种差异降级为「仅行尾不同」的提示；Linux 上两侧都是 LF，比对是逐字节的。
+  #      e) 注入 / 内联脚本语法 —— `webview-app/src/*.js`、mobilebar 分片按 lib.rs 顺序拼接后的
+  #         IIFE、四个 HTML 的内联 `<script>`（`scripts/check-js-syntax.mjs`，与 electron-ci 共用）。
+  #         这批脚本只在运行期注入，编译期不检查；坏了就是「标题栏不见 / 设置页白屏」。
   #
   #    ⚠️⚠️ 本作业**必须在仓库根执行**：契约脚本与 workflow 都在仓库根的 `.github/` 下。
   #        而本文件顶部的 `defaults.run.working-directory: webview-app` 会把每个 `run:`
@@ -195,6 +216,7 @@ jobs:
   config-contract:
     name: Config contract
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: .
@@ -209,8 +231,9 @@ jobs:
         # 现抽成共享脚本；它们只在 Android 打包时才被执行，不挂门禁就等于「本地不跑、CI 不跑」。
         # ⚠️ 必须在仓库根跑：`from android_gen import ...` 靠脚本所在目录进 sys.path。
         # ⚠️ 名单**不手写**：按 `.github/scripts/*.py` 目录发现、只跑声明了 `--selftest` 的脚本
-        #    （android_gen.py 是纯模块、check-workflows.py 由下一步单独跑）。发现结果必须非空，
-        #    否则规则写错时「一个都没发现」也会显示绿色。
+        #    （`android_gen.py` 是纯模块；`check-workflows.py` 的 `--selftest` 也会被这里跑到一次，
+        #    下一步再跑它的真检查 —— 反向对照多跑一遍没有成本）。当前发现 17 个。
+        #    发现结果必须非空，否则规则写错时「一个都没发现」也会显示绿色。
         run: |
           set -euo pipefail
           found=0
@@ -234,6 +257,18 @@ jobs:
 
       - name: 静态检查所有 workflow（YAML + 内联 python/bash）
         run: python3 .github/scripts/check-workflows.py
+
+      - name: 注入 / 内联脚本语法门禁（两壳共用真源）
+        # 覆盖 `webview-app/src/*.js`、mobilebar 六个分片**按 lib.rs 顺序拼接后的 IIFE**、
+        # 以及 `src/*.html` + `dist/*.html` 的内联 `<script>`。
+        # 这些都是**运行期才注入**的脚本：Rust 只是 `include_str!` 后 `initialization_script()`，
+        # 编译期一个字都不检查，语法错的表现是「自绘标题栏整体消失 / 设置页白屏」，
+        # 而排查方向会被带到「注入没生效」上。探测这些错误原先只能靠 GUI 探针（Linux 作业够不着）。
+        # ⚠️ 先跑 `--selftest`：检测器本身不会报错时，「全绿」毫无意义（8 条反向对照）。
+        # ⚠️ 与 `electron-ci.yml` 共用同一个脚本（两壳消费同一份 JS/HTML 真源）。
+        run: |
+          node scripts/check-js-syntax.mjs --selftest
+          node scripts/check-js-syntax.mjs
 
       - name: 仓库内配置样例必须符合契约
         shell: bash

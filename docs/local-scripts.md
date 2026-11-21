@@ -1,8 +1,10 @@
 # 本地脚本（scripts/）说明
 
-> `scripts/` 下的脚本均为**零第三方依赖**的 Node 脚本（Node ≥ 18），**不进 CI** ——
-> CI 侧对应能力由 `.github/workflows/` 与 `.github/scripts/` 承担。本文是两个入口脚本的权威说明；
-> 打包配置 JSON 契约的唯一文档是 [packaging-config.md](packaging-config.md)（pack-local 详见其 §7.2）。
+> `scripts/` 下的脚本均为**零第三方依赖**的 Node 脚本（Node ≥ 18）。其中 `init-env.mjs` 只在本地跑；
+> `pack-local.mjs` 与 `check-js-syntax.mjs` 同时被 CI 调用（`ci.yml` 的 config-contract /
+> `electron-ci.yml` 的 lint 作业），其余 CI 能力由 `.github/workflows/` 与 `.github/scripts/` 承担。
+> 本文是这三个入口脚本的权威说明；打包配置 JSON 契约的唯一文档是
+> [packaging-config.md](packaging-config.md)（pack-local 详见其 §7.2）。
 
 ## init-env.mjs —— 环境初始化
 
@@ -71,3 +73,26 @@ Python 不是必然存在的依赖；两侧靠 `--parity` 逐项比对钉住等�
 
 > 用法、目标矩阵、参数与配置字段语义的**唯一权威文档**见
 > [packaging-config.md](packaging-config.md) §7.2（及全文的字段契约），本文不重复维护。
+
+## check-js-syntax.mjs —— 注入脚本语法门禁（两壳共用）
+
+```bash
+node scripts/check-js-syntax.mjs             # 真检查，任何语法错误 → 退出码 1
+node scripts/check-js-syntax.mjs --selftest  # 反向对照：确认检测器自己能报错
+```
+
+补的是「编译期没人看、运行期才炸」的那类脚本（都是**两壳共用真源**）：
+
+| 类别 | 覆盖对象 | 判定方式 |
+| --- | --- | --- |
+| 注入脚本 | `webview-app/src/*.js`（`titlebar` / `loading` / `tab_*` / `dnd_polyfill`） | 逐个整文件编译 |
+| 移动端底栏 | `webview-app/src/mobilebar/*.js` —— **分片**，单独拿出来不是合法脚本（`core.js` / `mount.js` 就是） | 按 `lib.rs` 里 `include_str!` 的**真实顺序**拼成同一个 IIFE 再编译；顺序只从 lib.rs 解析，不手写第二份 |
+| 内联脚本 | `webview-app/src/*.html` + `dist/*.html` 的 `<script>` 块 | 先剥 HTML 注释（`splash.html` 头注释里就写着 `<script>` 字样），跳过 `src=` 与 `type="module"` |
+| Node 工具 | `scripts/**`、`electron-app/scripts/**` 的 `.mjs` / `.cjs` | 跑 `node --check`（ESM 的 `import` 只能由 node 自己解析） |
+
+实现用 `vm.Script`（**只编译、不执行**），全量约 40 段，秒级。**覆盖完整性**是硬要求：
+发现结果必须非空，且 `webview-app/src/` 下每个 `.js` 都必须被上面某条规则覆盖到 ——
+新增子目录没纳入会直接红灯（否则等于给新文件自动免检）。
+
+调用点两处（同一份脚本，不各写一份）：`ci.yml` 的 config-contract（先 `--selftest` 再真跑）、
+`electron-ci.yml` 的 lint 作业（Ubuntu，几秒出结果，不必等 Windows 探针）。

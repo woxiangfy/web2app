@@ -6,31 +6,46 @@
 
 共 **8 条** workflow，统一存放在**仓库根 `.github/workflows/`**（2026-09-22 由本目录上移）：
 其中 **6 条服务本工程**（命令经 `defaults.run.working-directory: webview-app` 落到本工程目录，
-产物路径则显式带 `webview-app/` 前缀）——2 条**自动**（`ci.yml` / `release.yml`）+
-4 条**手动 / 定时**（`generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml`
-在 Actions 页手动 Run workflow；`cleanup-runs.yml` 每日定时删除 3 天前的运行记录与旧产物，
-2026-11-01 新增）；另外 2 条服务 **Electron 绿色版壳**（工作目录是 `electron-app/`，
-用法见 `electron-app/AGENTS.md`）：自动的 `electron-ci.yml`（lint / 探针 e2e / 出包）与
-手动的 `electron-build-custom.yml`（自定义打包）。
+产物路径则显式带 `webview-app/` 前缀）——1 条**自动**（`release.yml`）+ 5 条**手动 / 定时**
+（`ci.yml` 与 `generate-signing-key.yml` / `resolve-keys.yml` / `build-custom.yml` 在 Actions 页手动
+Run workflow；`cleanup-runs.yml` 每日定时删除 3 天前的运行记录与旧产物，2026-11-01 新增）；
+另外 2 条服务 **Electron 绿色版壳**（工作目录是 `electron-app/`，用法见 `electron-app/AGENTS.md`）：
+**手动**的 `electron-ci.yml`（lint / 单测 / 探针 e2e / 冒烟 / 出包，一次跑完、**无开关**）与
+**手动**的 `electron-build-custom.yml`（自定义打包）。
 
 > 打包一个可安装、可覆盖升级的应用，推荐顺序：**先跑 `generate-signing-key.yml` 生成并保存签名 → 再跑 `build-custom.yml` 打包**。详见下文第 3、4 小节。
 
 ## 1. 手动触发 — `.github/workflows/ci.yml`
 
-⚠️ 该 workflow **只有 `workflow_dispatch`**（在 Actions 页点「Run workflow」），**已不再随 push / PR 自动运行**：
+⚠️ 该 workflow **只有 `workflow_dispatch`**（在 Actions 页点「Run workflow」），**已不再随 push / PR 自动运行**。
+`permissions: contents: read` + `concurrency`（同分支连点会取消上一次），每个作业都带 `timeout-minutes`
+（防挂死烧满 6 小时）：
 
 - **Lint & Test (Ubuntu)**：安装 WebKit2GTK 等依赖 → `cargo fmt --all -- --check`（**阻断**）→
   `cargo clippy -D warnings` → `cargo test --all`（同时验证 Android 代码路径）。
-- **Check (Windows)**：`cargo check --all-targets` 验证 WebView2 那套代码能编译，并跑 `clippy` / `test`。
+- **Check (Windows)**：`cargo clippy --all-targets -D warnings`（**取代原先单独的 `cargo check`**：
+  clippy 先编译再 lint，编译错误一样红，省掉一整轮全量编译）→ `TABS_ENABLED=true cargo check --all-targets`
+  （`option_env!` 是编译期常量，换个值会重编本 crate，故单独跑一次）→ `cargo test --all`。
 - **Check (Android)**：用 `cargo ndk` 交叉编译 `aarch64-linux-android`，并跑 **Android 目标 clippy**
   （**阻断**，不产出 APK）。NDK 由 `.github/scripts/install-android-ndk.sh` 安装（版本单一真源）。
 - **config-contract**：跑打包配置契约门禁 —— 解析器 `--selftest`、**按目录发现的安卓共享脚本
-  `--selftest`**（`.github/scripts/*.py` 里声明了 `--selftest` 的全部执行；当前发现 13 个 = 12 个
-  Android 管线脚本 + `parse-packaging-config.py`，且**发现结果必须非空**，否则规则写错也会假绿）、
-  校验全仓库 workflow YAML 与 `.github/scripts/*.sh` 语法（`check-workflows.py`）、
+  `--selftest`**（`.github/scripts/*.py` 里声明了 `--selftest` 的全部执行；当前发现 17 个 = 14 个
+  Android 管线脚本 + `android_gen` + `check-workflows` + `parse-packaging-config.py`，且**发现结果必须非空**，
+  否则规则写错也会假绿）、
+  校验全仓库 workflow YAML 与 `.github/scripts/*.sh` 语法 + **`needs:` 与 `inputs.*` 引用**
+  （`check-workflows.py`：作业 id 写错、或引用了未声明的 input ⇒ 作业会静默跳过，GitHub 自己不报错）、
+  **注入 / 内联脚本语法门禁**（`scripts/check-js-syntax.mjs`，见下）、
   逐个校验两份 `config.example.json` 与 `scripts/pack-local.mjs`
   的 `--parity`（Node 复刻与 Python 解析器的 55 组用例必须逐条一致，本机实跑 55/55）。详见
   `docs/packaging-config.md` §5。
+
+> **注入 / 内联脚本语法门禁（2026-11-21 新增）**：`webview-app/src/*.js`、`mobilebar` 六个分片
+> **按 `lib.rs` 顺序拼接后的 IIFE**、`src/*.html` + `dist/*.html` 的内联 `<script>` 都是**运行期注入**的 ——
+> Rust 只是 `include_str!` 后 `initialization_script()`，编译期一个字都不检查，语法错的表现是
+> 「自绘标题栏整体消失 / 设置页白屏」，而排查方向会被带到「注入没生效」。用 Node 的 `vm.Script`
+> 只编译不执行，秒级过完；先跑 `--selftest`（8 条反向对照：坏脚本必红、好脚本不误报、顺序/注释/外链
+> 三类提取规则正确、漏项必须被抓到）。同一脚本也挂在 `electron-ci.yml` 的 Ubuntu 作业里
+> （两壳消费同一份真源）。详见 `docs/local-scripts.md`。
 
 ## 2. 发版即编译 — `.github/workflows/release.yml`
 
