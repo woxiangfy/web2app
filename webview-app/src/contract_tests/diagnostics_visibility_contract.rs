@@ -113,16 +113,22 @@ fn tauri_injects_diag_marker_through_overlay_script() {
          WEB2APP_DEBUG=1）；只看 config::DEBUG 会让交付包失去唯一逃生口，且与 Electron 侧分叉"
     );
 
-    // 启动页与两处初始化脚本注入都必须走 overlay_script()
-    // 片段要跨过 splash_html 上方的整段文档注释（约 1.2KB 中文），故给足窗口。
+    // 启动页与两处初始化脚本注入都必须走 overlay_script()。替换发生在参数化的
+    // splash_html_impl 里（wrapper 只负责把 cfg!(windows) 传进去），锚点贴实现节点。
     let splash = body_after(
         LOADING_RS,
-        "pub fn splash_html(title: &str) -> String",
-        2000,
+        "fn splash_html_impl(title: &str, inline_titlebar: bool) -> String",
+        1200,
     );
     assert!(
         splash.contains("let loading_js = overlay_script();"),
-        "splash_html 必须用 overlay_script() —— 否则「启动页上的失败卡」永远不显示诊断"
+        "splash_html_impl 必须用 overlay_script() —— 否则「启动页上的失败卡」永远不显示诊断"
+    );
+    // 生产入口必须保持平台判定（Android 内联自绘标题栏 = 双标题栏）。
+    let entry = body_after(LOADING_RS, "pub fn splash_html(title: &str) -> String", 600);
+    assert!(
+        entry.contains("splash_html_impl(title, cfg!(windows))"),
+        "splash_html 必须把 cfg!(windows) 作为 inline_titlebar 传入（非 Windows 不内联自绘标题栏）"
     );
     assert!(
         LIB_RS.contains(".initialization_script(loading::overlay_script())"),

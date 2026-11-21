@@ -111,10 +111,18 @@ pub fn splash_url() -> Url {
 /// initialization_script」——该说法已被 `examples/probe_new_window.rs` 实测推翻，别再引用。）
 pub fn splash_html(title: &str) -> String {
     // 自绘标题栏（顶部通栏）是 **Windows 专属**：Android 有系统标题栏，再内联一条自绘通栏就会
-    // 叠成「双标题栏」，且加载层会依 `__web2appChromeH` 在顶部空出 38px。非 Windows 一律替换为
-    // 空串 —— 占位符仍照常消费（模板与 `splash_template_has_no_token_in_comments` 都按「恰好出现
-    // 一次」约束，不能直接删掉占位符）。
-    let titlebar_js = if cfg!(windows) { TITLEBAR_JS } else { "" };
+    // 叠成「双标题栏」，且加载层会依 `__web2appChromeH` 在顶部空出 38px。
+    splash_html_impl(title, cfg!(windows))
+}
+
+/// [`splash_html`] 的参数化实现：把「是否内联自绘标题栏」提为显式参数，
+/// 让内联 / 空串两个分支都能在任意宿主平台上单测 —— `cfg!` 的 else 分支在 Windows
+/// 上永远走不到，2026-10-08 的平台感知断言因此把替换逻辑整块漏测到 2026-11-21 CI 才炸。
+///
+/// 非 Windows 一律替换为**空串** —— 占位符仍照常消费（模板与
+/// `splash_template_has_no_token_in_comments` 都按「恰好出现一次」约束，不能直接删掉占位符）。
+fn splash_html_impl(title: &str, inline_titlebar: bool) -> String {
+    let titlebar_js = if inline_titlebar { TITLEBAR_JS } else { "" };
     // ⚠️ 用 `overlay_script()` 而不是裸 `LOADING_JS`：启动页同样要吃 `debug` 门控，
     //    否则「启动页上的失败卡」和「目标页上的失败卡」会一半显示诊断、一半不显示。
     let loading_js = overlay_script();
@@ -235,6 +243,17 @@ fn html_escape(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 「titlebar.js 本体已被内联」的判据标记：titlebar.js 里创建标题栏 DOM 的那行代码
+    /// （`bar.id = '__web2app_titlebar__'`）。
+    ///
+    /// ⚠️ 判据不能用「整份 HTML 是否含 `__web2app_titlebar__`」：`loading.js` 的
+    /// `bodyEmpty()` 同样引用该 id，而 loading.js 各平台都会内联 —— 用 id 判定会把
+    /// 「含 loading.js」误判成「含 titlebar.js」，非 Windows 分支恒挂（2026-11-21 Ubuntu
+    /// CI 才炸出来）。也不能用 `__web2appTitlebar`：`splash.html` 模板头部注释里就有它，
+    /// 反向断言会被说明文字污染（本项目在守卫上已踩过两次这个坑）。
+    /// 判据必须**只**存在于 titlebar.js —— 下方自校验盯着模板与 loading.js 不得含它。
+    const TITLEBAR_MARKER: &str = "bar.id = '__web2app_titlebar__'";
+
     #[test]
     fn splash_html_inlines_script_and_title() {
         let html = splash_html(r"Tom's <App> & \Co");
@@ -244,19 +263,50 @@ mod tests {
         assert!(html.contains("Tom&#39;s &lt;App&gt; &amp; \\Co"));
         assert!(html.contains("__web2appLoadingMode = 'splash'"));
         assert!(html.contains("w2l-ring"), "应内联加载层脚本");
-        // 自绘标题栏（顶部通栏）是 Windows 专属：Windows 内联；非 Windows（Android）替换为空串，
-        // 避免与系统标题栏叠成双通栏（`__web2app_titlebar__` 是 titlebar.js 里的 DOM id / 选择器）。
+        // 自绘标题栏（顶部通栏）是 Windows 专属：Windows 内联；非 Windows（Android）替换为
+        // 空串，避免与系统标题栏叠成双通栏。判据必须是 titlebar.js **本体**的独有代码标记。
+        assert!(
+            TITLEBAR_JS.contains(TITLEBAR_MARKER),
+            "判据标记必须真实存在于 titlebar.js（否则正向断言会假绿）"
+        );
+        assert!(
+            !LOADING_JS.contains(TITLEBAR_MARKER) && !SPLASH_TEMPLATE.contains(TITLEBAR_MARKER),
+            "判据标记必须只存在于 titlebar.js —— loading.js / 模板引用它就会让判定失效"
+        );
         if cfg!(windows) {
             assert!(
-                html.contains("__web2app_titlebar__"),
+                html.contains(TITLEBAR_MARKER),
                 "Windows 启动页应内联自绘标题栏（让窗口一出现就有顶部栏）"
             );
         } else {
             assert!(
-                !html.contains("__web2app_titlebar__"),
+                !html.contains(TITLEBAR_MARKER),
                 "非 Windows（Android）启动页不应内联自绘标题栏"
             );
         }
+    }
+
+    /// 「是否内联标题栏」的两个分支必须都能在任意宿主上单测。
+    ///
+    /// `cfg!` 的 else 分支在 Windows 上永远走不到 —— 2026-10-08 的平台感知断言因此把
+    /// 「空串替换」整块逻辑漏测了四十天，直到 Ubuntu CI 跑 `cargo test` 才炸。这里直接
+    /// 调参数化实现，让两个分支都进本地测试基数。
+    #[test]
+    fn splash_titlebar_inlining_follows_explicit_param() {
+        let with = splash_html_impl("t", true);
+        assert!(
+            with.contains(TITLEBAR_MARKER),
+            "inline_titlebar=true 必须真的内联 titlebar.js 本体"
+        );
+        let without = splash_html_impl("t", false);
+        assert!(
+            !without.contains(TITLEBAR_MARKER),
+            "inline_titlebar=false 必须把占位符替换为空串（不得残留 titlebar.js 本体）"
+        );
+        assert!(
+            !without.contains(TOKEN_TITLEBAR_JS),
+            "空串替换仍要消费占位符（不能留 token）"
+        );
     }
 
     /// 启动页模板里，占位符**只能**出现在预期的两个 `<script>` 与 `<title>` 里。
