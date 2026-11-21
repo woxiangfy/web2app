@@ -22,6 +22,7 @@
 3. PATH 上 `python` 是 reparse point ⇒ Node `spawnSync` 恒 EBUSY，本机 `--parity` 只能留「未能验证」。
 4. 系统临时区会被外部脚本清掉 ⇒ 唯一副本别只放临时区。
 5. 改 UI 目视取证：WebView2 走 DWM 合成截不到 ⇒ 用 Electron 渲染同一份共享 HTML 截图。
+6. Android 交叉验证**一律走 GitHub CI**，本地不下载交叉工具链 / NDK（2026-11-21 用户决策）。
 
 ## 状态
 - 仓库 v1.80（tauri 2.12.1 / wry 0.57.0 / tao 0.37.1）；Electron M0–M7 全交付。
@@ -39,3 +40,4 @@
 - 2026-11-21：**`debug` 语义扩为「诊断开关」（日志 + 屏幕可见性，两壳同义）**。屏幕侧唯一闸门 = `window.__web2appDiag`（**缺省 false、只认严格 true**）：`loading.js` 的 `pushNote` 短路，`failCard` / 40s 超时卡 / 空白文档 CAP 卡三处 `diagText()` 与「仍停在启动页」判读全门控，`debug=false` 只剩一句可执行文案 + 重试；Tauri 经 `loading.rs::overlay_script()` 注入标记（`splash_html` 与主窗 / 页签两处 `initialization_script` 统一用它；`OVERLAY_SCRIPT` 降为 `#[cfg(test)]` 守卫锚点），`bootstrap.rs` 五类内部错误串按 `DEBUG` 分级；Electron 经 `readInject('loading.js')` 前置 `DIAG_MARKER`（**`readInject` 定义必须移到 `DEBUG` 判之后**）、`navFailText`/`parseAppUrl`/`sidecarFailureText`/`showShellStartupError` 加 `debug` 逐层传，`!DEBUG` 时 `--log-level=3`+`--disable-logging`（Chromium stderr 不受 `silenceConsole` 管辖）。守卫 `contract_tests/diagnostics_visibility_contract.rs`（7 条，反向对照 3 组 sha256 还原一致）；`cargo test --all` **349 passed / 3 ignored**、Electron unit **236**、probe **178/178**、tabs **69/69**、smoke ✅ 。**同日复审又补两处**：① Tauri 屏幕诊断原只看编译期 `config::DEBUG` ⇒ 交付包加 `--debug` 只有日志、屏幕不给诊断（与 Electron 分叉），改走 **`debug_log::enabled()`**（判据真源：编译期 `DEBUG` ∥ `--debug` ∥ `WEB2APP_DEBUG`；Android 无入口 ⇒ 仍只能重打包）；② 探测**失败**详情走 `fail(t,d,soft)` 绕开 `pushNote` ⇒ `debug=false` 仍显示主机名 + DNS/TLS 术语，新增 `probe.rs::probe_failure_detail` 分级。守卫增至 **10 条**、反向对照 6 组 ⇒ `docs/changes/2026-11-21.md`、`docs/packaging-config.md` §3.5。
 
 - 2026-11-21（CI）：**两条 CI 都只 `workflow_dispatch`、无任何开关**。`ci.yml`（Tauri 4 作业）/ `electron-ci.yml`（Electron 2 作业：lint → `e2e-package`，原 `package` 开关已删 ⇒ 出包固定）。新增 `scripts/check-js-syntax.mjs`：`src/*.js` 整文件 + mobilebar **按 lib.rs 顺序拼 IIFE** + 5 个 HTML 内联 script + scripts 下 mjs/cjs `node --check`，覆盖完整性硬要求（漏项即红），`--selftest` 8 条。`check-workflows.py` 增 `needs:` / `inputs.*` 引用检查（13 条反向对照）⇒ 改作业 id / 删 input 有门禁兜底（这类错 GitHub 自己不报错，表现为作业静默跳过）。
+- 2026-11-21（dead_code 第二批）：**「Linux 活、Android 死」是 P2-2 豁免的结构性盲区** —— Ubuntu 清单只覆盖「Linux 死」的符号（`probe_mode` 调用点在 `cfg(desktop)`/`cfg(windows)` 下即为此例）。平台专属符号的「死」要按 **mobile / desktop / windows 三组 cfg 各自**问「谁调用它」；修法优先**拆进精确 cfg**（`#[cfg(desktop)]`）而非挂豁免（移动端不编译 ⇒ lint 无从触发）。

@@ -176,7 +176,12 @@ fn quit_app(app: tauri::AppHandle) {
 ///
 /// ⚠️ 刻意做成**函数**而不是 `run()` 里的一个 `bool` 变量：那个变量在非 Windows / 非桌面上
 /// 会变成「未使用变量」，在 `-D warnings` 下直接编译失败（历史上踩过同款 cfg-only 陷阱）。
-/// 函数只在有调用点的地方被引用，Android 上它只是一个被 `#![allow(dead_code)]` 放过的死函数。
+///
+/// ⚠️ 整个函数挂 `#[cfg(desktop)]`：两个调用点分别在 `#[cfg(desktop)]`（插件装配）与
+/// `#[cfg(windows)]`（floatprobe 分支）下，移动端（Android）没有任何调用方。早先它靠
+/// crate 级 `#![allow(dead_code)]` 当死函数放过；P2-2 移除全局豁免后，Android 交叉编译
+/// 直接 `-D dead-code` 红灯（2026-11-21 CI）—— 按文件头约定拆进精确 cfg，而不是再挂豁免。
+#[cfg(desktop)]
 fn probe_mode() -> bool {
     #[cfg(windows)]
     {
